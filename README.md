@@ -126,13 +126,20 @@ MIDI mappings are constants at the top of `crates/app/src/midi.rs`. To discover 
 
 ### ProDJ Link (receive-only)
 
-FreeDJ-3000 listens on UDP port 50002 for Pioneer beat packets. When a CDJ on the same network sends a beat, the second beat grid (cyan strip at the bottom of the waveform display) updates to show that deck's tempo and phase. Use this to manually beatmatch your track to an incoming CDJ.
+FreeDJ-3000 listens on UDP ports 50001 (where real CDJ/XDJ hardware sends beat
+packets) and 50002 (used by the simulator below) for Pioneer beat packets. When a CDJ on the same network sends a beat, the second beat grid (cyan strip at the bottom of the waveform display) updates to show that deck's tempo and phase. Use this to manually beatmatch your track to an incoming CDJ.
 
 For single-machine testing without real hardware:
 
 ```bash
-python3 tools/send_beat.py 130.0 127.0.0.1 50002
+python3 tools/send_beat.py 130.0 127.0.0.1 50002   # or: make two-deck BPM=130
 ```
+
+With a real deck: connect it and this machine to the same switch (or a direct
+ethernet cable — Pioneer decks auto-negotiate crossover), start playback on the
+deck, and run `make dev`. Every packet received on 50000–50002 is logged in
+full hex, which is the reference for the packet-format work in
+`docs/WORKSTREAMS.md` §B1.
 
 ---
 

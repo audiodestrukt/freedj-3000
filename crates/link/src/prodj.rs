@@ -10,8 +10,12 @@ use opendeck_types::EngineSnapshot;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use tokio::net::UdpSocket;
 
-/// UDP ports used by ProDJ Link.
+/// UDP ports used by ProDJ Link (per the Deep Symmetry analysis):
+///   50000 — device announce / keep-alive, every 1.5 s
+///   50001 — beat packets (0x28), one per beat, from every playing deck
+///   50002 — status packets (0x0a), ~5/s, play state / pitch / sync flags
 pub const PORT_ANNOUNCE:  u16 = 50000;
+pub const PORT_BEAT:      u16 = 50001;
 pub const PORT_STATUS:    u16 = 50002;
 
 /// Packet type bytes.

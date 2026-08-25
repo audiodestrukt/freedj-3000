@@ -96,6 +96,13 @@ it was written against the parser. Neither matches the real protocol:
 
 Source: <https://djl-analysis.deepsymmetry.org/djl-analysis/beats.html>
 
+Also: real hardware sends beat packets on **UDP 50001**; the app listened only
+on 50002 until 2026-08-25, so an XDJ on the LAN would have been silent. Both
+ports are bound now, and the beat-port log prints full packet hex. **Ground
+truth for this item is the XDJ-1000MK2 on the desk** — plug it in over
+ethernet, `make dev`, and capture what it sends. Fix the format to the
+captured packets, not to the simulator.
+
 Doing this first means the two-deck test *is* the compatibility work, rather
 than validating a private format that proves nothing about real gear.
 
