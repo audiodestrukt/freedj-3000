@@ -11,12 +11,15 @@ mod audio;
 mod midi;
 mod prodj;
 mod renderer;
+mod screen;
+mod snapshot;
 
 use anyhow::{bail, Context, Result};
 use audio::AudioHandle;
 use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_types::{BeatAnalyzer, BeatGrid};
 use renderer::Renderer;
+use snapshot::DeckSnapshot;
 use std::{
     path::PathBuf,
     sync::{
@@ -206,99 +209,30 @@ impl DeckApp {
         } else {
             0.0
         };
-        let sr        = self.audio.sample_rate;
-        let ch        = self.audio.channels as u64;
-        let total_s   = self.audio.samples.len() as f64 / sr as f64 / ch as f64;
-        let elapsed_s = pos as f64 / sr as f64 / ch as f64;
+        let title = self.path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
+        let snap = DeckSnapshot {
+            title,
+            position:      pos,
+            sample_rate:   self.audio.sample_rate,
+            channels:      self.audio.channels,
+            total_samples: self.audio.samples.len() as u64,
+            playing,
+            speed,
+            fader_speed,
+            key_lock:      true,   // Rubber Band path is always engaged today
+            beat_grid:     self.beat_grid.as_ref(),
+            beat2_bpm,
+            beat2_phase_beats,
+        };
 
         // Build egui overlay.
         let raw = egui_state.take_egui_input(window.as_ref());
-        let mut output = self.egui_ctx.run(raw, |ctx| {
-            // Transparent panel at the top.
-            egui::TopBottomPanel::top("info")
-                .frame(egui::Frame::default().fill(egui::Color32::from_black_alpha(160)))
-                .show(ctx, |ui| {
-                    ui.horizontal(|ui| {
-                        ui.label(
-                            egui::RichText::new(
-                                self.path
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("unknown"),
-                            )
-                            .color(egui::Color32::WHITE)
-                            .strong(),
-                        );
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new(format!(
-                                "{} {:02.0}:{:05.2} / {:02.0}:{:05.2}  {}Hz",
-                                if playing { "▶" } else { "⏸" },
-                                elapsed_s / 60.0,
-                                elapsed_s % 60.0,
-                                total_s / 60.0,
-                                total_s % 60.0,
-                                sr,
-                            ))
-                            .color(egui::Color32::LIGHT_GRAY)
-                            .monospace(),
-                        );
-                        if let Some(grid) = &self.beat_grid {
-                            ui.separator();
-                            let conf = grid.confidence;
-                            let color = if conf >= 0.7 {
-                                egui::Color32::from_rgb(80, 220, 80)
-                            } else {
-                                egui::Color32::from_rgb(220, 180, 60)
-                            };
-                            let displayed_bpm = grid.bpm * speed as f64;
-                            ui.label(
-                                egui::RichText::new(format!("{:.1} BPM", displayed_bpm))
-                                    .color(color)
-                                    .monospace(),
-                            );
-                        }
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new(format!("B2: {beat2_bpm:.1} BPM"))
-                                .color(egui::Color32::from_rgb(0, 220, 220))
-                                .monospace(),
-                        );
-                        ui.separator();
-                        let speed_color = if (speed - 1.0).abs() < 0.01 {
-                            egui::Color32::DARK_GRAY
-                        } else {
-                            egui::Color32::from_rgb(240, 160, 60)
-                        };
-                        ui.label(
-                            egui::RichText::new(format!("{:.2}×", speed))
-                                .color(speed_color)
-                                .monospace(),
-                        );
-                        ui.separator();
-                        ui.label(
-                            egui::RichText::new("Space=play/pause  ←/→=seek  +/-=speed  Q=quit")
-                                .color(egui::Color32::DARK_GRAY)
-                                .small(),
-                        );
-                    });
-                });
-        });
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap));
 
         let platform_output = std::mem::take(&mut output.platform_output);
         egui_state.handle_platform_output(window.as_ref(), platform_output);
 
-        renderer.render(
-            pos,
-            sr,
-            self.audio.channels,
-            self.beat_grid.as_ref(),
-            fader_speed,
-            beat2_bpm,
-            beat2_phase_beats,
-            &self.egui_ctx,
-            output,
-        );
+        renderer.render(&snap, &self.egui_ctx, output);
     }
 }
 

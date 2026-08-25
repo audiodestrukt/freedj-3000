@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use opendeck_analysis::WaveformCache;
-use opendeck_types::BeatGrid;
+use crate::snapshot::DeckSnapshot;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
 use winit::window::Window;
@@ -317,16 +317,17 @@ impl Renderer {
 
     pub fn render(
         &mut self,
-        playhead_sample:  u64,
-        sample_rate:      u32,
-        channels:         u8,
-        beat_grid:        Option<&BeatGrid>,
-        fader_speed:       f32,   // stable pitch-fader speed (no jog nudge)
-        beat2_bpm:         f32,   // 0.0 = disabled
-        beat2_phase_beats: f32,  // wall-clock beat phase 0.0–1.0
-        egui_ctx:         &egui::Context,
-        full_output:      egui::FullOutput,
+        snap:        &DeckSnapshot,
+        egui_ctx:    &egui::Context,
+        full_output: egui::FullOutput,
     ) {
+        let playhead_sample   = snap.position;
+        let sample_rate       = snap.sample_rate;
+        let channels          = snap.channels;
+        let beat_grid         = snap.beat_grid;
+        let fader_speed       = snap.fader_speed;
+        let beat2_bpm         = snap.beat2_bpm;
+        let beat2_phase_beats = snap.beat2_phase_beats;
         let pixels_per_point = full_output.pixels_per_point;
         let egui_shapes      = full_output.shapes;
         let textures_delta   = full_output.textures_delta;
