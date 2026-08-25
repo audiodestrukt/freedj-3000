@@ -75,7 +75,14 @@ Defer until C1 lands — the transport refactor changes who owns the buffer.
 
 ## B. ProDJ Link and two-deck testing
 
-### B1. Fix the wire format — **small**
+### B1. Fix the wire format — **done** (2026-08-25)
+
+Parser and builder now use the real 96-byte layout, verified against
+`prolink_virtual_cdj` traffic (16/16 beats decoded; the captured packet is
+pinned as a unit test). `send_beat.py` emits the real format on 50001.
+Harness: `make virtual-cdj` — see `docs/reference/link-test-harness.md`.
+Original finding kept below for the record.
+
 
 `build_beat()` and `parse_beat_packet()` in `crates/link/src/prodj.rs` disagree
 with each other. `build_beat` writes the player number at byte 26 and BPM at 44;

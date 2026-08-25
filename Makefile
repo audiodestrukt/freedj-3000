@@ -15,7 +15,13 @@ TRACK      ?= techno.mp3
 # Second-deck simulation (ProDJ Link beat sender)
 BPM        ?= 130.0
 HOST       ?= 127.0.0.1
-PORT       ?= 50002
+PORT       ?= 50001
+
+# Virtual CDJ harness (prolink-cpp); see docs/reference/link-test-harness.md
+PROLINK    ?= $(HOME)/sandbox/thirdparty/prolink-cpp/build
+IFACE      ?= eno1
+VCDJ_DEV   ?= 5
+VCDJ_NAME  ?= VirtualCDJ
 
 # Manual page range to extract for local visual reference
 REF_PDF    := reference/pioneer/CDJ-3000X_manual.pdf
@@ -24,7 +30,7 @@ REF_URL    := https://downloads.support.alphatheta.com/manuals/dj-players/CDJ-30
 RUST_LOG   ?= info,wgpu=warn,naga=warn
 
 .DEFAULT_GOAL := help
-.PHONY: help build debug relink run dev two-deck beat shot check fmt clippy test clean reference distclean
+.PHONY: help build debug relink run dev two-deck beat virtual-cdj shot check fmt clippy test clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +70,14 @@ two-deck: build ## Run a deck + a simulated CDJ sending beats at BPM
 
 beat: ## Send ProDJ Link beat packets only (no deck) — BPM=130.0
 	python3 tools/send_beat.py $(BPM) $(HOST) $(PORT)
+
+virtual-cdj: ## Run prolink-cpp's virtual CDJ on IFACE (announce+beat+status) — BPM, VCDJ_DEV
+	@test -x $(PROLINK)/prolink_virtual_cdj || { echo "prolink_virtual_cdj not built in $(PROLINK) — see docs/reference/link-test-harness.md"; exit 1; }
+	@IP=$$(ip -4 -o addr show $(IFACE) | awk '{print $$4}' | cut -d/ -f1); \
+	 BC=$$(ip -4 -o addr show $(IFACE) | awk '{print $$6}'); \
+	 test -n "$$IP" || { echo "no IPv4 on $(IFACE) — set IFACE=..."; exit 1; }; \
+	 echo "virtual CDJ: device $(VCDJ_DEV) '$(VCDJ_NAME)' @ $(BPM) BPM on $$IP (bcast $$BC)"; \
+	 sleep 100000 | $(PROLINK)/prolink_virtual_cdj $$IP $$BC 02:fd:00:00:00:0$(VCDJ_DEV) $(VCDJ_DEV) $(VCDJ_NAME) $(BPM)
 
 ## ── Screenshots ────────────────────────────────────────────────────────────
 

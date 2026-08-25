@@ -3,12 +3,15 @@
 //! Protocol documentation: https://djl-analysis.deepsymmetry.org/
 //! Reference implementation: beat-link (Java) by Deep Symmetry
 //!
+//! Packet layouts below were verified byte-for-byte against traffic from
+//! `prolink_virtual_cdj` (grantHarris/prolink-cpp) on 2026-08-25; the beat
+//! packet in the tests is that capture.  See docs/reference/link-test-harness.md.
+//!
 //! We appear on the network as player number 1–4.
 //! Pioneer mixers (DJM-900NXS2 etc.) and CDJs see us as a peer.
 
 use opendeck_types::EngineSnapshot;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use tokio::net::UdpSocket;
+use std::net::Ipv4Addr;
 
 /// UDP ports used by ProDJ Link (per the Deep Symmetry analysis):
 ///   50000 — device announce / keep-alive, every 1.5 s
@@ -18,103 +21,247 @@ pub const PORT_ANNOUNCE:  u16 = 50000;
 pub const PORT_BEAT:      u16 = 50001;
 pub const PORT_STATUS:    u16 = 50002;
 
-/// Packet type bytes.
+/// Packet type byte, at offset 0x0a in every packet.
 pub const PKT_ANNOUNCE:   u8 = 0x06;
 pub const PKT_BEAT:       u8 = 0x28;
 pub const PKT_STATUS:     u8 = 0x0A;
 
-/// Magic header present in all ProDJ Link packets.
-pub const MAGIC: &[u8] = b"Qspt";
+/// Magic header present in all ProDJ Link packets: "Qspt1WmJOL".
+pub const MAGIC: &[u8; 10] = b"Qspt1WmJOL";
+
+/// Pitch field value meaning +0% (1.0×).
+const PITCH_UNITY: u32 = 0x0010_0000;
+
+/// Offsets within a beat packet (0x60 bytes).
+mod beat {
+    pub const NAME:      usize = 0x0b;   // 20 bytes, NUL padded
+    pub const DEVICE:    usize = 0x21;
+    pub const LEN:       usize = 0x22;   // u16 BE, remaining length = 0x3c
+    pub const NEXT_BEAT: usize = 0x24;   // six u32 BE, ms until: next beat, 2nd beat,
+                                         // next bar, 4th beat, 2nd bar, 8th beat
+    pub const FILL:      usize = 0x3c;   // 24 × 0xFF
+    pub const PITCH:     usize = 0x54;   // u32 BE, 0x00100000 = +0%
+    pub const BPM:       usize = 0x5a;   // u16 BE, ×100
+    pub const BEAT:      usize = 0x5c;   // beat within bar, 1–4
+    pub const DEVICE2:   usize = 0x5f;
+    pub const SIZE:      usize = 0x60;
+}
+
+/// Offsets within an announce / keep-alive packet (0x36 bytes).
+mod announce {
+    pub const NAME:    usize = 0x0c;   // 20 bytes
+    pub const LEN:     usize = 0x22;   // u16 BE = 0x36
+    pub const DEVICE:  usize = 0x24;
+    pub const MAC:     usize = 0x26;
+    pub const IP:      usize = 0x2c;
+    pub const SIZE:    usize = 0x36;
+}
 
 pub struct ProDjLink {
-    player_num: u8,
+    player_num:  u8,
     device_name: [u8; 20],
+}
+
+/// Everything a beat packet tells us about the sender.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Beat {
+    pub player:       u8,
+    /// Effective tempo, already including the sender's pitch.
+    pub bpm:          f32,
+    /// Pitch multiplier, 1.0 = +0%.
+    pub pitch:        f32,
+    /// 1–4.
+    pub beat_in_bar:  u8,
+    /// Milliseconds until the next beat, as the sender predicts it.
+    pub next_beat_ms: u32,
 }
 
 impl ProDjLink {
     pub fn new(player_num: u8) -> Self {
         let mut device_name = [0u8; 20];
-        let name = b"OpenDeck";
+        let name = b"freedj-3000";
         device_name[..name.len()].copy_from_slice(name);
         Self { player_num, device_name }
     }
 
-    /// Build a device announce packet (0x06).
+    /// Build a device announce / keep-alive packet (0x06).
     /// Broadcast on PORT_ANNOUNCE every 1.5 seconds.
     pub fn build_announce(&self, ip: Ipv4Addr, mac: [u8; 6]) -> Vec<u8> {
-        let mut pkt = Vec::with_capacity(54);
-        pkt.extend_from_slice(MAGIC);
-        pkt.push(0x10);         // sub-type
-        pkt.push(PKT_ANNOUNCE);
-        pkt.extend_from_slice(&self.device_name);
-        pkt.push(0x01);
-        pkt.push(0x36);         // packet length
-        pkt.extend_from_slice(&ip.octets());
-        pkt.extend_from_slice(&mac);
-        pkt.push(self.player_num);
-        pkt.push(0x01);         // device type (CDJ)
+        let mut pkt = vec![0u8; announce::SIZE];
+        pkt[..10].copy_from_slice(MAGIC);
+        pkt[0x0a] = PKT_ANNOUNCE;
+        pkt[announce::NAME..announce::NAME + 20].copy_from_slice(&self.device_name);
+        pkt[0x20] = 0x01;
+        pkt[0x21] = 0x02;
+        pkt[announce::LEN..announce::LEN + 2].copy_from_slice(&(announce::SIZE as u16).to_be_bytes());
+        pkt[announce::DEVICE] = self.player_num;
+        pkt[0x25] = 0x01;                       // device type: CDJ
+        pkt[announce::MAC..announce::MAC + 6].copy_from_slice(&mac);
+        pkt[announce::IP..announce::IP + 4].copy_from_slice(&ip.octets());
+        // Trailer per the analysis: 01 00 00 00 01 00
+        pkt[0x30] = 0x01;
+        pkt[0x34] = 0x01;
         pkt
     }
 
-    /// Build a beat announcement packet (0x28).
-    /// Sent at every beat onset, derived from our EngineState.
-    pub fn build_beat(&self, snap: &EngineSnapshot) -> Vec<u8> {
-        let bpm_raw = (snap.bpm * 100.0) as u32;
-        let mut pkt = Vec::with_capacity(0x60);
-        pkt.extend_from_slice(MAGIC);
-        pkt.push(0x10);
-        pkt.push(PKT_BEAT);
-        pkt.extend_from_slice(&self.device_name);
-        pkt.push(self.player_num);
-        pkt.push(0x60);         // length
-        // Next beat number, 2nd beat, next-bar beat (placeholders)
-        pkt.extend_from_slice(&1u32.to_be_bytes());
-        pkt.extend_from_slice(&2u32.to_be_bytes());
-        pkt.extend_from_slice(&1u32.to_be_bytes());
-        // Beat within bar 1–4
-        let beat_in_bar = ((snap.bar_phase * 4.0) as u32 % 4) + 1;
-        pkt.extend_from_slice(&beat_in_bar.to_be_bytes());
-        pkt.extend_from_slice(&bpm_raw.to_be_bytes());
+    /// Build a beat packet (0x28) for the beat that is happening now.
+    ///
+    /// `snap.bpm` is the effective tempo; `beat_in_bar` is 1–4.  The six
+    /// countdown fields are derived from the beat period.
+    pub fn build_beat(&self, snap: &EngineSnapshot, beat_in_bar: u8) -> Vec<u8> {
+        let mut pkt = vec![0u8; beat::SIZE];
+        pkt[..10].copy_from_slice(MAGIC);
+        pkt[0x0a] = PKT_BEAT;
+        pkt[beat::NAME..beat::NAME + 20].copy_from_slice(&self.device_name);
+        pkt[0x1f] = 0x01;
+        pkt[beat::DEVICE] = self.player_num;
+        pkt[beat::LEN..beat::LEN + 2].copy_from_slice(&((beat::SIZE - beat::NEXT_BEAT) as u16).to_be_bytes());
+
+        let beat_ms = 60_000.0 / snap.bpm.max(1.0);
+        let bib = beat_in_bar.clamp(1, 4) as f32;
+        let beats_to_next_bar = 5.0 - bib;                 // 4,3,2,1
+        let counts = [1.0, 2.0, beats_to_next_bar, 4.0, beats_to_next_bar + 4.0, 8.0];
+        for (i, n) in counts.iter().enumerate() {
+            let ms = (n * beat_ms).round() as u32;
+            let o = beat::NEXT_BEAT + i * 4;
+            pkt[o..o + 4].copy_from_slice(&ms.to_be_bytes());
+        }
+        pkt[beat::FILL..beat::FILL + 24].fill(0xFF);
+
+        let pitch = (snap.speed.max(0.0) * PITCH_UNITY as f32) as u32;
+        pkt[beat::PITCH..beat::PITCH + 4].copy_from_slice(&pitch.to_be_bytes());
+        let bpm_raw = (snap.bpm * 100.0).round() as u16;
+        pkt[beat::BPM..beat::BPM + 2].copy_from_slice(&bpm_raw.to_be_bytes());
+        pkt[beat::BEAT] = beat_in_bar.clamp(1, 4);
+        pkt[beat::DEVICE2] = self.player_num;
         pkt
+    }
+
+    /// Packet type, if this is a ProDJ Link packet at all.
+    pub fn packet_type(data: &[u8]) -> Option<u8> {
+        if data.len() < 0x0b || &data[..10] != MAGIC {
+            return None;
+        }
+        Some(data[0x0a])
+    }
+
+    /// Parse a beat packet.
+    pub fn parse_beat(data: &[u8]) -> Option<Beat> {
+        if Self::packet_type(data)? != PKT_BEAT || data.len() < beat::SIZE {
+            return None;
+        }
+        let u16_at = |o: usize| u16::from_be_bytes([data[o], data[o + 1]]);
+        let u32_at = |o: usize| u32::from_be_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+
+        let pitch_raw = u32_at(beat::PITCH);
+        let pitch = pitch_raw as f32 / PITCH_UNITY as f32;
+        // Some senders put a flag in the top byte; if the value is absurd,
+        // fall back to unity rather than poisoning the tempo.
+        let pitch = if (0.25..=4.0).contains(&pitch) { pitch } else { 1.0 };
+
+        Some(Beat {
+            player:       data[beat::DEVICE],
+            bpm:          u16_at(beat::BPM) as f32 / 100.0,
+            pitch,
+            beat_in_bar:  data[beat::BEAT].clamp(1, 4),
+            next_beat_ms: u32_at(beat::NEXT_BEAT),
+        })
     }
 
     /// Parse an incoming packet and return the peer's EngineSnapshot if it's
-    /// a beat or status packet we care about.
+    /// a beat packet.  Status packets are recognised but not yet decoded.
     pub fn parse_packet(data: &[u8]) -> Option<(u8, EngineSnapshot)> {
-        if data.len() < 5 || &data[0..4] != MAGIC {
-            return None;
-        }
-        let pkt_type = data[5];
-        match pkt_type {
-            PKT_BEAT => parse_beat_packet(data),
+        match Self::packet_type(data)? {
+            PKT_BEAT => {
+                let b = Self::parse_beat(data)?;
+                Some((b.player, EngineSnapshot {
+                    position: 0,
+                    ghost_position: 0,
+                    speed: b.pitch,
+                    bpm: b.bpm,
+                    beat_phase: 0.0,
+                    bar_phase: (b.beat_in_bar - 1) as f32 / 4.0,
+                    is_playing: true,
+                    slip_active: false,
+                    key_lock: false,
+                    deck_id: b.player,
+                    timestamp_ns: 0,
+                }))
+            }
             PKT_STATUS => parse_status_packet(data),
             _ => None,
         }
     }
 }
 
-fn parse_beat_packet(data: &[u8]) -> Option<(u8, EngineSnapshot)> {
-    if data.len() < 0x28 + 4 { return None; }
-    let player_num = data[0x10];
-    let bpm_raw = u32::from_be_bytes(data[0x24..0x28].try_into().ok()?) as f32 / 100.0;
-    // TODO: extract full fields per dysentery spec
-    Some((player_num, EngineSnapshot {
-        position: 0,
-        ghost_position: 0,
-        speed: 1.0,
-        bpm: bpm_raw,
-        beat_phase: 0.0,
-        bar_phase: 0.0,
-        is_playing: true,
-        slip_active: false,
-        key_lock: false,
-        deck_id: player_num,
-        timestamp_ns: 0,
-    }))
-}
-
 fn parse_status_packet(data: &[u8]) -> Option<(u8, EngineSnapshot)> {
-    // TODO: implement per dysentery protocol spec chapter 5
+    // TODO: implement per dysentery protocol spec chapter 5.  Carries play
+    // state, pitch, BPM, beat number, and the SYNC / MASTER flags.
     let _ = data;
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Captured from prolink_virtual_cdj (device 5, "VirtualCDJ", 128 BPM)
+    /// on 2026-08-25 — 96 bytes on UDP 50001.
+    const CAPTURED_BEAT: [u8; 0x60] = [
+        0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6D, 0x4A, 0x4F, 0x4C, 0x28,
+        0x56, 0x69, 0x72, 0x74, 0x75, 0x61, 0x6C, 0x43, 0x44, 0x4A, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x05, 0x00, 0x3C,
+        0x00, 0x00, 0x01, 0xD4,  0x00, 0x00, 0x03, 0xA8,  0x00, 0x00, 0x05, 0x7C,
+        0x00, 0x00, 0x07, 0x50,  0x00, 0x00, 0x0C, 0xCF,  0x00, 0x00, 0x0E, 0xA0,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00,
+        0x10, 0x10, 0x00, 0x00, 0x00, 0x00, 0x32, 0x00, 0x02, 0x00, 0x0D, 0x05,
+    ];
+
+    #[test]
+    fn parses_captured_virtual_cdj_beat() {
+        let b = ProDjLink::parse_beat(&CAPTURED_BEAT).expect("beat packet");
+        assert_eq!(b.player, 5);
+        assert_eq!(b.bpm, 128.0);
+        assert_eq!(b.beat_in_bar, 2);
+        assert_eq!(b.next_beat_ms, 468);   // 60_000 / 128 = 468.75
+    }
+
+    #[test]
+    fn rejects_the_old_private_format() {
+        // What send_beat.py used to emit: 4-byte magic, type at offset 5.
+        let mut old = [0u8; 0x30];
+        old[..4].copy_from_slice(b"Qspt");
+        old[4] = 0x10;
+        old[5] = PKT_BEAT;
+        assert!(ProDjLink::parse_packet(&old).is_none());
+    }
+
+    #[test]
+    fn beat_round_trips() {
+        let link = ProDjLink::new(3);
+        let snap = EngineSnapshot {
+            position: 0, ghost_position: 0, speed: 1.02, bpm: 130.0,
+            beat_phase: 0.0, bar_phase: 0.0, is_playing: true,
+            slip_active: false, key_lock: false, deck_id: 3, timestamp_ns: 0,
+        };
+        let pkt = link.build_beat(&snap, 3);
+        assert_eq!(pkt.len(), 0x60);
+        let b = ProDjLink::parse_beat(&pkt).unwrap();
+        assert_eq!(b.player, 3);
+        assert_eq!(b.bpm, 130.0);
+        assert_eq!(b.beat_in_bar, 3);
+        assert!((b.pitch - 1.02).abs() < 1e-4);
+        assert_eq!(b.next_beat_ms, 462);   // 60_000 / 130
+    }
+
+    #[test]
+    fn announce_has_spec_layout() {
+        let pkt = ProDjLink::new(2).build_announce(Ipv4Addr::new(192, 168, 68, 64), [2, 0xfd, 0, 0, 0, 2]);
+        assert_eq!(pkt.len(), 0x36);
+        assert_eq!(&pkt[..10], MAGIC);
+        assert_eq!(pkt[0x0a], PKT_ANNOUNCE);
+        assert_eq!(pkt[0x24], 2);
+        assert_eq!(&pkt[0x2c..0x30], &[192, 168, 68, 64]);
+    }
 }

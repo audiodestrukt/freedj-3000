@@ -1,5 +1,8 @@
 //! ProDJ Link beat packet listener.
 //!
+//! Testing without a second deck: docs/reference/link-test-harness.md
+//! (`make virtual-cdj` for a full virtual CDJ, `make two-deck` for beats only).
+//!
 //! Binds UDP on port 50002 and waits for Pioneer beat packets (0x28).
 //! On each beat, updates beat2_bpm and bumps beat2_anchor (which triggers
 //! a phase reset in the renderer, keeping the second beat grid locked to

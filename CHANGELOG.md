@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed — 2026-08-25
+- **ProDJ Link parser rejected every real packet.** It checked the type byte
+  at offset 5 — which in the real 10-byte-magic format (`Qspt1WmJOL`) is the
+  `W` — and read BPM from 0x24, the next-beat countdown. It only ever
+  understood `send_beat.py`'s private layout. Rewritten to the documented
+  96-byte layout (player 0x21, six countdown u32s from 0x24, pitch 0x54, BPM
+  u16 at 0x5a, beat-in-bar 0x5c) and verified against `prolink_virtual_cdj`:
+  0/16 → 16/16 beats decoded. The captured packet is a unit test. Announce
+  packets follow the 0x36-byte layout. `send_beat.py` now emits the real
+  format and defaults to 50001.
+- **Beat listener only bound 50002.** Real hardware sends beats on 50001.
+  Both are bound now.
 - **App would not start**: two stacked breakages since March. The binary was
   linked against `librubberband.so.2` while the system had moved to `.so.3`
   (cargo does not notice a C soname change — `make relink`), and
