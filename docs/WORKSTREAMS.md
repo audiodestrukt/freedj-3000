@@ -36,7 +36,7 @@ Not in M1: key detection, cues/loops, library, touch, any custom hardware.
 
 ```
 INPUT_PLAN step 1  ControlEvent bus + Deck::apply      ─┐
-G1a  S2 MK2 HID adapter (recover from bc4a6dd^)         ├─▶ controller drives the deck
+G1a  DJ2Go MIDI adapter first; S2 MK2 HID after (bc4a6dd^) ├─▶ controller drives the deck
 INPUT_PLAN step 2  event log / --script / --record      ─┘   (and is regression-tested)
 
 A1   sample-rate conversion (48 kHz devices play sharp) ─┐

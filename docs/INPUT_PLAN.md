@@ -48,6 +48,26 @@ or consumes it.
   recording format and the replay format — the simulator's script syntax is
   just a human-writable spelling of it.
 
+## Why the seam matters: the S2 lesson
+
+The first controller was the Kontrol S2 MK2 over HID, and it stalled because
+a bad jog delta and a bad nudge looked identical — reading the wheel and
+acting on it were one function, and there was no way to tell which half was
+wrong. The bus fixes this by construction:
+
+- **The adapter's output is inspectable on its own.** `--record` (or
+  `RUST_LOG=opendeck::input=debug`) shows the raw `JogDelta` stream with
+  timestamps. Does it wrap cleanly at the 24-bit boundary, is the rate what
+  the hardware should produce, does it go to zero at rest? Those are
+  questions about the adapter, answered without the deck involved.
+- **The deck's behaviour is testable with hardware out of the loop.** A
+  simulator jog profile is a known-good delta stream; if the nudge misbehaves
+  on it, the nudge is wrong. If it behaves on the profile and not on the
+  device, the adapter is wrong.
+
+Same for every source. This is the main reason the seam is worth half a day
+before any feature.
+
 ## Touch
 
 The XDJ screen is a touch panel. winit delivers `WindowEvent::Touch` and
