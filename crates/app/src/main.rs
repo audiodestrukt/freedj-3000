@@ -59,6 +59,8 @@ struct DeckApp {
     smoothed_pos:      f64,       // phase-locked playhead, source samples
     heard_avg:         f64,       // low-passed reference the playhead locks to
     refresh_interval:  Duration,  // display period; each frame lands in one of these
+    frame_count:       u64,
+    exit_after_capture: bool,
 
     // Created on first `resumed`.
     window:      Option<Arc<Window>>,
@@ -95,6 +97,8 @@ impl DeckApp {
             smoothed_pos:      0.0,
             heard_avg:         0.0,
             refresh_interval:  FRAME_INTERVAL,
+            frame_count:       0,
+            exit_after_capture: false,
             window:      None,
             renderer:    None,
             egui_ctx:    egui::Context::default(),
@@ -225,14 +229,29 @@ impl DeckApp {
             beat2_phase_beats,
         };
 
+        // Screen layout in logical points; the shader gets its two rects in pixels.
+        let ppp  = window.scale_factor() as f32;
+        let size = window.inner_size();
+        let lay  = screen::layout(egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
+        let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
+        let vp   = renderer::Viewports { wave: px(lay.wave), overview: px(lay.overview) };
+
         // Build egui overlay.
         let raw = egui_state.take_egui_input(window.as_ref());
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap));
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay));
 
         let platform_output = std::mem::take(&mut output.platform_output);
         egui_state.handle_platform_output(window.as_ref(), platform_output);
 
-        renderer.render(&snap, &self.egui_ctx, output);
+        // Dev: OPENDECK_SCREENSHOT=path captures frame 90 and exits.
+        self.frame_count += 1;
+        if self.frame_count == 90 {
+            if let Ok(path) = std::env::var("OPENDECK_SCREENSHOT") {
+                renderer.request_capture(path.into());
+                self.exit_after_capture = true;
+            }
+        }
+        renderer.render(&snap, &vp, &self.egui_ctx, output);
     }
 }
 
@@ -244,7 +263,7 @@ impl ApplicationHandler for DeckApp {
 
         let attrs = WindowAttributes::default()
             .with_title("freedj-3000")
-            .with_inner_size(winit::dpi::LogicalSize::new(1280u32, 480u32));
+            .with_inner_size(winit::dpi::LogicalSize::new(1024u32, 600u32));   // XDJ-1000MK2 7" panel
 
         let window = Arc::new(
             event_loop
@@ -345,6 +364,14 @@ impl ApplicationHandler for DeckApp {
                     self.audio.speed_store(1.0);
                     log::info!("speed → 1.00× (reset)");
                 }
+                PhysicalKey::Code(KeyCode::KeyC) => {
+                    // Cycle waveform colour like the Shortcut screen's Waveform Color.
+                    if let Some(r) = &mut self.renderer {
+                        use renderer::ColorMode::*;
+                        r.color_mode = match r.color_mode { Rgb => ThreeBand, ThreeBand => Blue, Blue => Rgb };
+                        log::info!("waveform colour → {:?}", r.color_mode);
+                    }
+                }
                 PhysicalKey::Code(KeyCode::Escape) | PhysicalKey::Code(KeyCode::KeyQ) => {
                     event_loop.exit();
                 }
@@ -359,6 +386,10 @@ impl ApplicationHandler for DeckApp {
 
             WindowEvent::RedrawRequested => {
                 self.render_frame();
+                if self.exit_after_capture {
+                    event_loop.exit();
+                    return;
+                }
                 // Ask for the next frame immediately.  On Wayland winit defers
                 // this to the compositor's frame callback, so redraws arrive
                 // phase-locked to the display instead of to a CPU timer.  The

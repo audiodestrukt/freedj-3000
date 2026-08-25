@@ -31,6 +31,27 @@ All notable changes to this project will be documented in this file.
   NVIDIA/Vulkan/Wayland only.
 
 ### Added — 2026-08-25
+- **XDJ-1000MK2 playback screen** (`crates/app/src/screen.rs`): the layout from
+  the XDJ-1000MK2 manual's *Normal playback screen* diagram — touch-key row,
+  title bar, LINK/source column, MASTER PLAYER + phase meter + beat countdown,
+  enlarged waveform with CUE/LOOP · CALL · ZOOM column, info row (PLAYER, TRACK,
+  cue pills, REMAIN time, TEMPO, SYNC/MASTER), and the bottom row with SLIP,
+  the whole-track overview and BPM. Window defaults to the panel's 1024×600.
+  Elements whose data does not exist yet (cues, key, loops, MASTER) are drawn
+  in their real positions, dim.
+- **Overview waveform** in the shader, peak-per-pixel so transients survive
+  the downsample; played portion dims as on the unit.
+- **Waveform colour modes**: RGB, 3 BAND (default; blue/amber/white stacked
+  by band, dominant band at full height), BLUE. `C` cycles. Colours are
+  authored in sRGB and converted once — the surface is sRGB, and writing
+  linear values directly had made the ground grey and the bands pastel.
+- **Display gain**: bar height normalised to the track's peak column so a
+  quiet master still fills the display.
+- **`DeckSnapshot`** (`snapshot.rs`): everything the deck knows this frame, in
+  one struct; renderer and screen chrome are consumers of it.
+- **Frame capture**: `OPENDECK_SCREENSHOT=path` writes frame 90 to a PNG and
+  exits; `make shot` wraps it. This is how the layout was checked against the
+  manual page without a working desktop screenshot tool.
 - **`Makefile`**: `make` lists targets; `run`, `dev`, `two-deck`, `relink`,
   `reference` and the usual `check`/`fmt`/`clippy`/`test`. Thin wrappers over
   cargo.

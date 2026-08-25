@@ -24,7 +24,7 @@ REF_URL    := https://downloads.support.alphatheta.com/manuals/dj-players/CDJ-30
 RUST_LOG   ?= info,wgpu=warn,naga=warn
 
 .DEFAULT_GOAL := help
-.PHONY: help build debug relink run dev two-deck beat check fmt clippy test clean reference distclean
+.PHONY: help build debug relink run dev two-deck beat shot check fmt clippy test clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -64,6 +64,14 @@ two-deck: build ## Run a deck + a simulated CDJ sending beats at BPM
 
 beat: ## Send ProDJ Link beat packets only (no deck) — BPM=130.0
 	python3 tools/send_beat.py $(BPM) $(HOST) $(PORT)
+
+## ── Screenshots ────────────────────────────────────────────────────────────
+
+SHOT ?= docs/screenshots/playback.png
+
+shot: build ## Capture the playback screen to SHOT (default docs/screenshots/playback.png)
+	@mkdir -p $(dir $(SHOT))
+	OPENDECK_SCREENSHOT=$(SHOT) RUST_LOG=opendeck=info,wgpu=off,naga=off,egui=off ./$(BIN) "$(TRACK)" 2>&1 | grep -E "captured|error" || true
 
 ## ── Quality ────────────────────────────────────────────────────────────────
 

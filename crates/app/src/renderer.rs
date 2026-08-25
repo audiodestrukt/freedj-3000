@@ -39,8 +39,27 @@ struct WaveformParams {
     beat2_phase_beats: f32,
     /// Second beat grid: columns per beat (0 if disabled).
     beat2_period_cols: f32,
-    _pad:             f32,
+    /// Waveform colour mode: 0 = RGB, 1 = 3 BAND, 2 = BLUE.
+    color_mode:       f32,
+    /// Enlarged-waveform rect in physical pixels: x, y, w, h.
+    wave_rect:        [f32; 4],
+    /// Overview-waveform rect in physical pixels: x, y, w, h.
+    over_rect:        [f32; 4],
+    /// Multiplier that brings the track's loudest column to full height.
+    amp_gain:         f32,
+    _pad:             [f32; 3],
 }
+
+/// Where the shader draws its two waveforms, in physical pixels.
+#[derive(Clone, Copy, Debug)]
+pub struct Viewports {
+    pub wave:     [f32; 4],
+    pub overview: [f32; 4],
+}
+
+/// Waveform colour scheme, matching the CDJ `Waveform Color` setting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ColorMode { Rgb = 0, ThreeBand = 1, Blue = 2 }
 
 // ── Renderer ──────────────────────────────────────────────────────────────────
 
@@ -65,6 +84,13 @@ pub struct Renderer {
 
     /// Kept so `render` can call `pre_present_notify` before each present.
     window:         Arc<Window>,
+
+    pub color_mode: ColorMode,
+    /// Normalises bar height to the track's peak so quiet masters still fill
+    /// the display, as they do on a CDJ.
+    amp_gain:       f32,
+    /// When set, the next frame is also written to this PNG path.
+    capture:        Option<std::path::PathBuf>,
 }
 
 impl Renderer {
@@ -152,7 +178,7 @@ impl Renderer {
         log::info!("present mode: {present_mode:?} (available: {:?})", caps.present_modes);
 
         let surface_config = wgpu::SurfaceConfiguration {
-            usage:                        wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage:                        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
             format,
             width:                        size.width.clamp(1, max_dim),
             height:                       size.height.clamp(1, max_dim),
@@ -170,6 +196,11 @@ impl Renderer {
         let waveform_data: Vec<u32> = waveform.columns.iter()
             .map(|col| u32::from_le_bytes(*col))
             .collect();
+
+        // Peak amplitude byte across the track sets the display gain.
+        let peak = waveform_data.iter().map(|v| (v >> 24) & 0xFF).max().unwrap_or(255) as f32 / 255.0;
+        let amp_gain = (0.97 / peak.max(0.05)).min(6.0);
+        log::info!("waveform peak {:.2} → display gain {:.2}", peak, amp_gain);
 
         let waveform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_data"),
@@ -190,7 +221,11 @@ impl Renderer {
             beats_per_bar:     4.0,
             beat2_phase_beats: 0.0,
             beat2_period_cols: 0.0,
-            _pad:              0.0,
+            color_mode:       ColorMode::ThreeBand as u32 as f32,
+            wave_rect:        [0.0; 4],
+            over_rect:        [0.0; 4],
+            amp_gain:         1.0,
+            _pad:             [0.0; 3],
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -298,6 +333,9 @@ impl Renderer {
             egui_screen,
             max_dim,
             window,
+            color_mode: ColorMode::ThreeBand,
+            amp_gain,
+            capture:    None,
         })
     }
 
@@ -315,9 +353,15 @@ impl Renderer {
         self.egui_screen.size_in_pixels = [width, height];
     }
 
+    /// Write the next rendered frame to `path` as a PNG.
+    pub fn request_capture(&mut self, path: std::path::PathBuf) {
+        self.capture = Some(path);
+    }
+
     pub fn render(
         &mut self,
         snap:        &DeckSnapshot,
+        vp:          &Viewports,
         egui_ctx:    &egui::Context,
         full_output: egui::FullOutput,
     ) {
@@ -368,7 +412,11 @@ impl Renderer {
             beats_per_bar,
             beat2_phase_beats,
             beat2_period_cols,
-            _pad:              0.0,
+            color_mode:        self.color_mode as u32 as f32,
+            wave_rect:         vp.wave,
+            over_rect:         vp.overview,
+            amp_gain:          self.amp_gain,
+            _pad:              [0.0; 3],
         };
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -398,7 +446,7 @@ impl Renderer {
                     view:           &view,
                     resolve_target: None,
                     ops:            wgpu::Operations {
-                        load:  wgpu::LoadOp::Clear(wgpu::Color { r: 0.04, g: 0.04, b: 0.04, a: 1.0 }),
+                        load:  wgpu::LoadOp::Clear(wgpu::Color { r: 0.0015, g: 0.002, b: 0.003, a: 1.0 }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -447,7 +495,64 @@ impl Renderer {
             self.egui_renderer.render(&mut pass, &primitives, &self.egui_screen);
         }
 
+        // ── Optional frame capture ────────────────────────────────────────────
+        let capture = self.capture.take().map(|path| {
+            let (w, h) = (self.surface_config.width, self.surface_config.height);
+            let bpr = ((w * 4 + 255) / 256) * 256;   // COPY_BYTES_PER_ROW_ALIGNMENT
+            let buf = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("capture"),
+                size:  (bpr * h) as u64,
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture {
+                    texture: &output.texture, mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::ImageCopyBuffer {
+                    buffer: &buf,
+                    layout: wgpu::ImageDataLayout {
+                        offset: 0, bytes_per_row: Some(bpr), rows_per_image: Some(h),
+                    },
+                },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+            (path, buf, w, h, bpr)
+        });
+
         self.queue.submit(std::iter::once(encoder.finish()));
+
+        if let Some((path, buf, w, h, bpr)) = capture {
+            let slice = buf.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            self.device.poll(wgpu::Maintain::Wait);
+            let data = slice.get_mapped_range();
+            let bgra = self.surface_config.format.remove_srgb_suffix() == wgpu::TextureFormat::Bgra8Unorm;
+            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+            for row in 0..h {
+                let r = &data[(row * bpr) as usize..(row * bpr + w * 4) as usize];
+                for px in r.chunks_exact(4) {
+                    if bgra { rgba.extend_from_slice(&[px[2], px[1], px[0], 255]); }
+                    else    { rgba.extend_from_slice(&[px[0], px[1], px[2], 255]); }
+                }
+            }
+            drop(data);
+            buf.unmap();
+            let written = std::fs::File::create(&path).map_err(anyhow::Error::from).and_then(|f| {
+                let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
+                enc.set_color(png::ColorType::Rgba);
+                enc.set_depth(png::BitDepth::Eight);
+                let mut wr = enc.write_header()?;
+                wr.write_image_data(&rgba)?;
+                Ok(())
+            });
+            match written {
+                Ok(())  => log::info!("captured {}x{} frame → {}", w, h, path.display()),
+                Err(e)  => log::error!("capture failed: {e}"),
+            }
+        }
+
         let t_present = std::time::Instant::now();
         // Required on Wayland: this is what requests the compositor frame
         // callback that paces the next RedrawRequested.  See Renderer::new.
@@ -464,18 +569,15 @@ impl Renderer {
 // ── WGSL shader ───────────────────────────────────────────────────────────────
 
 const WAVEFORM_WGSL: &str = r#"
-// Waveform display shader.
+// Waveform display shader — draws the enlarged waveform and the overview
+// waveform into two rects; everything outside them is ground for egui.
 //
 // Waveform data is a storage buffer of u32 values, one per column.
-// Each u32 packs [R, G, B, Amp] as little-endian bytes:
-//   bits  0-7:  R (bass energy)
-//   bits  8-15: G (mid energy)
-//   bits 16-23: B (high energy)
-//   bits 24-31: A (overall amplitude, controls bar height)
+// Each u32 packs [low, mid, high, amp] as little-endian bytes.
 
 struct Params {
-    playhead_col:       f32,  // column index at screen center
-    cols_visible:       f32,  // columns visible across full width
+    playhead_col:       f32,  // column index at the enlarged-waveform centre
+    cols_visible:       f32,  // columns visible across the enlarged waveform
     num_cols:           f32,  // number of valid columns in the buffer
     screen_w:           f32,
     screen_h:           f32,
@@ -483,13 +585,39 @@ struct Params {
     beat_period_cols:   f32,  // columns per beat (0 = no grid)
     downbeat_offset:    f32,  // which beat within the bar is beat 0
     beats_per_bar:      f32,  // 4 for 4/4
-    beat2_phase_beats:  f32,  // wall-clock beat phase 0.0–1.0
-    beat2_period_cols:  f32,  // second beat grid columns per beat (0 = disabled)
-    _pad:               f32,
+    beat2_phase_beats:  f32,  // external deck beat phase 0.0–1.0
+    beat2_period_cols:  f32,  // external deck columns per beat (0 = disabled)
+    color_mode:         f32,  // 0 RGB, 1 3-BAND, 2 BLUE
+    wave_rect:          vec4<f32>,
+    over_rect:          vec4<f32>,
+    amp_gain:           f32,  // brings the track peak to full height
+    _p0: f32, _p1: f32, _p2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
 @group(0) @binding(1) var<uniform> p: Params;
+
+const B2_STRIP_PX: f32 = 22.0;   // external-deck beat strip along the bottom of the enlarged waveform
+
+// The surface is sRGB, so the shader outputs linear.  Author colours in sRGB
+// (what you see) and convert once here.
+fn srgb(r: f32, g: f32, b: f32) -> vec4<f32> {
+    let c = vec3<f32>(r, g, b) / 255.0;
+    return vec4<f32>(pow(c, vec3<f32>(2.2)), 1.0);
+}
+fn ground() -> vec4<f32>   { return srgb(5.0, 7.0, 10.0); }     // matches screen.rs BG
+fn wave_bg() -> vec4<f32>  { return srgb(12.0, 14.0, 18.0); }   // enlarged-waveform field
+fn over_bg() -> vec4<f32>  { return srgb(10.0, 12.0, 16.0); }
+fn white() -> vec4<f32>    { return srgb(244.0, 246.0, 248.0); }
+fn band_low() -> vec4<f32> { return srgb(58.0, 123.0, 240.0); }  // 3-band blue
+fn band_mid() -> vec4<f32> { return srgb(240.0, 160.0, 48.0); }  // 3-band amber
+fn blue_wave(s: f32) -> vec4<f32> { return srgb(64.0 * s, 140.0 * s, 255.0 * s); }
+fn cyan() -> vec4<f32>     { return srgb(0.0, 216.0, 216.0); }
+fn strip_bg() -> vec4<f32> { return srgb(0.0, 22.0, 40.0); }
+fn tick() -> vec4<f32>     { return srgb(90.0, 96.0, 104.0); }
+fn tick_hi() -> vec4<f32>  { return srgb(230.0, 232.0, 236.0); }
+fn down() -> vec4<f32>     { return srgb(120.0, 40.0, 40.0); }
+fn down_hi() -> vec4<f32>  { return srgb(255.0, 60.0, 60.0); }
 
 // ── Vertex: fullscreen triangle ───────────────────────────────────────────────
 @vertex
@@ -499,96 +627,146 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> @builtin(position) vec4<f32> {
     return vec4<f32>(x, y, 0.0, 1.0);
 }
 
+// ── Helpers ───────────────────────────────────────────────────────────────────
+fn in_rect(q: vec2<f32>, r: vec4<f32>) -> bool {
+    return q.x >= r.x && q.x < r.x + r.z && q.y >= r.y && q.y < r.y + r.w;
+}
+
+fn unpack(v: u32) -> vec4<f32> {
+    return vec4<f32>(
+        f32( v         & 0xFFu),
+        f32((v >>  8u) & 0xFFu),
+        f32((v >> 16u) & 0xFFu),
+        f32((v >> 24u) & 0xFFu),
+    ) / 255.0;
+}
+
+// Colour of a bar pixel at normalised distance `dist` from the centre line
+// (0 = centre, 1 = edge), given band energies c = (low, mid, high, amp).
+// Alpha 0 means "not part of the bar".
+fn bar_color(c_in: vec4<f32>, dist: f32) -> vec4<f32> {
+    let c    = vec4<f32>(c_in.xyz, min(c_in.w * p.amp_gain, 1.0));
+    let mode = u32(p.color_mode + 0.5);
+    if mode == 1u {
+        // 3 BAND: the dominant band reaches the full amplitude; the others are
+        // stacked inside it in proportion.  White highs at the core, amber
+        // mids, blue lows outermost — the Pioneer look.
+        let m = max(c.x, max(c.y, c.z)) + 0.001;
+        let h = c.xyz / m * c.w;
+        if dist < h.z { return white(); }
+        if dist < h.y { return band_mid(); }
+        if dist < h.x { return band_low(); }
+        return vec4<f32>(0.0);
+    }
+    if dist >= c.w { return vec4<f32>(0.0); }
+    let shade = 1.0 - dist / (c.w + 0.001) * 0.3;
+    if mode == 2u {
+        return blue_wave(shade);
+    }
+    return vec4<f32>(pow(c.xyz * shade, vec3<f32>(2.2)), 1.0);
+}
+
+// ── Enlarged waveform ─────────────────────────────────────────────────────────
+fn draw_wave(q: vec2<f32>) -> vec4<f32> {
+    let r  = p.wave_rect;
+    let sx = (q.x - r.x) / r.z;
+
+    // External-deck beat strip along the bottom edge, wall-clock driven so it
+    // does not scroll with the audio.
+    if q.y > r.y + r.w - B2_STRIP_PX && p.beat2_period_cols > 0.0 {
+        let pixels_per_beat = p.beat2_period_cols * r.z / p.cols_visible;
+        let phase_px        = p.beat2_phase_beats * pixels_per_beat;
+        let beat_x = (((q.x - r.x) + phase_px) % pixels_per_beat + pixels_per_beat) % pixels_per_beat;
+        if beat_x < 3.0 || beat_x > pixels_per_beat - 3.0 {
+            return cyan();
+        }
+        return strip_bg();
+    }
+
+    // Playhead hairline at the horizontal centre.
+    if abs(q.x - (r.x + r.z * 0.5)) < 1.0 {
+        return white();
+    }
+
+    let wave_h = r.w - select(0.0, B2_STRIP_PX, p.beat2_period_cols > 0.0);
+    let sy     = (q.y - r.y) / wave_h;
+
+    let half  = p.cols_visible * 0.5;
+    let col_f = (p.playhead_col - half) + sx * p.cols_visible;
+    if col_f < 0.0 || col_f >= p.num_cols {
+        return wave_bg();
+    }
+
+    // Bilinear between adjacent columns so the scroll is sub-pixel smooth.
+    let col_lo = u32(col_f);
+    let col_hi = min(col_lo + 1u, u32(p.num_cols) - 1u);
+    let c      = mix(unpack(waveform[col_lo]), unpack(waveform[col_hi]), col_f - f32(col_lo));
+
+    let dist = abs(sy - 0.5) * 2.0;
+    let bar  = bar_color(c, dist);
+    if bar.a > 0.0 {
+        return bar;
+    }
+
+    // Beat grid behind the bars: faint full-height lines, brighter ticks at
+    // the bottom edge, red on downbeats.
+    if p.beat_period_cols > 0.0 {
+        let rel      = col_f - p.beat_anchor_col;
+        let beat_pos = ((rel % p.beat_period_cols) + p.beat_period_cols) % p.beat_period_cols;
+        let beat_num = floor(rel / p.beat_period_cols);
+        let bpb      = p.beats_per_bar;
+        let adjusted = ((beat_num + p.downbeat_offset) % bpb + bpb) % bpb;
+        let is_down  = adjusted < 0.5;
+        let tick_w   = select(1.0, 2.0, is_down);
+        if beat_pos < tick_w || beat_pos > p.beat_period_cols - tick_w {
+            let bottom = q.y > r.y + wave_h - select(8.0, 14.0, is_down);
+            if is_down {
+                return select(down(), down_hi(), bottom);
+            }
+            return select(tick(), tick_hi(), bottom);
+        }
+    }
+    return wave_bg();
+}
+
+// ── Overview waveform ─────────────────────────────────────────────────────────
+fn draw_overview(q: vec2<f32>) -> vec4<f32> {
+    let r  = p.over_rect;
+    let sx = (q.x - r.x) / r.z;
+    let sy = (q.y - r.y) / r.w;
+
+    // Playhead marker.
+    let ph_x = r.x + p.playhead_col / p.num_cols * r.z;
+    if abs(q.x - ph_x) < 1.0 {
+        return white();
+    }
+
+    // Each pixel column covers many waveform columns; take the peak of each
+    // band so transients survive the downsample instead of aliasing away.
+    let cols_per_px = p.num_cols / r.z;
+    let c0 = u32(sx * p.num_cols);
+    let n  = min(u32(cols_per_px) + 1u, 64u);
+    var c  = vec4<f32>(0.0);
+    for (var i = 0u; i < n; i = i + 1u) {
+        let idx = min(c0 + i, u32(p.num_cols) - 1u);
+        c = max(c, unpack(waveform[idx]));
+    }
+
+    let dist = abs(sy - 0.5) * 2.0;
+    let bar  = bar_color(c, dist);
+    if bar.a > 0.0 {
+        // Dim what has already played, as the CDJ does.
+        return select(bar, bar * vec4<f32>(0.18, 0.18, 0.18, 1.0), q.x < ph_x);
+    }
+    return over_bg();
+}
+
 // ── Fragment ──────────────────────────────────────────────────────────────────
 @fragment
 fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let sx = frag_pos.x / p.screen_w;
-    let sy = frag_pos.y / p.screen_h;
-
-    // White playhead hairline at x = 0.5.
-    if abs(frag_pos.x - p.screen_w * 0.5) < 1.5 {
-        return vec4<f32>(1.0, 1.0, 1.0, 1.0);
-    }
-
-    // Map screen x → column index.
-    let half  = p.cols_visible * 0.5;
-    let col_f = (p.playhead_col - half) + sx * p.cols_visible;
-
-    // Second beat grid — 40 px strip at the bottom, screen-space (not audio-time).
-    // Advances on wall-clock time via beat2_phase_beats so it doesn't scroll
-    // with the audio waveform.
-    if frag_pos.y > p.screen_h - 40.0 && p.beat2_period_cols > 0.0 {
-        let pixels_per_beat = p.beat2_period_cols * p.screen_w / p.cols_visible;
-        let phase_px        = p.beat2_phase_beats * pixels_per_beat;
-        // Add phase_px so markers drift left as phase increases (same direction
-        // as the waveform scroll).
-        let beat_x = ((frag_pos.x + phase_px) % pixels_per_beat + pixels_per_beat) % pixels_per_beat;
-        if beat_x < 3.0 || beat_x > pixels_per_beat - 3.0 {
-            return vec4<f32>(0.0, 1.0, 1.0, 1.0);  // bright cyan beat marker
-        }
-        return vec4<f32>(0.0, 0.05, 0.15, 1.0);    // dark blue strip background
-    }
-
-    // Out of track range → dark background.
-    if col_f < 0.0 || col_f >= p.num_cols {
-        return vec4<f32>(0.04, 0.04, 0.04, 1.0);
-    }
-
-    // Read packed waveform column — bilinear interpolation between adjacent
-    // columns so the waveform scrolls sub-pixel smoothly.
-    let col_lo  = u32(col_f);
-    let col_hi  = min(col_lo + 1u, u32(p.num_cols) - 1u);
-    let frac    = col_f - f32(col_lo);
-
-    let p0 = waveform[col_lo];
-    let p1 = waveform[col_hi];
-
-    let r   = mix(f32( p0        & 0xFFu) / 255.0, f32( p1        & 0xFFu) / 255.0, frac);
-    let g   = mix(f32((p0 >>  8u) & 0xFFu) / 255.0, f32((p1 >>  8u) & 0xFFu) / 255.0, frac);
-    let b   = mix(f32((p0 >> 16u) & 0xFFu) / 255.0, f32((p1 >> 16u) & 0xFFu) / 255.0, frac);
-    let amp = mix(f32((p0 >> 24u) & 0xFFu) / 255.0, f32((p1 >> 24u) & 0xFFu) / 255.0, frac);
-
-    // Beat grid tick marks.
-    // Downbeats: orange (CDJ-style), 2 columns wide.
-    // Beats:     white, 1 column wide.
-    if p.beat_period_cols > 0.0 {
-        let rel = col_f - p.beat_anchor_col;
-
-        // beat_pos in [0, beat_period_cols) — always positive
-        let beat_pos = ((rel % p.beat_period_cols) + p.beat_period_cols) % p.beat_period_cols;
-
-        // Fractional beat number (may be negative before anchor).
-        let beat_num = floor(rel / p.beat_period_cols);
-
-        // Bar-relative beat after applying the downbeat offset.
-        let bpb      = p.beats_per_bar;
-        let adjusted = ((beat_num + p.downbeat_offset) % bpb + bpb) % bpb;
-        let is_downbeat = adjusted < 0.5;
-
-        let tick_w = select(1.0, 2.0, is_downbeat);
-
-        if beat_pos < tick_w || beat_pos > p.beat_period_cols - tick_w {
-            if is_downbeat {
-                // Red downbeat (beat 1) marker.
-                return vec4<f32>(1.0, 0.15, 0.15, 1.0);
-            } else {
-                // White beat marker.
-                return vec4<f32>(1.0, 1.0, 1.0, 0.85);
-            }
-        }
-    }
-
-    // Bar chart centered vertically, height = amp.
-    let dist = abs(sy - 0.5) * 2.0;
-
-    if dist < amp {
-        let shade = 1.0 - dist / (amp + 0.001) * 0.3;
-        return vec4<f32>(r * shade, g * shade, b * shade, 1.0);
-    }
-
-    // Dark background with subtle grid lines every 16 columns.
-    let grid = col_f % 16.0;
-    let bg   = select(0.04, 0.06, grid < 0.5);
-    return vec4<f32>(bg, bg, bg, 1.0);
+    let q = frag_pos.xy;
+    if in_rect(q, p.wave_rect) { return draw_wave(q); }
+    if in_rect(q, p.over_rect) { return draw_overview(q); }
+    return ground();
 }
 "#;

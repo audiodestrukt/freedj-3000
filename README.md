@@ -98,6 +98,7 @@ make run TRACK=/path/to/track.mp3
 |---|---|
 | `Space` | Play / pause |
 | `←` / `→` | Seek ±10 seconds |
+| `C` | Cycle waveform colour: RGB → 3 BAND → BLUE (the CDJ *Waveform Color* setting) |
 | `Q` / `Esc` | Quit |
 
 ### Controller input (development only)
