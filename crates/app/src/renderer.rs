@@ -62,6 +62,9 @@ pub struct Renderer {
 
     /// Largest surface dimension this device can back with a texture.
     max_dim:        u32,
+
+    /// Kept so `render` can call `pre_present_notify` before each present.
+    window:         Arc<Window>,
 }
 
 impl Renderer {
@@ -125,12 +128,35 @@ impl Renderer {
             .find(|f| f.is_srgb())
             .unwrap_or(caps.formats[0]);
 
+        // Frame pacing.
+        //
+        // The compositor is the clock.  On Wayland, winit only requests the
+        // compositor's frame callback if the app calls `pre_present_notify()`
+        // before presenting; without that call `request_redraw()` fires
+        // immediately and the loop free-runs — measured at 12,500 fps with a
+        // non-blocking swapchain.  With the callback in place, RedrawRequested
+        // arrives once per refresh, phase-locked to the display.
+        //
+        // Given that, the swapchain must NOT add a second throttle.  Mailbox
+        // never blocks on acquire: the compositor takes the newest image each
+        // refresh and we render exactly one per callback.  Fifo was tried as
+        // the sole pacer instead: at frame latency 1 it missed 18% of vsyncs
+        // (compositor buffer release arrives after the deadline), at latency 2
+        // it delivered frames in bursts.  Fifo remains the fallback for
+        // platforms without Mailbox.
+        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
+            wgpu::PresentMode::Mailbox
+        } else {
+            wgpu::PresentMode::Fifo
+        };
+        log::info!("present mode: {present_mode:?} (available: {:?})", caps.present_modes);
+
         let surface_config = wgpu::SurfaceConfiguration {
             usage:                        wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
             width:                        size.width.clamp(1, max_dim),
             height:                       size.height.clamp(1, max_dim),
-            present_mode:                 wgpu::PresentMode::Fifo,
+            present_mode,
             alpha_mode:                   caps.alpha_modes[0],
             view_formats:                 vec![],
             desired_maximum_frame_latency: 2,
@@ -271,6 +297,7 @@ impl Renderer {
             egui_renderer,
             egui_screen,
             max_dim,
+            window,
         })
     }
 
@@ -345,10 +372,15 @@ impl Renderer {
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
         // ── Get surface texture ───────────────────────────────────────────────
+        // Where a frame's time goes is the difference between "vsync-paced" and
+        // "timer-paced with a compositor guessing".  Acquire is where a Fifo
+        // swapchain blocks when it is genuinely throttling to the display.
+        let t_acquire = std::time::Instant::now();
         let output = match self.surface.get_current_texture() {
             Ok(t)  => t,
             Err(e) => { log::warn!("surface error: {e}"); return; }
         };
+        let acquire_ms = t_acquire.elapsed().as_secs_f64() * 1000.0;
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
@@ -415,7 +447,16 @@ impl Renderer {
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
+        let t_present = std::time::Instant::now();
+        // Required on Wayland: this is what requests the compositor frame
+        // callback that paces the next RedrawRequested.  See Renderer::new.
+        self.window.pre_present_notify();
         output.present();
+        log::debug!(
+            "gpu: acquire {:5.2}ms  present {:5.2}ms",
+            acquire_ms,
+            t_present.elapsed().as_secs_f64() * 1000.0,
+        );
     }
 }
 

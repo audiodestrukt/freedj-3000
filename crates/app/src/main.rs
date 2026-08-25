@@ -55,6 +55,7 @@ struct DeckApp {
     prev_pos:          u64,       // previous frame's audio position (scroll instrument)
     smoothed_pos:      f64,       // phase-locked playhead, source samples
     heard_avg:         f64,       // low-passed reference the playhead locks to
+    refresh_interval:  Duration,  // display period; each frame lands in one of these
 
     // Created on first `resumed`.
     window:      Option<Arc<Window>>,
@@ -90,6 +91,7 @@ impl DeckApp {
             prev_pos:          0,
             smoothed_pos:      0.0,
             heard_avg:         0.0,
+            refresh_interval:  FRAME_INTERVAL,
             window:      None,
             renderer:    None,
             egui_ctx:    egui::Context::default(),
@@ -148,7 +150,15 @@ impl DeckApp {
             self.heard_avg += (heard - self.heard_avg) * 0.05;
 
             if playing {
-                self.smoothed_pos += frame_dt.as_secs_f64() * sr_ch * speed as f64;
+                // Advance by whole display periods, not by measured wall-clock.
+                // Each rendered frame is shown for an integer number of
+                // refreshes; the CPU-side `frame_dt` carries ±2ms of wake-up
+                // slop that is not reflected on screen.  Snapping dt to the
+                // nearest multiple of the refresh period keeps motion exact
+                // per refresh and still accounts for a genuinely dropped frame.
+                let period  = self.refresh_interval.as_secs_f64();
+                let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
+                self.smoothed_pos += periods * period * sr_ch * speed as f64;
             }
             // Gentle pull toward the filtered reference: enough to stop drift
             // over minutes, far too slow to see as a step.
@@ -308,6 +318,18 @@ impl ApplicationHandler for DeckApp {
                 .expect("failed to create window"),
         );
 
+        // The display's refresh period is the unit the playhead advances in.
+        // On Wayland `current_monitor()` is None until the surface has entered
+        // an output, which is after this point; fall back to the first monitor.
+        let monitor = window.current_monitor().or_else(|| window.available_monitors().next());
+        if let Some(mhz) = monitor.and_then(|m| m.refresh_rate_millihertz()) {
+            self.refresh_interval = Duration::from_secs_f64(1000.0 / mhz as f64);
+            log::info!("display refresh {:.3} Hz → {:.3} ms per frame",
+                       mhz as f64 / 1000.0, self.refresh_interval.as_secs_f64() * 1000.0);
+        } else {
+            log::warn!("display refresh rate unknown — assuming 60 Hz");
+        }
+
         let renderer =
             pollster::block_on(Renderer::new(Arc::clone(&window), &self.waveform))
                 .expect("failed to create renderer");
@@ -403,6 +425,19 @@ impl ApplicationHandler for DeckApp {
 
             WindowEvent::RedrawRequested => {
                 self.render_frame();
+                // Ask for the next frame immediately.  On Wayland winit defers
+                // this to the compositor's frame callback, so redraws arrive
+                // phase-locked to the display instead of to a CPU timer.  The
+                // previous WaitUntil(last_render + 16.667ms) pacing was not
+                // locked to anything: measured over 400 frames, only 59% were
+                // rendered within 2ms of the vsync period — 17 were rendered
+                // <2ms after the previous one and 50 arrived 20–65ms late.
+                // The compositor shows those twice or skips them.  No amount of
+                // position smoothing can fix a frame that lands in the wrong
+                // vsync slot.
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
             }
 
             _ => {}
@@ -410,17 +445,9 @@ impl ApplicationHandler for DeckApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Request one redraw per frame interval.  Fifo vsync makes wgpu block
-        // inside present() until the display is ready, so the thread sleeps in
-        // the driver rather than spinning.  WaitUntil is a belt-and-suspenders
-        // guard for compositors that deliver frame callbacks faster than vsync.
-        let next = self.last_render + FRAME_INTERVAL;
-        if Instant::now() >= next {
-            if let Some(w) = &self.window {
-                w.request_redraw();
-            }
-        }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+        // Nothing to do between events — redraws are requested from the
+        // RedrawRequested handler and paced by the compositor.
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
 }
 

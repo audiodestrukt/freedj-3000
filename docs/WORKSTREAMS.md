@@ -38,12 +38,18 @@ time from a thread sleeping 0–8 ms between blocks, so 37% of frames showed zer
 movement and the rest lurched two to four blocks. `render_frame` now free-runs a
 phase-locked playhead against the audio clock. Stalled frames 37.2% → 0.0%.
 
-Remaining, small: the frame pacing in `about_to_wait` throttles to
-`FRAME_INTERVAL` (16.667 ms) *and* present-blocks on `PresentMode::Fifo`. On a
-60 Hz display the vsync period is 16.672 ms so the timer never binds and the
-double-throttle is harmless. On a 144 Hz panel it would present every 2.4
-vsyncs, giving an alternating 13.9/20.8 ms cadence — visible judder. Drop the
-timer and let Fifo pace it before shipping on unknown hardware.
+Frame pacing was the second half of the same problem and is also done
+(`see git log`). The renderer had three competing clocks — a CPU `WaitUntil`
+timer, the Fifo swapchain's acquire block, and the compositor — and none was
+phase-locked to the display; only 59% of frames landed in their vsync slot.
+Root cause: winit on Wayland only requests the compositor frame callback if the
+app calls `window.pre_present_notify()` before presenting, and it never did, so
+`request_redraw()` was never gated (the loop free-ran at 12,500 fps once the
+swapchain stopped blocking). Now: `pre_present_notify` + Mailbox + redraw from
+the `RedrawRequested` handler, and the playhead advances by whole display
+periods (from `refresh_rate_millihertz`) rather than measured wall-clock.
+Acquire never blocks, zero double frames, one skip in 400, motion exactly one
+period per frame. Not yet verified on X11, GLES, or the Pi.
 
 ### A3. Real-time thread hardening — **medium**
 
