@@ -11,6 +11,60 @@ packets. Five of the twelve crates — `engine`, `db`, `ui`, `timecode`,
 
 ---
 
+## Milestone 1 — a deck you can actually DJ with
+
+Set 2026-08-25. **A running deck on commodity hardware that responds to an
+existing USB DJ controller (Dan's NI Kontrol S2 MK2) and syncs over ProDJ
+Link.** The analysis we have (MiniBPM grid, waveform) is enough for this;
+no new DSP.
+
+What "syncs over Link" means here, concretely:
+
+1. **Seen** — freedj announces on 50000 and the XDJ-1000MK2 lists it as a
+   player.
+2. **Heard** — freedj sends beat (50001) and status (50002) packets derived
+   from its own grid and *audible* position, so the XDJ's phase meter shows
+   us.
+3. **Follows** — with SYNC on, freedj sets its tempo to the master's
+   effective BPM. Phase alignment (nudging to land on the master's beat) is
+   the stretch goal; tempo follow alone already makes the phase meter and
+   the B2 strip sit still.
+
+Not in M1: key detection, cues/loops, library, touch, any custom hardware.
+
+### Dependency chain
+
+```
+INPUT_PLAN step 1  ControlEvent bus + Deck::apply      ─┐
+G1a  S2 MK2 HID adapter (recover from bc4a6dd^)         ├─▶ controller drives the deck
+INPUT_PLAN step 2  event log / --script / --record      ─┘   (and is regression-tested)
+
+A1   sample-rate conversion (48 kHz devices play sharp) ─┐
+B3   --device output selection                          ├─▶ sound is right on any box
+A3a  xrun counter (know when it glitches)               ─┘
+
+B2   Link send: announce + beat + status, --player N    ─┐
+B4   status packet parsing (master flag, master's BPM)  ├─▶ seen, heard, follows
+B5   SYNC: tempo-follow the master (new)                ─┘
+```
+
+Verification is the XDJ on the desk plus `make virtual-cdj`: the harness for
+day-to-day, the unit for the final check — the harness cannot tell us whether
+Pioneer firmware accepts *our* packets, only whether we parse *theirs*.
+
+### S2 MK2 note
+
+The Kontrol S2 MK2 is **HID, not MIDI**. Its mapping was reverse-engineered
+in March and lives at `git show bc4a6dd^:crates/app/src/midi.rs`: VID 0x17CC
+PID 0x1320; jog wheel is a 24-bit absolute counter in report bytes 1–3
+(deltas by wrapping subtraction); platter touch byte 10 bit 0; play byte 11
+bit 0, cue bit 1; pitch fader byte 7, centre calibrated from the first
+report. `hidapi` is still in the workspace. It returns as an adapter
+emitting `ControlEvent`s on the bus alongside the DJ2Go MIDI adapter — the
+first proof that the bus design holds for two different device classes.
+
+---
+
 ## A. Foundations
 
 Not visible, but everything downstream inherits these.
