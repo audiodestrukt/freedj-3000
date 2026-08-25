@@ -26,19 +26,24 @@ large fraction of machines. `ResampleStage` exists in
 
 Blocks nothing technically. Makes the deck unusable on other people's hardware.
 
-### A2. Position truth — **broken, small**
+### A2. Position truth — **done** (`ea6dd13`)
 
-`position` is advanced by the *processor* thread at `audio.rs:314`, immediately
-after reading a source block — before Rubber Band and before ~93 ms of ring
-buffer (`RING_BUFFER_SAMPLES = 8_192`). Everything visual runs that far ahead of
-what you hear, and the offset varies with buffer fill.
+`position` is the decoder's cursor and ran ~93 ms ahead of what is audible.
+`AudioHandle::in_flight` now publishes that distance (ring buffer contents plus
+stretcher latency, in source samples) and the renderer subtracts it.
 
-Fix: a second atomic incremented in the cpal callback by frames actually
-consumed, minus stretcher latency; drive the renderer from that.
+This also fixed the waveform flicker, which turned out to be the same bug wearing
+a different hat: `position` advances one `BLOCK_FRAMES` (11.61 ms of audio) at a
+time from a thread sleeping 0–8 ms between blocks, so 37% of frames showed zero
+movement and the rest lurched two to four blocks. `render_frame` now free-runs a
+phase-locked playhead against the audio clock. Stalled frames 37.2% → 0.0%.
 
-**Blocks B2.** Broadcasting beat packets derived from a position that lies puts
-every other deck on the network out of sync, variably. This stops being hygiene
-and becomes a prerequisite the moment Link send exists.
+Remaining, small: the frame pacing in `about_to_wait` throttles to
+`FRAME_INTERVAL` (16.667 ms) *and* present-blocks on `PresentMode::Fifo`. On a
+60 Hz display the vsync period is 16.672 ms so the timer never binds and the
+double-throttle is harmless. On a 144 Hz panel it would present every 2.4
+vsyncs, giving an alternating 13.9/20.8 ms cadence — visible judder. Drop the
+timer and let Fifo pace it before shipping on unknown hardware.
 
 ### A3. Real-time thread hardening — **medium**
 
