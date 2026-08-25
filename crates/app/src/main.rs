@@ -52,6 +52,9 @@ struct DeckApp {
     beat2_start:  Instant,        // wall-clock time of the last phase reset
     prev_beat2_anchor: u64,       // detect changes in beat2_anchor
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
+    prev_pos:          u64,       // previous frame's audio position (scroll instrument)
+    smoothed_pos:      f64,       // phase-locked playhead, source samples
+    heard_avg:         f64,       // low-passed reference the playhead locks to
 
     // Created on first `resumed`.
     window:      Option<Arc<Window>>,
@@ -84,6 +87,9 @@ impl DeckApp {
             beat2_start:       Instant::now(),
             prev_beat2_anchor: 0,
             prev_beat2_bpm:    0.0,
+            prev_pos:          0,
+            smoothed_pos:      0.0,
+            heard_avg:         0.0,
             window:      None,
             renderer:    None,
             egui_ctx:    egui::Context::default(),
@@ -93,7 +99,9 @@ impl DeckApp {
     }
 
     fn render_frame(&mut self) {
-        self.last_render = Instant::now();
+        let frame_start = Instant::now();
+        let frame_dt    = frame_start.duration_since(self.last_render);
+        self.last_render = frame_start;
 
         let (renderer, egui_state, window) = match (
             self.renderer.as_mut(),
@@ -104,9 +112,69 @@ impl DeckApp {
             _ => return,
         };
 
-        let pos          = self.audio.position.load(Ordering::Relaxed);
+        let raw_pos      = self.audio.position.load(Ordering::Relaxed);
+        let in_flight    = self.audio.in_flight.load(Ordering::Relaxed);
         let playing      = self.audio.playing.load(Ordering::Relaxed);
         let speed        = self.audio.speed_load();
+
+        // ── Smooth, latency-compensated playhead ──────────────────────────────
+        // `position` is the decoder's cursor: it advances in BLOCK_FRAMES steps
+        // on a thread whose wake-up is scheduler-dependent.  Sampling it once
+        // per frame makes the waveform freeze for a frame then lurch several
+        // blocks — measured at 37% of frames showing zero movement, with jumps
+        // quantised to multiples of 11.6 ms.  The shader interpolates between
+        // columns perfectly well; the input was the staircase.
+        //
+        // So free-run a local playhead at the true playback rate and phase-lock
+        // it to the decoder, correcting a fraction of the error each frame.
+        // Motion becomes continuous and the audio thread only has to supply a
+        // reference, not a per-frame value.
+        //
+        // `in_flight` is what has been decoded but is still queued in the ring
+        // buffer and stretcher, so subtracting it puts the playhead on what the
+        // listener actually hears rather than ~93 ms ahead of it.
+        let sr_ch  = self.audio.sample_rate as f64 * self.audio.channels as f64;
+        let heard  = raw_pos.saturating_sub(in_flight) as f64;
+
+        if self.smoothed_pos <= 0.0 || (heard - self.smoothed_pos).abs() > sr_ch * 0.5 {
+            // First frame, or a seek — snap, and reset the reference filter.
+            self.smoothed_pos = heard;
+            self.heard_avg    = heard;
+        } else {
+            // `in_flight` is sampled once per decode block, right after a push,
+            // so it is both biased high and noisy — measured swinging ±35 ms.
+            // Low-pass it before phase-locking, or that jitter goes straight
+            // into the playhead and the waveform visibly walks backwards.
+            self.heard_avg += (heard - self.heard_avg) * 0.05;
+
+            if playing {
+                self.smoothed_pos += frame_dt.as_secs_f64() * sr_ch * speed as f64;
+            }
+            // Gentle pull toward the filtered reference: enough to stop drift
+            // over minutes, far too slow to see as a step.
+            self.smoothed_pos += (self.heard_avg - self.smoothed_pos) * 0.02;
+
+            // Never let the playhead run backwards during playback.  A stall
+            // reads as a hitch; reversal reads as a glitch, which is worse.
+            if playing {
+                self.smoothed_pos = self.smoothed_pos.max(self.prev_pos as f64);
+            }
+        }
+        let pos = self.smoothed_pos.max(0.0) as u64;
+
+        // Scroll-smoothness instrument: audio time advanced per frame should
+        // track wall-clock time per frame.  Departure from ratio 1.0 is judder.
+        if log::log_enabled!(log::Level::Debug) && self.prev_pos != 0 {
+            let d_audio_ms = (pos as f64 - self.prev_pos as f64) / sr_ch * 1000.0;
+            let d_wall_ms  = frame_dt.as_secs_f64() * 1000.0;
+            log::debug!(
+                "frame: dt {:5.2}ms  audio {:6.2}ms  ratio {:5.2}  lag {:5.1}ms",
+                d_wall_ms, d_audio_ms,
+                if d_wall_ms > 0.0 { d_audio_ms / d_wall_ms } else { 0.0 },
+                in_flight as f64 / sr_ch * 1000.0,
+            );
+        }
+        self.prev_pos = pos;
         let fader_speed  = f32::from_bits(self.fader_speed.load(Ordering::Relaxed));
         let beat2_bpm    = f32::from_bits(self.beat2_bpm.load(Ordering::Relaxed));
         let beat2_anchor = self.beat2_anchor.load(Ordering::Relaxed);

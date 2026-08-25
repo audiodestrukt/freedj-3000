@@ -69,6 +69,12 @@ pub struct AudioHandle {
     /// Playback speed as f32 bits (1.0 = normal, 0.5 = half, 2.0 = double).
     /// Set via `speed_store` / `speed_load` helpers.
     pub speed:       Arc<AtomicU32>,
+    /// Source samples that have been decoded but are not yet audible: the
+    /// contents of the ring buffer plus the stretcher's internal latency.
+    ///
+    /// `position` is the *decoder's* cursor and runs ahead of what the listener
+    /// hears by this much.  Subtract it to get the true playhead.
+    pub in_flight:   Arc<AtomicU64>,
     pub sample_rate: u32,
     pub channels:    u8,
     _stream:     cpal::Stream,
@@ -152,6 +158,7 @@ impl AudioHandle {
         let playing    = Arc::new(AtomicBool::new(true));
         let speed      = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let drain_flag = Arc::new(AtomicBool::new(false));
+        let in_flight  = Arc::new(AtomicU64::new(0));
 
         // ── 4. Ring buffer ─────────────────────────────────────────────────────
         let (producer, mut consumer) = rtrb::RingBuffer::<f32>::new(RING_BUFFER_SAMPLES);
@@ -162,6 +169,7 @@ impl AudioHandle {
         let proc_playing    = Arc::clone(&playing);
         let proc_speed      = Arc::clone(&speed);
         let proc_drain_flag = Arc::clone(&drain_flag);
+        let proc_in_flight  = Arc::clone(&in_flight);
 
         let processor = thread::Builder::new()
             .name("audio-proc".into())
@@ -172,6 +180,7 @@ impl AudioHandle {
                     proc_playing,
                     proc_speed,
                     proc_drain_flag,
+                    proc_in_flight,
                     file_sr,
                     file_ch,
                     device_ch,
@@ -213,6 +222,7 @@ impl AudioHandle {
             position,
             playing,
             speed,
+            in_flight,
             sample_rate: file_sr,
             channels: file_ch as u8,
             _stream: stream,
@@ -229,6 +239,7 @@ fn processor_loop(
     playing:    Arc<AtomicBool>,
     speed:      Arc<AtomicU32>,
     drain_flag: Arc<AtomicBool>,
+    in_flight:  Arc<AtomicU64>,
     sample_rate: u32,
     file_ch:    usize,
     device_ch:  usize,
@@ -344,5 +355,15 @@ fn processor_loop(
                 let _ = producer.push(ts_out[i * file_ch + src_ch]);
             }
         }
+
+        // ── Publish decode-ahead distance ─────────────────────────────────────
+        // `position` is where the *decoder* has read to.  What the listener
+        // hears is that minus everything still queued: the ring buffer plus the
+        // stretcher's internal latency.  Expressed in source samples so the UI
+        // can subtract it directly.
+        let ring_out_frames = (RING_BUFFER_SAMPLES - producer.slots()) / device_ch;
+        let src_frames_ahead =
+            (ring_out_frames as f32 * spd) as u64 + stretcher.latency_frames() as u64;
+        in_flight.store(src_frames_ahead * file_ch as u64, Ordering::Relaxed);
     }
 }
