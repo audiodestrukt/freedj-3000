@@ -143,6 +143,23 @@ the same format. Drive it with the DJ2Go, replay it with `--script`. That
 is the regression suite for MIDI mapping changes and, later, for RP2350
 firmware.
 
+## Hardware sources (all adapters, all later)
+
+Each is a thread that turns device input into `ControlEvent`s on the bus and
+takes LED/display feedback back out. None touches deck state.
+
+| Source | Transport | Notes |
+|---|---|---|
+| **USB MIDI controllers** (DJ2Go today; DDJ-400/FLX4, Mixtrack, …) | `midir`, already used | Becomes a mapping file per controller instead of constants in `midi.rs` (WORKSTREAMS G1). Jog wheels arrive as relative CCs at the controller's own rate — profiles in the simulator should include a "MIDI-rate jog" so this path is tested too. |
+| **USB HID controllers** (Native Instruments S2/S4, Denon, anything vendor-specific) | `hidapi`, already a dependency, unused | Report descriptors per device; higher-rate jog than MIDI, plus LED/screen feedback over the same interface. Same adapter shape as MIDI with a different decoder. |
+| **Direct hardware on the Pi** — encoders, buttons, capacitive strip on GPIO / SPI / I²C | `gpiod` / `rppal` | For a first physical build without the RP2350: read the jog encoder from a GPIO interrupt, buttons from a matrix, LEDs over SPI. Runs on a dedicated thread with RT priority so the jog stream is not at the mercy of the UI. Simplest route from "app on a Pi" to "deck you can touch". |
+| **RP2350 control surface** over serial / SPI | `McuPacket` (`crates/protocol`) | The eventual product path: the MCU does the timing-critical encoder work and the Pi gets a clean 1 kHz `JogDelta` stream. Below. |
+
+Which of the last two to build first is a hardware-availability question, not
+a software one: the bus and the simulator are identical either way, and the
+Pi-GPIO adapter is a reasonable stepping stone to the RP2350 one (same events,
+worse timing guarantees).
+
 ## MCU path (later, unchanged by this plan)
 
 The RP2350 sends `McuPacket`s; a serial adapter decodes them into
