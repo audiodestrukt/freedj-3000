@@ -4,6 +4,45 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — 2026-08-25
+- **App would not start**: two stacked breakages since March. The binary was
+  linked against `librubberband.so.2` while the system had moved to `.so.3`
+  (cargo does not notice a C soname change — `make relink`), and
+  `Limits::downlevel_defaults()` capped surface size at 2048 px so any display
+  wider than that panicked in `Surface::configure`. Limits now come from the
+  adapter; surface size is clamped on resize.
+- **Waveform judder, part 1 — position**: the playhead was the decoder's cursor,
+  which advances one 512-frame block at a time from a sleeping thread. 37% of
+  frames showed zero movement and the rest lurched 2–4 blocks. `render_frame`
+  now free-runs a phase-locked playhead against the audio clock, with the
+  reference low-passed and the playhead clamped monotonic. Stalled frames
+  37.2% → 0.0%.
+- **Playhead ran ~93 ms ahead of the audio**: `AudioHandle::in_flight` now
+  publishes ring-buffer contents plus stretcher latency, and the renderer
+  subtracts it. Measured 92.6 ms. Anything derived from position — the beat
+  grid, and later ProDJ Link send — was that far in the future.
+- **Waveform judder, part 2 — frame pacing**: three clocks (a CPU `WaitUntil`
+  timer, the Fifo acquire block, the compositor callback) competed and none was
+  locked to the display; only 59% of frames hit their vsync slot. Root cause:
+  winit on Wayland only requests the compositor frame callback if the app calls
+  `window.pre_present_notify()`, which it never did. Now compositor-paced with a
+  Mailbox swapchain, and the playhead advances by whole display periods read
+  from the monitor. Zero double frames, one skip in 400. Verified on
+  NVIDIA/Vulkan/Wayland only.
+
+### Added — 2026-08-25
+- **`Makefile`**: `make` lists targets; `run`, `dev`, `two-deck`, `relink`,
+  `reference` and the usual `check`/`fmt`/`clippy`/`test`. Thin wrappers over
+  cargo.
+- **`docs/WORKSTREAMS.md`**: every open workstream with dependencies and three
+  defensible starting points.
+- **`docs/reference/cdj-3000-playback-screen.md`**: all 29 CDJ-3000 playback
+  screen callouts mapped to current status. `make reference` pulls the manual
+  pages locally (gitignored — AlphaTheta's copyright).
+- **Frame instrument**: `RUST_LOG=opendeck=debug` logs per-frame wall dt, audio
+  advance, decode-ahead lag, and acquire/present times. This is how both judder
+  causes were found.
+
 ### Previously working (documented here for completeness)
 - **Key lock / timestretching**: pitch-preserving speed change via Rubber Band R3
   (`crates/timestretch/`), active across the full ±16% pitch range.

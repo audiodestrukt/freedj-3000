@@ -41,15 +41,58 @@ Nothing above 2%. No single hotspot. RubberBand, `processor_loop`, and
 `nanosleep`/`clock_nanosleep` are **absent** from the profile — the audio
 thread spends its time in OS sleep, not on-CPU.
 
-### Root cause of earlier high CPU (now fixed)
+### Root cause of earlier high CPU (revised August 2026)
 
-The render loop was unbounded: `ControlFlow::Poll` + `request_redraw()` in
-`about_to_wait` caused the GPU to render as fast as possible (easily 1 000+
-fps), pegging one CPU core at ~100%.
+The render loop was unbounded: `request_redraw()` in `about_to_wait` caused the
+GPU to render as fast as possible (measured at 12 500 fps with a non-blocking
+swapchain), pegging one CPU core.
 
-**Fix:** switched to `ControlFlow::WaitUntil(last_render + 16.67 ms)` in
-`about_to_wait`, capping the render thread to ~60 fps and letting the OS sleep
-it between frames.
+The March fix — a `ControlFlow::WaitUntil(last_render + 16.67 ms)` timer — did
+cap the frame rate, but it treated the symptom. The actual cause was that
+**winit on Wayland only requests the compositor's frame callback when the app
+calls `window.pre_present_notify()` before presenting**, and the app never did.
+Without that callback, `request_redraw()` is never gated on the display and the
+loop free-runs.
+
+The timer also introduced its own problem: it was not phase-locked to vsync,
+so only 59% of frames landed in their refresh slot and the compositor showed
+the rest twice or dropped them — visible as waveform judder that survived every
+attempt to smooth the position feeding the shader.
+
+**Current design** (see `renderer.rs` and the `RedrawRequested` handler):
+`pre_present_notify()` before every present, the next redraw requested from the
+`RedrawRequested` handler, `about_to_wait` does nothing, and a Mailbox swapchain
+so acquire never adds a second throttle. The compositor is the only clock. The
+playhead advances by whole display periods (from `refresh_rate_millihertz`)
+rather than measured wall-clock, since each frame is shown for an integer
+number of refreshes regardless of CPU-side jitter.
+
+Measured over 400 frames: acquire never blocks, zero double frames, one
+skipped frame, motion exactly one period per frame. Verified on
+NVIDIA/Vulkan/Wayland; X11 and GLES paths not yet measured.
+
+## Frame instrument
+
+```
+RUST_LOG=opendeck=debug,wgpu=off,naga=off,egui=off ./target/release/opendeck track.mp3
+```
+
+Logs one line per frame:
+
+```
+frame: dt 16.72ms  audio  16.68ms  ratio  1.00  lag  92.6ms
+gpu: acquire  0.04ms  present  0.08ms
+```
+
+- `dt` — wall-clock since the previous frame started
+- `audio` — how far the playhead advanced this frame; should equal `dt`
+- `ratio` — `audio / dt`; sustained departure from 1.00 is judder
+- `lag` — decode-ahead distance being compensated
+- `acquire` — time blocked in `get_current_texture()`; nonzero means the
+  swapchain is throttling, which should not happen under Mailbox
+
+A healthy run has `dt` and `audio` both near the display period with no zeros
+and no negatives, and `acquire` near zero.
 
 The audio processor thread was also sleeping only 1 ms between back-pressure
 checks. **Fix:** sleep scales proportionally with ring buffer fill level (up to
