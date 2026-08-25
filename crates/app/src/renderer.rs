@@ -59,6 +59,9 @@ pub struct Renderer {
     // egui pass
     egui_renderer:  egui_wgpu::Renderer,
     egui_screen:    egui_wgpu::ScreenDescriptor,
+
+    /// Largest surface dimension this device can back with a texture.
+    max_dim:        u32,
 }
 
 impl Renderer {
@@ -86,12 +89,26 @@ impl Renderer {
             .await
             .context("no compatible GPU adapter found")?;
 
+        let info = adapter.get_info();
+        log::info!(
+            "GPU: {} ({:?}, {:?}) via {:?}",
+            info.name, info.device_type, info.driver, info.backend,
+        );
+
+        // Keep the conservative downlevel feature set — it is what the Pi 5 /
+        // GLES fallback can offer — but raise the *resolution* limits to what
+        // this adapter actually supports.  `downlevel_defaults()` alone caps
+        // max_texture_dimension_2d at 2048, which fails Surface::configure on
+        // any display wider than 2048 physical pixels regardless of GPU.
+        let limits = wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits());
+        let max_dim = limits.max_texture_dimension_2d;
+
         let (device, queue) = adapter
             .request_device(
                 &wgpu::DeviceDescriptor {
                     label:             Some("opendeck"),
                     required_features: wgpu::Features::empty(),
-                    required_limits:   wgpu::Limits::downlevel_defaults(),
+                    required_limits:   limits,
                     memory_hints:      wgpu::MemoryHints::Performance,
                 },
                 None,
@@ -111,8 +128,8 @@ impl Renderer {
         let surface_config = wgpu::SurfaceConfiguration {
             usage:                        wgpu::TextureUsages::RENDER_ATTACHMENT,
             format,
-            width:                        size.width.max(1),
-            height:                       size.height.max(1),
+            width:                        size.width.clamp(1, max_dim),
+            height:                       size.height.clamp(1, max_dim),
             present_mode:                 wgpu::PresentMode::Fifo,
             alpha_mode:                   caps.alpha_modes[0],
             view_formats:                 vec![],
@@ -253,6 +270,7 @@ impl Renderer {
             num_cols,
             egui_renderer,
             egui_screen,
+            max_dim,
         })
     }
 
@@ -260,6 +278,10 @@ impl Renderer {
         if width == 0 || height == 0 {
             return;
         }
+        // Never hand the surface a size the device cannot back with a texture —
+        // Surface::configure panics rather than returning an error.
+        let width  = width.min(self.max_dim);
+        let height = height.min(self.max_dim);
         self.surface_config.width  = width;
         self.surface_config.height = height;
         self.surface.configure(&self.device, &self.surface_config);

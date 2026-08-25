@@ -60,11 +60,20 @@ Any Linux machine with Vulkan support works for development and testing.
 ```bash
 # Debian/Ubuntu
 sudo apt install libasound2-dev libvulkan-dev libwayland-dev \
-                 libxkbcommon-dev pkg-config build-essential
+                 libxkbcommon-dev librubberband-dev \
+                 pkg-config build-essential
+
+# Optional: poppler-utils, for `make reference`
+sudo apt install poppler-utils
 
 # Raspberry Pi (additionally)
 sudo apt install mesa-vulkan-drivers
 ```
+
+Rubber Band is linked dynamically. If you upgrade `librubberband` the existing
+binary keeps its old soname and fails at startup with
+`error while loading shared libraries: librubberband.so.N`. Cargo does not
+notice, because no Rust source changed — force a relink with `make relink`.
 
 ### Rust toolchain
 
@@ -75,10 +84,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 ### Compile and run
 
 ```bash
-git clone https://github.com/freedj/freedj-3000
+git clone https://github.com/audiodestrukt/freedj-3000
 cd freedj-3000
-cargo run --release -p opendeck-app -- /path/to/track.mp3
+make run TRACK=/path/to/track.mp3
 ```
+
+`make` on its own lists every target. The underlying commands are plain cargo —
+`make build` is `cargo build --release -p opendeck-app` and nothing more.
 
 ### Controls (MVP)
 

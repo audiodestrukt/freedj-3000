@@ -1,3 +1,7 @@
 /target
 Cargo.lock
 *.mp3
+
+# Pioneer manual page extracts — copyrighted, local reference only.
+# Regenerate with: tools/fetch-reference.sh
+/reference/pioneer/

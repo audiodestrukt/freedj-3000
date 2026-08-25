@@ -1,0 +1,101 @@
+# FreeDJ-3000 — build and run
+#
+#   make            list targets
+#   make run        build release and play the default track
+#   make two-deck   run a deck plus a simulated second deck over ProDJ Link
+#
+# Override the track on any run target:
+#   make run TRACK=~/music/something.flac
+
+BIN        := target/release/opendeck
+CARGO      := cargo
+PKG        := opendeck-app
+TRACK      ?= techno.mp3
+
+# Second-deck simulation (ProDJ Link beat sender)
+BPM        ?= 130.0
+HOST       ?= 127.0.0.1
+PORT       ?= 50002
+
+# Manual page range to extract for local visual reference
+REF_PDF    := reference/pioneer/CDJ-3000X_manual.pdf
+REF_URL    := https://downloads.support.alphatheta.com/manuals/dj-players/CDJ-3000X/CDJ-3000X_DRI1956B_manual.pdf
+
+RUST_LOG   ?= info,wgpu=warn,naga=warn
+
+.DEFAULT_GOAL := help
+.PHONY: help build debug relink run dev two-deck beat check fmt clippy test clean reference distclean
+
+## ── Build ──────────────────────────────────────────────────────────────────
+
+build: ## Release build (this is what you want for audio)
+	$(CARGO) build --release -p $(PKG)
+
+debug: ## Debug build — faster to compile, audio may glitch
+	$(CARGO) build -p $(PKG)
+
+relink: ## Force a relink — fixes "librubberband.so.N: cannot open shared object file"
+	@touch crates/timestretch/build.rs crates/app/src/main.rs
+	@rm -f $(BIN)
+	$(CARGO) build --release -p $(PKG)
+	@ldd $(BIN) | grep -E 'rubberband|not found' || true
+
+## ── Run ────────────────────────────────────────────────────────────────────
+
+run: build ## Play TRACK (default: techno.mp3)
+	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; echo "usage: make run TRACK=path/to/file.mp3"; exit 1; }
+	RUST_LOG=$(RUST_LOG) ./$(BIN) "$(TRACK)"
+
+dev: debug ## Play TRACK with debug logging (verbose: MIDI + ProDJ packets)
+	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; exit 1; }
+	RUST_LOG=debug,wgpu=warn,naga=warn ./target/debug/opendeck "$(TRACK)"
+
+## ── Two-deck testing ───────────────────────────────────────────────────────
+
+two-deck: build ## Run a deck + a simulated CDJ sending beats at BPM
+	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; exit 1; }
+	@echo "Deck A: $(TRACK)"
+	@echo "Deck B: simulated CDJ at $(BPM) BPM -> $(HOST):$(PORT)"
+	@echo "Match deck A's pitch to $(BPM) and watch the cyan strip lock."
+	@python3 tools/send_beat.py $(BPM) $(HOST) $(PORT) & \
+	  SENDER=$$!; \
+	  trap "kill $$SENDER 2>/dev/null" EXIT INT TERM; \
+	  RUST_LOG=$(RUST_LOG) ./$(BIN) "$(TRACK)"
+
+beat: ## Send ProDJ Link beat packets only (no deck) — BPM=130.0
+	python3 tools/send_beat.py $(BPM) $(HOST) $(PORT)
+
+## ── Quality ────────────────────────────────────────────────────────────────
+
+check: ## Type-check the whole workspace
+	$(CARGO) check --workspace
+
+fmt: ## Format
+	$(CARGO) fmt --all
+
+clippy: ## Lint
+	$(CARGO) clippy --workspace -- -D warnings
+
+test: ## Run tests
+	$(CARGO) test --workspace
+
+## ── Reference material ─────────────────────────────────────────────────────
+
+reference: ## Download the CDJ-3000X manual and extract screen pages (local only)
+	./tools/fetch-reference.sh
+
+## ── Housekeeping ───────────────────────────────────────────────────────────
+
+clean: ## Remove build artifacts
+	$(CARGO) clean
+
+distclean: clean ## Also remove downloaded reference material
+	rm -rf reference/pioneer
+
+help: ## Show this help
+	@echo "FreeDJ-3000"
+	@echo ""
+	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
+	  | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
+	@echo ""
+	@echo "Variables:  TRACK=$(TRACK)  BPM=$(BPM)  PORT=$(PORT)"
