@@ -274,6 +274,12 @@ the rekordbox USB export parser. All wait on C3.
 
 ## G. Hardware and control
 
+See `docs/INPUT_PLAN.md` for the input architecture: one `ControlEvent` bus
+fed by keyboard, mouse/touch, MIDI, a scripted simulator (file / stdin / UDP,
+with realistic jog profiles and session recording), and later the RP2350.
+G1 below becomes an adapter on that bus; G2 is unchanged.
+
+
 ### G1. MIDI mapping system — **medium**
 
 `midi.rs` has hardcoded constants for one DJ2Go. A mapping file format plus MIDI
