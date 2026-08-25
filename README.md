@@ -49,7 +49,7 @@ The Pi 5's GPU (VideoCore VII / Mesa V3DV) supports Vulkan 1.2, which is what th
 
 Any Linux machine with Vulkan support works for development and testing.
 
-**Display: any HDMI screen.** The target form factor uses a high-DPI 1280×480 widescreen panel, but the UI adapts to any resolution.
+**Display: any HDMI screen.** The reference layout is the XDJ-1000MK2's 7" 1024×600 panel (the window opens at that size); regions are fractions of the screen so the UI adapts to any resolution.
 
 ---
 
