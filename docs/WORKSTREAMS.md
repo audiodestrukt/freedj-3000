@@ -264,13 +264,44 @@ any track with an ambient outro should mis-detect today.
 
 ---
 
-## F. Library
+## F. Library — rekordbox is the interop target
 
-`crates/db` has SQLite with FTS5 search, beat grids, cue points and playlists
-designed — and is imported by nothing. F1 wire it up, F2 the BROWSE screen, F3
-the rekordbox USB export parser. All wait on C3.
+Decision 2026-08-25: interoperate with the CDJ ecosystem, i.e. rekordbox's
+formats, and do not build a Mixxx-specific path. Mixxx reads rekordbox USB
+exports but cannot write them (open since 2018, mixxxdj/mixxx#9463), and its
+own analysis lives in a private sqlite/protobuf format nothing else consumes.
+Reading rekordbox exports gives Mixxx interop for free; writing them would
+give it in the other direction.
 
----
+### F1. Read rekordbox USB exports — **medium**, the real "drop-in" feature
+
+`PIONEER/rekordbox/export.pdb` (DeviceSQL: tracks, playlists, key, colour)
+plus `PIONEER/USBANLZ/**/ANLZ0000.{DAT,EXT,2EX}` (beat grid, hot and memory
+cues, waveforms including 3-band, phrases). A DJ's stick from a CDJ then
+loads with *their* grids and cues instead of our MiniBPM guess. Use
+`rekordcrate` (Holzhaus — a Mixxx maintainer; built on Deep Symmetry's
+crate-digger). Read-only, actively developed, same lineage as the Link docs.
+Unlocks screen callouts 4, 17, and the BROWSE screen; the cue data unlocks
+the cue overlays once the transport is wired (C2).
+
+### F2. BROWSE screen — **medium**, needs F1
+
+`crates/db` (SQLite + FTS5) becomes the cache/index over imported exports and
+our own analysed files.
+
+### F3. Network library (dbserver, port 1051 via 12523 lookup) — **large**
+
+Browse a linked CDJ's USB from freedj, and eventually serve ours. Same
+ecosystem as Link; later.
+
+### F4. Write rekordbox exports — **large, low priority**
+
+Producing PDB/ANLZ from our analysis. No open-source implementation does it
+well; DeviceSQL writing is under-documented and rekordcrate does not write.
+Noted so it is not planned around.
+
+Borrow from Mixxx: algorithms, not formats. libKeyFinder for E1 (key
+detection), as MiniBPM was for tempo.
 
 ## G. Hardware and control
 
