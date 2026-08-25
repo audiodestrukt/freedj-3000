@@ -45,9 +45,11 @@ struct WaveformParams {
     wave_rect:        [f32; 4],
     /// Overview-waveform rect in physical pixels: x, y, w, h.
     over_rect:        [f32; 4],
-    /// Multiplier that brings the track's loudest column to full height.
+    /// Multiplier that brings the track's loudest column to its display height.
     amp_gain:         f32,
-    _pad:             [f32; 3],
+    /// 1.0 = dim the played part of the overview (REMAIN mode).
+    dim_played:       f32,
+    _pad:             [f32; 2],
 }
 
 /// Where the shader draws its two waveforms, in physical pixels.
@@ -55,6 +57,8 @@ struct WaveformParams {
 pub struct Viewports {
     pub wave:     [f32; 4],
     pub overview: [f32; 4],
+    /// REMAIN mode: the played part of the overview turns off.
+    pub dim_played: bool,
 }
 
 /// Waveform colour scheme, matching the CDJ `Waveform Color` setting.
@@ -199,7 +203,7 @@ impl Renderer {
 
         // Peak amplitude byte across the track sets the display gain.
         let peak = waveform_data.iter().map(|v| (v >> 24) & 0xFF).max().unwrap_or(255) as f32 / 255.0;
-        let amp_gain = (0.97 / peak.max(0.05)).min(6.0);
+        let amp_gain = (0.62 / peak.max(0.05)).min(6.0);
         log::info!("waveform peak {:.2} → display gain {:.2}", peak, amp_gain);
 
         let waveform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -221,11 +225,12 @@ impl Renderer {
             beats_per_bar:     4.0,
             beat2_phase_beats: 0.0,
             beat2_period_cols: 0.0,
-            color_mode:       ColorMode::ThreeBand as u32 as f32,
+            color_mode:       ColorMode::Blue as u32 as f32,
             wave_rect:        [0.0; 4],
             over_rect:        [0.0; 4],
             amp_gain:         1.0,
-            _pad:             [0.0; 3],
+            dim_played:       0.0,
+            _pad:             [0.0; 2],
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -333,7 +338,7 @@ impl Renderer {
             egui_screen,
             max_dim,
             window,
-            color_mode: ColorMode::ThreeBand,
+            color_mode: ColorMode::Blue,
             amp_gain,
             capture:    None,
         })
@@ -416,7 +421,8 @@ impl Renderer {
             wave_rect:         vp.wave,
             over_rect:         vp.overview,
             amp_gain:          self.amp_gain,
-            _pad:              [0.0; 3],
+            dim_played:        if vp.dim_played { 1.0 } else { 0.0 },
+            _pad:              [0.0; 2],
         };
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -590,8 +596,9 @@ struct Params {
     color_mode:         f32,  // 0 RGB, 1 3-BAND, 2 BLUE
     wave_rect:          vec4<f32>,
     over_rect:          vec4<f32>,
-    amp_gain:           f32,  // brings the track peak to full height
-    _p0: f32, _p1: f32, _p2: f32,
+    amp_gain:           f32,  // brings the track peak to its display height
+    dim_played:         f32,  // 1 = REMAIN mode: played part of the overview turns off
+    _p1: f32, _p2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
@@ -605,13 +612,19 @@ fn srgb(r: f32, g: f32, b: f32) -> vec4<f32> {
     let c = vec3<f32>(r, g, b) / 255.0;
     return vec4<f32>(pow(c, vec3<f32>(2.2)), 1.0);
 }
-fn ground() -> vec4<f32>   { return srgb(5.0, 7.0, 10.0); }     // matches screen.rs BG
-fn wave_bg() -> vec4<f32>  { return srgb(12.0, 14.0, 18.0); }   // enlarged-waveform field
-fn over_bg() -> vec4<f32>  { return srgb(10.0, 12.0, 16.0); }
+fn ground() -> vec4<f32>   { return srgb(3.0, 4.0, 6.0); }      // matches screen.rs BG
+fn wave_bg() -> vec4<f32>  { return ground(); }                 // the unit draws the waveform on bare ground
+fn over_bg() -> vec4<f32>  { return ground(); }
+fn playhead() -> vec4<f32> { return srgb(232.0, 40.0, 40.0); }  // red on the unit
 fn white() -> vec4<f32>    { return srgb(244.0, 246.0, 248.0); }
 fn band_low() -> vec4<f32> { return srgb(58.0, 123.0, 240.0); }  // 3-band blue
 fn band_mid() -> vec4<f32> { return srgb(240.0, 160.0, 48.0); }  // 3-band amber
-fn blue_wave(s: f32) -> vec4<f32> { return srgb(64.0 * s, 140.0 * s, 255.0 * s); }
+// BLUE mode: blue body tinted toward white where the high band is strong,
+// which is how the unit's blue waveform gets its bright transient spikes.
+fn blue_wave(s: f32, hi: f32) -> vec4<f32> {
+    let t = clamp(hi * 2.4 - 0.15, 0.0, 0.9);
+    return srgb(mix(40.0, 235.0, t) * s, mix(125.0, 240.0, t) * s, mix(235.0, 250.0, t) * s);
+}
 fn cyan() -> vec4<f32>     { return srgb(0.0, 216.0, 216.0); }
 fn strip_bg() -> vec4<f32> { return srgb(0.0, 22.0, 40.0); }
 fn tick() -> vec4<f32>     { return srgb(90.0, 96.0, 104.0); }
@@ -661,7 +674,7 @@ fn bar_color(c_in: vec4<f32>, dist: f32) -> vec4<f32> {
     if dist >= c.w { return vec4<f32>(0.0); }
     let shade = 1.0 - dist / (c.w + 0.001) * 0.3;
     if mode == 2u {
-        return blue_wave(shade);
+        return blue_wave(shade, c.z);
     }
     return vec4<f32>(pow(c.xyz * shade, vec3<f32>(2.2)), 1.0);
 }
@@ -683,9 +696,9 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
         return strip_bg();
     }
 
-    // Playhead hairline at the horizontal centre.
-    if abs(q.x - (r.x + r.z * 0.5)) < 1.0 {
-        return white();
+    // Playhead line at the horizontal centre — red, full height, as on the unit.
+    if abs(q.x - (r.x + r.z * 0.5)) < 1.5 {
+        return playhead();
     }
 
     let wave_h = r.w - select(0.0, B2_STRIP_PX, p.beat2_period_cols > 0.0);
@@ -708,8 +721,9 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
         return bar;
     }
 
-    // Beat grid behind the bars: faint full-height lines, brighter ticks at
-    // the bottom edge, red on downbeats.
+    // Beat grid as edge ticks only — top and bottom of the field, red and
+    // taller on downbeats, white on beats.  No full-height lines: that is how
+    // the unit draws it.
     if p.beat_period_cols > 0.0 {
         let rel      = col_f - p.beat_anchor_col;
         let beat_pos = ((rel % p.beat_period_cols) + p.beat_period_cols) % p.beat_period_cols;
@@ -719,11 +733,11 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
         let is_down  = adjusted < 0.5;
         let tick_w   = select(1.0, 2.0, is_down);
         if beat_pos < tick_w || beat_pos > p.beat_period_cols - tick_w {
-            let bottom = q.y > r.y + wave_h - select(8.0, 14.0, is_down);
-            if is_down {
-                return select(down(), down_hi(), bottom);
+            let len  = select(0.055, 0.10, is_down) * wave_h;
+            let edge = (q.y - r.y) < len || (q.y - r.y) > wave_h - len;
+            if edge {
+                return select(tick_hi(), down_hi(), is_down);
             }
-            return select(tick(), tick_hi(), bottom);
         }
     }
     return wave_bg();
@@ -755,8 +769,9 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
     let dist = abs(sy - 0.5) * 2.0;
     let bar  = bar_color(c, dist);
     if bar.a > 0.0 {
-        // Dim what has already played, as the CDJ does.
-        return select(bar, bar * vec4<f32>(0.18, 0.18, 0.18, 1.0), q.x < ph_x);
+        // REMAIN mode: the played part turns off from the left.  TIME mode
+        // leaves the whole graph lit.
+        return select(bar, bar * vec4<f32>(0.18, 0.18, 0.18, 1.0), q.x < ph_x && p.dim_played > 0.5);
     }
     return over_bg();
 }

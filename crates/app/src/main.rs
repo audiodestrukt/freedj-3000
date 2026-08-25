@@ -60,6 +60,7 @@ struct DeckApp {
     heard_avg:         f64,       // low-passed reference the playhead locks to
     refresh_interval:  Duration,  // display period; each frame lands in one of these
     frame_count:       u64,
+    remain_mode:       bool,      // time display: REMAIN vs TIME
     exit_after_capture: bool,
 
     // Created on first `resumed`.
@@ -98,6 +99,7 @@ impl DeckApp {
             heard_avg:         0.0,
             refresh_interval:  FRAME_INTERVAL,
             frame_count:       0,
+            remain_mode:       false,   // the reference unit was in TIME mode
             exit_after_capture: false,
             window:      None,
             renderer:    None,
@@ -224,6 +226,7 @@ impl DeckApp {
             speed,
             fader_speed,
             key_lock:      true,   // Rubber Band path is always engaged today
+            remain_mode:   self.remain_mode,
             beat_grid:     self.beat_grid.as_ref(),
             beat2_bpm,
             beat2_phase_beats,
@@ -234,7 +237,7 @@ impl DeckApp {
         let size = window.inner_size();
         let lay  = screen::layout(egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
         let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
-        let vp   = renderer::Viewports { wave: px(lay.wave), overview: px(lay.overview) };
+        let vp   = renderer::Viewports { wave: px(lay.wave), overview: px(lay.overview), dim_played: self.remain_mode };
 
         // Build egui overlay.
         let raw = egui_state.take_egui_input(window.as_ref());
@@ -363,6 +366,10 @@ impl ApplicationHandler for DeckApp {
                 PhysicalKey::Code(KeyCode::Digit0) | PhysicalKey::Code(KeyCode::Numpad0) => {
                     self.audio.speed_store(1.0);
                     log::info!("speed → 1.00× (reset)");
+                }
+                PhysicalKey::Code(KeyCode::KeyT) => {
+                    self.remain_mode = !self.remain_mode;
+                    log::info!("time display → {}", if self.remain_mode { "REMAIN" } else { "TIME" });
                 }
                 PhysicalKey::Code(KeyCode::KeyC) => {
                     // Cycle waveform colour like the Shortcut screen's Waveform Color.

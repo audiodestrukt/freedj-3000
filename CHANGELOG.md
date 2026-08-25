@@ -31,8 +31,15 @@ All notable changes to this project will be documented in this file.
   NVIDIA/Vulkan/Wayland only.
 
 ### Added — 2026-08-25
-- **XDJ-1000MK2 playback screen** (`crates/app/src/screen.rs`): the layout from
-  the XDJ-1000MK2 manual's *Normal playback screen* diagram — touch-key row,
+- **XDJ-1000MK2 playback screen** (`crates/app/src/screen.rs`): laid out first
+  from the manual's *Normal playback screen* diagram, then re-measured against
+  a photograph of the unit (`reference/pioneer/xdj-1000mk2-photo.png`, local
+  only). From the photo: red full-height playhead; beat grid as edge ticks only
+  (red at bars, white at beats); phase meter as two rows of four outlined boxes
+  with the current beat solid; off-state pills hidden rather than dimmed;
+  light proportional face for the big readouts; green source bar on the
+  selected key's edge only; `NEEDLE SEARCH` bar; BLUE waveform and TIME mode
+  as defaults to match the unit. `T` toggles REMAIN/TIME. Originally — touch-key row,
   title bar, LINK/source column, MASTER PLAYER + phase meter + beat countdown,
   enlarged waveform with CUE/LOOP · CALL · ZOOM column, info row (PLAYER, TRACK,
   cue pills, REMAIN time, TEMPO, SYNC/MASTER), and the bottom row with SLIP,

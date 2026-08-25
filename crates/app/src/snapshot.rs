@@ -25,6 +25,8 @@ pub struct DeckSnapshot<'a> {
     pub fader_speed:  f32,
     /// Master Tempo (key lock) engaged.
     pub key_lock:     bool,
+    /// Time display shows remaining (REMAIN) rather than elapsed (TIME).
+    pub remain_mode:  bool,
 
     pub beat_grid:    Option<&'a BeatGrid>,
 
