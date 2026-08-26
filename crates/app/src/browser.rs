@@ -1,38 +1,44 @@
 //! Source-based track browser — the BROWSE screen's model.
 //!
-//! Navigates a tree that can be either the **filesystem** (a plain USB / folder,
-//! as a CDJ shows a stick without a rekordbox export) or a **rekordbox library**
-//! (playlists → tracks, read from `PIONEER/rekordbox/export.pdb`), the way the
-//! XDJ browses a prepared USB.  When a browsed directory contains a rekordbox
-//! export, a "rekordbox" entry appears at the top that descends into its playlist
-//! tree; the raw folders/files remain browsable too.
+//! Navigates a tree that can be the **filesystem** (a plain USB / folder), a
+//! **rekordbox library** on local media (playlists → tracks, from
+//! `export.pdb`), or a **linked player** over the network (LINK): the same
+//! rekordbox library, read off a CDJ/XDJ over NFS.  This mirrors the XDJ browse
+//! flow — pick a source, browse playlists, load a track.
 //!
-//! LINK (a linked player's media over the network) will slot in as another
-//! location kind behind the same interface.
-//!
-//! The model owns navigation only — loading the highlighted track is the deck's
-//! job (`DeckApp::load_track`); `enter()` reports which path to load.
+//! Navigation only; the deck does the loading.  `enter()` reports a `Load`
+//! describing where the audio lives (a local path, or an NFS path on a player).
 
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use opendeck_rekordbox::{read_export, RbExport};
+use crate::prodj::LinkState;
+use opendeck_nfs::Nfs;
+use opendeck_rekordbox::{read_export, read_export_from, RbExport};
 
-/// Audio extensions we offer as loadable rows in the filesystem view.
 const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg", "opus"];
 
 fn is_audio(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
+    path.extension().and_then(|e| e.to_str())
         .map(|e| AUDIO_EXTS.iter().any(|a| a.eq_ignore_ascii_case(e)))
         .unwrap_or(false)
+}
+
+/// Where a track to load lives.
+#[derive(Clone)]
+pub enum Load {
+    /// A local file (with an optional local ANLZ analysis file).
+    Local { path: PathBuf, analyze: Option<PathBuf> },
+    /// A track on a linked player, read over NFS.  Paths are rekordbox-relative.
+    Link  { ip: Ipv4Addr, rel_path: String, analyze_rel: String },
 }
 
 /// One visible row.
 #[derive(Clone)]
 pub struct Entry {
     pub name:   String,
-    pub is_dir: bool,               // folder / playlist (descend) vs track (load)
-    pub artist: Option<String>,     // rekordbox second column
+    pub is_dir: bool,
+    pub artist: Option<String>,
     pub bpm:    Option<f32>,
     kind:       EntryKind,
 }
@@ -40,42 +46,47 @@ pub struct Entry {
 #[derive(Clone)]
 enum EntryKind {
     Descend(Loc),
-    Track { path: PathBuf, analyze: Option<PathBuf> },
-    Nothing,
+    /// Connect to a linked player, then browse its rekordbox library.
+    ConnectLink(Ipv4Addr),
+    Track(Load),
 }
 
-/// Where we can be browsing.
 #[derive(Clone)]
 enum Loc {
-    /// A filesystem directory.
     Fs(PathBuf),
-    /// A folder in the rekordbox playlist tree (0 = the tree root).
+    /// The LINK source: a list of discovered players.
+    Link,
+    /// A folder in the current rekordbox library's playlist tree (0 = root).
     RbTree(u32),
     /// The tracks of a rekordbox playlist.
     RbPlaylist(u32),
 }
 
-/// What `enter()` decided the highlighted row is.
+/// Which media the currently-loaded rekordbox export came from — decides how a
+/// selected track loads.
+#[derive(Clone)]
+enum RbSource {
+    Local(PathBuf),   // paths resolve against this mount
+    Link(Ipv4Addr),   // paths are NFS paths on this player
+}
+
 pub enum Enter {
     Folder,
-    Track { path: PathBuf, analyze: Option<PathBuf> },
+    Track(Load),
     Nothing,
 }
 
 pub struct Browser {
-    /// Navigation stack; the last element is the current location.
     stack:    Vec<Loc>,
     entries:  Vec<Entry>,
     pub selected: usize,
-    /// The rekordbox export for the current media, loaded lazily when a rekordbox
-    /// USB is browsed.  `root` is the media mount the paths resolve against.
-    rb:       Option<Arc<RbExport>>,
-    rb_root:  PathBuf,
+    rb:        Option<Arc<RbExport>>,
+    rb_source: Option<RbSource>,
+    link:      Arc<LinkState>,
 }
 
 impl Browser {
-    /// Start in `dir` if it is a directory, otherwise in its parent.
-    pub fn new(dir: &Path) -> Self {
+    pub fn new(dir: &Path, link: Arc<LinkState>) -> Self {
         let start = if dir.is_dir() {
             dir.to_path_buf()
         } else {
@@ -85,11 +96,12 @@ impl Browser {
             }
         };
         let mut b = Browser {
-            stack:    vec![Loc::Fs(start)],
-            entries:  Vec::new(),
+            stack: vec![Loc::Fs(start)],
+            entries: Vec::new(),
             selected: 0,
-            rb:       None,
-            rb_root:  PathBuf::new(),
+            rb: None,
+            rb_source: None,
+            link,
         };
         b.rebuild();
         b
@@ -98,29 +110,30 @@ impl Browser {
     pub fn entries(&self) -> &[Entry] { &self.entries }
     pub fn selected_entry(&self) -> Option<&Entry> { self.entries.get(self.selected) }
 
-    /// Display label for the current location (the browse header).
     pub fn title(&self) -> String {
         match self.stack.last() {
-            Some(Loc::Fs(p)) => p.file_name()
-                .and_then(|n| n.to_str()).unwrap_or("/").to_string(),
-            Some(Loc::RbTree(0)) => "REKORDBOX".to_string(),
+            Some(Loc::Fs(p)) => p.file_name().and_then(|n| n.to_str()).unwrap_or("/").to_string(),
+            Some(Loc::Link)  => "LINK".to_string(),
+            Some(Loc::RbTree(0)) => match &self.rb_source {
+                Some(RbSource::Link(ip)) => format!("LINK  {ip}"),
+                _ => "REKORDBOX".to_string(),
+            },
             Some(Loc::RbTree(id)) | Some(Loc::RbPlaylist(id)) => self.rb.as_ref()
                 .and_then(|e| e.playlists.iter().find(|n| n.id == *id))
-                .map(|n| n.name.clone())
-                .unwrap_or_else(|| "rekordbox".to_string()),
+                .map(|n| n.name.clone()).unwrap_or_else(|| "rekordbox".to_string()),
             None => "/".to_string(),
         }
     }
 
-    /// Re-read the current location into `entries`, clamping the selection.
     pub fn refresh(&mut self) { self.rebuild(); }
 
     fn rebuild(&mut self) {
         let entries = match self.stack.last().cloned() {
-            Some(Loc::Fs(dir))       => self.fs_entries(&dir),
-            Some(Loc::RbTree(node))  => self.rb_tree_entries(node),
-            Some(Loc::RbPlaylist(id))=> self.rb_playlist_entries(id),
-            None                     => Vec::new(),
+            Some(Loc::Fs(dir))        => self.fs_entries(&dir),
+            Some(Loc::Link)           => self.link_entries(),
+            Some(Loc::RbTree(node))   => self.rb_tree_entries(node),
+            Some(Loc::RbPlaylist(id)) => self.rb_playlist_entries(id),
+            None                      => Vec::new(),
         };
         self.entries = entries;
         if self.selected >= self.entries.len() {
@@ -128,29 +141,32 @@ impl Browser {
         }
     }
 
-    /// Filesystem directory: subfolders then audio files, alphabetical.  If the
-    /// directory holds a rekordbox export, load it and prepend a "rekordbox" row.
     fn fs_entries(&mut self, dir: &Path) -> Vec<Entry> {
         let mut out: Vec<Entry> = Vec::new();
 
-        // rekordbox present here → offer the library, and cache the export.
-        if dir.join("PIONEER/rekordbox/export.pdb").is_file() {
-            if self.rb.is_none() || self.rb_root != dir {
-                match read_export(dir) {
-                    Ok(exp) => { self.rb = Some(Arc::new(exp)); self.rb_root = dir.to_path_buf(); }
-                    Err(e)  => log::warn!("rekordbox export at {}: {e:#}", dir.display()),
+        // Source rows appear only at the top browse level (like the XDJ's source
+        // buttons), not inside every folder.
+        let at_top = self.stack.len() == 1;
+        if at_top {
+            out.push(Entry { name: "LINK".into(), is_dir: true, artist: None, bpm: None,
+                kind: EntryKind::Descend(Loc::Link) });
+            if dir.join("PIONEER/rekordbox/export.pdb").is_file() {
+                let need = !matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir);
+                if self.rb.is_none() || need {
+                    match read_export(dir) {
+                        Ok(exp) => { self.rb = Some(Arc::new(exp)); self.rb_source = Some(RbSource::Local(dir.to_path_buf())); }
+                        Err(e)  => log::warn!("rekordbox export at {}: {e:#}", dir.display()),
+                    }
                 }
-            }
-            if self.rb.is_some() {
-                out.push(Entry {
-                    name: "rekordbox".to_string(), is_dir: true,
-                    artist: None, bpm: None, kind: EntryKind::Descend(Loc::RbTree(0)),
-                });
+                if matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir) {
+                    out.push(Entry { name: "rekordbox".into(), is_dir: true, artist: None, bpm: None,
+                        kind: EntryKind::Descend(Loc::RbTree(0)) });
+                }
             }
         }
 
-        let mut dirs:  Vec<Entry> = Vec::new();
-        let mut files: Vec<Entry> = Vec::new();
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
         if let Ok(rd) = std::fs::read_dir(dir) {
             for ent in rd.flatten() {
                 let path = ent.path();
@@ -161,7 +177,7 @@ impl Browser {
                         kind: EntryKind::Descend(Loc::Fs(path)) });
                 } else if is_audio(&path) {
                     files.push(Entry { name, is_dir: false, artist: None, bpm: None,
-                        kind: EntryKind::Track { path, analyze: None } });
+                        kind: EntryKind::Track(Load::Local { path, analyze: None }) });
                 }
             }
         }
@@ -172,45 +188,62 @@ impl Browser {
         out
     }
 
-    /// A rekordbox playlist-tree folder: its child folders and playlists.
+    /// The LINK source: discovered players from the ProDJ Link peer table.
+    fn link_entries(&self) -> Vec<Entry> {
+        let peers = self.link.peers.lock().map(|p| p.clone()).unwrap_or_default();
+        let mut v: Vec<(u8, Ipv4Addr)> = peers.into_iter().collect();
+        v.sort_by_key(|(p, _)| *p);
+        v.into_iter().map(|(player, ip)| Entry {
+            name: format!("Player {player}   {ip}"),
+            is_dir: true, artist: None, bpm: None,
+            kind: EntryKind::ConnectLink(ip),
+        }).collect()
+    }
+
     fn rb_tree_entries(&self, node: u32) -> Vec<Entry> {
         let Some(exp) = self.rb.as_ref() else { return Vec::new() };
         exp.children(node).into_iter().map(|n| Entry {
-            name:   n.name.clone(),
-            is_dir: true,
-            artist: None,
-            bpm:    None,
-            kind:   EntryKind::Descend(if n.is_folder {
-                Loc::RbTree(n.id)
-            } else {
-                Loc::RbPlaylist(n.id)
-            }),
+            name: n.name.clone(), is_dir: true, artist: None, bpm: None,
+            kind: EntryKind::Descend(if n.is_folder { Loc::RbTree(n.id) } else { Loc::RbPlaylist(n.id) }),
         }).collect()
     }
 
-    /// A rekordbox playlist: its tracks (load targets), in playlist order.
     fn rb_playlist_entries(&self, id: u32) -> Vec<Entry> {
         let Some(exp) = self.rb.as_ref() else { return Vec::new() };
-        exp.playlist_tracks(id).into_iter().map(|t| Entry {
-            name:   t.title.clone(),
-            is_dir: false,
-            artist: Some(t.artist.clone()),
-            bpm:    Some(t.bpm),
-            kind:   EntryKind::Track {
-                path:    t.path_on(&self.rb_root),
-                analyze: t.analyze_on(&self.rb_root),
-            },
+        let src = self.rb_source.clone();
+        exp.playlist_tracks(id).into_iter().filter_map(|t| {
+            let load = match &src {
+                Some(RbSource::Local(root)) => Load::Local { path: t.path_on(root), analyze: t.analyze_on(root) },
+                Some(RbSource::Link(ip))    => Load::Link { ip: *ip, rel_path: t.rel_path.clone(), analyze_rel: t.analyze_rel.clone() },
+                None => return None,
+            };
+            Some(Entry {
+                name: t.title.clone(), is_dir: false,
+                artist: Some(t.artist.clone()), bpm: Some(t.bpm),
+                kind: EntryKind::Track(load),
+            })
         }).collect()
     }
 
-    /// Move the highlight by `delta` rows, clamped (no wrap).
+    /// Connect to a linked player, read its `export.pdb` over NFS, and browse it.
+    fn connect_link(&mut self, ip: Ipv4Addr) -> anyhow::Result<()> {
+        let mut nfs = Nfs::connect(ip)?;
+        let root = nfs.mount_usb()?;
+        let (fh, size) = nfs.lookup_path(&root, "PIONEER/rekordbox/export.pdb")?;
+        let bytes = nfs.read_file(&fh, size)?;
+        let exp = read_export_from(&mut std::io::Cursor::new(bytes), PathBuf::from(format!("link://{ip}")))?;
+        log::info!("LINK {ip}: {} tracks, {} playlists", exp.tracks.len(), exp.playlists.len());
+        self.rb = Some(Arc::new(exp));
+        self.rb_source = Some(RbSource::Link(ip));
+        Ok(())
+    }
+
     pub fn move_selection(&mut self, delta: i32) {
         if self.entries.is_empty() { return; }
         let last = self.entries.len() as i32 - 1;
         self.selected = (self.selected as i32 + delta).clamp(0, last) as usize;
     }
 
-    /// Act on the highlighted row: descend, or report the track to load.
     pub fn enter(&mut self) -> Enter {
         let Some(sel) = self.entries.get(self.selected) else { return Enter::Nothing };
         match sel.kind.clone() {
@@ -220,19 +253,25 @@ impl Browser {
                 self.rebuild();
                 Enter::Folder
             }
-            EntryKind::Track { path, analyze } => Enter::Track { path, analyze },
-            EntryKind::Nothing     => Enter::Nothing,
+            EntryKind::ConnectLink(ip) => match self.connect_link(ip) {
+                Ok(()) => {
+                    self.stack.push(Loc::RbTree(0));
+                    self.selected = 0;
+                    self.rebuild();
+                    Enter::Folder
+                }
+                Err(e) => { log::warn!("LINK connect {ip} failed: {e:#}"); Enter::Nothing }
+            },
+            EntryKind::Track(load) => Enter::Track(load),
         }
     }
 
-    /// Go up one level (filesystem parent, or up the rekordbox tree).
     pub fn back(&mut self) {
         if self.stack.len() > 1 {
             self.stack.pop();
             self.rebuild();
             self.selected = 0;
         } else if let Some(Loc::Fs(dir)) = self.stack.last().cloned() {
-            // At the top filesystem level, ascend to the parent as before.
             if let Some(parent) = dir.parent().map(Path::to_path_buf) {
                 self.stack = vec![Loc::Fs(parent)];
                 self.rebuild();
@@ -247,31 +286,34 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Gated on a real rekordbox USB: OPENDECK_TEST_RB=/run/media/dan/CDJ1
+    // Gated on a linked player: OPENDECK_TEST_NFS=192.168.68.58
     #[test]
-    fn browses_rekordbox_usb() {
-        let Ok(root) = std::env::var("OPENDECK_TEST_RB") else { return };
-        let root = std::path::PathBuf::from(root);
-        let mut b = Browser::new(&root);
-        // Top of the USB should offer a "rekordbox" entry.
-        let rb_idx = b.entries().iter().position(|e| e.name == "rekordbox")
-            .expect("rekordbox entry at USB root");
-        b.selected = rb_idx;
-        assert!(matches!(b.enter(), Enter::Folder));            // into the library
-        assert!(!b.entries().is_empty(), "playlist tree non-empty");
-        // Descend into the first playlist/folder until we reach tracks.
+    fn link_source_browses_to_a_loadable_track() {
+        let Ok(ip) = std::env::var("OPENDECK_TEST_NFS") else { return };
+        let ip: Ipv4Addr = ip.parse().unwrap();
+        let link = crate::prodj::LinkState::new(1);
+        link.peers.lock().unwrap().insert(2, ip);   // pretend player 2 is the XDJ
+        let mut b = Browser::new(&std::env::temp_dir(), link);
+
+        // LINK row at top → the player → its rekordbox tree → a playlist → tracks
+        let li = b.entries().iter().position(|e| e.name == "LINK").expect("LINK row");
+        b.selected = li;
+        assert!(matches!(b.enter(), Enter::Folder));            // LINK list
+        assert!(!b.entries().is_empty(), "a player is listed");
         b.selected = 0;
-        assert!(matches!(b.enter(), Enter::Folder));            // into first playlist
-        let track_count = b.entries().len();
-        let all_tracks  = b.entries().iter().all(|e| !e.is_dir);
-        assert!(track_count > 0, "playlist has tracks");
-        assert!(all_tracks, "playlist entries are tracks");
-        // A track loads to a path that exists on disk.
+        assert!(matches!(b.enter(), Enter::Folder));            // connect + tree root
+        assert!(!b.entries().is_empty(), "playlist tree");
+        b.selected = 0;
+        assert!(matches!(b.enter(), Enter::Folder));            // into a playlist
+        assert!(b.entries().iter().all(|e| !e.is_dir), "tracks");
         b.selected = 0;
         match b.enter() {
-            Enter::Track { path, .. } => assert!(path.exists(), "resolves: {}", path.display()),
-            _ => panic!("expected a track"),
+            Enter::Track(Load::Link { ip: tip, rel_path, .. }) => {
+                assert_eq!(tip, ip);
+                assert!(rel_path.contains("/Contents/"), "nfs rel path: {rel_path}");
+                println!("OK: LINK browse → loadable track {rel_path}");
+            }
+            _ => panic!("expected a Link track"),
         }
-        println!("OK: {track_count} tracks in first playlist");
     }
 }

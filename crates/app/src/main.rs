@@ -22,7 +22,7 @@ use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_types::{BeatAnalyzer, BeatGrid};
 use renderer::Renderer;
 use input::{ControlEvent, Event, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
-use browser::{Browser, Enter};
+use browser::{Browser, Enter, Load};
 use snapshot::DeckSnapshot;
 use std::{
     path::PathBuf,
@@ -199,7 +199,7 @@ impl DeckApp {
         link:         Arc<prodj::LinkState>,
         event_rx:     mpsc::Receiver<Event>,
     ) -> Self {
-        let browser = Browser::new(&path);
+        let browser = Browser::new(&path, std::sync::Arc::clone(&link));
         let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
             .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
         Self {
@@ -405,7 +405,7 @@ impl DeckApp {
                     match self.browser.enter() {
                         Enter::Folder  => {}                       // descended; stay in browser
                         Enter::Nothing => {}
-                        Enter::Track { path, analyze } => match self.load_track(&path, analyze.as_deref()) {
+                        Enter::Track(load) => match self.load_selected(load) {
                             Ok(())  => self.screen_mode = ScreenMode::Playback,
                             Err(e)  => log::warn!("load failed: {e:#}"),
                         },
@@ -493,6 +493,17 @@ impl DeckApp {
     fn grid_from_anlz(anlz: &std::path::Path, deck_sr: u32, ch: u8) -> Option<(BeatGrid, u64)> {
         let a = opendeck_rekordbox::read_anlz(anlz)
             .map_err(|e| log::warn!("ANLZ {}: {e:#}", anlz.display())).ok()?;
+        Self::anlz_to_grid(a, deck_sr, ch)
+    }
+
+    /// Same as `grid_from_anlz` but from ANLZ bytes read over the network.
+    fn grid_from_anlz_bytes(bytes: &[u8], deck_sr: u32, ch: u8) -> Option<(BeatGrid, u64)> {
+        let a = opendeck_rekordbox::read_anlz_from(&mut std::io::Cursor::new(bytes.to_vec()))
+            .map_err(|e| log::warn!("ANLZ (link): {e:#}")).ok()?;
+        Self::anlz_to_grid(a, deck_sr, ch)
+    }
+
+    fn anlz_to_grid(a: opendeck_rekordbox::RbAnalysis, deck_sr: u32, ch: u8) -> Option<(BeatGrid, u64)> {
         let first = *a.beats.first()?;
         let anchor = (first.time_ms as u64 * deck_sr as u64) / 1000;      // frames
         let mut grid = BeatGrid::new_constant(anchor, first.bpm as f64);
@@ -504,39 +515,73 @@ impl DeckApp {
         Some((grid, cue))
     }
 
+    /// Dispatch a browser selection: a local file, or a track on a linked player.
+    fn load_selected(&mut self, load: Load) -> Result<()> {
+        match load {
+            Load::Local { path, analyze } => self.load_track(&path, analyze.as_deref()),
+            Load::Link { ip, rel_path, analyze_rel } => self.load_track_link(ip, &rel_path, &analyze_rel),
+        }
+    }
+
+    /// Load a local file: decode from disk, grid from its ANLZ if given.
     fn load_track(&mut self, path: &std::path::Path, analyze: Option<&std::path::Path>) -> Result<()> {
         let t0 = Instant::now();
         let (samples, sr, ch) = audio::decode_file(path)?;
+        let deck_sr = self.audio.sample_rate;
+        let grid_cue = analyze.and_then(|p| Self::grid_from_anlz(p, deck_sr, ch as u8));
+        self.path = path.to_path_buf();
+        self.finish_load(&path.display().to_string(), samples, sr, ch, grid_cue, t0)
+    }
+
+    /// Load a track from a linked player over NFS: pull the audio + ANLZ off the
+    /// wire, decode from memory.  Blocks the UI for the fetch (a few seconds for
+    /// a multi-MB read at 8 KB/NFS-read — non-blocking load is #19).
+    fn load_track_link(&mut self, ip: std::net::Ipv4Addr, rel_path: &str, analyze_rel: &str) -> Result<()> {
+        let t0 = Instant::now();
+        let mut nfs = opendeck_nfs::Nfs::connect(ip)?;
+        let root = nfs.mount_usb()?;
+        let (fh, size) = nfs.lookup_path(&root, rel_path)?;
+        let audio = nfs.read_file(&fh, size)?;
+        let (samples, sr, ch) = audio::decode_bytes(audio, rel_path.rsplit('.').next())?;
+        let deck_sr = self.audio.sample_rate;
+        let grid_cue = if analyze_rel.is_empty() {
+            None
+        } else {
+            match nfs.lookup_path(&root, analyze_rel).and_then(|(afh, asz)| nfs.read_file(&afh, asz)) {
+                Ok(bytes) => Self::grid_from_anlz_bytes(&bytes, deck_sr, ch as u8),
+                Err(e) => { log::warn!("link ANLZ {analyze_rel}: {e:#}"); None }
+            }
+        };
+        self.path = std::path::PathBuf::from(rel_path);
+        self.finish_load(rel_path, samples, sr, ch, grid_cue, t0)
+    }
+
+    /// Shared load tail: resample to the deck rate, build the waveform, apply the
+    /// grid (given, or detect a fallback), swap the samples in, reset transport.
+    fn finish_load(&mut self, name: &str, samples: Vec<f32>, sr: u32, ch: usize,
+                   grid_cue: Option<(BeatGrid, u64)>, t0: Instant) -> Result<()> {
         let deck_sr = self.audio.sample_rate;
         if ch as u8 != self.audio.channels {
             bail!("track has {} channels but the deck runs {} — channel conversion not yet implemented",
                   ch, self.audio.channels);
         }
-        // Offline sample-rate conversion so tracks recorded at a different rate
-        // than the deck's pipeline play at the right pitch.  A one-time cost per
-        // load; real-time streaming SRC is the proper fix (WORKSTREAMS A1).
+        // Offline SRC so a differently-sampled track plays at the right pitch.
         let samples = if sr != deck_sr {
             audio::resample_interleaved(&samples, ch, sr, deck_sr)?
-        } else {
-            samples
-        };
+        } else { samples };
         let samples = Arc::new(samples);
 
         let mut wb = WaveformBuilder::new(deck_sr);
         wb.push(&samples);
-        let waveform  = wb.finish();
+        let waveform = wb.finish();
 
-        // Beat grid + start cue: prefer rekordbox's own ANLZ analysis when the
-        // track came from a rekordbox library (exact grid + cues, and it skips
-        // our ~150 ms detector); fall back to freedj's detector for tracks that
-        // rekordbox never analysed — so a plain USB / dropped file still works.
-        let mut cue_pt: u64 = 0;
-        let (beat_grid, grid_src) = match analyze.and_then(|p| Self::grid_from_anlz(p, deck_sr, ch as u8)) {
-            Some((grid, cue)) => { cue_pt = cue; (Some(grid), "rekordbox") }
+        // Prefer rekordbox's grid+cue; fall back to freedj's detector otherwise.
+        let (beat_grid, cue_pt, grid_src) = match grid_cue {
+            Some((grid, cue)) => (Some(grid), cue, "rekordbox"),
             None => {
                 let mut ba = BeatAnalyzerImpl::new(deck_sr);
                 ba.push(&samples, deck_sr);
-                (ba.beat_grid().map(|g| (*g).clone()), "freedj")
+                (ba.beat_grid().map(|g| (*g).clone()), 0, "freedj")
             }
         };
 
@@ -544,7 +589,6 @@ impl DeckApp {
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&waveform); }
         self.waveform     = waveform;
         self.beat_grid    = beat_grid;
-        self.path         = path.to_path_buf();
         self.smoothed_pos = 0.0;
         self.prev_pos     = 0;
         self.cue_point    = cue_pt;
@@ -552,10 +596,9 @@ impl DeckApp {
         self.cued         = true;
         log::info!(
             "loaded {} in {:.1}s ({} BPM, {} grid, cue {:.2}s)",
-            path.display(), t0.elapsed().as_secs_f32(),
+            name, t0.elapsed().as_secs_f32(),
             self.beat_grid.as_ref().map(|g| format!("{:.1}", g.bpm)).unwrap_or_else(|| "?".into()),
-            grid_src,
-            cue_pt as f64 / (deck_sr as f64 * ch as f64),
+            grid_src, cue_pt as f64 / (deck_sr as f64 * ch as f64),
         );
         Ok(())
     }
