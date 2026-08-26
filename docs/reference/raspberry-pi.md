@@ -1,9 +1,38 @@
 # Running freedj on a Raspberry Pi
 
-First-bring-up guide. The app runs on x86/NVIDIA/Wayland today; the Pi is a
-different GPU (VideoCore, Mesa V3DV / GLES) and often no compositor, so expect
-to shake out the graphics and audio paths. Nothing here is verified on a Pi
-yet — this is the plan and the known risks.
+First-bring-up guide.
+
+## Verified on a Pi 5 (2026-08-26)
+
+A Pi 5 (4 GB, Bookworm 64-bit, wayfire, 4K HDMI) built and ran freedj cleanly:
+
+- **GPU:** `V3D 7.1.7.0 (V3DV Mesa) via Vulkan` — real hardware, not llvmpipe.
+- **Frame pacing:** present mode **Mailbox** *is* available on V3DV, so the
+  desktop design (Mailbox + `pre_present_notify`) works unchanged. Measured
+  60 fps, dt sd **0.12 ms**, 100 % of frames in the vsync window, zero stalls —
+  cleaner than the NVIDIA desktop.
+- **Audio:** HDMI out negotiated 44.1 kHz to match the track, so **no
+  sample-rate warning / no pitch error** (SRC still unimplemented — a 48 kHz
+  USB DAC would still play 44.1 kHz sharp; this just happened to match).
+- **CPU/mem:** ~58 % of one core at 1.0× (render thread the biggest share),
+  load 0.82 on 4 cores, RSS 249 MB. Plenty of headroom.
+- **Thermals:** 77.9 °C under light load with the stock setup — **needs an
+  active cooler**; the Pi 5 throttles ~80–85 °C and throttling causes audio
+  glitches.
+- Native `make build` took **6m47s** (first build; incremental is fast).
+
+So the Pi 5 is a viable target and the graphics path that was the main unknown
+is confirmed. Remaining Pi-specific work is unchanged: SRC (A1), RT audio
+hardening (A3), and eventually bare DRM/KMS (no compositor) where the
+Mailbox/compositor pacing won't exist.
+
+The original plan and risks follow.
+
+---
+
+The app runs on x86/NVIDIA/Wayland and now a Pi 5. Bare DRM/KMS (no compositor)
+is still unshaken — there the compositor frame callback won't exist and Fifo
+becomes the only clock.
 
 ## Hardware to gather
 
@@ -33,6 +62,9 @@ eventual appliance mode) is a second step — see "Graphics" below.
 ## Build
 
 Native on the Pi is simplest to start (slower compile, no cross toolchain):
+
+If `apt update` fails on a `bookworm-testing` Release file, comment that line
+out of `/etc/apt/sources.list.d/raspi.list` first (a stray testing repo).
 
 ```bash
 sudo apt update
