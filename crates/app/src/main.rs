@@ -257,12 +257,20 @@ impl DeckApp {
     fn apply(&mut self, ev: Event) {
         log::debug!("event: {ev:?}");
         match ev {
-            Event::Deck(ControlEvent::Play)  => { self.audio.playing.store(true,  Ordering::Relaxed); log::info!("playing"); }
+            Event::Deck(ControlEvent::Play)  => { self.lock_in_play(); log::info!("playing"); }
             Event::Deck(ControlEvent::Pause) => { self.audio.playing.store(false, Ordering::Relaxed); log::info!("paused"); }
             Event::Deck(ControlEvent::PlayPause) => {
-                let was = self.audio.playing.load(Ordering::Relaxed);
-                self.audio.playing.store(!was, Ordering::Relaxed);
-                log::info!("{}", if was { "paused" } else { "playing" });
+                if self.cue_preview {
+                    // XDJ: pressing PLAY while CUE is held for a preview latches
+                    // continuous playback — it does NOT toggle to pause.  After
+                    // this, releasing CUE keeps playing instead of returning.
+                    self.lock_in_play();
+                    log::info!("play locked in from cue preview");
+                } else {
+                    let was = self.audio.playing.load(Ordering::Relaxed);
+                    self.audio.playing.store(!was, Ordering::Relaxed);
+                    log::info!("{}", if was { "paused" } else { "playing" });
+                }
             }
             Event::Deck(ControlEvent::TempoNudge { delta }) => {
                 let step = delta / (2.0 * input::TEMPO_RANGE);
@@ -451,6 +459,16 @@ impl DeckApp {
     /// playhead and the audible-position estimate in sync so it tracks crisply
     /// (used by vinyl-scrub and CUE).  in_flight is zeroed — while paused
     /// nothing is queued, and on resume the processor re-derives it.
+    /// Latch continuous playback, cancelling any momentary CUE preview.  After
+    /// this, releasing CUE no longer jumps back to the cue point — the deck just
+    /// keeps playing (the XDJ "hold CUE, tap PLAY to lock in" gesture).  Also the
+    /// plain PLAY action, which should always mean sustained play.
+    fn lock_in_play(&mut self) {
+        self.cue_preview = false;   // release won't return to the cue
+        self.cued        = false;   // playhead is leaving the cue
+        self.audio.playing.store(true, Ordering::Relaxed);
+    }
+
     fn seek_to(&mut self, pos: u64) {
         let pos = pos.min(self.audio.len() as u64);
         // The seek_request channel is what the processor actually acts on; it

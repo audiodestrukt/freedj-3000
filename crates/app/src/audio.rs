@@ -358,6 +358,19 @@ fn processor_loop(
             position.store(proc_pos, Ordering::Relaxed);   // reflect immediately
             // Tell the cpal callback to flush stale buffered audio.
             drain_flag.store(true, Ordering::Release);
+            // Then WAIT for it to actually flush before pushing the first
+            // post-seek block.  Otherwise, when the ring is empty (e.g. a cue
+            // preview from a paused deck), we push the block containing the cue
+            // transient and the callback promptly drains it with the stale
+            // audio — playback starts one block (~11 ms) late and the transient
+            // is lost.  The callback runs every buffer period even while paused
+            // (it swaps drain_flag before the play check), so this clears fast;
+            // bounded so a stopped stream can't hang us.
+            let mut spins = 0;
+            while drain_flag.load(Ordering::Acquire) && spins < 50 {
+                thread::sleep(Duration::from_millis(1));
+                spins += 1;
+            }
         }
 
         // ── Back-pressure ─────────────────────────────────────────────────────
