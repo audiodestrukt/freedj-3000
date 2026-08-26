@@ -1,15 +1,16 @@
 //! Read a Pioneer rekordbox device export (the `PIONEER/rekordbox/export.pdb`
-//! database on a CDJ/XDJ USB) into freedj's world: a flat, sorted track list
-//! with resolved artist names, BPM, and absolute file paths.
+//! database on a CDJ/XDJ USB) into freedj's world: the playlist tree plus a
+//! track list with resolved artist names, BPM, and absolute file paths — enough
+//! to browse and load a library the way the XDJ does.
 //!
 //! Parsing is done by the (vendored, MPL-2.0) `rekordcrate` crate; this crate is
-//! the thin adapter that pulls out the fields we care about and resolves paths.
-//! Cue-point / beat-grid import from the `ANLZ` files is a later step.
+//! the thin adapter. Cue-point / beat-grid import from the `ANLZ` files is a
+//! later step.
 
 use anyhow::{anyhow, Context, Result};
 use binrw::BinRead;
-use rekordcrate::pdb::{Header, Row};
 use rekordcrate::pdb::string::DeviceSQLString;
+use rekordcrate::pdb::{Header, Row};
 use std::collections::HashMap;
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -41,10 +42,47 @@ impl RbTrack {
     }
 }
 
-/// A parsed export: the media root plus its tracks.
+/// A node in the playlist tree — either a folder (contains child nodes) or a
+/// playlist (contains track entries). Mirrors the XDJ's Playlists browse.
+#[derive(Debug, Clone)]
+pub struct RbPlaylistNode {
+    pub id:         u32,
+    pub parent_id:  u32,   // 0 = top level
+    pub name:       String,
+    pub is_folder:  bool,
+    pub sort_order: u32,
+}
+
+/// A parsed export: the media root, its tracks, and its playlist tree.
 pub struct RbExport {
-    pub root:   PathBuf,
-    pub tracks: Vec<RbTrack>,
+    pub root:      PathBuf,
+    pub tracks:    Vec<RbTrack>,
+    pub playlists: Vec<RbPlaylistNode>,
+    /// playlist node id → ordered track ids.
+    entries:       HashMap<u32, Vec<u32>>,
+    /// track id → index into `tracks`.
+    by_id:         HashMap<u32, usize>,
+}
+
+impl RbExport {
+    /// Track by rekordbox id.
+    pub fn track(&self, id: u32) -> Option<&RbTrack> {
+        self.by_id.get(&id).map(|&i| &self.tracks[i])
+    }
+    /// Child nodes of a folder (0 = top level), ordered as rekordbox sorts them.
+    pub fn children(&self, parent_id: u32) -> Vec<&RbPlaylistNode> {
+        let mut v: Vec<&RbPlaylistNode> =
+            self.playlists.iter().filter(|n| n.parent_id == parent_id).collect();
+        v.sort_by_key(|n| (n.sort_order, n.id));
+        v
+    }
+    /// Tracks in a playlist, in playlist order.
+    pub fn playlist_tracks(&self, playlist_id: u32) -> Vec<&RbTrack> {
+        self.entries
+            .get(&playlist_id)
+            .map(|ids| ids.iter().filter_map(|id| self.track(*id)).collect())
+            .unwrap_or_default()
+    }
 }
 
 fn text(s: &DeviceSQLString) -> String {
@@ -69,8 +107,8 @@ fn read_all_rows(pdb: &Path) -> Result<Vec<Row>> {
     Ok(rows)
 }
 
-/// Read `usb_root/PIONEER/rekordbox/export.pdb` into a sorted track list with
-/// artist names resolved.
+/// Read `usb_root/PIONEER/rekordbox/export.pdb` into tracks + playlist tree,
+/// with artist names resolved and track order stable.
 pub fn read_export(usb_root: &Path) -> Result<RbExport> {
     let pdb = usb_root.join("PIONEER/rekordbox/export.pdb");
     let rows = read_all_rows(&pdb)?;
@@ -82,10 +120,14 @@ pub fn read_export(usb_root: &Path) -> Result<RbExport> {
         }
     }
 
-    let mut tracks: Vec<RbTrack> = rows
-        .iter()
-        .filter_map(|row| match row {
-            Row::Track(t) => Some(RbTrack {
+    let mut tracks: Vec<RbTrack> = Vec::new();
+    let mut playlists: Vec<RbPlaylistNode> = Vec::new();
+    // playlist id → (entry_index, track_id), sorted into order afterwards.
+    let mut raw_entries: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+
+    for row in &rows {
+        match row {
+            Row::Track(t) => tracks.push(RbTrack {
                 id:            t.id.0,
                 title:         text(&t.title),
                 artist:        artists.get(&t.artist_id.0).cloned().unwrap_or_default(),
@@ -95,10 +137,32 @@ pub fn read_export(usb_root: &Path) -> Result<RbExport> {
                 rel_path:      text(&t.file_path),
                 analyze_rel:   text(&t.analyze_path),
             }),
-            _ => None,
+            Row::PlaylistTreeNode(n) => playlists.push(RbPlaylistNode {
+                id:         n.id.0,
+                parent_id:  n.parent_id.0,
+                name:       text(&n.name),
+                is_folder:  n.is_folder(),
+                sort_order: n.sort_order,
+            }),
+            Row::PlaylistEntry(e) => raw_entries
+                .entry(e.playlist_id.0)
+                .or_default()
+                .push((e.entry_index, e.track_id.0)),
+            _ => {}
+        }
+    }
+
+    tracks.sort_by_key(|t| t.id);
+    let by_id: HashMap<u32, usize> =
+        tracks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
+
+    let entries: HashMap<u32, Vec<u32>> = raw_entries
+        .into_iter()
+        .map(|(pid, mut v)| {
+            v.sort_by_key(|(idx, _)| *idx);
+            (pid, v.into_iter().map(|(_, tid)| tid).collect())
         })
         .collect();
-    tracks.sort_by_key(|t| t.id);
 
-    Ok(RbExport { root: usb_root.to_path_buf(), tracks })
+    Ok(RbExport { root: usb_root.to_path_buf(), tracks, playlists, entries, by_id })
 }

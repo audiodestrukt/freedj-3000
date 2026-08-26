@@ -1,3 +1,4 @@
+#![allow(warnings)] // vendored third-party crate; not our lint surface
 // Copyright (c) 2025 Jan Holthuis <jan.holthuis@rub.de>
 //
 // This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy

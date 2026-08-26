@@ -1,13 +1,21 @@
-// Dev tool: read a rekordbox USB export and list its tracks.
+use opendeck_rekordbox::{read_export, RbExport};
+fn walk(exp: &RbExport, parent: u32, depth: usize) {
+    for node in exp.children(parent) {
+        let pad = "  ".repeat(depth);
+        if node.is_folder {
+            println!("{pad}📁 {}", node.name);
+            walk(exp, node.id, depth + 1);
+        } else {
+            let n = exp.playlist_tracks(node.id).len();
+            println!("{pad}🎵 {} ({n} tracks)", node.name);
+        }
+    }
+}
 fn main() -> anyhow::Result<()> {
     let root = std::env::args().nth(1).expect("usage: list <usb-root>");
-    let exp = opendeck_rekordbox::read_export(std::path::Path::new(&root))?;
-    println!("{} tracks under {}", exp.tracks.len(), exp.root.display());
-    for t in exp.tracks.iter().take(20) {
-        let exists = t.path_on(&exp.root).exists();
-        println!("  [{:>3}] {:>6.2} BPM  {:>4}s  {} — {}   ({}{})",
-            t.id, t.bpm, t.duration_secs, t.artist, t.title,
-            t.rel_path, if exists { "" } else { "  <MISSING>" });
-    }
+    let exp = read_export(std::path::Path::new(&root))?;
+    println!("{} tracks, {} playlist nodes", exp.tracks.len(), exp.playlists.len());
+    println!("--- playlist tree ---");
+    walk(&exp, 0, 0);
     Ok(())
 }
