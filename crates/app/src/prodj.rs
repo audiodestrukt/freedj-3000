@@ -362,21 +362,17 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
             link.handoff_to.store(0, Ordering::Relaxed);
             log::info!("ProDJ Link: handed master to player {}", st.player);
         } else if st.master && link.master.load(Ordering::Relaxed) {
-            // Someone else says it is master while we are.  The rule is the
-            // sync counter: whoever holds the higher one wins.  A CDJ takes
-            // master by asserting it with counter = max seen + 1 and holding;
-            // the old master then drops its own flag on its own.  So we only
-            // relinquish to a *strictly higher* counter — otherwise we keep
-            // asserting and the peer yields (verified: the XDJ drops MASTER a
-            // second or two after we start claiming with a higher counter).
-            if st.sync_counter > link.our_sync.load(Ordering::Relaxed) {
-                link.master.store(false, Ordering::Relaxed);
-                log::info!("ProDJ Link: player {} asserts master with newer sync {} > {} — no longer master",
-                           st.player, st.sync_counter, link.our_sync.load(Ordering::Relaxed));
-            } else {
-                log::debug!("ProDJ Link: player {} still claims master (sync {} ≤ ours {}); holding",
-                            st.player, st.sync_counter, link.our_sync.load(Ordering::Relaxed));
-            }
+            // A peer still reports master while we do.  Per the DJ Link spec the
+            // **handshake decides mastery, not the sync counter** — and the
+            // *outgoing* master deliberately bumps its own Syncn above everyone
+            // and keeps its master flag until it sees the new master (us) assert
+            // Mm=1.  So during a handoff the old master transiently shows
+            // master=true WITH a higher counter; abdicating on that counter was
+            // the bug (we dropped Mm before it saw us assert → it never yielded).
+            // We took master through the handoff (its 0x27 / Mh=us); HOLD, and it
+            // drops its own flag once it sees our status.
+            log::debug!("ProDJ Link: player {} still shows master (sync {} vs ours {}); holding — the handoff decides",
+                        st.player, st.sync_counter, link.our_sync.load(Ordering::Relaxed));
         }
         if !st.master && cur == st.player {
             link.master_player.store(0, Ordering::Relaxed);
