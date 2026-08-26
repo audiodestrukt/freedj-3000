@@ -405,7 +405,7 @@ impl DeckApp {
                     match self.browser.enter() {
                         Enter::Folder  => {}                       // descended; stay in browser
                         Enter::Nothing => {}
-                        Enter::Track(path) => match self.load_track(&path) {
+                        Enter::Track { path, analyze } => match self.load_track(&path, analyze.as_deref()) {
                             Ok(())  => self.screen_mode = ScreenMode::Playback,
                             Err(e)  => log::warn!("load failed: {e:#}"),
                         },
@@ -487,7 +487,24 @@ impl DeckApp {
     /// (~1-2 s on a Pi) — acceptable for a LOAD, as a CDJ spins up briefly;
     /// can move to a worker thread later.  Leaves the deck paused at the start,
     /// as a CDJ does after loading.
-    fn load_track(&mut self, path: &std::path::Path) -> Result<()> {
+    /// Convert a rekordbox ANLZ file into a constant BeatGrid (anchored on its
+    /// first beat) and a start-cue sample index (first memory cue, interleaved).
+    /// Returns None if the file has no beat grid.
+    fn grid_from_anlz(anlz: &std::path::Path, deck_sr: u32, ch: u8) -> Option<(BeatGrid, u64)> {
+        let a = opendeck_rekordbox::read_anlz(anlz)
+            .map_err(|e| log::warn!("ANLZ {}: {e:#}", anlz.display())).ok()?;
+        let first = *a.beats.first()?;
+        let anchor = (first.time_ms as u64 * deck_sr as u64) / 1000;      // frames
+        let mut grid = BeatGrid::new_constant(anchor, first.bpm as f64);
+        grid.downbeat_offset = first.beat_in_bar.saturating_sub(1) % 4;
+        grid.confidence = 1.0;
+        let cue = a.memory_cues.first()
+            .map(|c| (c.time_ms as u64 * deck_sr as u64) / 1000 * ch as u64)  // interleaved
+            .unwrap_or(0);
+        Some((grid, cue))
+    }
+
+    fn load_track(&mut self, path: &std::path::Path, analyze: Option<&std::path::Path>) -> Result<()> {
         let t0 = Instant::now();
         let (samples, sr, ch) = audio::decode_file(path)?;
         let deck_sr = self.audio.sample_rate;
@@ -506,11 +523,22 @@ impl DeckApp {
         let samples = Arc::new(samples);
 
         let mut wb = WaveformBuilder::new(deck_sr);
-        let mut ba = BeatAnalyzerImpl::new(deck_sr);
         wb.push(&samples);
-        ba.push(&samples, deck_sr);
         let waveform  = wb.finish();
-        let beat_grid = ba.beat_grid().map(|g| (*g).clone());
+
+        // Beat grid + start cue: prefer rekordbox's own ANLZ analysis when the
+        // track came from a rekordbox library (exact grid + cues, and it skips
+        // our ~150 ms detector); fall back to freedj's detector for tracks that
+        // rekordbox never analysed — so a plain USB / dropped file still works.
+        let mut cue_pt: u64 = 0;
+        let (beat_grid, grid_src) = match analyze.and_then(|p| Self::grid_from_anlz(p, deck_sr, ch as u8)) {
+            Some((grid, cue)) => { cue_pt = cue; (Some(grid), "rekordbox") }
+            None => {
+                let mut ba = BeatAnalyzerImpl::new(deck_sr);
+                ba.push(&samples, deck_sr);
+                (ba.beat_grid().map(|g| (*g).clone()), "freedj")
+            }
+        };
 
         self.audio.load_samples(Arc::clone(&samples), deck_sr, ch as u8)?;
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&waveform); }
@@ -519,13 +547,15 @@ impl DeckApp {
         self.path         = path.to_path_buf();
         self.smoothed_pos = 0.0;
         self.prev_pos     = 0;
-        self.cue_point    = 0;
+        self.cue_point    = cue_pt;
         self.cue_preview  = false;
         self.cued         = true;
         log::info!(
-            "loaded {} in {:.1}s ({} BPM)",
+            "loaded {} in {:.1}s ({} BPM, {} grid, cue {:.2}s)",
             path.display(), t0.elapsed().as_secs_f32(),
             self.beat_grid.as_ref().map(|g| format!("{:.1}", g.bpm)).unwrap_or_else(|| "?".into()),
+            grid_src,
+            cue_pt as f64 / (deck_sr as f64 * ch as f64),
         );
         Ok(())
     }
@@ -535,7 +565,7 @@ impl DeckApp {
         // exercise the runtime reload path headlessly (before any borrows).
         if self.frame_count == 150 {
             if let Ok(path) = std::env::var("OPENDECK_AUTOLOAD") {
-                match self.load_track(std::path::Path::new(&path)) {
+                match self.load_track(std::path::Path::new(&path), None) {
                     Ok(())  => { self.audio.playing.store(true, Ordering::Relaxed); log::info!("autoload ok"); }
                     Err(e)  => log::error!("autoload failed: {e:#}"),
                 }
@@ -1124,4 +1154,23 @@ fn main() -> Result<()> {
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod anlz_grid_tests {
+    use super::*;
+    // Gated: OPENDECK_TEST_RB=/run/media/dan/CDJ1
+    #[test]
+    fn grid_from_anlz_matches_rekordbox() {
+        let Ok(root) = std::env::var("OPENDECK_TEST_RB") else { return };
+        let root = std::path::PathBuf::from(root);
+        let exp = opendeck_rekordbox::read_export(&root).unwrap();
+        let t = exp.tracks.iter().find(|t| t.title.contains("OG Sins")).unwrap();
+        let ap = t.analyze_on(&root).unwrap();
+        let (grid, _cue) = DeckApp::grid_from_anlz(&ap, 48_000, 2).expect("grid");
+        assert!((grid.bpm - 125.0).abs() < 0.5, "bpm {}", grid.bpm);
+        assert_eq!(grid.downbeat_offset, 0, "first beat is a downbeat");
+        // first beat at 56 ms → 56*48000/1000 = 2688 frames
+        assert_eq!(grid.anchor_sample, 2688, "anchor frames");
+    }
 }

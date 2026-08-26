@@ -166,3 +166,92 @@ pub fn read_export(usb_root: &Path) -> Result<RbExport> {
 
     Ok(RbExport { root: usb_root.to_path_buf(), tracks, playlists, entries, by_id })
 }
+
+// ── ANLZ analysis import (beat grid + cues) ───────────────────────────────────
+
+use rekordcrate::anlz::{Content, CueListType, CueType, ANLZ};
+
+/// One beat from the rekordbox beat grid.
+#[derive(Debug, Clone, Copy)]
+pub struct RbBeat {
+    pub time_ms:     u32,
+    pub bpm:         f32,
+    /// Beat within the bar, 1–4 (1 = downbeat).
+    pub beat_in_bar: u8,
+}
+
+/// A memory or hot cue (or loop) from the analysis.
+#[derive(Debug, Clone, Copy)]
+pub struct RbCue {
+    pub time_ms: u32,
+    pub is_loop: bool,
+    pub loop_ms: u32,
+    /// `Some(n)` if this is hot cue n, `None` for a memory cue.
+    pub hot_cue: Option<u32>,
+}
+
+/// Parsed analysis for one track.
+#[derive(Debug, Clone, Default)]
+pub struct RbAnalysis {
+    pub beats:       Vec<RbBeat>,
+    pub memory_cues: Vec<RbCue>,
+    pub hot_cues:    Vec<RbCue>,
+}
+
+/// Read a rekordbox `ANLZ####.DAT` analysis file: beat grid + cue points.
+/// Waveforms are ignored (freedj renders its own). Missing sections are fine.
+pub fn read_anlz(path: &Path) -> Result<RbAnalysis> {
+    let mut r = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    let anlz = ANLZ::read(&mut r).map_err(|e| anyhow!("parse ANLZ: {e}"))?;
+
+    let mut out = RbAnalysis::default();
+    for section in &anlz.sections {
+        match &section.content {
+            Content::BeatGrid(bg) => {
+                out.beats = bg.beats.iter().map(|b| RbBeat {
+                    time_ms:     b.time,
+                    bpm:         b.tempo as f32 / 100.0,
+                    beat_in_bar: b.beat_number as u8,
+                }).collect();
+            }
+            Content::CueList(cl) => {
+                let hot = cl.list_type == CueListType::HotCues;
+                let dst = if hot { &mut out.hot_cues } else { &mut out.memory_cues };
+                for c in &cl.cues {
+                    dst.push(RbCue {
+                        time_ms: c.time,
+                        is_loop: c.cue_type == CueType::Loop,
+                        loop_ms: c.loop_time,
+                        hot_cue: hot.then_some(c.hot_cue),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+    out.memory_cues.sort_by_key(|c| c.time_ms);
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    // Gated: OPENDECK_TEST_RB=/run/media/dan/CDJ1
+    #[test]
+    fn reads_anlz_beatgrid() {
+        let Ok(root) = std::env::var("OPENDECK_TEST_RB") else { return };
+        let root = std::path::PathBuf::from(root);
+        let exp = read_export(&root).unwrap();
+        let t = exp.tracks.iter().find(|t| t.title.contains("OG Sins")).expect("OG Sins");
+        let ap = t.analyze_on(&root).expect("analyze path");
+        let a = read_anlz(&ap).unwrap();
+        assert!(!a.beats.is_empty(), "has beats");
+        let first = a.beats[0];
+        assert!((first.bpm - 125.0).abs() < 0.5, "≈125 BPM, got {}", first.bpm);
+        assert_eq!(first.beat_in_bar, 1, "first beat is a downbeat");
+        // beat spacing ≈ 480 ms at 125 BPM
+        let gap = a.beats[1].time_ms - a.beats[0].time_ms;
+        assert!((gap as i32 - 480).abs() <= 2, "≈480ms spacing, got {gap}");
+        println!("OK: {} beats, first @ {}ms {} BPM", a.beats.len(), first.time_ms, first.bpm);
+    }
+}

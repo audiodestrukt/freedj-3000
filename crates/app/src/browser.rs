@@ -40,7 +40,7 @@ pub struct Entry {
 #[derive(Clone)]
 enum EntryKind {
     Descend(Loc),
-    Track(PathBuf),
+    Track { path: PathBuf, analyze: Option<PathBuf> },
     Nothing,
 }
 
@@ -58,7 +58,7 @@ enum Loc {
 /// What `enter()` decided the highlighted row is.
 pub enum Enter {
     Folder,
-    Track(PathBuf),
+    Track { path: PathBuf, analyze: Option<PathBuf> },
     Nothing,
 }
 
@@ -161,7 +161,7 @@ impl Browser {
                         kind: EntryKind::Descend(Loc::Fs(path)) });
                 } else if is_audio(&path) {
                     files.push(Entry { name, is_dir: false, artist: None, bpm: None,
-                        kind: EntryKind::Track(path) });
+                        kind: EntryKind::Track { path, analyze: None } });
                 }
             }
         }
@@ -196,7 +196,10 @@ impl Browser {
             is_dir: false,
             artist: Some(t.artist.clone()),
             bpm:    Some(t.bpm),
-            kind:   EntryKind::Track(t.path_on(&self.rb_root)),
+            kind:   EntryKind::Track {
+                path:    t.path_on(&self.rb_root),
+                analyze: t.analyze_on(&self.rb_root),
+            },
         }).collect()
     }
 
@@ -217,7 +220,7 @@ impl Browser {
                 self.rebuild();
                 Enter::Folder
             }
-            EntryKind::Track(path) => Enter::Track(path),
+            EntryKind::Track { path, analyze } => Enter::Track { path, analyze },
             EntryKind::Nothing     => Enter::Nothing,
         }
     }
@@ -266,7 +269,7 @@ mod tests {
         // A track loads to a path that exists on disk.
         b.selected = 0;
         match b.enter() {
-            Enter::Track(p) => assert!(p.exists(), "track path resolves: {}", p.display()),
+            Enter::Track { path, .. } => assert!(path.exists(), "resolves: {}", path.display()),
             _ => panic!("expected a track"),
         }
         println!("OK: {track_count} tracks in first playlist");
