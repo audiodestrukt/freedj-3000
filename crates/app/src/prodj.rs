@@ -541,8 +541,10 @@ impl ProDjSender {
                                 if let Some((_, frac)) = beat_now {
                                     let err = if frac > 0.5 { frac - 1.0 } else { frac };   // beats, ±0.5
                                     if err.abs() > 0.01 {
-                                        // Correct the error over about a beat, bounded like a jog nudge.
-                                        let offset = (-(err as f32) * 1.0).clamp(-0.03, 0.03);
+                                        // Correct half the error per master beat: bounded like a
+                                        // jog nudge, and halving avoids the overshoot a full
+                                        // correction gives (measured ±0.02 beat oscillation at gain 1).
+                                        let offset = (-(err as f32) * 0.5).clamp(-0.03, 0.03);
                                         let period_s = 60.0 / master_bpm.max(1.0);
                                         nudge = Some((offset, now + Duration::from_secs_f32(period_s)));
                                         st.speed.store((want + offset).to_bits(), Ordering::Relaxed);

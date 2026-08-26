@@ -49,8 +49,8 @@ All notable changes to this project will be documented in this file.
   a higher Syncn counter (0x84) and hold. Verified live: the real XDJ-1000MK2
   yields to us, and we yield back to a peer with a higher counter.
 - **SYNC follow**: with SYNC on, match the master's effective BPM via the
-  pitch fader and nudge phase on each master beat. Tempo-match verified
-  between two instances; live phase-lock against the XDJ still to test.
+  pitch fader and phase-lock to its beat. Verified live against the
+  XDJ-1000MK2: tempo snapped to −6.48 %, phase converged to ±0.01 beat.
 - **Handled from other decks**: incoming 0x26 (master request), 0x27 (yield),
   and 0x2a (sync-control: sync on/off, become master).
 - **Beat timing at Pioneer's level**: the sender free-runs a phase-locked

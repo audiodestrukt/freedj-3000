@@ -20,15 +20,15 @@ no new DSP.
 
 What "syncs over Link" means here, concretely:
 
-1. **Seen** — freedj announces on 50000 and the XDJ-1000MK2 lists it as a
-   player.
-2. **Heard** — freedj sends beat (50001) and status (50002) packets derived
-   from its own grid and *audible* position, so the XDJ's phase meter shows
-   us.
-3. **Follows** — with SYNC on, freedj sets its tempo to the master's
-   effective BPM. Phase alignment (nudging to land on the master's beat) is
-   the stretch goal; tempo follow alone already makes the phase meter and
-   the B2 strip sit still.
+1. **Seen** ✅ — announces on 50000; the XDJ lists us, LINK reads *connected*.
+2. **Heard** ✅ — beat + status sent; the XDJ accepts a master handoff from us.
+3. **Follows** ✅ — SYNC matches the master's BPM and phase-locks to within
+   ~0.01 beat.
+
+All three verified live on the XDJ-1000MK2, 2026-08-26. The Link half of
+Milestone 1 is complete; what remains is controller input (the input bus
+exists; the S2 MK2 / DJ2Go adapters are next) and the commodity-hardware
+foundations (A1 sample-rate conversion, B3 device selection).
 
 Not in M1: key detection, cues/loops, library, touch, any custom hardware.
 
@@ -177,15 +177,16 @@ PERFORMANCE.md). Verified against the real XDJ-1000MK2: it lists us and
 accepts a master handoff (B6). Unlocks screen callouts 15 (player number) and
 26 (MASTER/SYNC).
 
-### B5. SYNC follow — **done, live-untested** (2026-08-26)
+### B5. SYNC follow — **done, live-verified** (2026-08-26)
 
 With SYNC on and not master, the sender sets the pitch fader so our effective
 BPM equals the master's (from its beats, or its status when it isn't playing),
 and nudges phase toward the master's beat on each of its beat packets, bounded
-like a jog nudge. Tempo-match verified between two freedj instances; the phase
-nudge was not exercised against the XDJ because the deck was idle by the time
-this landed. **Live test still owed:** XDJ as master and playing, freedj on
-SYNC, confirm tempo locks and phase holds.
+like a jog nudge. Verified live against the XDJ-1000MK2 as master at 126 BPM: freedj's fader
+snapped to −6.48 % (134.73 → 126.00), our beat interval pulled to the XDJ's
+476 ms, and the phase error converged monotonically 0.275 → 0.14 → 0.09 →
+0.05 → 0.03 → 0.01 beat into the ±0.01 deadband (phase-correction gain 0.5
+per master beat; gain 1.0 overshot).
 
 ### B6. Tempo-master handoff — **done** (2026-08-26)
 
