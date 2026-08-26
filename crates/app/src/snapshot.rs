@@ -34,6 +34,12 @@ pub struct DeckSnapshot<'a> {
     pub zoom_grid_mode: bool,
     /// LINK selected in the source column (else the local file / USB).
     pub source_link:  bool,
+    /// Phase-meter slot shows the master-alignment tick view.
+    pub phase_ticks_view: bool,
+    /// A ProDJ Link peer has been heard from.
+    pub linked:       bool,
+    /// Player number of the external master (0 = unknown / none).
+    pub master_player: u8,
 
     pub beat_grid:    Option<&'a BeatGrid>,
 

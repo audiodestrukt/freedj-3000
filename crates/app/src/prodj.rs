@@ -39,10 +39,11 @@ impl ProDjHandle {
     pub fn listen(
         beat2_bpm:    Arc<AtomicU32>,
         beat2_anchor: Arc<AtomicU64>,
+        beat2_player: Arc<AtomicU32>,
     ) -> Option<Self> {
         let mut threads = Vec::new();
         for port in [PORT_BEAT, PORT_STATUS] {
-            match listen_port(port, Arc::clone(&beat2_bpm), Arc::clone(&beat2_anchor)) {
+            match listen_port(port, Arc::clone(&beat2_bpm), Arc::clone(&beat2_anchor), Arc::clone(&beat2_player)) {
                 Some(t) => threads.push(t),
                 None    => log::warn!("ProDJ Link: not listening on {port}"),
             }
@@ -77,6 +78,7 @@ fn listen_port(
     port:         u16,
     beat2_bpm:    Arc<AtomicU32>,
     beat2_anchor: Arc<AtomicU64>,
+    beat2_player: Arc<AtomicU32>,
 ) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(port)?;
     log::info!("ProDJ Link: listening for beat packets on port {port}");
@@ -94,6 +96,7 @@ fn listen_port(
                         if let Some((player, snap)) = ProDjLink::parse_packet(&buf[..n]) {
                             let old_bpm = f32::from_bits(beat2_bpm.load(Ordering::Relaxed));
                             beat2_bpm.store(snap.bpm.to_bits(), Ordering::Relaxed);
+                            beat2_player.store(player as u32, Ordering::Relaxed);
                             beat2_anchor.fetch_add(1, Ordering::Relaxed);
                             log::info!(
                                 "ProDJ beat: player {} @ {:.2} BPM (was {:.2}) via :{port}",

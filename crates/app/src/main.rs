@@ -54,6 +54,7 @@ struct DeckApp {
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
     beat2_bpm:    Arc<AtomicU32>,  // f32 bits; BPM of the second grid
     beat2_anchor: Arc<AtomicU64>, // written by MIDI Cue B to signal a phase reset
+    beat2_player: Arc<AtomicU32>, // player number of the last Link beat sender
     beat2_start:  Instant,        // wall-clock time of the last phase reset
     prev_beat2_anchor: u64,       // detect changes in beat2_anchor
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
@@ -70,6 +71,7 @@ struct DeckApp {
     zoom_level:        usize,     // index into ZOOM_LEVELS
     zoom_grid_mode:    bool,
     source_link:       bool,
+    phase_ticks_view:  bool,
     /// Input bus: every source pushes here; `apply` drains it once per frame.
     events:            Vec<Event>,
     exit_after_capture: bool,
@@ -90,7 +92,7 @@ struct DeckApp {
 #[derive(Clone, Copy)]
 struct UiFlags {
     key_lock: bool, remain_mode: bool, slip: bool, sync: bool, master: bool,
-    zoom_grid_mode: bool, source_link: bool,
+    zoom_grid_mode: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -112,6 +114,9 @@ fn make_snapshot<'a>(
         master:        f.master,
         zoom_grid_mode: f.zoom_grid_mode,
         source_link:   f.source_link,
+        phase_ticks_view: f.phase_ticks_view,
+        linked:        f.linked,
+        master_player: f.master_player,
         beat_grid,
         beat2_bpm,
         beat2_phase_beats,
@@ -127,6 +132,7 @@ impl DeckApp {
         fader_speed:  Arc<AtomicU32>,
         beat2_bpm:    Arc<AtomicU32>,
         beat2_anchor: Arc<AtomicU64>,
+        beat2_player: Arc<AtomicU32>,
     ) -> Self {
         Self {
             path,
@@ -136,6 +142,7 @@ impl DeckApp {
             fader_speed,
             beat2_bpm,
             beat2_anchor,
+            beat2_player,
             beat2_start:       Instant::now(),
             prev_beat2_anchor: 0,
             prev_beat2_bpm:    0.0,
@@ -152,6 +159,8 @@ impl DeckApp {
             zoom_level:        ZOOM_DEFAULT,
             zoom_grid_mode:    false,
             source_link:       false,
+            // Dev: OPENDECK_PHASE_VIEW=ticks starts in the alignment view (for captures).
+            phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
             events:            Vec::new(),
             exit_after_capture: false,
             window:      None,
@@ -213,6 +222,7 @@ impl DeckApp {
                 log::info!("zoom {} cols", ZOOM_LEVELS[self.zoom_level]);
             }
             Event::Ui(UiEvent::ZoomGridMode) => { self.zoom_grid_mode = !self.zoom_grid_mode; }
+            Event::Ui(UiEvent::PhaseMeterView) => { self.phase_ticks_view = !self.phase_ticks_view; log::info!("phase meter → {}", if self.phase_ticks_view { "alignment" } else { "beat display" }); }
             Event::Ui(UiEvent::Source(src))  => { self.source_link = src == Source::Link; log::info!("source {src:?}"); }
             Event::Ui(UiEvent::Screen(sc))   => log::info!("{sc:?} screen not implemented"),
         }
@@ -303,6 +313,7 @@ impl DeckApp {
         let fader_speed  = f32::from_bits(self.fader_speed.load(Ordering::Relaxed));
         let beat2_bpm    = f32::from_bits(self.beat2_bpm.load(Ordering::Relaxed));
         let beat2_anchor = self.beat2_anchor.load(Ordering::Relaxed);
+        let beat2_player = self.beat2_player.load(Ordering::Relaxed);
 
         // Log when beat2_bpm changes (confirms ProDJ data is reaching the renderer).
         if (beat2_bpm - self.prev_beat2_bpm).abs() > 0.01 {
@@ -324,7 +335,8 @@ impl DeckApp {
         let flags = UiFlags {
             key_lock: self.key_lock, remain_mode: self.remain_mode, slip: self.slip,
             sync: self.sync, master: self.master, zoom_grid_mode: self.zoom_grid_mode,
-            source_link: self.source_link,
+            source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
+            linked: beat2_player > 0, master_player: beat2_player as u8,
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats);
 
@@ -359,7 +371,8 @@ impl DeckApp {
         let flags = UiFlags {
             key_lock: self.key_lock, remain_mode: self.remain_mode, slip: self.slip,
             sync: self.sync, master: self.master, zoom_grid_mode: self.zoom_grid_mode,
-            source_link: self.source_link,
+            source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
+            linked: beat2_player > 0, master_player: beat2_player as u8,
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats);
 
@@ -464,6 +477,7 @@ impl ApplicationHandler for DeckApp {
                     KeyY => Some(Event::Deck(ControlEvent::SyncToggle)),
                     KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
                     KeyT => Some(Event::Ui(UiEvent::TimeMode)),
+                    KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
                     KeyC => Some(Event::Ui(UiEvent::CycleColor)),
                     KeyZ => Some(Event::Ui(UiEvent::ZoomStep(1))),
                     KeyX => Some(Event::Ui(UiEvent::ZoomStep(-1))),
@@ -559,11 +573,13 @@ fn main() -> Result<()> {
     let fader_speed  = Arc::new(AtomicU32::new(1.0f32.to_bits()));
     let beat2_bpm    = Arc::new(AtomicU32::new(base_bpm.to_bits()));
     let beat2_anchor = Arc::new(AtomicU64::new(0));
+    let beat2_player = Arc::new(AtomicU32::new(0));
 
     // ── 4. Start ProDJ Link listener (optional — app runs fine without it) ────────
     let _prodj = prodj::ProDjHandle::listen(
         Arc::clone(&beat2_bpm),
         Arc::clone(&beat2_anchor),
+        Arc::clone(&beat2_player),
     );
 
     // ── 5. Connect MIDI controller (optional — app runs fine without it) ──────────
@@ -584,7 +600,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor);
+    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player);
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())

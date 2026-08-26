@@ -28,6 +28,8 @@ pub enum UiEvent {
     ZoomStep(i32),
     /// Toggle the ZOOM / GRID ADJUST mode indicator.
     ZoomGridMode,
+    /// Phase-meter slot: 4-box beat display ↔ master alignment ticks.
+    PhaseMeterView,
     /// Select the source column key: LINK or the local file/USB.
     Source(Source),
     /// A top-row touch key or a screen we do not have yet.

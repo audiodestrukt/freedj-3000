@@ -103,6 +103,7 @@ make run TRACK=/path/to/track.mp3
 | `K` `S` `Y` `M` | Master tempo · SLIP · SYNC · MASTER (indicators; SYNC/MASTER wait on Link send) |
 | `C` | Cycle waveform colour: RGB → 3 BAND → BLUE (the *Waveform Color* setting) |
 | `T` | Toggle time display: TIME (elapsed) ↔ REMAIN |
+| `P` | Phase meter: 4-box beat display ↔ master alignment ticks (also tap it) |
 | `Q` / `Esc` | Quit |
 
 ### Touch screen (mouse for now)

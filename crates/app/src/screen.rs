@@ -34,6 +34,7 @@ const BLUE:    Color32 = Color32::from_rgb(0x2f, 0x7f, 0xe0);
 const ORANGE:  Color32 = Color32::from_rgb(0xf0, 0x8a, 0x1e);
 const RED:     Color32 = Color32::from_rgb(0xe0, 0x2a, 0x2a);
 const GREEN:   Color32 = Color32::from_rgb(0x3c, 0xc8, 0x50);
+const GOLD:    Color32 = Color32::from_rgb(0xf0, 0xb0, 0x20);   // MASTER state
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 
@@ -129,7 +130,7 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, out: &mut Ve
             draw_left(ui, snap, lay, h, out);
             draw_keys(ui, lay, h, out);
             draw_title(ui, snap, lay, h);
-            draw_phase(ui, snap, lay, h);
+            draw_phase(ui, snap, lay, h, out);
             draw_wave_area(ui, snap, lay, h, out);
             draw_info(ui, snap, lay, h, out);
             draw_bottom(ui, snap, lay, h, out);
@@ -162,9 +163,9 @@ fn tap(ui: &Ui, r: Rect, name: &str) -> (bool, bool) {
 
 /// Touch key: slate face, main label, optional "– SUB" line.  `lit` is the
 /// engaged state; the face also brightens while the finger is down.
-fn key(ui: &Ui, r: Rect, name: &str, main: &str, sub: &str, h: f32, lit: bool) -> bool {
+fn key(ui: &Ui, r: Rect, name: &str, main: &str, sub: &str, h: f32, lit: Option<Color32>) -> bool {
     let (clicked, down) = tap(ui, r, name);
-    let face = if lit { BLUE } else if down { KEY_HI } else { KEY };
+    let face = if let Some(c) = lit { c } else if down { KEY_HI } else { KEY };
     ui.painter().rect_filled(r, 2.0, face);
     let big = h * 0.032;
     if sub.is_empty() {
@@ -208,22 +209,28 @@ fn draw_left(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
     p.circle_filled(c, h * 0.008, TEXT);
     text(ui, Pos2::new(l.center().x, l.max.y - h * 0.022), Align2::CENTER_CENTER, "freedj", h * 0.018, TEXT);
 
-    if key(ui, lay.link, "src-link", "LINK", "", h, false) {
+    if key(ui, lay.link, "src-link", "LINK", "", h, None) {
         out.push(Event::Ui(UiEvent::Source(Source::Link)));
     }
-    if key(ui, lay.usb, "src-usb", "FILE", "", h, false) {
+    if key(ui, lay.usb, "src-usb", "FILE", "", h, None) {
         out.push(Event::Ui(UiEvent::Source(Source::Usb)));
     }
     // Green bar down the left edge of the selected source only.
     let sel = if snap.source_link { lay.link } else { lay.usb };
     ui.painter().rect_filled(Rect::from_min_size(sel.min, Vec2::new(h * 0.008, sel.height())), 0.0, GREEN);
 
-    // PLAYER n — dim on the unit unless lit by link state.
+    // PLAYER n — dim text standalone; a solid blue box once a Link peer is heard.
     let pl = lay.player;
-    text(ui, Pos2::new(pl.center().x, pl.min.y + h * 0.018), Align2::CENTER_CENTER, "PLAYER", h * 0.018, FAINT);
-    text(ui, Pos2::new(pl.center().x, pl.center().y + h * 0.020), Align2::CENTER_CENTER, "1", h * 0.075, FAINT);
+    let (cap_c, num_c) = if snap.linked {
+        p.rect_filled(pl, 2.0, BLUE);
+        (TEXT, TEXT)
+    } else {
+        (FAINT, FAINT)
+    };
+    text(ui, Pos2::new(pl.center().x, pl.min.y + h * 0.018), Align2::CENTER_CENTER, "PLAYER", h * 0.018, cap_c);
+    text(ui, Pos2::new(pl.center().x, pl.center().y + h * 0.020), Align2::CENTER_CENTER, "1", h * 0.075, num_c);
 
-    if key(ui, lay.slip, "slip", "SLIP", "", h, snap.slip) {
+    if key(ui, lay.slip, "slip", "SLIP", "", h, snap.slip.then_some(BLUE)) {
         out.push(Event::Deck(ControlEvent::SlipToggle));
     }
 }
@@ -244,7 +251,7 @@ fn draw_keys(ui: &Ui, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     for (i, (m, s, which)) in keys.iter().enumerate() {
         let x0 = r.min.x + i as f32 * (kw + gap);
         let kr = Rect::from_min_max(Pos2::new(x0, r.min.y), Pos2::new(x0 + kw, r.max.y));
-        if key(ui, kr, m, m, s, h, false) {
+        if key(ui, kr, m, m, s, h, None) {
             out.push(Event::Ui(UiEvent::Screen(*which)));
         }
     }
@@ -278,54 +285,107 @@ fn draw_title(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
 
 // ── Phase meter + beat countdown ──────────────────────────────────────────────
 
-fn draw_phase(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
-    let p = ui.painter();
+fn draw_phase(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     let r = lay.phase;
+    // Touching the slot switches between the two views, as on the unit.
+    let (toggle, _) = tap(ui, r, "phase-meter");
+    if toggle { out.push(Event::Ui(UiEvent::PhaseMeterView)); }
+
+    if snap.phase_ticks_view {
+        draw_phase_ticks(ui, snap, r, h);
+    } else {
+        draw_phase_boxes(ui, snap, r, h);
+    }
+
+    // "Bars" readouts: orange counts bars.beats to the next memory cue, blue
+    // to the next hot cue.  No cues exist yet, so both are None → dashes.
+    let b = lay.bars;
+    let row = r.height() / 2.0;
+    let fs = h * 0.026;
+    let fmt = |v: Option<(u32, u32)>| v.map(|(bars, beats)| format!("{bars:02}.{beats}")).unwrap_or_else(|| "--.-".into());
+    let memory_cue: Option<(u32, u32)> = None;
+    let hot_cue:    Option<(u32, u32)> = None;
+    text(ui, Pos2::new(b.min.x, b.min.y + row * 0.5), Align2::LEFT_CENTER, fmt(memory_cue), fs, ORANGE);
+    text(ui, Pos2::new(b.min.x + h * 0.078, b.min.y + row * 0.5), Align2::LEFT_CENTER, "Bars", h * 0.020, ORANGE);
+    text(ui, Pos2::new(b.min.x, b.min.y + row * 1.5), Align2::LEFT_CENTER, fmt(hot_cue), fs, BLUE);
+    text(ui, Pos2::new(b.min.x + h * 0.078, b.min.y + row * 1.5), Align2::LEFT_CENTER, "Bars", h * 0.020, BLUE);
+}
+
+/// Beat display: two rows of four outlined boxes.  Top row is the master
+/// player (orange), bottom row this deck; the current beat is solid — blue,
+/// or orange when this deck is the master.
+fn draw_phase_boxes(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
+    let p = ui.painter();
     let gap = h * 0.006;
     let row_h = (r.height() - gap) / 2.0;
     let cell_w = (r.width() - 3.0 * gap) / 4.0;
     let ours = snap.beat_in_bar();
     let has_master = snap.beat2_bpm > 0.0;
-    // Master's beat in bar: we only know its phase, so advance a counter from
-    // our own beat as the reference cell (same cell when beatmatched).
-    let master_beat = ours;
+    let master_beat = ours;   // only the master's phase is known; same cell when matched
+    let our_lit = if snap.master { ORANGE } else { BLUE };
 
     for i in 0..4u8 {
         let x = r.min.x + i as f32 * (cell_w + gap);
         let top = Rect::from_min_size(Pos2::new(x, r.min.y),               Vec2::new(cell_w, row_h));
         let bot = Rect::from_min_size(Pos2::new(x, r.min.y + row_h + gap), Vec2::new(cell_w, row_h));
-        // Top row: master player, orange outline; lit solid on its beat.
         if has_master && master_beat == Some(i + 1) {
             p.rect_filled(top, 1.0, ORANGE);
         } else {
             p.rect_stroke(top, 1.0, Stroke::new(1.0, if has_master { ORANGE } else { Color32::from_rgb(0x7a, 0x4a, 0x16) }));
         }
-        // Bottom row: this player, blue outline; current beat solid.
         if ours == Some(i + 1) {
-            p.rect_filled(bot, 1.0, BLUE);
+            p.rect_filled(bot, 1.0, our_lit);
         } else {
             p.rect_stroke(bot, 1.0, Stroke::new(1.0, BLUE));
         }
     }
-    // Master phase marker across the bar — the divergence you read.
     if has_master {
         let cell = master_beat.unwrap_or(1) as f32 - 1.0;
         let x = r.min.x + cell * (cell_w + gap) + snap.beat2_phase_beats * cell_w;
         p.line_segment([Pos2::new(x, r.min.y - 2.0), Pos2::new(x, r.min.y + row_h + 2.0)], Stroke::new(2.0, TEXT));
     }
+}
 
-    // "--.- Bars" readouts: orange = to nearest stored cue (none yet),
-    // blue = bars.beats to the next downbeat.
-    let b = lay.bars;
-    let fs = h * 0.026;
-    let blue = match (snap.beat_in_bar(), snap.beat_phase()) {
-        (Some(bb), Some(_)) => format!("--.{}", 4 - bb),
-        _ => "--.-".into(),
-    };
-    text(ui, Pos2::new(b.min.x, b.min.y + row_h / 2.0), Align2::LEFT_CENTER, "--.-", fs, ORANGE);
-    text(ui, Pos2::new(b.min.x + h * 0.078, b.min.y + row_h / 2.0), Align2::LEFT_CENTER, "Bars", h * 0.020, ORANGE);
-    text(ui, Pos2::new(b.min.x, b.min.y + row_h + gap + row_h / 2.0), Align2::LEFT_CENTER, blue, fs, BLUE);
-    text(ui, Pos2::new(b.min.x + h * 0.078, b.min.y + row_h + gap + row_h / 2.0), Align2::LEFT_CENTER, "Bars", h * 0.020, BLUE);
+/// Alignment view: `MASTER PLAYER [n]` tag, then two rows of beat ticks —
+/// the master's grid above, ours below — scrolling under a fixed white
+/// playhead.  Phase offset between the decks reads as horizontal displacement.
+fn draw_phase_ticks(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
+    let p = ui.painter();
+    // Tag at the left.
+    let tag_w = h * 0.115;
+    text(ui, Pos2::new(r.min.x, r.min.y + h * 0.012), Align2::LEFT_CENTER, "MASTER", h * 0.016, TEXT);
+    text(ui, Pos2::new(r.min.x, r.min.y + h * 0.032), Align2::LEFT_CENTER, "PLAYER", h * 0.016, TEXT);
+    let nb = Rect::from_min_size(Pos2::new(r.min.x + h * 0.070, r.min.y + h * 0.010), Vec2::new(h * 0.028, h * 0.028));
+    let master_txt = if snap.master_player > 0 { snap.master_player.to_string() } else { "-".into() };
+    p.rect_filled(nb, 1.0, GOLD);
+    text(ui, nb.center(), Align2::CENTER_CENTER, master_txt, h * 0.018, Color32::BLACK);
+
+    // Tick rows.
+    let x0 = r.min.x + tag_w;
+    let w  = r.max.x - x0;
+    let beats_visible = 8.0;
+    let beat_px = w / beats_visible;
+    let cx = x0 + w * 0.5;
+    let rows = [
+        (r.min.y + r.height() * 0.30, if snap.beat2_bpm > 0.0 { Some(snap.beat2_phase_beats) } else { None }, ORANGE),
+        (r.min.y + r.height() * 0.78, snap.beat_phase(), BLUE),
+    ];
+    let bib = snap.beat_in_bar().unwrap_or(1) as i32;
+    for (y, phase, bar_col) in rows {
+        p.line_segment([Pos2::new(x0, y), Pos2::new(r.max.x, y)], Stroke::new(1.0, FAINT));
+        let Some(ph) = phase else { continue };
+        for i in -4..=4i32 {
+            let x = cx + (i as f32 - ph) * beat_px;
+            if x < x0 || x > r.max.x { continue; }
+            // Bar ticks taller; bar position from our own beat-in-bar.
+            let is_bar = (i + bib - 1).rem_euclid(4) == 0;
+            let len = if is_bar { h * 0.020 } else { h * 0.011 };
+            let col = if is_bar { bar_col } else { DIM };
+            p.line_segment([Pos2::new(x, y - len), Pos2::new(x, y)], Stroke::new(1.5, col));
+        }
+    }
+    // Playhead.
+    p.line_segment([Pos2::new(cx, r.min.y), Pos2::new(cx, r.max.y)], Stroke::new(1.5, TEXT));
 }
 
 // ── Enlarged waveform: zoom by wheel; and the column to its right ────────────
@@ -345,12 +405,12 @@ fn draw_wave_area(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut 
         Rect::from_min_size(Pos2::new(r.min.x + i as f32 * (w + 2.0), r.min.y), Vec2::new(w, r.height()))
     };
     bracket_caption(ui, lay.cueloop, "CUE / LOOP", h);
-    key(ui, half(lay.cueloop, 0), "cue-delete", "DELETE", "", h, false);
-    key(ui, half(lay.cueloop, 1), "cue-memory", "MEMORY", "", h, false);
+    key(ui, half(lay.cueloop, 0), "cue-delete", "DELETE", "", h, None);
+    key(ui, half(lay.cueloop, 1), "cue-memory", "MEMORY", "", h, None);
 
     bracket_caption(ui, lay.call, "CALL", h);
-    key(ui, half(lay.call, 0), "call-prev", "◀", "", h, false);
-    key(ui, half(lay.call, 1), "call-next", "▶", "", h, false);
+    key(ui, half(lay.call, 0), "call-prev", "◀", "", h, None);
+    key(ui, half(lay.call, 1), "call-next", "▶", "", h, None);
 
     // ZOOM – GRID pill: tap ZOOM to step the zoom, tap GRID to switch mode.
     let z = lay.zoom;
@@ -415,10 +475,10 @@ fn draw_info(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
     text(ui, Pos2::new(te.max.x - h * 0.030, base_y(te)), Align2::RIGHT_BOTTOM, s, big, TEXT);
     text(ui, Pos2::new(te.max.x, base_y(te) - h * 0.008), Align2::RIGHT_BOTTOM, "%", h * 0.034, TEXT);
 
-    if key(ui, lay.sync, "sync", "SYNC", "INST.D.", h, snap.sync) {
+    if key(ui, lay.sync, "sync", "SYNC", "INST.D.", h, snap.sync.then_some(BLUE)) {
         out.push(Event::Deck(ControlEvent::SyncToggle));
     }
-    if key(ui, lay.master, "master", "MASTER", "", h, snap.master) {
+    if key(ui, lay.master, "master", "MASTER", "", h, snap.master.then_some(GOLD)) {
         out.push(Event::Deck(ControlEvent::MasterRequest));
     }
 }
@@ -445,7 +505,7 @@ fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec
     // NEEDLE SEARCH bar under the overview.
     let n = lay.needle;
     p.rect_filled(n, 1.0, KEY_LO);
-    text(ui, n.center(), Align2::CENTER_CENTER, "NEEDLE SEARCH", h * 0.018, TEXT);
+    text(ui, n.center(), Align2::CENTER_CENTER, if snap.linked { "NEEDLE COUNTDOWN" } else { "NEEDLE SEARCH" }, h * 0.018, TEXT);
     // Cue marker triangle (none stored yet): a single start marker, as on the unit.
     let x = ov.min.x + 3.0;
     let y = ov.max.y + h * 0.010;
@@ -460,9 +520,10 @@ fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec
 
     // BPM box: dark face, big integer part, smaller fraction, "BPM" caption.
     let b = lay.bpm;
-    p.rect_filled(b, 2.0, KEY_LO);
+    p.rect_filled(b, 2.0, if snap.master { GOLD } else { KEY_LO });
+    let ink = if snap.master { Color32::BLACK } else { TEXT };
     let (txt, col) = match (snap.bpm(), snap.beat_grid) {
-        (Some(v), Some(g)) => (format!("{:.1}", v), if g.confidence >= 0.7 { TEXT } else { ORANGE }),
+        (Some(v), Some(g)) => (format!("{:.1}", v), if snap.master { Color32::BLACK } else if g.confidence >= 0.7 { TEXT } else { ORANGE }),
         _ => ("---.-".into(), DIM),
     };
     let dot = txt.find('.').unwrap_or(txt.len());
@@ -471,5 +532,5 @@ fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec
     let ip_size = h * 0.060;
     text(ui, Pos2::new(b.min.x + h * 0.012, base), Align2::LEFT_BOTTOM, ip, ip_size, col);
     text(ui, Pos2::new(b.min.x + h * 0.012 + ip.len() as f32 * ip_size * 0.56, base), Align2::LEFT_BOTTOM, fp, h * 0.040, col);
-    text(ui, Pos2::new(b.max.x - h * 0.010, b.max.y - h * 0.008), Align2::RIGHT_BOTTOM, "BPM", h * 0.018, TEXT);
+    text(ui, Pos2::new(b.max.x - h * 0.010, b.max.y - h * 0.008), Align2::RIGHT_BOTTOM, if snap.master { "MASTER" } else { "BPM" }, h * 0.018, ink);
 }
