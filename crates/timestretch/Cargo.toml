@@ -12,3 +12,6 @@ pkg-config = "0.3"
 opendeck-types = { workspace = true }
 rubato         = { workspace = true }
 log            = { workspace = true }
+
+[dev-dependencies]
+rustfft = "6"        # independent DSP calibration for the RTF regression guard

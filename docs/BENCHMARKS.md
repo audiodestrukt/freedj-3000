@@ -128,18 +128,29 @@ needs," and the heaviest job that scales is per-deck DSP.
 ## Regression guard (in the test suite)
 
 `make perf` (and `cargo test --workspace`) runs `timestretch_realtime_factor`, a
-hermetic guard that measures the **real-time factor** of the R3 timestretch —
-processing time ÷ audio duration — at 1.0×, 0.5× (heaviest), and 2.0×. RTF < 1.0
-means the DSP keeps up; the test asserts viability ceilings (sized for the Pi 5
-target with margin) and always prints the measured RTF, so a smaller regression
-shows as a trend even while the assertion passes. It uses a synthetic signal (no
-audio device, GPU, or track file) and is profile-independent (Rubber Band is
-optimised C), so it runs the same under `cargo test` and `--release`. Tighten the
-ceilings locally with `OPENDECK_RTF_CEIL=<scale>`.
+hermetic guard on the R3 timestretch cost at 1.0×, 0.5× (heaviest), and 2.0×.
+It uses a synthetic signal (no audio device, GPU, or track file) and is
+profile-independent (Rubber Band is optimised C), so it runs the same under
+`cargo test` and `--release`. Two guards per speed:
 
-Reference numbers (RTX desktop): RTF ≈ 0.03 @ 1.0×, 0.06 @ 0.5×. The Pi 4's
-audio-proc sits near 0.7 of a core at 1.0× (see the underrun discussion below),
-which is why it is scheduling-jitter sensitive there.
+- **Normalised ratio** `rb_time / fft_calibration` — the primary regression
+  catch. The R3 time is divided by an independent FFT calibration measured on
+  the same machine in the same run, so CPU speed cancels out: the ratio is
+  stable to ~1% run-to-run and roughly machine-independent, letting the band be
+  tight (≈1.7× the desktop value — catches a ~70% slowdown while tolerating
+  cross-CPU drift). A real R3 regression trips it on any hardware.
+- **Absolute RTF** `rb_time / audio_duration` — the viability floor (< 1.0 = the
+  DSP keeps up), sized for the Pi 5 target; also the backstop if the FFT
+  calibration itself regressed.
+
+Both are printed every run so a sub-threshold creep is visible as a trend.
+`OPENDECK_RTF_CEIL=<scale>` relaxes both (hardware slower than the Pi 5) or
+tightens them (a stricter local check).
+
+Reference (RTX desktop): norm ≈ 2.44 / 4.45 / 1.90, RTF ≈ 0.034 / 0.062 / 0.027
+at 1.0× / 0.5× / 2.0×. The Pi 4's audio-proc sits near 0.7 of a core at 1.0×
+(see the underrun discussion below), which is why it is scheduling-jitter
+sensitive there.
 
 ## Reproduction recipe
 

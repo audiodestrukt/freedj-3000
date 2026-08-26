@@ -270,42 +270,89 @@ mod perf {
         t0.elapsed()
     }
 
-    /// Real-time factor of the R3 timestretch: processing_time / audio_duration.
-    /// < 1.0 means it keeps up; a performance regression (or an accidental
-    /// non-optimised build of Rubber Band) shows up as RTF creeping toward 1.0.
+    /// Machine-speed calibration independent of Rubber Band: time a fixed batch
+    /// of 1024-point FFTs (rustfft), the same class of SIMD/FP DSP work R3 does.
+    /// Normalising the timestretch time by this makes the guard roughly
+    /// machine-independent — a real R3 regression shifts `rb_time / calib` on any
+    /// box, while a faster/slower CPU moves both together and cancels out.
+    fn calibrate() -> std::time::Duration {
+        use rustfft::{num_complex::Complex, FftPlanner};
+        const N: usize = 1024;
+        // Sized so the calibration takes ~200 ms — comparable to the R3
+        // measurement, so both are equally stable. A too-short calibration is
+        // dominated by turbo-ramp / scheduling noise and the ratio jitters.
+        const ITERS: usize = 160_000;
+        let fft = FftPlanner::<f32>::new().plan_fft_forward(N);
+        let mut buf: Vec<Complex<f32>> = (0..N)
+            .map(|i| Complex::new((i as f32 * 0.017).sin(), 0.0))
+            .collect();
+        let t0 = Instant::now();
+        for _ in 0..ITERS {
+            fft.process(&mut buf);
+            // Re-normalise so values don't blow up over 4000 forward FFTs
+            // (keeps the work honest without allocating).
+            let s = 1.0 / N as f32;
+            for c in buf.iter_mut() { *c *= s; }
+        }
+        t0.elapsed()
+    }
+
+    /// Two guards on the R3 timestretch cost, checked at 1.0×, 0.5× (heaviest —
+    /// it emits ~2× frames), and 2.0×:
     ///
-    /// Ceilings are *viability* bounds sized for the Pi 5 target with margin —
-    /// they pass comfortably on any supported hardware and only trip on a major
-    /// regression. The measured RTF is always printed (run with `--nocapture`,
-    /// or `make perf`) so a smaller regression is visible as a trend even when
-    /// the assertion still passes. Override the ceiling with OPENDECK_RTF_CEIL.
+    /// 1. **Normalised ratio** `rb_time / fft_calibration` — the primary
+    ///    regression catch. Because both are f32 DSP measured on the same box in
+    ///    the same run, a faster/slower CPU cancels out and the ratio is stable
+    ///    to ~1% (desktop: 2.49 / 4.57 / 1.94). A real R3 regression shifts it on
+    ///    *any* machine, so the band can be tight (≈1.7× the desktop value —
+    ///    catches a ~70% slowdown while tolerating cross-CPU drift).
+    /// 2. **Absolute RTF** `rb_time / audio_duration` — the viability floor:
+    ///    < 1.0 means the DSP keeps up. Sized for the Pi 5 target with margin;
+    ///    also the backstop if the FFT calibration itself ever regressed.
+    ///
+    /// Both are always printed (`make perf` / `--nocapture`) so a sub-threshold
+    /// creep shows as a trend. `OPENDECK_RTF_CEIL=<scale>` relaxes/tightens both
+    /// (e.g. on hardware slower than the Pi 5, or for a stricter local check).
     #[test]
     fn timestretch_realtime_factor() {
         let secs = 8.0f32;
         let audio = signal(secs);
 
-        let ceil_scale: f64 = std::env::var("OPENDECK_RTF_CEIL")
+        let scale: f64 = std::env::var("OPENDECK_RTF_CEIL")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
 
-        // speed, ceiling. 0.5× is the heaviest for R3 (it emits ~2× frames).
-        for (speed, base_ceil) in [(1.0f32, 0.80f64), (0.5, 1.10), (2.0, 0.60)] {
+        // Warm the calibration path once, then measure it — the machine-speed
+        // reference the R3 cost is normalised against.
+        calibrate();
+        let calib = calibrate().as_secs_f64();
+
+        // speed, normalised-ratio ceiling, absolute-RTF ceiling.
+        for (speed, norm_ceil, rtf_ceil) in
+            [(1.0f32, 4.2f64, 0.80f64), (0.5, 7.5, 1.10), (2.0, 3.3, 0.60)]
+        {
             let mut stage = TimestretechStage::new(SR, CH as u8);
             stage.set_speed(speed);
-            // Warm up so first-call/cold-cache cost doesn't skew the measurement.
-            run(&mut stage, &signal(1.0));
+            run(&mut stage, &signal(1.0));            // warm up
 
-            let elapsed = run(&mut stage, &audio);
-            let rtf = elapsed.as_secs_f64() / secs as f64;
-            let ceil = base_ceil * ceil_scale;
+            let elapsed = run(&mut stage, &audio).as_secs_f64();
+            let rtf  = elapsed / secs as f64;
+            let norm = elapsed / calib;
+            let (nc, rc) = (norm_ceil * scale, rtf_ceil * scale);
             println!(
-                "RTF @ {:.2}x = {:.4}  ({:.0} ms to process {:.0} s audio; ceiling {:.2})",
-                speed, rtf, elapsed.as_secs_f64() * 1000.0, secs, ceil,
+                "@ {:.2}x  norm(rb/fft) = {:.3} (ceil {:.2})   RTF = {:.4} (ceil {:.2})   \
+                 rb {:.0}ms calib {:.0}ms",
+                speed, norm, nc, rtf, rc, elapsed * 1000.0, calib * 1000.0,
             );
             assert!(
-                rtf < ceil,
-                "timestretch RTF regression @ {speed:.2}x: {rtf:.3} ≥ ceiling {ceil:.2} \
-                 (processing is no longer comfortably real-time — a DSP regression, \
-                 an un-optimised Rubber Band build, or slower hardware than the Pi 5 target)",
+                norm < nc,
+                "timestretch regression @ {speed:.2}x: normalised cost {norm:.2} ≥ {nc:.2} \
+                 — R3 got slower relative to the FFT calibration (a DSP change or a \
+                 heavier Rubber Band config; independent of CPU speed)",
+            );
+            assert!(
+                rtf < rc,
+                "timestretch not real-time @ {speed:.2}x: RTF {rtf:.3} ≥ {rc:.2} \
+                 — either an un-optimised build or hardware slower than the Pi 5 target",
             );
         }
     }
