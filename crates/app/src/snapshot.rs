@@ -17,6 +17,8 @@ pub struct DeckSnapshot<'a> {
     pub sample_rate:  u32,
     pub channels:     u8,
     pub total_samples: u64,
+    /// Start-cue position in source samples (CDJ CUE).
+    pub cue_point:    u64,
 
     pub playing:      bool,
     /// Instantaneous playback speed including jog nudges.

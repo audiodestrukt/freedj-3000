@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added — 2026-08-26
+- **Jog wheel: vinyl / nudge modes.** The DJ2Go jog is not touch-sensitive, so
+  play state selects the mode: **playing → nudge** (a temporary pitch bend that
+  snaps back), **paused → vinyl** (the wheel scrubs the playhead through the
+  track; position + waveform only, no scrub-audio yet). Keyboard `,` / `.` drive
+  the same path for desktop testing.
+- **Start cue point (CDJ CUE).** CUE now behaves like a CDJ: **playing →** return
+  to the cue and pause; **paused at the cue →** play from it; **paused
+  elsewhere →** set the cue there — so you place the start cue by pausing,
+  jogging to the drop, and pressing CUE. The cue shows as an **orange marker** on
+  both the enlarged waveform and the overview. Keyboard `Enter` = CUE. (The TEMPO
+  readout tracks the pitch fader, not the nudge — matching the real XDJ.)
+
 - **Load tracks at any sample rate (offline SRC).** The browser LOAD path now
   resamples a track whose rate differs from the deck's pipeline (e.g. a 48 kHz
   track into a 44.1 kHz deck) with rubato, once at load — so a mixed-rate library

@@ -102,6 +102,8 @@ make run TRACK=/path/to/track.mp3
 | Key | Action |
 |---|---|
 | `Space` | Play / pause |
+| `Enter` | CUE — set / return-to-cue / play-from-cue (CDJ) |
+| `,` / `.` | Jog: nudge (playing) / vinyl-scrub (paused) — the jog wheel does this too |
 | `←` / `→` | Seek ±10 seconds |
 | `+` / `−` / `0` | Tempo ±1% / reset (±16% range, as the TEMPO readout) |
 | `Z` / `X` | Zoom the enlarged waveform in / out |

@@ -49,7 +49,9 @@ struct WaveformParams {
     amp_gain:         f32,
     /// 1.0 = dim the played part of the overview (REMAIN mode).
     dim_played:       f32,
-    _pad:             [f32; 2],
+    /// Start-cue column (source position), orange marker.
+    cue_col:          f32,
+    _pad:             [f32; 1],
 }
 
 /// Where the shader draws its two waveforms, in physical pixels.
@@ -243,7 +245,8 @@ impl Renderer {
             over_rect:        [0.0; 4],
             amp_gain:         1.0,
             dim_played:       0.0,
-            _pad:             [0.0; 2],
+            cue_col:          0.0,
+            _pad:             [0.0; 1],
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -460,7 +463,8 @@ impl Renderer {
             over_rect:         vp.overview,
             amp_gain:          self.amp_gain,
             dim_played:        if vp.dim_played { 1.0 } else { 0.0 },
-            _pad:              [0.0; 2],
+            cue_col:           snap.cue_point as f32 / channels as f32 / hop_size,
+            _pad:              [0.0; 1],
         };
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -639,7 +643,8 @@ struct Params {
     over_rect:          vec4<f32>,
     amp_gain:           f32,  // brings the track peak to its display height
     dim_played:         f32,  // 1 = REMAIN mode: played part of the overview turns off
-    _p1: f32, _p2: f32,
+    cue_col:            f32,  // start-cue column (orange marker)
+    _p1: f32,
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
@@ -657,6 +662,7 @@ fn ground() -> vec4<f32>   { return srgb(3.0, 4.0, 6.0); }      // matches scree
 fn wave_bg() -> vec4<f32>  { return ground(); }                 // the unit draws the waveform on bare ground
 fn over_bg() -> vec4<f32>  { return ground(); }
 fn playhead() -> vec4<f32> { return srgb(232.0, 40.0, 40.0); }  // red on the unit
+fn cue_color() -> vec4<f32> { return srgb(240.0, 138.0, 30.0); }  // orange start-cue marker
 fn white() -> vec4<f32>    { return srgb(244.0, 246.0, 248.0); }
 fn band_low() -> vec4<f32> { return srgb(58.0, 123.0, 240.0); }  // 3-band blue
 fn band_mid() -> vec4<f32> { return srgb(240.0, 160.0, 48.0); }  // 3-band amber
@@ -747,6 +753,11 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
 
     let half  = p.cols_visible * 0.5;
     let col_f = (p.playhead_col - half) + sx * p.cols_visible;
+    // Start-cue marker — a ~2px orange line at the cue column.
+    let cue_per_px = p.cols_visible / r.z;
+    if abs(col_f - p.cue_col) < cue_per_px {
+        return cue_color();
+    }
     if col_f < 0.0 || col_f >= p.num_cols {
         return wave_bg();
     }
@@ -794,6 +805,10 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
     let ph_x = r.x + p.playhead_col / p.num_cols * r.z;
     if abs(q.x - ph_x) < 1.0 {
         return white();
+    }
+    let cue_x = r.x + p.cue_col / p.num_cols * r.z;
+    if abs(q.x - cue_x) < 1.5 {
+        return cue_color();
     }
 
     // Each pixel column covers many waveform columns; take the peak of each

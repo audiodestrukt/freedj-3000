@@ -87,6 +87,7 @@ struct DeckApp {
     /// Jog nudge: a temporary speed offset that snaps back when the wheel stops.
     jog_offset:        f32,
     jog_until:         Option<Instant>,
+    cue_point:         u64,   // start cue, source sample index (CDJ CUE)
     exit_after_capture: bool,
 
     // Created on first `resumed`.
@@ -106,6 +107,7 @@ struct DeckApp {
 struct UiFlags {
     key_lock: bool, remain_mode: bool, slip: bool, sync: bool, master: bool,
     zoom_grid_mode: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
+    cue_point: u64,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -119,6 +121,7 @@ fn make_snapshot<'a>(
         sample_rate:   audio.sample_rate,
         channels:      audio.channels,
         total_samples: audio.len() as u64,
+        cue_point:     f.cue_point,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
         remain_mode:   f.remain_mode,
@@ -183,6 +186,8 @@ impl DeckApp {
         event_rx:     mpsc::Receiver<Event>,
     ) -> Self {
         let browser = Browser::new(&path);
+        let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
+            .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
         Self {
             path,
             waveform,
@@ -216,6 +221,7 @@ impl DeckApp {
             event_rx,
             jog_offset:        0.0,
             jog_until:         None,
+            cue_point,
             exit_after_capture: false,
             window:      None,
             renderer:    None,
@@ -243,18 +249,51 @@ impl DeckApp {
                 self.apply(Event::Deck(ControlEvent::TempoFader { position: f + step }));
             }
             Event::Deck(ControlEvent::JogDelta { delta, .. }) => {
-                // Nudge: accumulate a speed offset; snap back after the wheel
-                // is idle.  Overrides SYNC's phase nudge while active, which is
-                // what a CDJ does when you touch the jog while synced.
-                const NUDGE_PER_TICK: f32 = 0.002;
-                self.jog_offset = (self.jog_offset + delta as f32 * NUDGE_PER_TICK).clamp(-0.5, 0.5);
-                self.jog_until  = Some(Instant::now() + Duration::from_millis(150));
-                let f = f32::from_bits(self.fader_speed.load(Ordering::Relaxed));
-                let spd = (f + self.jog_offset).clamp(0.25, 4.0);
-                self.audio.speed.store(spd.to_bits(), Ordering::Relaxed);
-                log::debug!("jog {delta:+} → speed {spd:.3}× (offset {:+.3})", self.jog_offset);
+                if self.audio.playing.load(Ordering::Relaxed) {
+                    // PLAYING → nudge: a temporary speed offset that snaps back
+                    // when the wheel goes idle.  Overrides SYNC's phase nudge
+                    // while active, as a CDJ does when you touch the jog synced.
+                    // (The DJ2Go jog is not touch-sensitive, so play state, not a
+                    // touch sensor, selects the mode — see docs/INPUT_PLAN.md.)
+                    const NUDGE_PER_TICK: f32 = 0.002;
+                    self.jog_offset = (self.jog_offset + delta as f32 * NUDGE_PER_TICK).clamp(-0.5, 0.5);
+                    self.jog_until  = Some(Instant::now() + Duration::from_millis(150));
+                    let f = f32::from_bits(self.fader_speed.load(Ordering::Relaxed));
+                    let spd = (f + self.jog_offset).clamp(0.25, 4.0);
+                    self.audio.speed.store(spd.to_bits(), Ordering::Relaxed);
+                    log::debug!("jog nudge {delta:+} → {spd:.3}×");
+                } else {
+                    // PAUSED → vinyl: the wheel scrubs the playhead through the
+                    // track (no scrub-audio yet — position + waveform only).
+                    const VINYL_SECS_PER_TICK: f64 = 0.020;
+                    let sr_ch = self.audio.sample_rate as f64 * self.audio.channels as f64;
+                    let step  = (sr_ch * VINYL_SECS_PER_TICK) as i64;
+                    let cur   = self.audio.position.load(Ordering::Relaxed) as i64;
+                    let new   = (cur + delta as i64 * step).clamp(0, self.audio.len() as i64) as u64;
+                    self.seek_to(new);
+                    log::debug!("jog vinyl {delta:+} → {:.2}s", new as f64 / sr_ch);
+                }
             }
-            Event::Deck(ControlEvent::Cue)   => { self.audio.position.store(0, Ordering::Relaxed); }
+            Event::Deck(ControlEvent::Cue) => {
+                // CDJ CUE: playing → return to the cue and pause; paused AT the
+                // cue → play from it; paused elsewhere → set the cue here (which
+                // is how you place the start cue: pause, jog to the drop, CUE).
+                let sr_ch   = self.audio.sample_rate as f64 * self.audio.channels as f64;
+                let playing = self.audio.playing.load(Ordering::Relaxed);
+                let pos     = self.audio.position.load(Ordering::Relaxed);
+                let at_cue  = (pos as i64 - self.cue_point as i64).unsigned_abs() < (sr_ch * 0.05) as u64;
+                if playing {
+                    self.audio.playing.store(false, Ordering::Relaxed);
+                    self.seek_to(self.cue_point);
+                    log::info!("cue: return to {:.2}s", self.cue_point as f64 / sr_ch);
+                } else if at_cue {
+                    self.audio.playing.store(true, Ordering::Relaxed);
+                    log::info!("cue: play from cue");
+                } else {
+                    self.cue_point = pos;
+                    log::info!("cue: set at {:.2}s", pos as f64 / sr_ch);
+                }
+            }
             Event::Deck(ControlEvent::NeedleSearch { position }) => {
                 let total = self.audio.len() as f64;
                 // Land on a frame boundary so channels stay interleaved.
@@ -359,6 +398,19 @@ impl DeckApp {
         }
     }
 
+    /// Move the playhead to a source-sample position, keeping the visual
+    /// playhead and the audible-position estimate in sync so it tracks crisply
+    /// (used by vinyl-scrub and CUE).  in_flight is zeroed — while paused
+    /// nothing is queued, and on resume the processor re-derives it.
+    fn seek_to(&mut self, pos: u64) {
+        let pos = pos.min(self.audio.len() as u64);
+        self.audio.position.store(pos, Ordering::Relaxed);
+        self.audio.in_flight.store(0, Ordering::Relaxed);
+        self.smoothed_pos = pos as f64;
+        self.heard_avg    = pos as f64;
+        self.prev_pos     = pos;
+    }
+
     /// Decode, analyse, and swap in a new track selected in the browser.
     /// Blocks the render thread for the decode + waveform/beat analysis
     /// (~1-2 s on a Pi) — acceptable for a LOAD, as a CDJ spins up briefly;
@@ -397,6 +449,7 @@ impl DeckApp {
         self.smoothed_pos = 0.0;
         self.heard_avg    = 0.0;
         self.prev_pos     = 0;
+        self.cue_point    = 0;
         log::info!(
             "loaded {} in {:.1}s ({} BPM)",
             path.display(), t0.elapsed().as_secs_f32(),
@@ -545,6 +598,7 @@ impl DeckApp {
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             master_player: match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 },
+            cue_point: self.cue_point,
         };
         let _t_snap = Instant::now();
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
@@ -598,6 +652,7 @@ impl DeckApp {
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             master_player: match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 },
+            cue_point: self.cue_point,
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
 
@@ -723,6 +778,9 @@ impl ApplicationHandler for DeckApp {
                     KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
                     KeyT => Some(Event::Ui(UiEvent::TimeMode)),
                     KeyB => Some(Event::Ui(UiEvent::Screen(TopScreen::Browse))),
+                    Enter | NumpadEnter => Some(Event::Deck(ControlEvent::Cue)),
+                    Comma  => Some(Event::Deck(ControlEvent::JogDelta { delta: -4, velocity_rpm: 0.0 })),
+                    Period => Some(Event::Deck(ControlEvent::JogDelta { delta:  4, velocity_rpm: 0.0 })),
                     KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
                     KeyC => Some(Event::Ui(UiEvent::CycleColor)),
                     KeyZ => Some(Event::Ui(UiEvent::ZoomStep(1))),
