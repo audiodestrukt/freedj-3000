@@ -101,6 +101,12 @@ struct DeckApp {
 
     /// Time of the last rendered frame, used to cap to FRAME_INTERVAL.
     last_render: Instant,
+    /// Wall-clock cost of the previous frame's render_frame body, so a spike
+    /// detector can split a long inter-frame gap into "our code was slow" vs
+    /// "the scheduler/compositor didn't wake us".
+    last_frame_total: Duration,
+    /// Count of inter-frame gaps that exceeded the spike threshold.
+    frame_spikes: u64,
 }
 
 /// Display/deck flags copied out of DeckApp so a snapshot can borrow only
@@ -234,6 +240,8 @@ impl DeckApp {
             egui_ctx:    egui::Context::default(),
             egui_state:  None,
             last_render: Instant::now(),
+            last_frame_total: Duration::ZERO,
+            frame_spikes: 0,
         }
     }
 
@@ -514,6 +522,31 @@ impl DeckApp {
         let frame_dt    = frame_start.duration_since(self.last_render);
         self.last_render = frame_start;
 
+        // ── Frame-spike detector ──────────────────────────────────────────────
+        // A UI hitch is an inter-frame gap much longer than the display period.
+        // Split it: `last_frame_total` is how long our render body took last
+        // frame; the rest of the gap is idle time the OS didn't schedule us.
+        // That distinguishes "our code / the GPU stalled" from "the scheduler or
+        // compositor didn't wake us" (the OS-level cause the user suspects).
+        // Always on (INFO) but only fires on a genuine spike, so a normal run is
+        // quiet and a hitch prints one attributed line.
+        let refresh = self.refresh_interval.as_secs_f64();
+        let dt_s    = frame_dt.as_secs_f64();
+        if self.frame_count > 60 && dt_s > refresh * 2.5 {
+            self.frame_spikes += 1;
+            let ours = self.last_frame_total.as_secs_f64();
+            let idle = (dt_s - ours).max(0.0);
+            let verdict = if ours > refresh * 1.5 {
+                "STALL INSIDE render (our code / GPU submit / present)"
+            } else {
+                "stall OUTSIDE render (scheduler / compositor / vsync miss)"
+            };
+            log::info!(
+                "frame spike #{}: gap {:.1}ms (~{:.1} refreshes)  prev-render {:.1}ms  idle {:.1}ms → {}",
+                self.frame_spikes, dt_s * 1000.0, dt_s / refresh, ours * 1000.0, idle * 1000.0, verdict,
+            );
+        }
+
         let (egui_state, window) = match (self.egui_state.as_mut(), self.window.as_ref()) {
             (Some(s), Some(w)) => (s, w),
             _ => return,
@@ -731,7 +764,9 @@ impl DeckApp {
         let _t_render = Instant::now();
         renderer.render(&snap, &vp, &self.egui_ctx, output);
         perf_accum("render_call", _t_render.elapsed());
-        perf_accum("FRAME_TOTAL", frame_start.elapsed());
+        let total = frame_start.elapsed();
+        self.last_frame_total = total;   // fed to next frame's spike detector
+        perf_accum("FRAME_TOTAL", total);
         perf_tick();
     }
 }
