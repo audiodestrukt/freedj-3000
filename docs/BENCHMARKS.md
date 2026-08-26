@@ -9,25 +9,61 @@ window, playing at 1.0× unless noted.
 
 ## Results
 
-| Metric | RTX 4070 SUPER desktop | **Raspberry Pi 5 (4 GB)** | Raspberry Pi 4 |
+| Metric | RTX 4070 desktop | **Raspberry Pi 5 (4 GB)** | **Raspberry Pi 4 (4 GB)** |
 |---|---|---|---|
-| SoC / GPU | x86-64 / RTX 4070 SUPER | Cortex-A76 ×4 / V3D 7.1 | *(TBD)* |
-| OS / compositor | Arch / Wayland | Bookworm 64-bit / wayfire | *(TBD)* |
-| GPU backend | Vulkan | **Vulkan (V3DV Mesa)** | *(TBD)* |
-| Present mode | Mailbox | **Mailbox** | *(TBD)* |
-| Frame rate | 60 fps | **60 fps** | |
-| Frame dt jitter (sd) | 1.64 ms | **0.12 ms** | |
-| Frames in vsync window | ~100 % (after fix) | **100 %** | |
-| Stalled / backwards frames | 0 / 0 | **0 / 0** | |
-| GPU acquire (Mailbox) | ~0.04 ms | ~0.08 ms | |
-| Decode + waveform + BPM | ~0.1 s | **0.7 s** | |
-| CPU @ 1.0× | low | **~58 % of one core** | |
-| Cores / load avg | many / low | **4 / 0.82** | |
-| RSS | — | **249 MB** | |
-| Peak temp (stock cooling) | — | **77.9 °C ⚠️** | |
-| First `make build` | ~2–3 min | **6 m 47 s** | |
+| SoC / GPU | x86-64 / RTX 4070 SUPER | Cortex-A76 ×4 / V3D 7.1 | Cortex-A72 ×4 / V3D 4.2 |
+| OS / compositor | Arch / Wayland | Bookworm 64-bit / wayfire | Bookworm 64-bit / labwc |
+| GPU backend | Vulkan | Vulkan (V3DV) | **Vulkan (V3DV)** |
+| Present mode | Mailbox | Mailbox | **Mailbox** |
+| Display / frame rate | 60 fps | 60 fps | **30 fps** (4K@30 HDMI) |
+| Frame dt jitter (sd) | 1.64 ms | 0.12 ms | **3.08 ms** |
+| Stalled / backwards frames | 0 / 0 | 0 / 0 | **0 / 0** |
+| GPU acquire (Mailbox) | ~0.04 ms | ~0.08 ms | ~0.2 ms |
+| Decode + waveform + BPM | ~0.1 s | 0.7 s | **~2.1 s** |
+| **Render thread CPU** | low | ~30 % of one core | **86 % of one core** ⚠️ |
+| Total process CPU @ 1.0× | low | ~58 % (0.6 core) | **~134 % (1.3 cores)** |
+| Load avg (4 cores) | — | 0.82 | 1.90 |
+| RSS | — | 249 MB | 252 MB |
+| Peak temp | — | **77.9 °C ⚠️** | 62.8 °C (no throttle) |
+| First `make build` | ~2–3 min | 6 m 47 s | **18 m 22 s** |
 
-Blank Pi 5 cells match the desktop. Pi 4 column is a placeholder.
+Both Pis: hardware Vulkan via V3DV, Mailbox available, clean pacing (0 stalls),
+audio at 44.1 kHz. The Pi 4's frame rate is the *display's* 30 Hz mode, not a
+freedj limit.
+
+## What the numbers say
+
+- **The graphics path holds on both Pis.** V3DV exposes Mailbox on the Pi 5
+  *and* the Pi 4, so the desktop frame-pacing design runs unchanged on both.
+  The Pi 5 is actually *tighter* than the NVIDIA box (dt sd 0.12 ms vs 1.64);
+  the Pi 4 is looser (3.08 ms) but still stall-free. The project's biggest
+  hardware unknown — pacing on VideoCore — is resolved for both.
+
+- **The Pi 4 is render-bound, and that is the key design signal.** Its main
+  thread — egui re-tessellating the whole screen + wgpu submit every frame — sits
+  at **86 % of one A72 core at just 30 fps**. The Rubber Band time-stretch is
+  light at 1.0× and on its own core, so DSP is not the limit; the **UI redraw
+  is**. At 60 Hz the Pi 4 render thread would likely not keep up. The Pi 5 does
+  the same work in ~30 % (faster A76 + 2× the frames), so it is comfortable.
+  The fix is the one already noted in PERFORMANCE.md: **skip the egui pass when
+  deck state hasn't changed**, or decouple the waveform-scroll redraw from the
+  chrome redraw. That optimization barely matters on the Pi 5 and is decisive on
+  the Pi 4 — worth doing to keep the Pi 4 a viable target.
+
+- **Compute headroom (DSP) is fine on both.** 0.6 cores (Pi 5) / 1.3 cores
+  (Pi 4) total at 1.0×, on 4-core parts. The render thread, not the audio
+  engine, is the single-core bottleneck.
+
+- **Audio was in tune by luck (both).** HDMI/analog negotiated 44.1 kHz to match
+  the track, so no pitch error. A 48 kHz output would still play 44.1 kHz sharp
+  until sample-rate conversion lands (WORKSTREAMS A1). "Audio fine on the Pi" is
+  not "SRC not needed." (And on the Pi it went to a device we did not choose —
+  device selection, B3, is unfinished.)
+
+- **Thermals: the Pi 5 is the hot one.** 77.9 °C under light load (needs an
+  active cooler; throttles ~80–85 °C). The Pi 4 ran 62.8 °C, no throttle — the
+  A72 draws less. Counter-intuitively the *faster* board is the one that needs
+  the cooling attention.
 
 ## What the Pi 5 numbers say
 
@@ -115,7 +151,10 @@ kill $P
 ```
 
 A "good" result: `via Vulkan`, `present mode: Mailbox` (or a clean Fifo — see
-below), dt sd well under a millisecond, 0 stalled/backwards, temp under ~75 °C.
+below), `dt` mean matching the display period (16.7 ms @ 60 Hz, 33.3 ms @ 30 Hz),
+`dt` sd small relative to that, 0 stalled/backwards, and the **render thread
+well under a full core** (`top -H`) — the Pi 4 showed that thread is the first
+thing to saturate. Temp under ~75 °C.
 
 ## Testing a Pi 4 (or any second aarch64 board)
 
