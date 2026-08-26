@@ -163,6 +163,28 @@ the same format. Drive it with the DJ2Go, replay it with `--script`. That
 is the regression suite for MIDI mapping changes and, later, for RP2350
 firmware.
 
+## Two decks on one controller
+
+Controllers split into two families, and the adapter handles both by a
+`--deck A|B` flag (channel select):
+
+- **True two-deck** (Kontrol S2/S4, DDJ-series): the right deck sends on MIDI
+  channel 1, the left on channel 0, same note/CC numbers. `--deck A` listens
+  to channel 0, `--deck B` to channel 1. Two freedj instances — one per
+  channel, each also its own Link player — split the controller. `make
+  link-pair` does exactly this (`--player 1 --deck A`, `--player 2 --deck B`).
+
+- **Deck-switching** (Numark DJ2Go): one physical control set plus a hardware
+  DECK button. Both decks send on channel 0 with identical MIDI (verified
+  2026-08-26: the right jog sends the same `B0 18/19` as the left). The
+  channel filter can't separate them. Driving two decks from a DJ2Go needs
+  either the transport refactor (one process, two decks, the DECK button
+  switches focus — WORKSTREAMS C1/C4) or simply a second controller. For now
+  a DJ2Go drives one instance.
+
+The flag is correct for the true-two-deck case today; the DJ2Go path waits on
+the transport work.
+
 ## Hardware sources (all adapters, all later)
 
 Each is a thread that turns device input into `ControlEvent`s on the bus and

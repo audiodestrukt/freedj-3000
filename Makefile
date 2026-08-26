@@ -72,9 +72,9 @@ link-pair: build ## Two freedj instances (players 1 and 2) linked to each other 
 	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; exit 1; }
 	@T2="$(TRACK2)"; test -n "$$T2" || T2="$(TRACK)"; \
 	 echo "player 1: $(TRACK)"; echo "player 2: $$T2"; \
-	 RUST_LOG=$(RUST_LOG) ./$(BIN) "$(TRACK)" --player 1 & P1=$$!; \
+	 RUST_LOG=$(RUST_LOG) ./$(BIN) "$(TRACK)" --player 1 --deck A & P1=$$!; \
 	 trap "kill $$P1 2>/dev/null" EXIT INT TERM; \
-	 sleep 1; RUST_LOG=$(RUST_LOG) ./$(BIN) "$$T2" --player 2
+	 sleep 1; RUST_LOG=$(RUST_LOG) ./$(BIN) "$$T2" --player 2 --deck B
 
 beat: ## Send ProDJ Link beat packets only (no deck) — BPM=130.0
 	python3 tools/send_beat.py $(BPM) $(HOST) $(PORT)

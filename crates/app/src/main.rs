@@ -600,9 +600,19 @@ fn main() -> Result<()> {
     let mut args = std::env::args().skip(1);
     let mut path: Option<PathBuf> = None;
     let mut player: u8 = std::env::var("OPENDECK_PLAYER").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    // Controller side: A = left (MIDI channel 0), B = right (channel 1).
+    let mut deck_channel: u8 = match std::env::var("OPENDECK_DECK").ok().as_deref() {
+        Some("B") | Some("b") => 1,
+        _ => 0,
+    };
     while let Some(a) = args.next() {
         match a.as_str() {
             "--player" => player = args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6")?,
+            "--deck" => deck_channel = match args.next().as_deref() {
+                Some("A") | Some("a") => 0,
+                Some("B") | Some("b") => 1,
+                _ => bail!("--deck needs A or B"),
+            },
             _ => path = Some(a.into()),
         }
     }
@@ -668,7 +678,8 @@ fn main() -> Result<()> {
     // ── 5. Connect MIDI controller (optional — app runs fine without it) ──────────
     // ── 5. Input bus: MIDI (DJ2Go) forwards controls into this channel ────────
     let (event_tx, event_rx) = mpsc::channel::<Event>();
-    let _midi = midi::MidiHandle::connect(event_tx);
+    log::info!("controller: deck {} (MIDI channel {deck_channel})", if deck_channel == 0 { "A/left" } else { "B/right" });
+    let _midi = midi::MidiHandle::connect(event_tx, deck_channel);
 
     // ── 6. Run the UI event loop ──────────────────────────────────────────────
     let event_loop = EventLoop::new().context("failed to create event loop")?;

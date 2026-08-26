@@ -27,7 +27,6 @@ const MAP_PITCH_DOWN: (u8, u8) = (0, 0x44);
 const JOG_CC_A:   u8 = 0x18; // 24
 const JOG_CC_B:   u8 = 0x19; // 25, relative: 1–63 = CW (+), 65–127 = CCW (−)
 const PITCH_CC:   u8 = 0x0D; // 13, absolute 0–127, centre 64
-const CH_A:       u8 = 0;
 
 /// Pitch step for the ± buttons and the fader range, matching a CDJ.
 const PITCH_STEP:  f32 = 0.01;
@@ -37,8 +36,12 @@ pub struct MidiHandle {
 }
 
 impl MidiHandle {
-    /// Connect to the DJ2Go and forward its controls to `tx` as bus events.
-    pub fn connect(tx: Sender<Event>) -> Option<Self> {
+    /// Connect to the DJ2Go and forward one deck's controls to `tx` as bus
+    /// events.  `channel` selects the controller side: 0 = left (deck A),
+    /// 1 = right (deck B).  A two-deck controller mirrors the same note/CC
+    /// numbers across both channels, so two freedj instances — one per
+    /// channel — split the controller between them.
+    pub fn connect(tx: Sender<Event>, channel: u8) -> Option<Self> {
         let midi_in = MidiInput::new("opendeck")
             .map_err(|e| log::warn!("MIDI: init failed: {e}"))
             .ok()?;
@@ -61,7 +64,7 @@ impl MidiHandle {
         log::info!("MIDI: found {DEVICE_NAME} — connecting");
         let conn = midi_in
             .connect(&port, "opendeck-dj2go", move |_ts, msg, _| {
-                if let Some(ev) = translate(msg) {
+                if let Some(ev) = translate(msg, channel) {
                     let _ = tx.send(ev);
                 }
             }, ())
@@ -74,27 +77,29 @@ impl MidiHandle {
 
 /// One MIDI message → at most one bus event.  Deck A only; the second-deck
 /// simulation retired when real ProDJ Link began driving the B2 strip.
-fn translate(msg: &[u8]) -> Option<Event> {
+fn translate(msg: &[u8], deck_channel: u8) -> Option<Event> {
     if msg.len() < 3 { return None; }
     let kind = msg[0] & 0xF0;
     let ch   = msg[0] & 0x0F;
     log::debug!("MIDI rx: {:02X?}", msg);
+    // Only this deck's channel; the other side drives the other instance.
+    if ch != deck_channel { return None; }
 
+    let deck = |e| Some(Event::Deck(e));
     match kind {
         // Note On (velocity 0 = Note Off, ignored).
         0x90 if msg[2] > 0 => {
             let note = msg[1];
-            let deck = |e| Some(Event::Deck(e));
-            match (ch, note) {
-                MAP_PLAY       => deck(ControlEvent::PlayPause),
-                MAP_CUE        => deck(ControlEvent::Cue),
-                MAP_PITCH_UP   => deck(ControlEvent::TempoNudge { delta:  PITCH_STEP }),
-                MAP_PITCH_DOWN => deck(ControlEvent::TempoNudge { delta: -PITCH_STEP }),
+            match note {
+                n if n == MAP_PLAY.1       => deck(ControlEvent::PlayPause),
+                n if n == MAP_CUE.1        => deck(ControlEvent::Cue),
+                n if n == MAP_PITCH_UP.1   => deck(ControlEvent::TempoNudge { delta:  PITCH_STEP }),
+                n if n == MAP_PITCH_DOWN.1 => deck(ControlEvent::TempoNudge { delta: -PITCH_STEP }),
                 _ => { log::debug!("MIDI note ch{ch} 0x{note:02X} unmapped"); None }
             }
         }
         // Control Change.
-        0xB0 if ch == CH_A => {
+        0xB0 => {
             let (cc, value) = (msg[1], msg[2]);
             match cc {
                 JOG_CC_A | JOG_CC_B => {
@@ -122,7 +127,7 @@ mod tests {
     use crate::input::{ControlEvent as CE, Event};
 
     fn deck(msg: &[u8]) -> Option<CE> {
-        match translate(msg) { Some(Event::Deck(e)) => Some(e), _ => None }
+        match translate(msg, 0) { Some(Event::Deck(e)) => Some(e), _ => None }
     }
 
     #[test]
@@ -140,5 +145,8 @@ mod tests {
         // Fader: centre 64 → ~0.5, top (0) → 1.0, bottom (127) → 0.0.
         assert!(matches!(deck(&[0xB0, 0x0D, 64]),  Some(CE::TempoFader { position }) if (position - 0.496).abs() < 0.02));
         assert!(matches!(deck(&[0xB0, 0x0D, 0]),   Some(CE::TempoFader { position }) if position > 0.99));
+        // Deck B (channel 1) is ignored when we are deck A (channel 0).
+        assert!(translate(&[0x91, 0x33, 0x7F], 0).is_none());
+        assert!(matches!(translate(&[0x91, 0x33, 0x7F], 1), Some(Event::Deck(CE::PlayPause))));
     }
 }
