@@ -92,6 +92,15 @@ impl MidiHandle {
 
 /// One MIDI message → at most one bus event, for the given deck's controls
 /// plus the shared browse controls.
+/// Absolute 0–127 pitch-fader value → normalised position (0.0–1.0), inverted so
+/// fader-up is faster.  The physical centre of a 0–127 fader can't land on 0.5
+/// (127 is odd, so the midpoint is 63.5), which left the pitch ~0.13% off zero
+/// at the detent.  Snap the two centre codes to exactly 0.5 — a one-code detent
+/// each side of true centre, as DJ controllers do.
+fn fader_position(b: u8) -> f32 {
+    if b == 63 || b == 64 { 0.5 } else { 1.0 - b as f32 / 127.0 }
+}
+
 fn translate(msg: &[u8], m: &DeckMap) -> Option<Event> {
     if msg.len() < 3 { return None; }
     let status = msg[0] & 0xF0;
@@ -132,9 +141,7 @@ fn translate(msg: &[u8], m: &DeckMap) -> Option<Event> {
                 Some(Event::Deck(ControlEvent::JogDelta { delta, velocity_rpm: delta as f32 * 2.0 }))
             }
             cc if cc == m.fader_cc => {
-                // Centre 64 = 0%; lower value = fader up = faster.
-                let position = 1.0 - b as f32 / 127.0;
-                Some(Event::Deck(ControlEvent::TempoFader { position }))
+                Some(Event::Deck(ControlEvent::TempoFader { position: fader_position(b) }))
             }
             SELECT_KNOB_CC => {
                 let delta = if b < 64 { b as i32 } else { b as i32 - 128 };
@@ -177,6 +184,9 @@ mod tests {
         assert!(matches!(ev(&[0x90, 0x47, 0x7F], true), Some(CE::SyncToggle)));      // sync B
         assert!(matches!(ev(&[0xB0, 0x18, 5],    true), Some(CE::JogDelta { delta: 5, .. })));
         assert!(matches!(ev(&[0xB0, 0x0E, 64],   true), Some(CE::TempoFader { .. })));
+        // centre codes 63/64 snap to exactly 0.5 (0% pitch) — fader centre detent
+        assert!(matches!(ev(&[0xB0, 0x0D, 64], false), Some(CE::TempoFader { position }) if (position - 0.5).abs() < 1e-6));
+        assert!(matches!(ev(&[0xB0, 0x0D, 63], false), Some(CE::TempoFader { position }) if (position - 0.5).abs() < 1e-6));
         // Deck A's play note does nothing when we are deck B.
         assert!(ev(&[0x90, 0x3B, 0x7F], true).is_none());
     }
