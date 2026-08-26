@@ -11,6 +11,7 @@ members = [
     "crates/link",
     "crates/db",
     "crates/rekordbox",
+    "crates/nfs",
     "crates/ui",
     "crates/app",
 ]

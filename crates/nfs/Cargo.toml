@@ -1,0 +1,10 @@
+[package]
+name        = "opendeck-nfs"
+description = "Minimal NFSv2/UDP client for reading a Pioneer CDJ/XDJ's linked USB over ProDJ Link"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+log    = { workspace = true }
