@@ -113,3 +113,10 @@ the decks auto-negotiate crossover), play a track, `make dev`. Same log lines
 as above, from the real thing. Press MASTER on the deck and watch the status
 packets change: that handshake is what Link *send* will eventually have to
 speak (WORKSTREAMS §B2).
+
+## Captures from the real unit
+
+`reference/link-captures/` holds log excerpts from the XDJ-1000MK2 on the
+network: idle (announce + status only) and playing (beats at 126 BPM). The
+first beat packet and the first status packet from it are pinned as unit
+tests in `crates/link/src/prodj.rs`.

@@ -4,8 +4,9 @@
 //! Reference implementation: beat-link (Java) by Deep Symmetry
 //!
 //! Packet layouts below were verified byte-for-byte against traffic from
-//! `prolink_virtual_cdj` (grantHarris/prolink-cpp) on 2026-08-25; the beat
-//! packet in the tests is that capture.  See docs/reference/link-test-harness.md.
+//! `prolink_virtual_cdj` (grantHarris/prolink-cpp) on 2026-08-25 and from a
+//! real XDJ-1000MK2 (firmware 1.44) on 2026-08-26; both captures are pinned
+//! as tests.  See docs/reference/link-test-harness.md.
 //!
 //! We appear on the network as player number 1–4.
 //! Pioneer mixers (DJM-900NXS2 etc.) and CDJs see us as a peer.
@@ -47,6 +48,28 @@ mod beat {
     pub const SIZE:      usize = 0x60;
 }
 
+/// Offsets within a CDJ status packet (0x0a).  Length varies by generation
+/// (0xd0 / 0xd4 / 0x11c / 0x124); an XDJ-1000MK2 on firmware 1.44 sends 0x124.
+mod status {
+    pub const DEVICE:    usize = 0x21;
+    pub const LEN:       usize = 0x22;   // u16 BE, remaining length
+    pub const ACTIVITY:  usize = 0x27;   // 0 idle, 1 active
+    pub const SLOT:      usize = 0x29;   // 1 CD, 2 SD, 3 USB, 4 rekordbox, 6 streaming
+    pub const TRACK_TYPE: usize = 0x2a;  // 0 none, 1 rekordbox, 2 unanalysed, 5 CD
+    pub const PLAY:      usize = 0x7b;   // P1, see PlayState
+    pub const FIRMWARE:  usize = 0x7c;   // 4 ASCII bytes
+    pub const FLAGS:     usize = 0x89;   // bit6 play, bit5 master, bit4 sync, bit3 on-air
+    pub const PITCH:     usize = 0x8c;   // u32 BE, 0x00100000 = +0%
+    pub const BPM:       usize = 0x92;   // u16 BE ×100, 0xffff = no track
+    pub const MASTER:    usize = 0x9e;   // Mm: 0 not master, 1 master, 2 master (tempo invalid)
+    pub const HANDOFF:   usize = 0x9f;   // Mh: player being handed master to, else 0xff
+    pub const BEAT:      usize = 0xa0;   // u32 BE, 0xffffffff = none
+    pub const CUE_CD:    usize = 0xa4;   // u16 BE bars to next cue, 0x1ff = none
+    pub const BEAT_BAR:  usize = 0xa6;   // 1–4, 0 = none
+    pub const COUNTER:   usize = 0xc8;   // u32 BE packet counter
+    pub const MIN_SIZE:  usize = 0xcc;
+}
+
 /// Offsets within an announce / keep-alive packet (0x36 bytes).
 mod announce {
     pub const NAME:    usize = 0x0c;   // 20 bytes
@@ -55,6 +78,46 @@ mod announce {
     pub const MAC:     usize = 0x26;
     pub const IP:      usize = 0x2c;
     pub const SIZE:    usize = 0x36;
+}
+
+/// Play state byte P1 of a status packet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlayState {
+    NoTrack, Loading, Playing, Looping, Paused, CuedPaused, CuePlay, CueScratch,
+    Searching, Ended, EmergencyLoop, Other(u8),
+}
+
+impl PlayState {
+    fn from_byte(b: u8) -> Self {
+        use PlayState::*;
+        match b {
+            0x00 => NoTrack, 0x02 => Loading, 0x03 => Playing, 0x04 => Looping,
+            0x05 => Paused, 0x06 => CuedPaused, 0x07 => CuePlay, 0x08 => CueScratch,
+            0x09 => Searching, 0x11 => Ended, 0x12 => EmergencyLoop, o => Other(o),
+        }
+    }
+}
+
+/// Everything a status packet tells us about a deck.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Status {
+    pub player:       u8,
+    pub play:         PlayState,
+    pub playing:      bool,     // F bit 6
+    pub master:       bool,     // F bit 5
+    pub sync:         bool,     // F bit 4
+    pub on_air:       bool,     // F bit 3
+    /// 1.0 = +0%.
+    pub pitch:        f32,
+    /// Track BPM ×1 (not pitched); None when no track is loaded.
+    pub bpm:          Option<f32>,
+    pub beat:         Option<u32>,
+    pub beat_in_bar:  Option<u8>,
+    /// Player master is being handed to, if a handoff is in progress.
+    pub handoff_to:   Option<u8>,
+    pub track_loaded: bool,
+    pub firmware:     [u8; 4],
+    pub counter:      u32,
 }
 
 pub struct ProDjLink {
@@ -168,8 +231,38 @@ impl ProDjLink {
         })
     }
 
+    /// Parse a CDJ status packet.
+    pub fn parse_status(data: &[u8]) -> Option<Status> {
+        if Self::packet_type(data)? != PKT_STATUS || data.len() < status::MIN_SIZE {
+            return None;
+        }
+        let u16_at = |o: usize| u16::from_be_bytes([data[o], data[o + 1]]);
+        let u32_at = |o: usize| u32::from_be_bytes([data[o], data[o + 1], data[o + 2], data[o + 3]]);
+        let f = data[status::FLAGS];
+        let bpm_raw = u16_at(status::BPM);
+        let beat_raw = u32_at(status::BEAT);
+        let bib = data[status::BEAT_BAR];
+        let handoff = data[status::HANDOFF];
+        Some(Status {
+            player:       data[status::DEVICE],
+            play:         PlayState::from_byte(data[status::PLAY]),
+            playing:      f & 0x40 != 0,
+            master:       f & 0x20 != 0,
+            sync:         f & 0x10 != 0,
+            on_air:       f & 0x08 != 0,
+            pitch:        u32_at(status::PITCH) as f32 / PITCH_UNITY as f32,
+            bpm:          (bpm_raw != 0xffff).then(|| bpm_raw as f32 / 100.0),
+            beat:         (beat_raw != 0xffff_ffff).then_some(beat_raw),
+            beat_in_bar:  (1..=4).contains(&bib).then_some(bib),
+            handoff_to:   (handoff != 0xff && handoff != 0).then_some(handoff),
+            track_loaded: data[status::TRACK_TYPE] != 0,
+            firmware:     [data[status::FIRMWARE], data[status::FIRMWARE + 1], data[status::FIRMWARE + 2], data[status::FIRMWARE + 3]],
+            counter:      u32_at(status::COUNTER),
+        })
+    }
+
     /// Parse an incoming packet and return the peer's EngineSnapshot if it's
-    /// a beat packet.  Status packets are recognised but not yet decoded.
+    /// a beat packet.  Status packets are decoded by `parse_status`.
     pub fn parse_packet(data: &[u8]) -> Option<(u8, EngineSnapshot)> {
         match Self::packet_type(data)? {
             PKT_BEAT => {
@@ -188,17 +281,9 @@ impl ProDjLink {
                     timestamp_ns: 0,
                 }))
             }
-            PKT_STATUS => parse_status_packet(data),
             _ => None,
         }
     }
-}
-
-fn parse_status_packet(data: &[u8]) -> Option<(u8, EngineSnapshot)> {
-    // TODO: implement per dysentery protocol spec chapter 5.  Carries play
-    // state, pitch, BPM, beat number, and the SYNC / MASTER flags.
-    let _ = data;
-    None
 }
 
 #[cfg(test)]
@@ -225,6 +310,67 @@ mod tests {
         assert_eq!(b.bpm, 128.0);
         assert_eq!(b.beat_in_bar, 2);
         assert_eq!(b.next_beat_ms, 468);   // 60_000 / 128 = 468.75
+    }
+
+    /// Captured from an XDJ-1000MK2 (player 1, idle, no track playing) on
+    /// 2026-08-26 — 292 bytes on UDP 50002, unicast to us.
+    const CAPTURED_STATUS: [u8; 292] = [
+        0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6D, 0x4A, 0x4F, 0x4C, 0x0A, 0x58, 0x44, 0x4A, 0x2D, 0x31,
+        0x30, 0x30, 0x30, 0x4D, 0x4B, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x05, 0x01, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x06, 0x04, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x04, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x31, 0x2E, 0x34, 0x34,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x84, 0x8D, 0xFE, 0x00, 0x10, 0x00, 0x00,
+        0x7F, 0xFF, 0xFF, 0xFF, 0x7F, 0xFF, 0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0xFF, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x0C, 0x1F, 0x03, 0x00, 0x00,
+        0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x00, 0x00, 0x00, 0x00,
+    ];
+
+    /// Captured from a real XDJ-1000MK2 (player 1, playing at 126.00 BPM,
+    /// beat 2 of the bar) on 2026-08-26 — 96 bytes on UDP 50001.
+    const CAPTURED_XDJ_BEAT: [u8; 0x60] = [
+        0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6D, 0x4A, 0x4F, 0x4C, 0x28, 0x58, 0x44, 0x4A, 0x2D, 0x31,
+        0x30, 0x30, 0x30, 0x4D, 0x4B, 0x32, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01,
+        0x00, 0x01, 0x00, 0x3C, 0x00, 0x00, 0x01, 0xDC, 0x00, 0x00, 0x03, 0xB9, 0x00, 0x00, 0x05, 0x95,
+        0x00, 0x00, 0x07, 0x71, 0x00, 0x00, 0x0D, 0x06, 0x00, 0x00, 0x0E, 0xE2, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF, 0x00, 0x10, 0x00, 0x00, 0x00, 0x00, 0x31, 0x38, 0x02, 0x00, 0x00, 0x01,
+    ];
+
+    #[test]
+    fn parses_real_xdj_beat() {
+        let b = ProDjLink::parse_beat(&CAPTURED_XDJ_BEAT).expect("beat packet");
+        assert_eq!(b.player, 1);
+        assert_eq!(b.bpm, 126.0);
+        assert_eq!(b.beat_in_bar, 2);
+        assert!((b.pitch - 1.0).abs() < 1e-6);
+        assert_eq!(b.next_beat_ms, 476);   // 60_000 / 126 = 476.19
+    }
+
+    #[test]
+    fn parses_captured_xdj_status() {
+        let st = ProDjLink::parse_status(&CAPTURED_STATUS).expect("status packet");
+        assert_eq!(st.player, 1);
+        assert_eq!(st.play, PlayState::NoTrack);
+        assert!(!st.playing && !st.master && !st.sync);
+        assert_eq!(&st.firmware, b"1.44");
+        assert!((st.pitch - 1.0).abs() < 1e-6);
+        assert_eq!(st.bpm, None);
+        assert_eq!(st.beat, None);
+        assert_eq!(st.beat_in_bar, None);
+        assert_eq!(st.handoff_to, None);
+        assert!(!st.track_loaded);
+        assert_eq!(st.counter, 268);
     }
 
     #[test]

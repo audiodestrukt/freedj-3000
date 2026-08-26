@@ -13,7 +13,7 @@
 //!
 //! Run with RUST_LOG=opendeck::prodj=debug for per-packet logging.
 
-use opendeck_link::prodj::{ProDjLink, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS};
+use opendeck_link::prodj::{ProDjLink, Status, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS};
 use opendeck_types::{BeatGrid, EngineSnapshot};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
@@ -89,13 +89,39 @@ fn listen_port(
         .name(format!("prodj-rx-{port}"))
         .spawn(move || {
             let mut buf = [0u8; 1500];
+            // Last decoded status per player, so changes are logged once.
+            let mut last_status: std::collections::HashMap<u8, Status> = Default::default();
             loop {
                 match sock.recv_from(&mut buf) {
                     Ok((n, addr)) => {
-                        // Full hex on the beat port: this is the ground truth
-                        // for fixing build_beat/parse_beat_packet against real
-                        // hardware.
-                        log::info!("ProDJ rx :{port} {n} bytes from {addr} — {:02X?}", &buf[..n]);
+                        // Full hex at debug: the ground truth for packet-format work.
+                        log::debug!("ProDJ rx :{port} {n} bytes from {addr} — {:02X?}", &buf[..n]);
+                        if let Some(st) = ProDjLink::parse_status(&buf[..n]) {
+                            if st.player == own_player { continue; }
+                            let changed = last_status.get(&st.player).map_or(true, |p| {
+                                p.play != st.play || p.master != st.master || p.sync != st.sync
+                                    || p.bpm != st.bpm || p.track_loaded != st.track_loaded
+                                    || p.handoff_to != st.handoff_to || (p.pitch - st.pitch).abs() > 0.0005
+                            });
+                            if changed {
+                                log::info!(
+                                    "ProDJ status: player {} fw {} {:?} {}{}{}{} pitch {:+.2}% bpm {} beat {:?}/{:?} handoff {:?}",
+                                    st.player, String::from_utf8_lossy(&st.firmware), st.play,
+                                    if st.playing { "PLAY " } else { "" }, if st.master { "MASTER " } else { "" },
+                                    if st.sync { "SYNC " } else { "" }, if st.on_air { "ONAIR " } else { "" },
+                                    (st.pitch - 1.0) * 100.0,
+                                    st.bpm.map(|b| format!("{b:.2}")).unwrap_or_else(|| "-".into()),
+                                    st.beat, st.beat_in_bar, st.handoff_to,
+                                );
+                                last_status.insert(st.player, st);
+                            }
+                            // A status packet from a peer means we are linked,
+                            // even before it plays a beat.
+                            if beat2_player.load(Ordering::Relaxed) == 0 {
+                                beat2_player.store(st.player as u32, Ordering::Relaxed);
+                            }
+                            continue;
+                        }
                         if let Some((player, snap)) = ProDjLink::parse_packet(&buf[..n]) {
                             // Our own broadcasts come back to us; a deck is
                             // not its own master.

@@ -192,11 +192,29 @@ Unlocks screen callouts 15 (player number) and 26 (MASTER/SYNC), and makes
 need `--device` so they do not fight, and a real deck needs to choose its
 interface anyway.
 
-### B4. Status packet parsing — **medium**
+### B4. Status packet parsing — **done** (2026-08-26)
 
-`parse_status_packet` returns `None` with a TODO. Receiving track metadata and
-playback state from real CDJs is what makes the second grid show more than a
-tempo.
+`ProDjLink::parse_status` decodes the 0x0a packet (play state, PLAY / MASTER /
+SYNC / ON-AIR flags, pitch, BPM, beat number, beat-in-bar, master handoff,
+firmware, counter), tested against a packet captured from the XDJ-1000MK2.
+The listener logs a line per *change* per player. Not yet used for anything
+beyond logging and marking the deck linked; B5 (SYNC follow) is the consumer.
+
+### Real-hardware results, 2026-08-26
+
+XDJ-1000MK2 (fw 1.44, player 1) on the same switch, freedj as player 2:
+
+- **Seen:** the XDJ's LINK status reads *connected*, and it unicasts status
+  to us ~6/s from a fresh source port each time — it only does that for
+  devices it has registered.
+- **Its packets:** 25/25 beats decoded at 126.00 BPM; arrival interval
+  476.2 ms with **sd 1.29 ms** — Pioneer's timing benchmark (ours is ~3 ms).
+  Status decoded: Playing, PLAY MASTER, pitch +0.00 %, beat 78 / bar 2.
+- **Not yet shown:** whether the XDJ *uses* our beats. It is master and we
+  do not send status packets, so it cannot elect us master or sync to us.
+  That is the next step: send status (0x0a) with the flags, then press SYNC
+  on the XDJ with freedj as MASTER.
+
 
 ---
 
