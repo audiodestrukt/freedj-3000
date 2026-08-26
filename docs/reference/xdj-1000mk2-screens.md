@@ -144,6 +144,26 @@ playhead; otherwise dashes. Every shot so far has no cues set, hence
 `--.-`. Model as `Option<(bars, beats)>` — `None` renders dashes. (The
 earlier freedj build showed beats-to-downbeat in blue; that was wrong.)
 
+The manual is explicit (CDJ-3000X, *Part names* callout 3, "Beat countdown"):
+*"Displays the number of bars and beats from the playback point to the closest
+saved cue point."* So on the real deck this readout **does not move for a track
+with no saved cues** — confirmed live 2026-08-26 on a track with none. It is
+not an "advanced rekordbox feature"; it just needs a memory or hot cue ahead
+of the playhead (set on the deck, or already present from rekordbox analysis).
+Drop a memory cue 8 bars ahead and it reads `8.0 → 7.4 → 7.3 …`.
+
+**freedj already matches this**: both readouts are hardcoded to `--.-` in
+`screen.rs` because we have no cue points. When the cue engine lands (below),
+the countdown becomes real; until then, dashes are correct parity, not a bug.
+
+> **Deferred, deliberately (2026-08-26):** hot cues / memory cues are **not**
+> being implemented yet. That means the Bars countdown stays `--.-`, the
+> CUE/LOOP and hot-cue pads stay inert, and the PERFORM screen's pads have
+> nothing behind them. This is a scope choice, not an oversight. Implementing
+> cues means wiring `crates/engine` into the binary (WORKSTREAMS C2) — a real
+> chunk — and there's no pull for it yet. Revisit when cues become worth the
+> transport work.
+
 ### Other footer variants seen
 
 - A.HOTCUE (red) and A.CUE can both be shown, stacked, when both modes are on.

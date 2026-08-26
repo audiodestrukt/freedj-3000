@@ -251,6 +251,12 @@ waits on this.
 
 ### C2. Wire `crates/engine` into the binary — **medium**
 
+**Deferred 2026-08-26**: hot/memory cues are intentionally not being built
+yet, so this stays parked. The visible consequence — the Bars cue-countdown
+reads `--.-`, the CUE/LOOP and PERFORM pads are inert — is correct parity
+for a deck with no cues, not a defect. Pick this up when cues earn the
+transport work.
+
 550 lines of transport, slip, loops and hot cues exist and are imported by
 nothing. `Transport::read_frame_at` at `transport.rs:373` returns `[0.0, 0.0]`
 with a TODO — wired up as-is it would output silence. It needs a positional
