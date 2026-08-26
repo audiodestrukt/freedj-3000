@@ -88,6 +88,16 @@ impl DeckSnapshot<'_> {
     }
 
     /// Beat number within the bar, 1–4, from our own grid.
+    /// Bar within a 4-bar phrase, 1–4; advances once per bar.
+    pub fn bar_in_phrase(&self) -> Option<u8> {
+        let g = self.beat_grid?;
+        let frames = self.position as f64 / self.channels as f64;
+        let period = self.sample_rate as f64 * 60.0 / g.bpm;
+        let beat = ((frames - g.anchor_sample as f64) / period).floor() as i64;
+        let bar  = (beat + g.downbeat_offset as i64).div_euclid(4);
+        Some((bar.rem_euclid(4) + 1) as u8)
+    }
+
     pub fn beat_in_bar(&self) -> Option<u8> {
         let g = self.beat_grid?;
         let frames = self.position as f64 / self.channels as f64;

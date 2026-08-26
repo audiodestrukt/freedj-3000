@@ -311,38 +311,31 @@ fn draw_phase(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<
     text(ui, Pos2::new(b.min.x + h * 0.078, b.min.y + row * 1.5), Align2::LEFT_CENTER, "Bars", h * 0.020, BLUE);
 }
 
-/// Beat display: two rows of four outlined boxes.  Top row is the master
-/// player (orange), bottom row this deck; the current beat is solid — blue,
-/// or orange when this deck is the master.
+/// Beat display: two rows of four outlined boxes, as on the unit's phase
+/// meter.  Top row = bar within the 4-bar phrase; bottom row = beat within
+/// the bar.  Each advances its own current cell solid; the bottom cycles
+/// every bar, the top every phrase.
 fn draw_phase_boxes(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
     let p = ui.painter();
     let gap = h * 0.006;
     let row_h = (r.height() - gap) / 2.0;
     let cell_w = (r.width() - 3.0 * gap) / 4.0;
-    let ours = snap.beat_in_bar();
-    let has_master = snap.beat2_bpm > 0.0;
-    let master_beat = ours;   // only the master's phase is known; same cell when matched
-    let our_lit = if snap.master { ORANGE } else { BLUE };
+    let bar  = snap.bar_in_phrase();   // top row: 1–4 bars
+    let beat = snap.beat_in_bar();     // bottom row: 1–4 beats
+    // When we are master the lit beat cell is orange, else blue (matches the
+    // unit); the bar row is always the calmer blue.
+    let beat_lit = if snap.master { ORANGE } else { BLUE };
 
     for i in 0..4u8 {
         let x = r.min.x + i as f32 * (cell_w + gap);
         let top = Rect::from_min_size(Pos2::new(x, r.min.y),               Vec2::new(cell_w, row_h));
         let bot = Rect::from_min_size(Pos2::new(x, r.min.y + row_h + gap), Vec2::new(cell_w, row_h));
-        if has_master && master_beat == Some(i + 1) {
-            p.rect_filled(top, 1.0, ORANGE);
-        } else {
-            p.rect_stroke(top, 1.0, Stroke::new(1.0, if has_master { ORANGE } else { Color32::from_rgb(0x7a, 0x4a, 0x16) }));
-        }
-        if ours == Some(i + 1) {
-            p.rect_filled(bot, 1.0, our_lit);
-        } else {
-            p.rect_stroke(bot, 1.0, Stroke::new(1.0, BLUE));
-        }
-    }
-    if has_master {
-        let cell = master_beat.unwrap_or(1) as f32 - 1.0;
-        let x = r.min.x + cell * (cell_w + gap) + snap.beat2_phase_beats * cell_w;
-        p.line_segment([Pos2::new(x, r.min.y - 2.0), Pos2::new(x, r.min.y + row_h + 2.0)], Stroke::new(2.0, TEXT));
+        // Top: bar within phrase.
+        if bar == Some(i + 1) { p.rect_filled(top, 1.0, BLUE); }
+        else                  { p.rect_stroke(top, 1.0, Stroke::new(1.0, Color32::from_rgb(0x24, 0x3a, 0x5c))); }
+        // Bottom: beat within bar.
+        if beat == Some(i + 1) { p.rect_filled(bot, 1.0, beat_lit); }
+        else                   { p.rect_stroke(bot, 1.0, Stroke::new(1.0, BLUE)); }
     }
 }
 
