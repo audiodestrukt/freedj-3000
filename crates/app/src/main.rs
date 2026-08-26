@@ -247,6 +247,13 @@ impl DeckApp {
                     log::info!("requesting master");
                 }
             }
+            Event::Deck(ControlEvent::BrowseEncoderDelta { delta }) => {
+                log::info!("browse {delta:+} (no browser screen yet)");
+            }
+            Event::Deck(ControlEvent::Load) => log::info!("load (no browser/load yet)"),
+            Event::Deck(ControlEvent::Back) => log::info!("back (no browser yet)"),
+            Event::Deck(ControlEvent::LoopIn)  => log::info!("loop in (no loop engine yet)"),
+            Event::Deck(ControlEvent::LoopOut) => log::info!("loop out (no loop engine yet)"),
             Event::Deck(other) => log::info!("unhandled deck event {other:?}"),
 
             Event::Ui(UiEvent::TimeMode) => {
@@ -679,7 +686,7 @@ fn main() -> Result<()> {
     // ── 5. Input bus: MIDI (DJ2Go) forwards controls into this channel ────────
     let (event_tx, event_rx) = mpsc::channel::<Event>();
     log::info!("controller: deck {} (MIDI channel {deck_channel})", if deck_channel == 0 { "A/left" } else { "B/right" });
-    let _midi = midi::MidiHandle::connect(event_tx, deck_channel);
+    let _midi = midi::MidiHandle::connect(event_tx, deck_channel == 1);
 
     // ── 6. Run the UI event loop ──────────────────────────────────────────────
     let event_loop = EventLoop::new().context("failed to create event loop")?;

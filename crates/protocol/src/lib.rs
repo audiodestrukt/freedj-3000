@@ -160,5 +160,7 @@ pub enum ControlEvent {
     NeedleSearch { position: f32 },  // 0.0–1.0 absolute track position
     BrowseEncoderDelta { delta: i32 },
     Load,
+    /// Browser: go up a level / back.
+    Back,
     Eject,
 }

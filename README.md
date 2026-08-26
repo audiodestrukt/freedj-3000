@@ -136,7 +136,7 @@ Deck B controls drive the second beat grid (for ProDJ Link sync comparison):
 | Pitch fader (ch 1) | Set B2 BPM |
 | Cue button (ch 1) | Reset B2 beat phase |
 
-MIDI mappings are constants at the top of `crates/app/src/midi.rs`. To discover mappings for a different controller run with `RUST_LOG=debug` — every incoming MIDI message is logged.
+The full DJ2Go mapping is `docs/reference/dj2go-midi-map.md` (from Mixxx, hardware-confirmed): Play, Cue, Sync (drives real Link SYNC), Loop In/Out, pitch fader, jog, plus the shared browse knob and Load. `--deck A` (default) or `--deck B` selects which side of the controller drives this instance — two freedj instances split one DJ2Go. To map a different controller, run with `RUST_LOG=opendeck::midi=debug`; every message is logged.
 
 ### ProDJ Link
 

@@ -1,14 +1,19 @@
 //! Numark DJ2Go — a USB MIDI adapter on the input bus.
 //!
-//! Class-compliant MIDI: Note On/Off for buttons, Control Change for the jog
-//! wheel (relative encoder) and pitch slider.  This module only *translates*
-//! MIDI into [`Event`]s and pushes them onto the bus; it holds no deck state.
-//! The jog *nudge* (accumulate a speed offset, snap back when idle) lives in
-//! `DeckApp::apply`, not here — so a wrong jog delta and a wrong nudge can be
-//! told apart (see docs/INPUT_PLAN.md, the S2 lesson).
+//! This module only *translates* MIDI into [`Event`]s and pushes them onto
+//! the bus; it holds no deck state.  The jog *nudge* (accumulate a speed
+//! offset, snap back when idle) lives in `DeckApp::apply`, not here — so a
+//! wrong jog delta and a wrong nudge can be told apart (docs/INPUT_PLAN.md,
+//! the S2 lesson).
 //!
-//! Run with `RUST_LOG=opendeck::midi=debug` to see every incoming message and
-//! check the constants below against a different controller.
+//! The full note/CC assignment is `docs/reference/dj2go-midi-map.md`, taken
+//! from the Mixxx `Numark DJ2Go.midi.xml` mapping and confirmed against the
+//! hardware.  The DJ2Go puts *both* decks on MIDI channel 0 and distinguishes
+//! them by note/CC number, so `--deck A|B` selects a note table, not a
+//! channel.  (A true two-channel controller like the Kontrol S2 would instead
+//! use channel 1 for its right deck; that is a separate adapter.)
+//!
+//! Run with `RUST_LOG=opendeck::midi=debug` to see every message.
 
 use crate::input::{ControlEvent, Event};
 use midir::MidiInput;
@@ -16,32 +21,42 @@ use std::sync::mpsc::Sender;
 
 const DEVICE_NAME: &str = "DJ2Go";
 
-// ── Deck A mappings — (channel 0-indexed, note/cc) ───────────────────────────
-const MAP_PLAY:       (u8, u8) = (0, 0x33);
-const MAP_CUE:        (u8, u8) = (0, 0x3B);
-const MAP_PITCH_UP:   (u8, u8) = (0, 0x43);
-const MAP_PITCH_DOWN: (u8, u8) = (0, 0x44);
+/// One deck's note/CC numbers.  All messages arrive on MIDI channel 0; these
+/// numbers are what separates deck A (left) from deck B (right).
+struct DeckMap {
+    play:     u8,   // note
+    cue:      u8,   // note
+    sync:     u8,   // note
+    pfl:      u8,   // note — headphone cue (not implemented; needs a cue bus)
+    load:     u8,   // note, sent as Note Off (0x80); Note On same number = Shift
+    loop_in:  u8,   // note
+    loop_out: u8,   // note
+    jog_cc:   u8,   // relative CC
+    fader_cc: u8,   // absolute CC, 0–127
+}
 
-// The DJ2Go jog sends two CCs: 0x18 (touch plate) and 0x19 (outer ring).
-// Both are relative; treat either as a jog delta.
-const JOG_CC_A:   u8 = 0x18; // 24
-const JOG_CC_B:   u8 = 0x19; // 25, relative: 1–63 = CW (+), 65–127 = CCW (−)
-const PITCH_CC:   u8 = 0x0D; // 13, absolute 0–127, centre 64
+const DECK_A: DeckMap = DeckMap {
+    play: 0x3B, cue: 0x33, sync: 0x40, pfl: 0x65, load: 0x4B,
+    loop_in: 0x44, loop_out: 0x43, jog_cc: 0x19, fader_cc: 0x0D,
+};
+const DECK_B: DeckMap = DeckMap {
+    play: 0x42, cue: 0x3C, sync: 0x47, pfl: 0x66, load: 0x34,
+    loop_in: 0x46, loop_out: 0x45, jog_cc: 0x18, fader_cc: 0x0E,
+};
 
-/// Pitch step for the ± buttons and the fader range, matching a CDJ.
-const PITCH_STEP:  f32 = 0.01;
+// ── Global controls (deck-independent) ───────────────────────────────────────
+const SELECT_KNOB_CC: u8 = 0x1A;   // browse encoder, relative
+const BACK_NOTE:      u8 = 0x59;   // Note Off on press
+const ENTER_NOTE:     u8 = 0x5A;   // Note Off on press
 
 pub struct MidiHandle {
     _conn: midir::MidiInputConnection<()>,
 }
 
 impl MidiHandle {
-    /// Connect to the DJ2Go and forward one deck's controls to `tx` as bus
-    /// events.  `channel` selects the controller side: 0 = left (deck A),
-    /// 1 = right (deck B).  A two-deck controller mirrors the same note/CC
-    /// numbers across both channels, so two freedj instances — one per
-    /// channel — split the controller between them.
-    pub fn connect(tx: Sender<Event>, channel: u8) -> Option<Self> {
+    /// Connect to the DJ2Go and forward one deck's controls to `tx`.
+    /// `deck_b` selects the right-hand deck's note table.
+    pub fn connect(tx: Sender<Event>, deck_b: bool) -> Option<Self> {
         let midi_in = MidiInput::new("opendeck")
             .map_err(|e| log::warn!("MIDI: init failed: {e}"))
             .ok()?;
@@ -61,10 +76,10 @@ impl MidiHandle {
             }
         };
 
-        log::info!("MIDI: found {DEVICE_NAME} — connecting");
+        log::info!("MIDI: found {DEVICE_NAME} — deck {}", if deck_b { "B/right" } else { "A/left" });
         let conn = midi_in
             .connect(&port, "opendeck-dj2go", move |_ts, msg, _| {
-                if let Some(ev) = translate(msg, channel) {
+                if let Some(ev) = translate(msg, if deck_b { &DECK_B } else { &DECK_A }) {
                     let _ = tx.send(ev);
                 }
             }, ())
@@ -75,48 +90,51 @@ impl MidiHandle {
     }
 }
 
-/// One MIDI message → at most one bus event.  Deck A only; the second-deck
-/// simulation retired when real ProDJ Link began driving the B2 strip.
-fn translate(msg: &[u8], deck_channel: u8) -> Option<Event> {
+/// One MIDI message → at most one bus event, for the given deck's controls
+/// plus the shared browse controls.
+fn translate(msg: &[u8], m: &DeckMap) -> Option<Event> {
     if msg.len() < 3 { return None; }
-    let kind = msg[0] & 0xF0;
-    let ch   = msg[0] & 0x0F;
+    let status = msg[0] & 0xF0;
+    let (a, b) = (msg[1], msg[2]);
     log::debug!("MIDI rx: {:02X?}", msg);
-    // Only this deck's channel; the other side drives the other instance.
-    if ch != deck_channel { return None; }
-
     let deck = |e| Some(Event::Deck(e));
-    match kind {
-        // Note On (velocity 0 = Note Off, ignored).
-        0x90 if msg[2] > 0 => {
-            let note = msg[1];
-            match note {
-                n if n == MAP_PLAY.1       => deck(ControlEvent::PlayPause),
-                n if n == MAP_CUE.1        => deck(ControlEvent::Cue),
-                n if n == MAP_PITCH_UP.1   => deck(ControlEvent::TempoNudge { delta:  PITCH_STEP }),
-                n if n == MAP_PITCH_DOWN.1 => deck(ControlEvent::TempoNudge { delta: -PITCH_STEP }),
-                _ => { log::debug!("MIDI note ch{ch} 0x{note:02X} unmapped"); None }
+
+    match status {
+        // ── Note On (button press; velocity 0 = release) ────────────────────
+        0x90 if b > 0 => match a {
+            n if n == m.play     => deck(ControlEvent::PlayPause),
+            n if n == m.cue      => deck(ControlEvent::Cue),
+            n if n == m.sync     => deck(ControlEvent::SyncToggle),
+            n if n == m.loop_in  => deck(ControlEvent::LoopIn),
+            n if n == m.loop_out => deck(ControlEvent::LoopOut),
+            n if n == m.pfl      => { log::info!("DJ2Go: headphone cue — no cue bus yet"); None }
+            // Note On for load/back/enter = the Shift layer; ignore for now.
+            _ => { log::debug!("MIDI note-on 0x{a:02X} unmapped"); None }
+        },
+        // ── Note Off — Load / Back / Enter fire here on the DJ2Go ───────────
+        0x80 => match a {
+            n if n == m.load => deck(ControlEvent::Load),
+            BACK_NOTE        => deck(ControlEvent::Back),
+            ENTER_NOTE       => deck(ControlEvent::Load),   // Enter loads the selection
+            _ => None,
+        },
+        // ── Control Change (faders, jog, browse knob) ───────────────────────
+        0xB0 => match a {
+            cc if cc == m.jog_cc => {
+                let delta = if b < 64 { b as i32 } else { b as i32 - 128 };
+                Some(Event::Deck(ControlEvent::JogDelta { delta, velocity_rpm: delta as f32 * 2.0 }))
             }
-        }
-        // Control Change.
-        0xB0 => {
-            let (cc, value) = (msg[1], msg[2]);
-            match cc {
-                JOG_CC_A | JOG_CC_B => {
-                    // Relative two's-complement delta.
-                    let delta = if value < 64 { value as i32 } else { value as i32 - 128 };
-                    // The DJ2Go gives no velocity; approximate one for scratch
-                    // mode from the delta (33.3 RPM reference).
-                    Some(Event::Deck(ControlEvent::JogDelta { delta, velocity_rpm: delta as f32 * 2.0 }))
-                }
-                PITCH_CC => {
-                    // Centre 64 = 0%; lower value = fader up = faster.
-                    let position = 1.0 - value as f32 / 127.0;
-                    Some(Event::Deck(ControlEvent::TempoFader { position }))
-                }
-                _ => None,
+            cc if cc == m.fader_cc => {
+                // Centre 64 = 0%; lower value = fader up = faster.
+                let position = 1.0 - b as f32 / 127.0;
+                Some(Event::Deck(ControlEvent::TempoFader { position }))
             }
-        }
+            SELECT_KNOB_CC => {
+                let delta = if b < 64 { b as i32 } else { b as i32 - 128 };
+                Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta }))
+            }
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -126,27 +144,41 @@ mod tests {
     use super::*;
     use crate::input::{ControlEvent as CE, Event};
 
-    fn deck(msg: &[u8]) -> Option<CE> {
-        match translate(msg, 0) { Some(Event::Deck(e)) => Some(e), _ => None }
+    fn ev(msg: &[u8], deck_b: bool) -> Option<CE> {
+        match translate(msg, if deck_b { &DECK_B } else { &DECK_A }) {
+            Some(Event::Deck(e)) => Some(e),
+            _ => None,
+        }
     }
 
     #[test]
-    fn dj2go_controls_map_to_deck_events() {
-        assert!(matches!(deck(&[0x90, 0x33, 0x7F]), Some(CE::PlayPause)));
-        assert!(matches!(deck(&[0x90, 0x3B, 0x7F]), Some(CE::Cue)));
-        assert!(matches!(deck(&[0x90, 0x43, 0x7F]), Some(CE::TempoNudge { delta }) if (delta - 0.01).abs() < 1e-6));
-        assert!(matches!(deck(&[0x90, 0x44, 0x7F]), Some(CE::TempoNudge { delta }) if (delta + 0.01).abs() < 1e-6));
-        // Note-off (velocity 0) produces nothing.
-        assert!(translate(&[0x90, 0x33, 0x00]).is_none());
-        // Jog: +5 clockwise, −5 as two's complement (123).
-        assert!(matches!(deck(&[0xB0, 0x19, 5]),   Some(CE::JogDelta { delta:  5, .. })));
-        assert!(matches!(deck(&[0xB0, 0x18, 5]),   Some(CE::JogDelta { delta:  5, .. })));
-        assert!(matches!(deck(&[0xB0, 0x19, 123]), Some(CE::JogDelta { delta: -5, .. })));
-        // Fader: centre 64 → ~0.5, top (0) → 1.0, bottom (127) → 0.0.
-        assert!(matches!(deck(&[0xB0, 0x0D, 64]),  Some(CE::TempoFader { position }) if (position - 0.496).abs() < 0.02));
-        assert!(matches!(deck(&[0xB0, 0x0D, 0]),   Some(CE::TempoFader { position }) if position > 0.99));
-        // Deck B (channel 1) is ignored when we are deck A (channel 0).
-        assert!(translate(&[0x91, 0x33, 0x7F], 0).is_none());
-        assert!(matches!(translate(&[0x91, 0x33, 0x7F], 1), Some(Event::Deck(CE::PlayPause))));
+    fn deck_a_controls() {
+        assert!(matches!(ev(&[0x90, 0x3B, 0x7F], false), Some(CE::PlayPause)));      // play
+        assert!(matches!(ev(&[0x90, 0x33, 0x7F], false), Some(CE::Cue)));            // cue
+        assert!(matches!(ev(&[0x90, 0x40, 0x7F], false), Some(CE::SyncToggle)));     // sync
+        assert!(matches!(ev(&[0x90, 0x44, 0x7F], false), Some(CE::LoopIn)));         // loop in
+        assert!(matches!(ev(&[0x90, 0x43, 0x7F], false), Some(CE::LoopOut)));        // loop out
+        assert!(matches!(ev(&[0x80, 0x4B, 0x00], false), Some(CE::Load)));           // load (note off)
+        assert!(matches!(ev(&[0xB0, 0x19, 5],    false), Some(CE::JogDelta { delta: 5, .. })));
+        assert!(matches!(ev(&[0xB0, 0x0D, 0],    false), Some(CE::TempoFader { position }) if position > 0.99));
+    }
+
+    #[test]
+    fn deck_b_uses_its_own_numbers() {
+        assert!(matches!(ev(&[0x90, 0x42, 0x7F], true), Some(CE::PlayPause)));       // play B
+        assert!(matches!(ev(&[0x90, 0x3C, 0x7F], true), Some(CE::Cue)));             // cue B
+        assert!(matches!(ev(&[0x90, 0x47, 0x7F], true), Some(CE::SyncToggle)));      // sync B
+        assert!(matches!(ev(&[0xB0, 0x18, 5],    true), Some(CE::JogDelta { delta: 5, .. })));
+        assert!(matches!(ev(&[0xB0, 0x0E, 64],   true), Some(CE::TempoFader { .. })));
+        // Deck A's play note does nothing when we are deck B.
+        assert!(ev(&[0x90, 0x3B, 0x7F], true).is_none());
+    }
+
+    #[test]
+    fn browse_controls_are_shared() {
+        assert!(matches!(ev(&[0xB0, 0x1A, 1],   false), Some(CE::BrowseEncoderDelta { delta:  1 })));
+        assert!(matches!(ev(&[0xB0, 0x1A, 127], false), Some(CE::BrowseEncoderDelta { delta: -1 })));
+        assert!(matches!(ev(&[0x80, 0x59, 0],   false), Some(CE::Back)));
+        assert!(matches!(ev(&[0x80, 0x5A, 0],   false), Some(CE::Load)));
     }
 }
