@@ -612,6 +612,11 @@ fn main() -> Result<()> {
         Some("B") | Some("b") => 1,
         _ => 0,
     };
+    // Link SEND (beat/status/master handoff) is on by default — verified
+    // against the XDJ. `--link-receive-only` (announce + listen only, still
+    // follows a master's tempo, never asks the deck to do anything) is a
+    // conservative fallback if a deck ever misbehaves.
+    let mut link_send = std::env::var("OPENDECK_LINK_SEND").map(|v| v != "0").unwrap_or(true);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--player" => player = args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6")?,
@@ -620,6 +625,8 @@ fn main() -> Result<()> {
                 Some("B") | Some("b") => 1,
                 _ => bail!("--deck needs A or B"),
             },
+            "--link-send" => link_send = true,
+            "--link-receive-only" => link_send = false,
             _ => path = Some(a.into()),
         }
     }
@@ -671,7 +678,9 @@ fn main() -> Result<()> {
         Arc::clone(&beat2_anchor),
         Arc::clone(&beat2_player),
     );
+    log::info!("ProDJ Link send: {}", if link_send { "full (beat/status/master)" } else { "receive-only (announce + listen)" });
     let _prodj_tx = prodj::ProDjSender::start(Arc::clone(&link), prodj::SenderState {
+        send_full:   link_send,
         position:    Arc::clone(&audio.position),
         in_flight:   Arc::clone(&audio.in_flight),
         playing:     Arc::clone(&audio.playing),
