@@ -16,6 +16,7 @@ opendeck-types       = { workspace = true }
 opendeck-protocol    = { workspace = true }
 opendeck-decode      = { workspace = true }
 opendeck-analysis    = { workspace = true }
+opendeck-rekordbox   = { path = "../rekordbox" }
 opendeck-timestretch = { workspace = true }
 cpal              = { workspace = true }
 rtrb              = { workspace = true }

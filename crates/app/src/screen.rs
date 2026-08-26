@@ -161,7 +161,7 @@ fn draw_browse(ui: &Ui, browser: &Browser, lay: &Layout, h: f32) {
     // Header replaces the title bar with the current folder name.
     let hdr = lay.title;
     ui.painter().rect_filled(hdr, 0.0, BAR);
-    let folder = browser.cwd().file_name().and_then(|n| n.to_str()).unwrap_or("/");
+    let folder = browser.title();
     text(ui, Pos2::new(hdr.min.x + h * 0.02, hdr.center().y), Align2::LEFT_CENTER,
          folder.to_uppercase(), h * 0.030, TEXT);
 
