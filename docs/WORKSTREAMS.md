@@ -191,6 +191,18 @@ send: build the status packet from zero, setting only the documented fields,
 instead of from the template.** Also worth: send status only when we actually
 need the XDJ to see us (master/sync), not continuously.
 
+**A master that stops must relinquish cleanly.** Observed 2026-08-26: when
+freedj was tempo master and stopped sending beats (its track ended, or it
+quit, or it went receive-only), an XDJ that was SYNC-following it entered play
+and **stalled waiting for beat packets that never came** — looked frozen, was
+just waiting. A master that goes away must clear its master flag in a final
+status (and ideally keep a clock while it still holds master) so followers
+elect a new master or free-run. Required before re-enabling send:
+- on end-of-track / pause while master, keep sending beats OR yield master;
+- on quit while master, send a status with master=false.
+The receive-only default sidesteps this for now (freedj never becomes master),
+which is another reason to keep send opt-in until the sender is hardened.
+
 Original completion note (mechanics verified):
 
 Announce (0x06), beat (0x28), and status (0x0a, unicast to every peer ~5/s)
