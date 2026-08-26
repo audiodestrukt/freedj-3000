@@ -396,17 +396,13 @@ impl Renderer {
             })
             .unwrap_or((0.0, 0.0, 0.0, 4.0));
 
-        // Scale B2 period by fader_speed so the B2 strip scrolls at the same
-        // visual velocity as the audio beat grid.  Audio markers scroll at
-        // fader_speed × (sr/hop) px/s; unscaled B2 always scrolls at 1×(sr/hop).
-        // Multiplying beat2_period_cols by fader_speed corrects this, and at
-        // perfect beatmatch (beat2_bpm = g.bpm × fader_speed) the two periods
-        // are equal, giving matching density AND velocity.
-        let beat2_period_cols = if beat2_bpm > 0.0 {
-            (sample_rate as f32 * 60.0 / beat2_bpm) / hop_size * fader_speed
-        } else {
-            0.0
-        };
+        // The cyan B2 beat strip under the waveform is not an XDJ-1000 element;
+        // it was a bring-up aid for external-sync testing.  Disabled for
+        // faithful reproduction — the external deck now lives only in the
+        // phase meter.  Set to the commented expression to bring it back.
+        //   (sample_rate as f32 * 60.0 / beat2_bpm) / hop_size * fader_speed
+        let _ = (beat2_bpm, beat2_phase_beats);
+        let beat2_period_cols = 0.0;
 
         let params = WaveformParams {
             playhead_col,

@@ -128,11 +128,25 @@ touching the widget or in SHORTCUT (manual: "Waveform/Phase Meter"). The
 two units simply happened to be in different modes.
 
 1. **Beat display** (player 1 shot): two rows of four outlined boxes, the
-   current beat solid — blue, or orange when this deck is master.
-2. **Alignment view** (player 4 shot): a `MASTER PLAYER [1]` tag in yellow,
-   then two rows of beat ticks — the master's grid on top, this deck's below
-   — with a white playhead line so phase offset between the decks is read as
-   horizontal displacement. Bar ticks are taller.
+   current beat solid — blue, or orange when this deck is master.  freedj's version: top row = bar within the
+   4-bar phrase, bottom row = beat within the bar (both from the local grid).
+2. **Alignment view** (player 4 shot): a `MASTER PLAYER [n]` tag in yellow,
+   then two rows of beat ticks under a fixed white playhead so phase offset
+   between the decks reads as horizontal displacement. Bar ticks are taller.
+   **Top row = the remote / master deck; bottom row = this (local) deck.**
+   Each row's tall downbeat ("one") tick comes from *that deck's own*
+   beat-in-bar — the master's from its Link beat packets (which carry beat
+   1–4), ours from our grid — so the downbeat marker stays put. (An earlier
+   build derived both rows' downbeat from the local beat count while the
+   master row scrolled on the master's phase, so the "one" danced and a
+   tick's height flickered tall/short.)
+
+   **Four-deck (and larger) setups:** ProDJ Link has exactly one tempo master
+   at a time, whatever the deck count. This view always compares *this* deck
+   against *the* master — the `MASTER PLAYER [n]` tag names which of the up-to-4
+   players that is. It never shows all four at once; the beat-box view shows
+   only this deck's own bar/beat. So more decks changes the tag number, not
+   the layout.
 
 Both views keep the two "Bars" readouts to their right.
 
@@ -169,3 +183,21 @@ the countdown becomes real; until then, dashes are correct parity, not a bug.
 - A.HOTCUE (red) and A.CUE can both be shown, stacked, when both modes are on.
 - Above the track number: TRACK or SINGLE, following the play-mode setting.
 - REMAIN caption appears when the time display counts down.
+
+## Downbeat / beat-1 is not truly detected yet
+
+Which beat is "one" (the bar's downbeat) is only as good as the beat grid's
+*phase*. freedj's grid (`crates/analysis/src/beat.rs`) anchors on a strong
+onset and leaves `downbeat_offset = 0`, so whichever beat the anchor lands on
+becomes beat 1 — the bar boundary can be off by 1–3 beats. On a CDJ the
+downbeat comes from the rekordbox grid (or the first memory cue you set), which
+pins beat 1 deliberately.
+
+So the phase meter's bar row and the (future) Bars countdown inherit an
+arbitrary bar phase until either:
+- the beat-grid analysis learns a real downbeat (bar-level onset weighting), or
+- we implement setting the beat-1 / initial memory cue (part of the cue engine,
+  WORKSTREAMS C2, deferred).
+
+Confirmed with a real track 2026-08-26: the detected downbeat did not line up
+with the musical "one". Not a rendering bug — the grid phase is unset.

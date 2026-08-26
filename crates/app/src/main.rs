@@ -55,6 +55,7 @@ struct DeckApp {
     beat2_bpm:    Arc<AtomicU32>,  // f32 bits; BPM of the second grid
     beat2_anchor: Arc<AtomicU64>, // written by MIDI Cue B to signal a phase reset
     beat2_player: Arc<AtomicU32>, // player number of the last Link beat sender
+    beat2_bib:    Arc<AtomicU32>, // external deck's beat within its bar (1-4, 0=unknown)
     link:         Arc<prodj::LinkState>,
     beat2_start:  Instant,        // wall-clock time of the last phase reset
     prev_beat2_anchor: u64,       // detect changes in beat2_anchor
@@ -102,7 +103,7 @@ struct UiFlags {
 #[allow(clippy::too_many_arguments)]
 fn make_snapshot<'a>(
     path: &'a std::path::Path, beat_grid: Option<&'a BeatGrid>, audio: &AudioHandle, f: UiFlags,
-    pos: u64, playing: bool, speed: f32, fader_speed: f32, beat2_bpm: f32, beat2_phase_beats: f32,
+    pos: u64, playing: bool, speed: f32, fader_speed: f32, beat2_bpm: f32, beat2_phase_beats: f32, beat2_beat_in_bar: u8,
 ) -> DeckSnapshot<'a> {
     DeckSnapshot {
         title:         path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
@@ -124,6 +125,7 @@ fn make_snapshot<'a>(
         beat_grid,
         beat2_bpm,
         beat2_phase_beats,
+        beat2_beat_in_bar,
     }
 }
 
@@ -137,6 +139,7 @@ impl DeckApp {
         beat2_bpm:    Arc<AtomicU32>,
         beat2_anchor: Arc<AtomicU64>,
         beat2_player: Arc<AtomicU32>,
+        beat2_bib:    Arc<AtomicU32>,
         link:         Arc<prodj::LinkState>,
         event_rx:     mpsc::Receiver<Event>,
     ) -> Self {
@@ -149,6 +152,7 @@ impl DeckApp {
             beat2_bpm,
             beat2_anchor,
             beat2_player,
+            beat2_bib,
             link,
             beat2_start:       Instant::now(),
             prev_beat2_anchor: 0,
@@ -367,6 +371,7 @@ impl DeckApp {
         let beat2_bpm    = f32::from_bits(self.beat2_bpm.load(Ordering::Relaxed));
         let beat2_anchor = self.beat2_anchor.load(Ordering::Relaxed);
         let beat2_player = self.beat2_player.load(Ordering::Relaxed);
+        let beat2_bib_v  = self.beat2_bib.load(Ordering::Relaxed) as u8;
 
         // Log when beat2_bpm changes (confirms ProDJ data is reaching the renderer).
         if (beat2_bpm - self.prev_beat2_bpm).abs() > 0.01 {
@@ -392,7 +397,7 @@ impl DeckApp {
             linked: beat2_player > 0,
             master_player: match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 },
         };
-        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats);
+        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
 
         // Screen layout in logical points; the shader gets its two rects in pixels.
         let ppp  = window.scale_factor() as f32;
@@ -440,7 +445,7 @@ impl DeckApp {
             linked: beat2_player > 0,
             master_player: match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 },
         };
-        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats);
+        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
 
         // Dev: OPENDECK_SCREENSHOT=path captures frame 90 and exits.
         self.frame_count += 1;
@@ -666,6 +671,7 @@ fn main() -> Result<()> {
     let beat2_bpm    = Arc::new(AtomicU32::new(base_bpm.to_bits()));
     let beat2_anchor = Arc::new(AtomicU64::new(0));
     let beat2_player = Arc::new(AtomicU32::new(0));
+    let beat2_bib    = Arc::new(AtomicU32::new(0));
 
     // ── 4. Start ProDJ Link listener (optional — app runs fine without it) ────────
     let link = prodj::LinkState::new(player);
@@ -677,6 +683,7 @@ fn main() -> Result<()> {
         Arc::clone(&beat2_bpm),
         Arc::clone(&beat2_anchor),
         Arc::clone(&beat2_player),
+        Arc::clone(&beat2_bib),
     );
     log::info!("ProDJ Link send: {}", if link_send { "full (beat/status/master)" } else { "receive-only (announce + listen)" });
     let _prodj_tx = prodj::ProDjSender::start(Arc::clone(&link), prodj::SenderState {
@@ -701,7 +708,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, link, event_rx);
+    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, event_rx);
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())

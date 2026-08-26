@@ -359,19 +359,27 @@ fn draw_phase_ticks(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
     let beats_visible = 8.0;
     let beat_px = w / beats_visible;
     let cx = x0 + w * 0.5;
+    // Two tick rows.  Top = the remote/master deck; bottom = this (local)
+    // deck.  Each row's tall "one" (downbeat) tick comes from *that deck's own*
+    // beat-in-bar — the top row from the master's beat packets, the bottom from
+    // our grid — so the downbeat marker stays put instead of dancing (it used
+    // to derive both from our beat count while the master row scrolled on the
+    // master's phase).
+    let master_bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
+    let our_bib    = snap.beat_in_bar().unwrap_or(1) as i32;
     let rows = [
-        (r.min.y + r.height() * 0.30, if snap.beat2_bpm > 0.0 { Some(snap.beat2_phase_beats) } else { None }, ORANGE),
-        (r.min.y + r.height() * 0.78, snap.beat_phase(), BLUE),
+        (r.min.y + r.height() * 0.30, (snap.beat2_bpm > 0.0).then_some(snap.beat2_phase_beats), master_bib, ORANGE),
+        (r.min.y + r.height() * 0.78, snap.beat_phase(), our_bib, BLUE),
     ];
-    let bib = snap.beat_in_bar().unwrap_or(1) as i32;
-    for (y, phase, bar_col) in rows {
+    for (y, phase, row_bib, bar_col) in rows {
         p.line_segment([Pos2::new(x0, y), Pos2::new(r.max.x, y)], Stroke::new(1.0, FAINT));
         let Some(ph) = phase else { continue };
         for i in -4..=4i32 {
             let x = cx + (i as f32 - ph) * beat_px;
             if x < x0 || x > r.max.x { continue; }
-            // Bar ticks taller; bar position from our own beat-in-bar.
-            let is_bar = (i + bib - 1).rem_euclid(4) == 0;
+            // The tick at offset i is a downbeat when this deck's beat-in-bar
+            // there is 1.
+            let is_bar = (i + row_bib - 1).rem_euclid(4) == 0;
             let len = if is_bar { h * 0.020 } else { h * 0.011 };
             let col = if is_bar { bar_col } else { DIM };
             p.line_segment([Pos2::new(x, y - len), Pos2::new(x, y)], Stroke::new(1.5, col));

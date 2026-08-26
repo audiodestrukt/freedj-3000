@@ -47,6 +47,8 @@ pub struct DeckSnapshot<'a> {
     pub beat2_bpm:    f32,
     /// External deck beat phase 0.0–1.0, wall-clock driven.
     pub beat2_phase_beats: f32,
+    /// External deck's beat within its bar, 1–4 (0 = unknown).
+    pub beat2_beat_in_bar: u8,
 }
 
 impl DeckSnapshot<'_> {

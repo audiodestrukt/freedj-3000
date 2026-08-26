@@ -174,10 +174,11 @@ impl ProDjHandle {
         beat2_bpm:    Arc<AtomicU32>,
         beat2_anchor: Arc<AtomicU64>,
         beat2_player: Arc<AtomicU32>,
+        beat2_bib:    Arc<AtomicU32>,
     ) -> Option<Self> {
         let mut threads = Vec::new();
         if let Some(t) = listen_announce(Arc::clone(&link)) { threads.push(t); }
-        if let Some(t) = listen_beat(Arc::clone(&link), beat2_bpm, beat2_anchor, Arc::clone(&beat2_player)) { threads.push(t); }
+        if let Some(t) = listen_beat(Arc::clone(&link), beat2_bpm, beat2_anchor, Arc::clone(&beat2_player), beat2_bib) { threads.push(t); }
         if let Some(t) = listen_status(Arc::clone(&link), beat2_player) { threads.push(t); }
         if threads.is_empty() { None } else { Some(ProDjHandle { _threads: threads }) }
     }
@@ -224,6 +225,7 @@ fn listen_beat(
     beat2_bpm:    Arc<AtomicU32>,
     beat2_anchor: Arc<AtomicU64>,
     beat2_player: Arc<AtomicU32>,
+    beat2_bib:    Arc<AtomicU32>,
 ) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(PORT_BEAT)?;
     log::info!("ProDJ Link: listening for beats on port {PORT_BEAT}");
@@ -240,6 +242,7 @@ fn listen_beat(
                 let old = f32::from_bits(beat2_bpm.load(Ordering::Relaxed));
                 beat2_bpm.store(b.bpm.to_bits(), Ordering::Relaxed);
                 beat2_player.store(b.player as u32, Ordering::Relaxed);
+                beat2_bib.store(b.beat_in_bar as u32, Ordering::Relaxed);
                 beat2_anchor.fetch_add(1, Ordering::Relaxed);
                 if (old - b.bpm).abs() > 0.005 {
                     log::info!("ProDJ beat: player {} @ {:.2} BPM (was {old:.2})", b.player, b.bpm);
