@@ -13,6 +13,7 @@ use rekordcrate::pdb::string::DeviceSQLString;
 use rekordcrate::pdb::{Header, Row};
 use std::collections::HashMap;
 use std::fs::File;
+use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 /// One track from the rekordbox database.
@@ -89,14 +90,13 @@ fn text(s: &DeviceSQLString) -> String {
     s.clone().into_string().unwrap_or_default()
 }
 
-/// Collect every row in the database (all tables).
-fn read_all_rows(pdb: &Path) -> Result<Vec<Row>> {
-    let mut r = File::open(pdb).with_context(|| format!("open {}", pdb.display()))?;
-    let header = Header::read(&mut r).map_err(|e| anyhow!("parse pdb header: {e}"))?;
+/// Collect every row in the database (all tables) from any reader.
+fn read_all_rows<R: Read + Seek>(r: &mut R) -> Result<Vec<Row>> {
+    let header = Header::read(r).map_err(|e| anyhow!("parse pdb header: {e}"))?;
     let mut rows = Vec::new();
     for table in &header.tables {
         let pages = header
-            .read_pages(&mut r, binrw::Endian::Little, (&table.first_page, &table.last_page))
+            .read_pages(r, binrw::Endian::Little, (&table.first_page, &table.last_page))
             .map_err(|e| anyhow!("read pages for {:?}: {e}", table.page_type))?;
         for page in pages {
             for group in &page.row_groups {
@@ -111,7 +111,15 @@ fn read_all_rows(pdb: &Path) -> Result<Vec<Row>> {
 /// with artist names resolved and track order stable.
 pub fn read_export(usb_root: &Path) -> Result<RbExport> {
     let pdb = usb_root.join("PIONEER/rekordbox/export.pdb");
-    let rows = read_all_rows(&pdb)?;
+    let mut f = File::open(&pdb).with_context(|| format!("open {}", pdb.display()))?;
+    read_export_from(&mut f, usb_root.to_path_buf())
+}
+
+/// Parse an `export.pdb` from any reader (e.g. bytes read over NFS from a linked
+/// player). `root` is the media root that track paths resolve against — a real
+/// mount for local media, or a label for a network source.
+pub fn read_export_from<R: Read + Seek>(reader: &mut R, root: PathBuf) -> Result<RbExport> {
+    let rows = read_all_rows(reader)?;
 
     let mut artists: HashMap<u32, String> = HashMap::new();
     for row in &rows {
@@ -164,7 +172,7 @@ pub fn read_export(usb_root: &Path) -> Result<RbExport> {
         })
         .collect();
 
-    Ok(RbExport { root: usb_root.to_path_buf(), tracks, playlists, entries, by_id })
+    Ok(RbExport { root, tracks, playlists, entries, by_id })
 }
 
 // ── ANLZ analysis import (beat grid + cues) ───────────────────────────────────

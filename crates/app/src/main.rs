@@ -1174,3 +1174,25 @@ mod anlz_grid_tests {
         assert_eq!(grid.anchor_sample, 2688, "anchor frames");
     }
 }
+
+#[cfg(test)]
+mod nfs_link_tests {
+    // Gated: OPENDECK_TEST_NFS=192.168.68.58 (a linked XDJ with a USB)
+    #[test]
+    fn browse_linked_library_over_nfs() {
+        let Ok(ip) = std::env::var("OPENDECK_TEST_NFS") else { return };
+        let ip: std::net::Ipv4Addr = ip.parse().unwrap();
+        let mut nfs = opendeck_nfs::Nfs::connect(ip).expect("connect");
+        let root = nfs.mount_usb().expect("mount");
+        let (fh, size) = nfs.lookup_path(&root, "PIONEER/rekordbox/export.pdb").expect("lookup");
+        let bytes = nfs.read_file(&fh, size).expect("read pdb");
+        assert_eq!(bytes.len() as u32, size, "read whole pdb");
+        let exp = opendeck_rekordbox::read_export_from(
+            &mut std::io::Cursor::new(bytes),
+            std::path::PathBuf::from("nfs://linked"),
+        ).expect("parse over-the-wire pdb");
+        assert!(exp.tracks.len() > 200, "tracks: {}", exp.tracks.len());
+        println!("OK: browsed {} tracks + {} playlists off the XDJ over NFS",
+            exp.tracks.len(), exp.playlists.len());
+    }
+}
