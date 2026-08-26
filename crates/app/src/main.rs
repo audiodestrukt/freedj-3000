@@ -304,7 +304,16 @@ impl DeckApp {
                     } else {
                         // Paused after searching away → set a new cue here, then
                         // preview it while held.
-                        self.cue_point   = self.audio.position.load(Ordering::Relaxed);
+                        //
+                        // Capture the cue at the *displayed* playhead, not the raw
+                        // decoder cursor.  `position` is the decode cursor, which
+                        // sits ~in_flight (≈93 ms) ahead of what is actually heard
+                        // and drawn (`smoothed_pos ≈ position − in_flight`).  Using
+                        // the raw cursor stored the cue ~93 ms past the transient
+                        // under the playhead, so playing from it skipped the kick.
+                        // Frame-align so channels stay interleaved.
+                        let ch = self.audio.channels as u64;
+                        self.cue_point   = ((self.smoothed_pos.max(0.0) as u64) / ch) * ch;
                         self.cue_preview = true;
                         self.cued        = true;
                         self.audio.playing.store(true, Ordering::Relaxed);
