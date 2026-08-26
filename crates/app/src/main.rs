@@ -534,6 +534,7 @@ fn main() -> Result<()> {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,wgpu=warn,naga=warn"),
     )
+    .format_timestamp_micros()   // beat and frame timing are measured from the log
     .init();
 
     // Args: <file> [--player N].  OPENDECK_PLAYER also works.

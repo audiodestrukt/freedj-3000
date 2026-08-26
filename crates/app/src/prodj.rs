@@ -213,6 +213,18 @@ impl ProDjSender {
                 let announce = link.build_announce(ip, mac);
                 let mut last_announce = std::time::Instant::now() - Duration::from_secs(5);
                 let mut last_beat: Option<i64> = None;
+                let mut last_sent  = std::time::Instant::now();
+                // The decoder cursor advances a 512-frame block at a time and
+                // `in_flight` swings ±35 ms between blocks, so beat crossings
+                // read straight off `position - in_flight` land on block
+                // boundaries (measured: intervals alternating 430/463 ms for a
+                // 445 ms beat).  Do what the renderer does: free-run an
+                // estimate of the audible position at the true rate and pull
+                // it gently toward the (low-passed) reference.  Beat crossings
+                // come from the estimate, which moves smoothly.
+                let mut ahead_avg: f64 = 0.0;
+                let mut est_frames: f64 = -1.0;
+                let mut last_tick = std::time::Instant::now();
                 loop {
                     let now = std::time::Instant::now();
                     if now.duration_since(last_announce) >= Duration::from_millis(1500) {
@@ -223,28 +235,42 @@ impl ProDjSender {
                     if st.playing.load(Ordering::Relaxed) {
                         if let Some(grid) = &st.grid {
                             let pos    = st.position.load(Ordering::Relaxed);
-                            let ahead  = st.in_flight.load(Ordering::Relaxed);
-                            let frames = pos.saturating_sub(ahead) / st.channels as u64;
+                            let ahead  = st.in_flight.load(Ordering::Relaxed) as f64;
+                            let fader  = f32::from_bits(st.fader_speed.load(Ordering::Relaxed)) as f64;
+                            ahead_avg += (ahead - ahead_avg) * 0.02;
+                            let reference = (pos as f64 - ahead_avg).max(0.0) / st.channels as f64;
+                            let dt = now.duration_since(last_tick).as_secs_f64();
+                            if est_frames < 0.0 || (reference - est_frames).abs() > st.sample_rate as f64 * 0.5 {
+                                est_frames = reference;                       // start, or a seek
+                            } else {
+                                est_frames += dt * st.sample_rate as f64 * fader;
+                                est_frames += (reference - est_frames) * 0.02;
+                            }
+                            let frames = est_frames.max(0.0) as u64;
                             let beat   = grid.beat_at_sample(frames, st.sample_rate).floor() as i64;
-                            if last_beat.map_or(true, |b| b != beat) {
-                                let fader = f32::from_bits(st.fader_speed.load(Ordering::Relaxed));
+                            let seek   = last_beat.map_or(false, |b| beat < b - 2 || beat > b + 8);
+                            if last_beat.map_or(true, |b| beat > b) || seek {
                                 let bib   = ((beat + grid.downbeat_offset as i64).rem_euclid(4) + 1) as u8;
                                 let snap  = EngineSnapshot {
-                                    position: pos, ghost_position: pos, speed: fader,
-                                    bpm: grid.bpm as f32 * fader,
+                                    position: pos, ghost_position: pos, speed: fader as f32,
+                                    bpm: grid.bpm as f32 * fader as f32,
                                     beat_phase: 0.0, bar_phase: (bib - 1) as f32 / 4.0,
                                     is_playing: true, slip_active: false, key_lock: true,
                                     deck_id: player, timestamp_ns: 0,
                                 };
                                 let pkt = link.build_beat(&snap, bib);
                                 let _ = sock.send_to(&pkt, (bcast, PORT_BEAT));
-                                log::debug!("ProDJ tx: beat {beat} ({bib}/4) @ {:.2} BPM", snap.bpm);
+                                let now = std::time::Instant::now();
+                                log::debug!("ProDJ tx: beat {beat} ({bib}/4) @ {:.2} BPM  +{:.1}ms", snap.bpm, now.duration_since(last_sent).as_secs_f64() * 1000.0);
+                                last_sent = now;
                                 last_beat = Some(beat);
                             }
                         }
                     } else {
                         last_beat = None;
+                        est_frames = -1.0;
                     }
+                    last_tick = now;
                     thread::sleep(Duration::from_millis(1));
                 }
             })

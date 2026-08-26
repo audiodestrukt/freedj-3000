@@ -171,8 +171,10 @@ than validating a private format that proves nothing about real gear.
 
 Announce (0x06, every 1.5 s) and beat (0x28, at each audible beat crossing)
 are sent as `--player N`; own broadcasts are filtered. Two freedj instances
-link to each other (`make link-pair`: 46 beats sent / 44 heard each way in
-8 s, none from itself). Still to do: status packets (0x0a) so a real XDJ
+link to each other (`make link-pair`: every beat heard by the other, none
+from itself; beat interval 445.2 ms ± 3.1 ms sent, ± 2.8 ms received, for a
+445.3 ms beat — the sender free-runs a phase-locked audible position like the
+renderer does, otherwise decode-block quantisation gave ± 15 ms). Still to do: status packets (0x0a) so a real XDJ
 lists us, and verification that Pioneer firmware accepts our packets — the
 XDJ on the desk is the test. Original scope below.
 
