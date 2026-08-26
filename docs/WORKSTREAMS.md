@@ -167,24 +167,35 @@ captured packets, not to the simulator.
 Doing this first means the two-deck test *is* the compatibility work, rather
 than validating a private format that proves nothing about real gear.
 
-### B2. Link send — **partly done** (2026-08-26)
+### B2. Link send — **done** (2026-08-26)
 
-Announce (0x06, every 1.5 s) and beat (0x28, at each audible beat crossing)
-are sent as `--player N`; own broadcasts are filtered. Two freedj instances
-link to each other (`make link-pair`: every beat heard by the other, none
-from itself; beat interval 445.2 ms ± 3.1 ms sent, ± 2.8 ms received, for a
-445.3 ms beat — the sender free-runs a phase-locked audible position like the
-renderer does, otherwise decode-block quantisation gave ± 15 ms). Still to do: status packets (0x0a) so a real XDJ
-lists us, and verification that Pioneer firmware accepts our packets — the
-XDJ on the desk is the test. Original scope below.
+Announce (0x06), beat (0x28), and status (0x0a, unicast to every peer ~5/s)
+are sent as `--player N`; own broadcasts are filtered. Status is built from
+the XDJ's own captured packet as a template, so every byte we don't model is
+exactly what Pioneer firmware sends. Beat timing matches the XDJ (sd ~1.2 ms;
+PERFORMANCE.md). Verified against the real XDJ-1000MK2: it lists us and
+accepts a master handoff (B6). Unlocks screen callouts 15 (player number) and
+26 (MASTER/SYNC).
 
+### B5. SYNC follow — **done, live-untested** (2026-08-26)
 
-Announce packets (0x06) every 1.5 s, beat packets (0x28) at each beat onset
-derived from our own grid and position, a `--player N` flag. `build_announce`
-and `build_beat` are already drafted; they need correcting and calling.
+With SYNC on and not master, the sender sets the pitch fader so our effective
+BPM equals the master's (from its beats, or its status when it isn't playing),
+and nudges phase toward the master's beat on each of its beat packets, bounded
+like a jog nudge. Tempo-match verified between two freedj instances; the phase
+nudge was not exercised against the XDJ because the deck was idle by the time
+this landed. **Live test still owed:** XDJ as master and playing, freedj on
+SYNC, confirm tempo locks and phase holds.
 
-Unlocks screen callouts 15 (player number) and 26 (MASTER/SYNC), and makes
-`make two-deck` launch two real freedj instances that see each other.
+### B6. Tempo-master handoff — **done** (2026-08-26)
+
+`M` (or `OPENDECK_MASTER=1`) requests master: send the 0x26 request to the
+current master, then assert master in our status with a sync counter one
+higher than any seen (bytes 0x84–0x87, the "Syncn" mechanism), and hold. The
+old master yields on its own. Verified live: the XDJ replied 0x27 *yields* and
+dropped its MASTER flag; freedj also correctly yields when a peer
+(prolink_virtual_cdj, or a returning XDJ) asserts a higher counter. Incoming
+0x26 requests and 0x2a sync-control commands from other decks are handled too.
 
 ### B3. Audio device selection — **small**
 
@@ -198,7 +209,7 @@ interface anyway.
 SYNC / ON-AIR flags, pitch, BPM, beat number, beat-in-bar, master handoff,
 firmware, counter), tested against a packet captured from the XDJ-1000MK2.
 The listener logs a line per *change* per player. Not yet used for anything
-beyond logging and marking the deck linked; B5 (SYNC follow) is the consumer.
+beyond logging, marking the deck linked, and driving SYNC follow / handoff (B5, B6).
 
 ### Real-hardware results, 2026-08-26
 

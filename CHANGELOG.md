@@ -42,11 +42,17 @@ All notable changes to this project will be documented in this file.
   NVIDIA/Vulkan/Wayland only.
 
 ### Added — 2026-08-26
-- **ProDJ Link send** (`--player N`): announce every 1.5 s on 50000, a beat
-  packet on 50001 at every beat of the *audible* position, own broadcasts
-  filtered. Two instances link to each other (`make link-pair`). Verified
-  against a real XDJ-1000MK2 (fw 1.44): its LINK status reads *connected*
-  and it unicasts status to us. Status packets from us are not sent yet.
+- **ProDJ Link send** (`--player N`): announce (50000), beat (50001), and
+  status (0x0a, unicast to every peer) are all sent; own broadcasts filtered.
+  Status is built from the XDJ's captured packet as a template.
+- **Tempo-master handoff**: `M` takes master — 0x26 request, then assert with
+  a higher Syncn counter (0x84) and hold. Verified live: the real XDJ-1000MK2
+  yields to us, and we yield back to a peer with a higher counter.
+- **SYNC follow**: with SYNC on, match the master's effective BPM via the
+  pitch fader and nudge phase on each master beat. Tempo-match verified
+  between two instances; live phase-lock against the XDJ still to test.
+- **Handled from other decks**: incoming 0x26 (master request), 0x27 (yield),
+  and 0x2a (sync-control: sync on/off, become master).
 - **Beat timing at Pioneer's level**: the sender free-runs a phase-locked
   audible clock (τ ≈ 200 ms) with a sleep-to-deadline for the last 1.5 ms.
   Measured at the same receiver in the same run: XDJ sd 1.33 ms, freedj
