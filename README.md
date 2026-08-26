@@ -51,6 +51,8 @@ Any Linux machine with Vulkan support works for development and testing.
 
 Bring-up on the Pi (hardware checklist, build, and the graphics/audio gaps to
 expect) is in **`docs/reference/raspberry-pi.md`**.
+Measured performance on real hardware — the Pi 5 is the reference target — is
+in **`docs/BENCHMARKS.md`**.
 
 **Display: any HDMI screen.** The reference layout is the XDJ-1000MK2's 7" 1024×600 panel (the window opens at that size); regions are fractions of the screen so the UI adapts to any resolution.
 
