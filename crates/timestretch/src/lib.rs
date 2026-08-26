@@ -225,3 +225,88 @@ impl PipelineStage for TimestretechStage {
         unsafe { rb::rubberband_reset(self.rb.state); }
     }
 }
+
+// ── Performance regression guard ──────────────────────────────────────────────
+#[cfg(test)]
+mod perf {
+    use super::*;
+    use opendeck_types::PipelineStage;
+    use std::time::Instant;
+
+    const SR: u32 = 48_000;
+    const CH: usize = 2;
+    const BLOCK: usize = 512;          // matches the app's BLOCK_FRAMES
+
+    /// Deterministic broadband stereo test signal (interleaved f32), `secs` long.
+    /// A handful of detuned partials plus a cheap LCG "noise" floor so Rubber Band
+    /// does representative work (silence would let it short-circuit).
+    fn signal(secs: f32) -> Vec<f32> {
+        let n = (secs * SR as f32) as usize;
+        let mut out = Vec::with_capacity(n * CH);
+        let mut lcg: u32 = 0x1234_5678;
+        for i in 0..n {
+            let t = i as f32 / SR as f32;
+            let mut s = 0.0f32;
+            for (f, a) in [(110.0, 0.30), (277.3, 0.22), (523.7, 0.16), (1500.9, 0.10)] {
+                s += a * (2.0 * std::f32::consts::PI * f * t).sin();
+            }
+            lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let noise = (lcg >> 9) as f32 / (1u32 << 23) as f32 - 0.5; // ~[-0.5,0.5)
+            s += 0.05 * noise;
+            out.push(s * 0.9);       // L
+            out.push(s * 0.9);       // R
+        }
+        out
+    }
+
+    /// Process `input` through the stage in BLOCK-frame chunks; return wall time.
+    fn run(stage: &mut TimestretechStage, input: &[f32]) -> std::time::Duration {
+        let mut scratch = Vec::with_capacity(BLOCK * CH * 8);
+        let t0 = Instant::now();
+        for chunk in input.chunks(BLOCK * CH) {
+            scratch.clear();
+            stage.process(chunk, &mut scratch);
+        }
+        t0.elapsed()
+    }
+
+    /// Real-time factor of the R3 timestretch: processing_time / audio_duration.
+    /// < 1.0 means it keeps up; a performance regression (or an accidental
+    /// non-optimised build of Rubber Band) shows up as RTF creeping toward 1.0.
+    ///
+    /// Ceilings are *viability* bounds sized for the Pi 5 target with margin —
+    /// they pass comfortably on any supported hardware and only trip on a major
+    /// regression. The measured RTF is always printed (run with `--nocapture`,
+    /// or `make perf`) so a smaller regression is visible as a trend even when
+    /// the assertion still passes. Override the ceiling with OPENDECK_RTF_CEIL.
+    #[test]
+    fn timestretch_realtime_factor() {
+        let secs = 8.0f32;
+        let audio = signal(secs);
+
+        let ceil_scale: f64 = std::env::var("OPENDECK_RTF_CEIL")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(1.0);
+
+        // speed, ceiling. 0.5× is the heaviest for R3 (it emits ~2× frames).
+        for (speed, base_ceil) in [(1.0f32, 0.80f64), (0.5, 1.10), (2.0, 0.60)] {
+            let mut stage = TimestretechStage::new(SR, CH as u8);
+            stage.set_speed(speed);
+            // Warm up so first-call/cold-cache cost doesn't skew the measurement.
+            run(&mut stage, &signal(1.0));
+
+            let elapsed = run(&mut stage, &audio);
+            let rtf = elapsed.as_secs_f64() / secs as f64;
+            let ceil = base_ceil * ceil_scale;
+            println!(
+                "RTF @ {:.2}x = {:.4}  ({:.0} ms to process {:.0} s audio; ceiling {:.2})",
+                speed, rtf, elapsed.as_secs_f64() * 1000.0, secs, ceil,
+            );
+            assert!(
+                rtf < ceil,
+                "timestretch RTF regression @ {speed:.2}x: {rtf:.3} ≥ ceiling {ceil:.2} \
+                 (processing is no longer comfortably real-time — a DSP regression, \
+                 an un-optimised Rubber Band build, or slower hardware than the Pi 5 target)",
+            );
+        }
+    }
+}

@@ -30,7 +30,7 @@ REF_URL    := https://downloads.support.alphatheta.com/manuals/dj-players/CDJ-30
 RUST_LOG   ?= info,wgpu=warn,naga=warn
 
 .DEFAULT_GOAL := help
-.PHONY: help build debug relink run dev two-deck link-pair beat virtual-cdj shot check fmt clippy test clean reference distclean
+.PHONY: help build debug relink run dev two-deck link-pair beat virtual-cdj shot check fmt clippy test perf clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -108,6 +108,9 @@ clippy: ## Lint
 
 test: ## Run tests
 	$(CARGO) test --workspace
+
+perf: ## Run the DSP real-time-factor guard, printing the measured RTF
+	$(CARGO) test --release -p opendeck-timestretch perf -- --nocapture
 
 ## ── Reference material ─────────────────────────────────────────────────────
 

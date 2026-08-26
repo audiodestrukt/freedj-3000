@@ -125,6 +125,22 @@ single-producer/single-consumer lock-free ring buffer is deliberately simple.
 The right rule here is "one heavy job per thread, one thread per core it
 needs," and the heaviest job that scales is per-deck DSP.
 
+## Regression guard (in the test suite)
+
+`make perf` (and `cargo test --workspace`) runs `timestretch_realtime_factor`, a
+hermetic guard that measures the **real-time factor** of the R3 timestretch —
+processing time ÷ audio duration — at 1.0×, 0.5× (heaviest), and 2.0×. RTF < 1.0
+means the DSP keeps up; the test asserts viability ceilings (sized for the Pi 5
+target with margin) and always prints the measured RTF, so a smaller regression
+shows as a trend even while the assertion passes. It uses a synthetic signal (no
+audio device, GPU, or track file) and is profile-independent (Rubber Band is
+optimised C), so it runs the same under `cargo test` and `--release`. Tighten the
+ceilings locally with `OPENDECK_RTF_CEIL=<scale>`.
+
+Reference numbers (RTX desktop): RTF ≈ 0.03 @ 1.0×, 0.06 @ 0.5×. The Pi 4's
+audio-proc sits near 0.7 of a core at 1.0× (see the underrun discussion below),
+which is why it is scheduling-jitter sensitive there.
+
 ## Reproduction recipe
 
 On the target, from the repo root:
