@@ -30,7 +30,7 @@ REF_URL    := https://downloads.support.alphatheta.com/manuals/dj-players/CDJ-30
 RUST_LOG   ?= info,wgpu=warn,naga=warn
 
 .DEFAULT_GOAL := help
-.PHONY: help build debug relink run dev two-deck beat virtual-cdj shot check fmt clippy test clean reference distclean
+.PHONY: help build debug relink run dev two-deck link-pair beat virtual-cdj shot check fmt clippy test clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -67,6 +67,14 @@ two-deck: build ## Run a deck + a simulated CDJ sending beats at BPM
 	  SENDER=$$!; \
 	  trap "kill $$SENDER 2>/dev/null" EXIT INT TERM; \
 	  RUST_LOG=$(RUST_LOG) ./$(BIN) "$(TRACK)"
+
+link-pair: build ## Two freedj instances (players 1 and 2) linked to each other — TRACK, TRACK2
+	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; exit 1; }
+	@T2="$(TRACK2)"; test -n "$$T2" || T2="$(TRACK)"; \
+	 echo "player 1: $(TRACK)"; echo "player 2: $$T2"; \
+	 RUST_LOG=$(RUST_LOG) ./$(BIN) "$(TRACK)" --player 1 & P1=$$!; \
+	 trap "kill $$P1 2>/dev/null" EXIT INT TERM; \
+	 sleep 1; RUST_LOG=$(RUST_LOG) ./$(BIN) "$$T2" --player 2
 
 beat: ## Send ProDJ Link beat packets only (no deck) — BPM=130.0
 	python3 tools/send_beat.py $(BPM) $(HOST) $(PORT)

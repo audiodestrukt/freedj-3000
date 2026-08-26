@@ -536,10 +536,18 @@ fn main() -> Result<()> {
     )
     .init();
 
-    let path: PathBuf = std::env::args()
-        .nth(1)
-        .context("usage: opendeck <path/to/file.mp3>")?
-        .into();
+    // Args: <file> [--player N].  OPENDECK_PLAYER also works.
+    let mut args = std::env::args().skip(1);
+    let mut path: Option<PathBuf> = None;
+    let mut player: u8 = std::env::var("OPENDECK_PLAYER").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--player" => player = args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6")?,
+            _ => path = Some(a.into()),
+        }
+    }
+    let path = path.context("usage: opendeck <path/to/file.mp3> [--player N]")?;
+    let player = player.clamp(1, 6);
 
     if !path.exists() {
         bail!("file not found: {}", path.display());
@@ -580,7 +588,17 @@ fn main() -> Result<()> {
         Arc::clone(&beat2_bpm),
         Arc::clone(&beat2_anchor),
         Arc::clone(&beat2_player),
+        player,
     );
+    let _prodj_tx = prodj::ProDjSender::start(player, prodj::SenderState {
+        position:    Arc::clone(&audio.position),
+        in_flight:   Arc::clone(&audio.in_flight),
+        playing:     Arc::clone(&audio.playing),
+        fader_speed: Arc::clone(&fader_speed),
+        sample_rate: audio.sample_rate,
+        channels:    audio.channels,
+        grid:        beat_grid.clone(),
+    });
 
     // ── 5. Connect MIDI controller (optional — app runs fine without it) ──────────
     let _midi = midi::MidiHandle::connect(

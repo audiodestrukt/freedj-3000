@@ -29,7 +29,7 @@ This project takes the position that DJ equipment protocols are infrastructure, 
 | Beat detection (MiniBPM) | ✅ Working |
 | Beat grid overlay | ✅ Working |
 | MIDI controller input | ✅ Working |
-| ProDJ Link beat sync (receive) | ✅ Working |
+| ProDJ Link beat sync (receive + send) | ✅ Working — status packets and SYNC follow pending |
 | Cue points / loops | 📋 Planned |
 | Key lock / timestretching | ✅ Working |
 | Hardware control surface | 📋 Planned |
@@ -138,10 +138,20 @@ Deck B controls drive the second beat grid (for ProDJ Link sync comparison):
 
 MIDI mappings are constants at the top of `crates/app/src/midi.rs`. To discover mappings for a different controller run with `RUST_LOG=debug` — every incoming MIDI message is logged.
 
-### ProDJ Link (receive-only)
+### ProDJ Link
 
-FreeDJ-3000 listens on UDP ports 50001 (where real CDJ/XDJ hardware sends beat
-packets) and 50002 (used by the simulator below) for Pioneer beat packets. When a CDJ on the same network sends a beat, the second beat grid (cyan strip at the bottom of the waveform display) updates to show that deck's tempo and phase. Use this to manually beatmatch your track to an incoming CDJ.
+FreeDJ-3000 is a Link peer: it announces itself on UDP 50000 every 1.5 s and
+sends a beat packet on 50001 at every beat of the audible position, as player
+`--player N` (default 1; `OPENDECK_PLAYER` also works). It listens on 50001
+(where real CDJ/XDJ hardware sends beats) and 50002, ignoring its own
+broadcasts. Status packets (50002) are not sent yet.
+
+Two instances on one machine link to each other:
+
+```bash
+make link-pair                     # players 1 and 2, same track
+make link-pair TRACK2=other.mp3
+``` When a CDJ on the same network sends a beat, the second beat grid (cyan strip at the bottom of the waveform display) updates to show that deck's tempo and phase. Use this to manually beatmatch your track to an incoming CDJ.
 
 For single-machine testing without real hardware:
 

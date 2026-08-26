@@ -2,6 +2,18 @@
 
 How to put a second deck on the network without owning a second deck.
 
+## Fastest: two freedj instances
+
+```bash
+make link-pair                 # players 1 and 2 on this machine
+```
+
+Each announces, sends beats, and hears the other; each ignores its own
+broadcasts. Both open the default audio device (PipeWire mixes them). This
+tests our sender against our parser — the harness below tests our parser
+against an independent implementation, and the XDJ tests our sender against
+Pioneer's.
+
 ## The harness: prolink-cpp
 
 Checked out at `~/sandbox/thirdparty/prolink-cpp` (grantHarris/prolink-cpp,

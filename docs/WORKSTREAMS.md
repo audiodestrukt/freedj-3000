@@ -167,7 +167,15 @@ captured packets, not to the simulator.
 Doing this first means the two-deck test *is* the compatibility work, rather
 than validating a private format that proves nothing about real gear.
 
-### B2. Link send — **medium**, needs A2 and B1
+### B2. Link send — **partly done** (2026-08-26)
+
+Announce (0x06, every 1.5 s) and beat (0x28, at each audible beat crossing)
+are sent as `--player N`; own broadcasts are filtered. Two freedj instances
+link to each other (`make link-pair`: 46 beats sent / 44 heard each way in
+8 s, none from itself). Still to do: status packets (0x0a) so a real XDJ
+lists us, and verification that Pioneer firmware accepts our packets — the
+XDJ on the desk is the test. Original scope below.
+
 
 Announce packets (0x06) every 1.5 s, beat packets (0x28) at each beat onset
 derived from our own grid and position, a `--player N` flag. `build_announce`
