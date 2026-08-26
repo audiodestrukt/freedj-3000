@@ -89,6 +89,7 @@ struct DeckApp {
     jog_until:         Option<Instant>,
     cue_point:         u64,   // start cue, source sample index (CDJ CUE)
     cue_preview:       bool,  // CUE held → previewing from the cue point
+    cued:              bool,  // playhead is sitting on the cue (not searched away)
     exit_after_capture: bool,
 
     // Created on first `resumed`.
@@ -224,6 +225,7 @@ impl DeckApp {
             jog_until:         None,
             cue_point,
             cue_preview:       false,
+            cued:              true,
             exit_after_capture: false,
             window:      None,
             renderer:    None,
@@ -273,6 +275,7 @@ impl DeckApp {
                     let cur   = self.audio.position.load(Ordering::Relaxed) as i64;
                     let new   = (cur + delta as i64 * step).clamp(0, self.audio.len() as i64) as u64;
                     self.seek_to(new);
+                    self.cued = false;
                     log::debug!("jog vinyl {delta:+} → {:.2}s", new as f64 / sr_ch);
                 }
             }
@@ -283,12 +286,25 @@ impl DeckApp {
                 let sr_ch = self.audio.sample_rate as f64 * self.audio.channels as f64;
                 if pressed {
                     if self.audio.playing.load(Ordering::Relaxed) {
+                        // Playing → return to the cue and pause.
                         self.audio.playing.store(false, Ordering::Relaxed);
                         self.seek_to(self.cue_point);
+                        self.cued = true;
                         log::info!("cue: return to {:.2}s", self.cue_point as f64 / sr_ch);
+                    } else if self.cued {
+                        // Paused, already sitting on the cue → preview from it while
+                        // held; do NOT move the cue.  Rapid re-taps always retrigger
+                        // the same point (never adopt a raced-forward position).
+                        self.cue_preview = true;
+                        self.seek_to(self.cue_point);
+                        self.audio.playing.store(true, Ordering::Relaxed);
+                        log::debug!("cue: preview from {:.2}s", self.cue_point as f64 / sr_ch);
                     } else {
+                        // Paused after searching away → set a new cue here, then
+                        // preview it while held.
                         self.cue_point   = self.audio.position.load(Ordering::Relaxed);
                         self.cue_preview = true;
+                        self.cued        = true;
                         self.audio.playing.store(true, Ordering::Relaxed);
                         log::info!("cue: set + preview at {:.2}s", self.cue_point as f64 / sr_ch);
                     }
@@ -296,6 +312,7 @@ impl DeckApp {
                     self.cue_preview = false;
                     self.audio.playing.store(false, Ordering::Relaxed);
                     self.seek_to(self.cue_point);
+                    self.cued = true;
                     log::debug!("cue: release → back to cue");
                 }
             }
@@ -305,6 +322,7 @@ impl DeckApp {
                 let ch = self.audio.channels as u64;
                 let target = ((position.clamp(0.0, 1.0) as f64 * total) as u64 / ch) * ch;
                 self.audio.position.store(target.min(self.audio.len() as u64), Ordering::Relaxed);
+                self.cued = false;   // searched away from the cue
             }
             Event::Deck(ControlEvent::TempoFader { position }) => {
                 let s = input::fader_to_speed(position);
@@ -456,6 +474,7 @@ impl DeckApp {
         self.prev_pos     = 0;
         self.cue_point    = 0;
         self.cue_preview  = false;
+        self.cued         = true;
         log::info!(
             "loaded {} in {:.1}s ({} BPM)",
             path.display(), t0.elapsed().as_secs_f32(),
