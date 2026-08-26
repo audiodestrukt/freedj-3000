@@ -67,10 +67,15 @@ const NO_SEEK: u64 = u64::MAX;
 #[derive(Default)]
 pub struct AudioStats {
     /// Samples of silence the callback filled because the ring was empty while
-    /// playing — audible underruns (clicks / dropouts).
+    /// playing — audible underruns (clicks / dropouts).  Steady-state only:
+    /// the *expected* re-prime silence right after a seek is excluded (that goes
+    /// to `seek_priming_samples`), so this is a clean "the core starved" signal.
     pub underrun_samples: AtomicU64,
-    /// Callbacks that hit ≥1 underrun (distinct glitch events).
+    /// Callbacks that hit ≥1 steady-state underrun (distinct glitch events).
     pub underrun_events:  AtomicU64,
+    /// Silence samples the callback filled on the buffer where it flushed the
+    /// ring for a seek — expected re-prime gap, not a starvation glitch.
+    pub seek_priming_samples: AtomicU64,
     /// Frames the producer dropped because the ring was full (overrun).
     pub dropped_frames:   AtomicU64,
 }
@@ -234,8 +239,12 @@ impl AudioHandle {
             .build_output_stream::<f32, _, _>(
                 &stream_config,
                 move |out: &mut [f32], _info| {
-                    // On seek, flush stale buffered audio.
-                    if drain_flag.swap(false, Ordering::AcqRel) {
+                    // On seek, flush stale buffered audio.  This same buffer will
+                    // then fill with silence until the producer re-primes from the
+                    // new position — expected, so attribute it to seek priming,
+                    // not to starvation.
+                    let draining = drain_flag.swap(false, Ordering::AcqRel);
+                    if draining {
                         while consumer.pop().is_ok() {}
                     }
 
@@ -245,9 +254,9 @@ impl AudioHandle {
                     }
 
                     // Fill from the ring; count any sample we had to invent as
-                    // silence — that is an audible underrun.  No allocation, and
-                    // the atomics are touched only when a glitch actually
-                    // happens, so the clean path stays a bare pop().
+                    // silence.  No allocation, and the atomics are touched only
+                    // when silence actually happens, so the clean path stays a
+                    // bare pop().
                     let mut underran = 0u64;
                     for sample in out.iter_mut() {
                         match consumer.pop() {
@@ -256,8 +265,14 @@ impl AudioHandle {
                         }
                     }
                     if underran > 0 {
-                        cpal_stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
-                        cpal_stats.underrun_events.fetch_add(1, Ordering::Relaxed);
+                        if draining {
+                            // Expected re-prime gap right after a seek/cue flush.
+                            cpal_stats.seek_priming_samples.fetch_add(underran, Ordering::Relaxed);
+                        } else {
+                            // Genuine starvation — the core failed to keep up.
+                            cpal_stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
+                            cpal_stats.underrun_events.fetch_add(1, Ordering::Relaxed);
+                        }
                     }
                 },
                 |err| log::error!("audio stream error: {err}"),
