@@ -107,6 +107,9 @@ struct DeckApp {
     last_frame_total: Duration,
     /// Count of inter-frame gaps that exceeded the spike threshold.
     frame_spikes: u64,
+    /// OPENDECK_PACE=hybrid: add a safety-net timer so a late/missing compositor
+    /// frame callback doesn't freeze the UI — we self-drive a frame instead.
+    hybrid_pace: bool,
 }
 
 /// Display/deck flags copied out of DeckApp so a snapshot can borrow only
@@ -242,6 +245,7 @@ impl DeckApp {
             last_render: Instant::now(),
             last_frame_total: Duration::ZERO,
             frame_spikes: 0,
+            hybrid_pace: std::env::var("OPENDECK_PACE").map(|v| v == "hybrid").unwrap_or(false),
         }
     }
 
@@ -935,9 +939,30 @@ impl ApplicationHandler for DeckApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // Nothing to do between events — redraws are requested from the
-        // RedrawRequested handler and paced by the compositor.
-        event_loop.set_control_flow(ControlFlow::Wait);
+        // Default: redraws are requested from RedrawRequested and paced entirely
+        // by the compositor's frame callback (ControlFlow::Wait).  Clean phase-
+        // lock, but no fallback — if the compositor is late calling us back the
+        // UI freezes for the whole gap (the "stall OUTSIDE render" spikes).
+        if !self.hybrid_pace {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
+
+        // Hybrid pacer: keep the frame callback as the primary clock, but arm a
+        // safety-net timer at ~2 display periods.  When a callback arrives on
+        // time (every ~1 period) the timer is re-armed well before it fires and
+        // nothing changes.  When the callback is late/missing, the WaitUntil
+        // wakes us here past the deadline and we self-drive one frame — turning
+        // a multi-refresh freeze into a single late frame.  render_frame owns
+        // its surface acquire+present, so it runs fine outside RedrawRequested;
+        // with Mailbox the extra present is non-blocking and re-locks to the
+        // callback as soon as the compositor resumes.
+        let net = self.refresh_interval.saturating_mul(2);
+        if self.window.is_some() && Instant::now() >= self.last_render + net {
+            self.render_frame();                 // updates last_render
+            if let Some(w) = &self.window { w.request_redraw(); }
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.last_render + net));
     }
 }
 
