@@ -8,6 +8,7 @@
 //!   Esc / Q  — quit
 
 mod audio;
+mod input;
 mod midi;
 mod prodj;
 mod renderer;
@@ -19,6 +20,7 @@ use audio::AudioHandle;
 use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_types::{BeatAnalyzer, BeatGrid};
 use renderer::Renderer;
+use input::{ControlEvent, Event, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
 use snapshot::DeckSnapshot;
 use std::{
     path::PathBuf,
@@ -61,6 +63,15 @@ struct DeckApp {
     refresh_interval:  Duration,  // display period; each frame lands in one of these
     frame_count:       u64,
     remain_mode:       bool,      // time display: REMAIN vs TIME
+    key_lock:          bool,      // MT indicator (Rubber Band path is always on today)
+    slip:              bool,
+    sync:              bool,
+    master:            bool,
+    zoom_level:        usize,     // index into ZOOM_LEVELS
+    zoom_grid_mode:    bool,
+    source_link:       bool,
+    /// Input bus: every source pushes here; `apply` drains it once per frame.
+    events:            Vec<Event>,
     exit_after_capture: bool,
 
     // Created on first `resumed`.
@@ -71,6 +82,40 @@ struct DeckApp {
 
     /// Time of the last rendered frame, used to cap to FRAME_INTERVAL.
     last_render: Instant,
+}
+
+/// Display/deck flags copied out of DeckApp so a snapshot can borrow only
+/// `path`, `beat_grid` and `audio` — leaving `renderer` free to be borrowed
+/// mutably in the same frame.
+#[derive(Clone, Copy)]
+struct UiFlags {
+    key_lock: bool, remain_mode: bool, slip: bool, sync: bool, master: bool,
+    zoom_grid_mode: bool, source_link: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn make_snapshot<'a>(
+    path: &'a std::path::Path, beat_grid: Option<&'a BeatGrid>, audio: &AudioHandle, f: UiFlags,
+    pos: u64, playing: bool, speed: f32, fader_speed: f32, beat2_bpm: f32, beat2_phase_beats: f32,
+) -> DeckSnapshot<'a> {
+    DeckSnapshot {
+        title:         path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
+        position:      pos,
+        sample_rate:   audio.sample_rate,
+        channels:      audio.channels,
+        total_samples: audio.samples.len() as u64,
+        playing, speed, fader_speed,
+        key_lock:      f.key_lock,
+        remain_mode:   f.remain_mode,
+        slip:          f.slip,
+        sync:          f.sync,
+        master:        f.master,
+        zoom_grid_mode: f.zoom_grid_mode,
+        source_link:   f.source_link,
+        beat_grid,
+        beat2_bpm,
+        beat2_phase_beats,
+    }
 }
 
 impl DeckApp {
@@ -100,6 +145,14 @@ impl DeckApp {
             refresh_interval:  FRAME_INTERVAL,
             frame_count:       0,
             remain_mode:       false,   // the reference unit was in TIME mode
+            key_lock:          true,
+            slip:              false,
+            sync:              false,
+            master:            false,
+            zoom_level:        ZOOM_DEFAULT,
+            zoom_grid_mode:    false,
+            source_link:       false,
+            events:            Vec::new(),
             exit_after_capture: false,
             window:      None,
             renderer:    None,
@@ -109,19 +162,72 @@ impl DeckApp {
         }
     }
 
+    /// The only place input changes deck state.  Every source — keyboard,
+    /// touch, later MIDI and scripts — ends up here.
+    fn apply(&mut self, ev: Event) {
+        log::debug!("event: {ev:?}");
+        match ev {
+            Event::Deck(ControlEvent::Play)  => { self.audio.playing.store(true,  Ordering::Relaxed); log::info!("playing"); }
+            Event::Deck(ControlEvent::Pause) => { self.audio.playing.store(false, Ordering::Relaxed); log::info!("paused"); }
+            Event::Deck(ControlEvent::Cue)   => { self.audio.position.store(0, Ordering::Relaxed); }
+            Event::Deck(ControlEvent::NeedleSearch { position }) => {
+                let total = self.audio.samples.len() as f64;
+                // Land on a frame boundary so channels stay interleaved.
+                let ch = self.audio.channels as u64;
+                let target = ((position.clamp(0.0, 1.0) as f64 * total) as u64 / ch) * ch;
+                self.audio.position.store(target.min(self.audio.samples.len() as u64), Ordering::Relaxed);
+            }
+            Event::Deck(ControlEvent::TempoFader { position }) => {
+                let s = input::fader_to_speed(position);
+                self.fader_speed.store(s.to_bits(), Ordering::Relaxed);
+                self.audio.speed_store(s);
+                log::info!("tempo {:+.2}%", (s - 1.0) * 100.0);
+            }
+            Event::Deck(ControlEvent::KeyLockToggle) => {
+                // The Rubber Band path is always engaged today; this is the
+                // indicator only, until the resample path exists (A1).
+                self.key_lock = !self.key_lock;
+                log::info!("master tempo {} (display only for now)", if self.key_lock { "on" } else { "off" });
+            }
+            Event::Deck(ControlEvent::SlipToggle)    => { self.slip   = !self.slip;   log::info!("slip {} (no engine yet)", self.slip); }
+            Event::Deck(ControlEvent::SyncToggle)    => { self.sync   = !self.sync;   log::info!("sync {} (Link send not implemented)", self.sync); }
+            Event::Deck(ControlEvent::MasterRequest) => { self.master = !self.master; log::info!("master {} (Link send not implemented)", self.master); }
+            Event::Deck(other) => log::info!("unhandled deck event {other:?}"),
+
+            Event::Ui(UiEvent::TimeMode) => {
+                self.remain_mode = !self.remain_mode;
+                log::info!("time display → {}", if self.remain_mode { "REMAIN" } else { "TIME" });
+            }
+            Event::Ui(UiEvent::CycleColor) => {
+                if let Some(r) = &mut self.renderer {
+                    use renderer::ColorMode::*;
+                    r.color_mode = match r.color_mode { Rgb => ThreeBand, ThreeBand => Blue, Blue => Rgb };
+                    log::info!("waveform colour → {:?}", r.color_mode);
+                }
+            }
+            Event::Ui(UiEvent::ZoomStep(d)) => {
+                let n = ZOOM_LEVELS.len() as i32;
+                // Positive = zoom in = fewer columns visible.
+                self.zoom_level = (self.zoom_level as i32 - d).clamp(0, n - 1) as usize;
+                if let Some(r) = &mut self.renderer { r.cols_visible = ZOOM_LEVELS[self.zoom_level]; }
+                log::info!("zoom {} cols", ZOOM_LEVELS[self.zoom_level]);
+            }
+            Event::Ui(UiEvent::ZoomGridMode) => { self.zoom_grid_mode = !self.zoom_grid_mode; }
+            Event::Ui(UiEvent::Source(src))  => { self.source_link = src == Source::Link; log::info!("source {src:?}"); }
+            Event::Ui(UiEvent::Screen(sc))   => log::info!("{sc:?} screen not implemented"),
+        }
+    }
+
     fn render_frame(&mut self) {
         let frame_start = Instant::now();
         let frame_dt    = frame_start.duration_since(self.last_render);
         self.last_render = frame_start;
 
-        let (renderer, egui_state, window) = match (
-            self.renderer.as_mut(),
-            self.egui_state.as_mut(),
-            self.window.as_ref(),
-        ) {
-            (Some(r), Some(s), Some(w)) => (r, s, w),
+        let (egui_state, window) = match (self.egui_state.as_mut(), self.window.as_ref()) {
+            (Some(s), Some(w)) => (s, w),
             _ => return,
         };
+        if self.renderer.is_none() { return; }
 
         let raw_pos      = self.audio.position.load(Ordering::Relaxed);
         let in_flight    = self.audio.in_flight.load(Ordering::Relaxed);
@@ -215,22 +321,12 @@ impl DeckApp {
         } else {
             0.0
         };
-        let title = self.path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown");
-        let snap = DeckSnapshot {
-            title,
-            position:      pos,
-            sample_rate:   self.audio.sample_rate,
-            channels:      self.audio.channels,
-            total_samples: self.audio.samples.len() as u64,
-            playing,
-            speed,
-            fader_speed,
-            key_lock:      true,   // Rubber Band path is always engaged today
-            remain_mode:   self.remain_mode,
-            beat_grid:     self.beat_grid.as_ref(),
-            beat2_bpm,
-            beat2_phase_beats,
+        let flags = UiFlags {
+            key_lock: self.key_lock, remain_mode: self.remain_mode, slip: self.slip,
+            sync: self.sync, master: self.master, zoom_grid_mode: self.zoom_grid_mode,
+            source_link: self.source_link,
         };
+        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats);
 
         // Screen layout in logical points; the shader gets its two rects in pixels.
         let ppp  = window.scale_factor() as f32;
@@ -241,10 +337,31 @@ impl DeckApp {
 
         // Build egui overlay.
         let raw = egui_state.take_egui_input(window.as_ref());
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay));
+        let mut touch = Vec::new();
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, &mut touch));
+        drop(snap);
+        self.events.append(&mut touch);
+        let pending = std::mem::take(&mut self.events);
+        for ev in pending {
+            self.apply(ev);
+        }
 
         let platform_output = std::mem::take(&mut output.platform_output);
+        let (renderer, egui_state, window) = match (
+            self.renderer.as_mut(),
+            self.egui_state.as_mut(),
+            self.window.as_ref(),
+        ) {
+            (Some(r), Some(s), Some(w)) => (r, s, w),
+            _ => return,
+        };
         egui_state.handle_platform_output(window.as_ref(), platform_output);
+        let flags = UiFlags {
+            key_lock: self.key_lock, remain_mode: self.remain_mode, slip: self.slip,
+            sync: self.sync, master: self.master, zoom_grid_mode: self.zoom_grid_mode,
+            source_link: self.source_link,
+        };
+        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats);
 
         // Dev: OPENDECK_SCREENSHOT=path captures frame 90 and exits.
         self.frame_count += 1;
@@ -325,65 +442,39 @@ impl ApplicationHandler for DeckApp {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent { physical_key, state: ElementState::Pressed, .. },
+                event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. },
                 ..
-            } => match physical_key {
-                PhysicalKey::Code(KeyCode::Space) => {
-                    let was = self.audio.playing.load(Ordering::Relaxed);
-                    self.audio.playing.store(!was, Ordering::Relaxed);
-                    log::info!("{}", if was { "paused" } else { "playing" });
+            } => {
+                use KeyCode::*;
+                let playing = self.audio.playing.load(Ordering::Relaxed);
+                let total   = self.audio.samples.len().max(1) as f32;
+                let frac    = self.audio.position.load(Ordering::Relaxed) as f32 / total;
+                let ten_s   = (self.audio.sample_rate as f32 * self.audio.channels as f32 * 10.0) / total;
+                let fader   = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)));
+                let step    = 0.01 / (2.0 * input::TEMPO_RANGE);   // ±1% per press, as the DJ2Go buttons
+                let ev = match code {
+                    Space      => Some(Event::Deck(if playing { ControlEvent::Pause } else { ControlEvent::Play })),
+                    ArrowRight => Some(Event::Deck(ControlEvent::NeedleSearch { position: (frac + ten_s).min(1.0) })),
+                    ArrowLeft  => Some(Event::Deck(ControlEvent::NeedleSearch { position: (frac - ten_s).max(0.0) })),
+                    Equal | NumpadAdd      => Some(Event::Deck(ControlEvent::TempoFader { position: fader + step })),
+                    Minus | NumpadSubtract => Some(Event::Deck(ControlEvent::TempoFader { position: fader - step })),
+                    Digit0 | Numpad0       => Some(Event::Deck(ControlEvent::TempoFader { position: 0.5 })),
+                    KeyK => Some(Event::Deck(ControlEvent::KeyLockToggle)),
+                    KeyS => Some(Event::Deck(ControlEvent::SlipToggle)),
+                    KeyY => Some(Event::Deck(ControlEvent::SyncToggle)),
+                    KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
+                    KeyT => Some(Event::Ui(UiEvent::TimeMode)),
+                    KeyC => Some(Event::Ui(UiEvent::CycleColor)),
+                    KeyZ => Some(Event::Ui(UiEvent::ZoomStep(1))),
+                    KeyX => Some(Event::Ui(UiEvent::ZoomStep(-1))),
+                    Escape | KeyQ => { event_loop.exit(); None }
+                    _ => None,
+                };
+                if let Some(ev) = ev {
+                    self.events.push(ev);
+                    if let Some(w) = &self.window { w.request_redraw(); }
                 }
-                PhysicalKey::Code(KeyCode::ArrowRight) => {
-                    let delta = self.audio.sample_rate as u64
-                        * self.audio.channels as u64
-                        * 10;
-                    let pos = self.audio.position.load(Ordering::Relaxed);
-                    self.audio.position.store(
-                        pos.saturating_add(delta).min(self.audio.samples.len() as u64),
-                        Ordering::Relaxed,
-                    );
-                }
-                PhysicalKey::Code(KeyCode::ArrowLeft) => {
-                    let delta = self.audio.sample_rate as u64
-                        * self.audio.channels as u64
-                        * 10;
-                    let pos = self.audio.position.load(Ordering::Relaxed);
-                    self.audio.position.store(
-                        pos.saturating_sub(delta),
-                        Ordering::Relaxed,
-                    );
-                }
-                PhysicalKey::Code(KeyCode::Equal) | PhysicalKey::Code(KeyCode::NumpadAdd) => {
-                    let s = (self.audio.speed_load() + 0.05).min(2.0);
-                    self.audio.speed_store(s);
-                    log::info!("speed → {s:.2}×");
-                }
-                PhysicalKey::Code(KeyCode::Minus) | PhysicalKey::Code(KeyCode::NumpadSubtract) => {
-                    let s = (self.audio.speed_load() - 0.05).max(0.25);
-                    self.audio.speed_store(s);
-                    log::info!("speed → {s:.2}×");
-                }
-                PhysicalKey::Code(KeyCode::Digit0) | PhysicalKey::Code(KeyCode::Numpad0) => {
-                    self.audio.speed_store(1.0);
-                    log::info!("speed → 1.00× (reset)");
-                }
-                PhysicalKey::Code(KeyCode::KeyT) => {
-                    self.remain_mode = !self.remain_mode;
-                    log::info!("time display → {}", if self.remain_mode { "REMAIN" } else { "TIME" });
-                }
-                PhysicalKey::Code(KeyCode::KeyC) => {
-                    // Cycle waveform colour like the Shortcut screen's Waveform Color.
-                    if let Some(r) = &mut self.renderer {
-                        use renderer::ColorMode::*;
-                        r.color_mode = match r.color_mode { Rgb => ThreeBand, ThreeBand => Blue, Blue => Rgb };
-                        log::info!("waveform colour → {:?}", r.color_mode);
-                    }
-                }
-                PhysicalKey::Code(KeyCode::Escape) | PhysicalKey::Code(KeyCode::KeyQ) => {
-                    event_loop.exit();
-                }
-                _ => {}
-            },
+            }
 
             WindowEvent::Resized(size) => {
                 if let Some(r) = &mut self.renderer {

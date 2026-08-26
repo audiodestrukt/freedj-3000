@@ -90,6 +90,8 @@ pub struct Renderer {
     window:         Arc<Window>,
 
     pub color_mode: ColorMode,
+    /// Waveform columns visible across the enlarged waveform (zoom).
+    pub cols_visible: f32,
     /// Normalises bar height to the track's peak so quiet masters still fill
     /// the display, as they do on a CDJ.
     amp_gain:       f32,
@@ -339,6 +341,7 @@ impl Renderer {
             max_dim,
             window,
             color_mode: ColorMode::Blue,
+            cols_visible: crate::input::ZOOM_LEVELS[crate::input::ZOOM_DEFAULT],
             amp_gain,
             capture:    None,
         })
@@ -407,7 +410,7 @@ impl Renderer {
 
         let params = WaveformParams {
             playhead_col,
-            cols_visible:      600.0,
+            cols_visible:      self.cols_visible,
             num_cols:          self.num_cols as f32,
             screen_w:          self.surface_config.width  as f32,
             screen_h:          self.surface_config.height as f32,

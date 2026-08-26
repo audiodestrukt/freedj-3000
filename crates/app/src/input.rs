@@ -1,0 +1,57 @@
+//! The input bus.
+//!
+//! Every source — keyboard, the touch screen (mouse for now), MIDI, a script,
+//! the control surface — produces [`Event`]s.  `DeckApp::apply` is the only
+//! place they change state.  Sources own no deck state and never touch the
+//! audio atomics directly.  See docs/INPUT_PLAN.md.
+//!
+//! Deck actions use `opendeck_protocol::ControlEvent`, the same type the MCU
+//! adapter and the engine crate speak.  Display-only settings are `UiEvent`.
+
+pub use opendeck_protocol::ControlEvent;
+
+#[derive(Debug, Clone)]
+pub enum Event {
+    /// Something a physical deck control would do.
+    Deck(ControlEvent),
+    /// A display setting; never reaches the audio path.
+    Ui(UiEvent),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UiEvent {
+    /// Toggle TIME (elapsed) ↔ REMAIN.
+    TimeMode,
+    /// Cycle Waveform Color: RGB → 3 BAND → BLUE.
+    CycleColor,
+    /// Zoom the enlarged waveform by whole steps; negative = out.
+    ZoomStep(i32),
+    /// Toggle the ZOOM / GRID ADJUST mode indicator.
+    ZoomGridMode,
+    /// Select the source column key: LINK or the local file/USB.
+    Source(Source),
+    /// A top-row touch key or a screen we do not have yet.
+    Screen(Screen),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source { Link, Usb }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Screen { Browse, TagList, Info, Menu, Perform }
+
+/// Zoom levels for the enlarged waveform, in waveform columns across the
+/// field.  Index 2 is the default the display has always used.
+pub const ZOOM_LEVELS: [f32; 6] = [300.0, 450.0, 600.0, 900.0, 1200.0, 1800.0];
+pub const ZOOM_DEFAULT: usize = 2;
+
+/// Pitch-fader travel maps to ±16% — the range badge on the screen.
+pub const TEMPO_RANGE: f32 = 0.16;
+
+pub fn fader_to_speed(position: f32) -> f32 {
+    1.0 + (position.clamp(0.0, 1.0) - 0.5) * 2.0 * TEMPO_RANGE
+}
+
+pub fn speed_to_fader(speed: f32) -> f32 {
+    ((speed - 1.0) / (2.0 * TEMPO_RANGE) + 0.5).clamp(0.0, 1.0)
+}

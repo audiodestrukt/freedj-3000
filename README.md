@@ -98,9 +98,22 @@ make run TRACK=/path/to/track.mp3
 |---|---|
 | `Space` | Play / pause |
 | `←` / `→` | Seek ±10 seconds |
+| `+` / `−` / `0` | Tempo ±1% / reset (±16% range, as the TEMPO readout) |
+| `Z` / `X` | Zoom the enlarged waveform in / out |
+| `K` `S` `Y` `M` | Master tempo · SLIP · SYNC · MASTER (indicators; SYNC/MASTER wait on Link send) |
 | `C` | Cycle waveform colour: RGB → 3 BAND → BLUE (the *Waveform Color* setting) |
 | `T` | Toggle time display: TIME (elapsed) ↔ REMAIN |
 | `Q` / `Esc` | Quit |
+
+### Touch screen (mouse for now)
+
+egui treats mouse and touch as the same pointer, so the mouse stands in for
+the panel. Press or drag on the overview to needle-search; scroll the wheel
+over the enlarged waveform to zoom; tap ZOOM / GRID, SLIP, SYNC, MASTER, the
+MT pill, the time readout (TIME ↔ REMAIN) and the LINK / FILE source keys.
+Keys with no function yet (BROWSE, CUE/LOOP, CALL…) press visually and log.
+Every input — keys and touch alike — is an `Event` on one bus applied in
+`DeckApp::apply`; see `docs/INPUT_PLAN.md`.
 
 ### Controller input (development only)
 

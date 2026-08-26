@@ -27,6 +27,13 @@ pub struct DeckSnapshot<'a> {
     pub key_lock:     bool,
     /// Time display shows remaining (REMAIN) rather than elapsed (TIME).
     pub remain_mode:  bool,
+    pub slip:         bool,
+    pub sync:         bool,
+    pub master:       bool,
+    /// ZOOM / GRID ADJUST mode indicator.
+    pub zoom_grid_mode: bool,
+    /// LINK selected in the source column (else the local file / USB).
+    pub source_link:  bool,
 
     pub beat_grid:    Option<&'a BeatGrid>,
 

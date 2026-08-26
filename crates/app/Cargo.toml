@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 opendeck-types       = { workspace = true }
+opendeck-protocol    = { workspace = true }
 opendeck-decode      = { workspace = true }
 opendeck-analysis    = { workspace = true }
 opendeck-timestretch = { workspace = true }

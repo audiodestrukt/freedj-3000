@@ -147,6 +147,10 @@ pub enum ControlEvent {
     BeatJump     { beats: f32 },
     SlipToggle,
     KeyLockToggle,
+    /// SYNC key: follow the tempo master.
+    SyncToggle,
+    /// MASTER key: ask to become tempo master.
+    MasterRequest,
     TempoFader   { position: f32 },  // 0.0–1.0 normalised
     KeyShift     { semitones: i8 },
     NeedleSearch { position: f32 },  // 0.0–1.0 absolute track position
