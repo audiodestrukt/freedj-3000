@@ -16,12 +16,13 @@ window, playing at 1.0× unless noted.
 | GPU backend | Vulkan | Vulkan (V3DV) | **Vulkan (V3DV)** |
 | Present mode | Mailbox | Mailbox | **Mailbox** |
 | Display / frame rate | 60 fps | 60 fps | **30 fps** (4K@30 HDMI) |
-| Frame dt jitter (sd) | 1.64 ms | 0.12 ms | **3.08 ms** |
+| Frame dt jitter (sd) | 1.64 ms | 0.12 ms | ~2.4 ms (idle) |
 | Stalled / backwards frames | 0 / 0 | 0 / 0 | **0 / 0** |
 | GPU acquire (Mailbox) | ~0.04 ms | ~0.08 ms | ~0.2 ms |
 | Decode + waveform + BPM | ~0.1 s | 0.7 s | **~2.1 s** |
-| **Render thread CPU** | low | ~30 % of one core | **86 % of one core** ⚠️ |
-| Total process CPU @ 1.0× | low | ~58 % (0.6 core) | **~134 % (1.3 cores)** |
+| Render thread CPU | low | ~30 % of one core | ~17 % of one core |
+| **Timestretch thread CPU @ 1.0×** | low | *(folded above)* | **~72 % of one core** ⚠️ |
+| Total active CPU @ 1.0× | low | ~58 % (0.6 core) | ~95 % (~1.0 core) |
 | Load avg (4 cores) | — | 0.82 | 1.90 |
 | RSS | — | 249 MB | 252 MB |
 | Peak temp | — | **77.9 °C ⚠️** | 62.8 °C (no throttle) |
@@ -39,20 +40,25 @@ freedj limit.
   the Pi 4 is looser (3.08 ms) but still stall-free. The project's biggest
   hardware unknown — pacing on VideoCore — is resolved for both.
 
-- **The Pi 4 is render-bound, and that is the key design signal.** Its main
-  thread — egui re-tessellating the whole screen + wgpu submit every frame — sits
-  at **86 % of one A72 core at just 30 fps**. The Rubber Band time-stretch is
-  light at 1.0× and on its own core, so DSP is not the limit; the **UI redraw
-  is**. At 60 Hz the Pi 4 render thread would likely not keep up. The Pi 5 does
-  the same work in ~30 % (faster A76 + 2× the frames), so it is comfortable.
-  The fix is the one already noted in PERFORMANCE.md: **skip the egui pass when
-  deck state hasn't changed**, or decouple the waveform-scroll redraw from the
-  chrome redraw. That optimization barely matters on the Pi 5 and is decisive on
-  the Pi 4 — worth doing to keep the Pi 4 a viable target.
+- **The Pi 4's hot thread is the timestretch, not the renderer.** Measured with
+  `/proc` utime/stime per thread (the authoritative source — `top -H`'s %CPU is
+  unreliable here and first reported a spurious 86 % on the render thread): the
+  **audio-proc thread running Rubber Band R3 sits at ~72 % of one A72 core even
+  at 1.0×**, while the render thread is a comfortable ~17 % (gdb confirms it
+  sleeps in `epoll_wait` between frames — it is not busy-waiting). So DSP, not
+  the UI, is the single-core cost on the Pi 4.
 
-- **Compute headroom (DSP) is fine on both.** 0.6 cores (Pi 5) / 1.3 cores
-  (Pi 4) total at 1.0×, on 4-core parts. The render thread, not the audio
-  engine, is the single-core bottleneck.
+- **This is the real headroom question.** R3 gets *heavier* off 1.0× (pitch-
+  bending), so a hard nudge could push that thread toward saturating its core on
+  the A72. The documented fallback is signalsmith-stretch (MIT, lighter) — see
+  raspberry-pi.md. The egui redraw, by contrast, is a non-issue on the Pi 4: the
+  render thread has ample room, so the "skip egui when unchanged" idea buys
+  almost nothing here and is not worth the complexity for this board.
+
+- **Total compute is fine on both.** ~0.6 cores (Pi 5) / ~1.0 core (Pi 4) of
+  active work at 1.0×, on 4-core parts — but it is concentrated in one thread
+  (the stretcher), which is why per-deck DSP maps so naturally onto the spare
+  cores (see below).
 
 - **Audio was in tune by luck (both).** HDMI/analog negotiated 44.1 kHz to match
   the track, so no pitch error. A 48 kHz output would still play 44.1 kHz sharp

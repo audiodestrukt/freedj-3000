@@ -129,6 +129,37 @@ fn make_snapshot<'a>(
     }
 }
 
+// ── Render-thread phase profiler (debug only) ─────────────────────────────────
+// Accumulates per-phase timings on the render thread and logs a rolling average
+// every 120 frames, so we can see whether the egui closure, tessellation, or GPU
+// submit dominates — without per-frame log spam skewing the numbers.
+thread_local! {
+    static PERF: std::cell::RefCell<std::collections::BTreeMap<&'static str, (f64, u32)>> =
+        std::cell::RefCell::new(std::collections::BTreeMap::new());
+    static PERF_N: std::cell::Cell<u32> = std::cell::Cell::new(0);
+}
+pub fn perf_accum(phase: &'static str, dt: std::time::Duration) {
+    if !log::log_enabled!(log::Level::Debug) { return; }
+    PERF.with(|m| {
+        let mut m = m.borrow_mut();
+        let e = m.entry(phase).or_insert((0.0, 0));
+        e.0 += dt.as_secs_f64() * 1000.0; e.1 += 1;
+    });
+}
+pub fn perf_tick() {
+    if !log::log_enabled!(log::Level::Debug) { return; }
+    let n = PERF_N.with(|c| { let v = c.get() + 1; c.set(v); v });
+    if n % 120 != 0 { return; }
+    PERF.with(|m| {
+        let mut m = m.borrow_mut();
+        let parts: Vec<String> = m.iter()
+            .map(|(k, (sum, cnt))| format!("{k} {:.2}ms", if *cnt > 0 { sum / *cnt as f64 } else { 0.0 }))
+            .collect();
+        log::debug!("perf: {}", parts.join("  "));
+        m.clear();
+    });
+}
+
 impl DeckApp {
     fn new(
         path:         PathBuf,
@@ -416,7 +447,9 @@ impl DeckApp {
             linked: beat2_player > 0,
             master_player: match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 },
         };
+        let _t_snap = Instant::now();
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        perf_accum("make_snapshot", _t_snap.elapsed());
 
         // Screen layout in logical points; the shader gets its two rects in pixels.
         let ppp  = window.scale_factor() as f32;
@@ -428,7 +461,9 @@ impl DeckApp {
         // Build egui overlay.
         let raw = egui_state.take_egui_input(window.as_ref());
         let mut touch = Vec::new();
+        let _t_run = Instant::now();
         let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, &mut touch));
+        perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
         self.events.append(&mut touch);
         let mut pending = std::mem::take(&mut self.events);
@@ -474,7 +509,11 @@ impl DeckApp {
                 self.exit_after_capture = true;
             }
         }
+        let _t_render = Instant::now();
         renderer.render(&snap, &vp, &self.egui_ctx, output);
+        perf_accum("render_call", _t_render.elapsed());
+        perf_accum("FRAME_TOTAL", frame_start.elapsed());
+        perf_tick();
     }
 }
 

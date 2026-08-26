@@ -176,10 +176,20 @@ impl Renderer {
         // (compositor buffer release arrives after the deadline), at latency 2
         // it delivered frames in bursts.  Fifo remains the fallback for
         // platforms without Mailbox.
-        let present_mode = if caps.present_modes.contains(&wgpu::PresentMode::Mailbox) {
-            wgpu::PresentMode::Mailbox
-        } else {
-            wgpu::PresentMode::Fifo
+        // OPENDECK_PRESENT=fifo|mailbox|immediate overrides the default, for
+        // measuring the render-thread busy-wait: with Mailbox the compositor
+        // frame callback paces us but the winit/wayland loop can spin between
+        // frames instead of sleeping (measured 92% of a core at 30fps on the
+        // Pi 4 with a 7ms frame); Fifo blocks the thread on vsync inside
+        // present(), which sleeps it.
+        let want = std::env::var("OPENDECK_PRESENT").ok().map(|v| v.to_lowercase());
+        let has = |m| caps.present_modes.contains(&m);
+        let present_mode = match want.as_deref() {
+            Some("fifo")      => wgpu::PresentMode::Fifo,
+            Some("immediate") if has(wgpu::PresentMode::Immediate) => wgpu::PresentMode::Immediate,
+            Some("mailbox")   if has(wgpu::PresentMode::Mailbox)   => wgpu::PresentMode::Mailbox,
+            _ if has(wgpu::PresentMode::Mailbox)                   => wgpu::PresentMode::Mailbox,
+            _                 => wgpu::PresentMode::Fifo,
         };
         log::info!("present mode: {present_mode:?} (available: {:?})", caps.present_modes);
 
@@ -472,7 +482,10 @@ impl Renderer {
             self.egui_renderer.free_texture(id);
         }
 
+        let _t_tess = std::time::Instant::now();
         let primitives = egui_ctx.tessellate(egui_shapes, pixels_per_point);
+        crate::perf_accum("tessellate", _t_tess.elapsed());
+        let _t_upl = std::time::Instant::now();
         self.egui_renderer.update_buffers(
             &self.device,
             &self.queue,
@@ -480,6 +493,7 @@ impl Renderer {
             &primitives,
             &self.egui_screen,
         );
+        crate::perf_accum("upload_bufs", _t_upl.elapsed());
         {
             let mut pass = encoder
                 .begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -526,7 +540,9 @@ impl Renderer {
             (path, buf, w, h, bpr)
         });
 
+        let _t_submit = std::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
+        crate::perf_accum("submit", _t_submit.elapsed());
 
         if let Some((path, buf, w, h, bpr)) = capture {
             let slice = buf.slice(..);
@@ -563,11 +579,8 @@ impl Renderer {
         // callback that paces the next RedrawRequested.  See Renderer::new.
         self.window.pre_present_notify();
         output.present();
-        log::debug!(
-            "gpu: acquire {:5.2}ms  present {:5.2}ms",
-            acquire_ms,
-            t_present.elapsed().as_secs_f64() * 1000.0,
-        );
+        crate::perf_accum("present", t_present.elapsed());
+        crate::perf_accum("acquire", std::time::Duration::from_secs_f64(acquire_ms / 1000.0));
     }
 }
 
