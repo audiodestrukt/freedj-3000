@@ -85,6 +85,9 @@ Two distinct rate mismatches:
    will be wrong"* and plays anyway. `ResampleStage` in
    `crates/timestretch/src/lib.rs` is still a passthrough.
 
+See **`docs/design/varispeed-engine.md`** — real-time SRC, Master Tempo
+on/off (key-lock), and the vinyl brake are one engine rewrite, planned there.
+
 **Roadmap — real-time streaming SRC (the proper fix).** Real players/CDJs do
 *not* pre-resample whole tracks; they pin the pipeline to the fixed device clock
 and resample each track's native rate into it in real time, block by block, in
