@@ -501,6 +501,26 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize)> {
     Ok((samples, file_sr, file_ch))
 }
 
+/// Decode an audio file from an in-memory buffer (e.g. read over NFS from a
+/// linked player). `ext` primes the format probe.  Same output as decode_file.
+pub fn decode_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<(Vec<f32>, u32, usize)> {
+    let mut decoder = SymphoniaDecoder::open_bytes(bytes, ext)
+        .context("failed to open in-memory audio")?;
+    let file_sr = decoder.sample_rate();
+    let file_ch = decoder.channels() as usize;
+    let mut samples: Vec<f32> = Vec::new();
+    let mut buf = vec![0f32; 4096 * file_ch];
+    loop {
+        match decoder.decode(&mut buf)? {
+            0 => break,
+            frames => samples.extend_from_slice(&buf[..frames * file_ch]),
+        }
+    }
+    log::info!("decoded {} frames ({:.1}s) at {}Hz {}ch (from memory)",
+        samples.len() / file_ch, samples.len() as f64 / file_ch as f64 / file_sr as f64, file_sr, file_ch);
+    Ok((samples, file_sr, file_ch))
+}
+
 /// Offline sample-rate conversion of an interleaved buffer, used at LOAD time so
 /// a track recorded at a different rate than the deck's pipeline plays at the
 /// right pitch.  This is a one-time cost per load, not the real-time SRC that a

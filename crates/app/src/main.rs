@@ -1196,3 +1196,40 @@ mod nfs_link_tests {
             exp.tracks.len(), exp.playlists.len());
     }
 }
+
+#[cfg(test)]
+mod nfs_load_tests {
+    // Gated: OPENDECK_TEST_NFS=192.168.68.58
+    #[test]
+    fn load_track_audio_and_anlz_over_nfs() {
+        let Ok(ip) = std::env::var("OPENDECK_TEST_NFS") else { return };
+        let ip: std::net::Ipv4Addr = ip.parse().unwrap();
+        let mut nfs = opendeck_nfs::Nfs::connect(ip).unwrap();
+        let root = nfs.mount_usb().unwrap();
+
+        // Parse the library off the wire, pick an mp3 track we know.
+        let (fh, size) = nfs.lookup_path(&root, "PIONEER/rekordbox/export.pdb").unwrap();
+        let pdb = nfs.read_file(&fh, size).unwrap();
+        let exp = opendeck_rekordbox::read_export_from(
+            &mut std::io::Cursor::new(pdb), std::path::PathBuf::from("nfs")).unwrap();
+        let t = exp.tracks.iter().find(|t| t.title.contains("OG Sins")).unwrap();
+        println!("track: {} — {}  {}", t.artist, t.title, t.rel_path);
+
+        // Read the audio file over NFS and decode from memory.
+        let (afh, asize) = nfs.lookup_path(&root, &t.rel_path).expect("audio lookup");
+        let audio = nfs.read_file(&afh, asize).unwrap();
+        assert_eq!(audio.len() as u32, asize);
+        let ext = t.rel_path.rsplit('.').next();
+        let (samples, sr, ch) = crate::audio::decode_bytes(audio, ext).expect("decode over-wire audio");
+        assert!(samples.len() > sr as usize * ch, "> 1s of audio decoded");
+        let secs = samples.len() as f64 / ch as f64 / sr as f64;
+
+        // Read the ANLZ over NFS and parse the beat grid.
+        let (nfh, nsize) = nfs.lookup_path(&root, &t.analyze_rel).expect("anlz lookup");
+        let anlz = nfs.read_file(&nfh, nsize).unwrap();
+        let a = opendeck_rekordbox::read_anlz_from(&mut std::io::Cursor::new(anlz)).unwrap();
+        assert!(!a.beats.is_empty());
+        println!("OK over NFS: decoded {secs:.0}s @ {sr}Hz/{ch}ch, {} beats @ {:.1} BPM",
+            a.beats.len(), a.beats[0].bpm);
+    }
+}

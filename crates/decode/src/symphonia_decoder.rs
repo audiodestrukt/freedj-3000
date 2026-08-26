@@ -1,4 +1,5 @@
 use opendeck_types::{DecodeError, Decoder};
+use std::io::Cursor;
 use std::path::Path;
 use symphonia::core::{
     audio::SampleBuffer,
@@ -24,12 +25,23 @@ impl SymphoniaDecoder {
     pub fn open(path: &Path) -> Result<Self, DecodeError> {
         let file = std::fs::File::open(path)?;
         let mss = MediaSourceStream::new(Box::new(file), Default::default());
-
         let mut hint = Hint::new();
         if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
             hint.with_extension(ext);
         }
+        Self::from_source(mss, hint)
+    }
 
+    /// Decode from an in-memory buffer (e.g. a track read over NFS from a linked
+    /// player). `ext` primes the format probe (e.g. "mp3", "m4a").
+    pub fn open_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<Self, DecodeError> {
+        let mss = MediaSourceStream::new(Box::new(Cursor::new(bytes)), Default::default());
+        let mut hint = Hint::new();
+        if let Some(e) = ext { hint.with_extension(e); }
+        Self::from_source(mss, hint)
+    }
+
+    fn from_source(mss: MediaSourceStream, hint: Hint) -> Result<Self, DecodeError> {
         let meta_opts = MetadataOptions::default();
         let fmt_opts = FormatOptions { enable_gapless: true, ..Default::default() };
 

@@ -209,8 +209,13 @@ pub struct RbAnalysis {
 /// Read a rekordbox `ANLZ####.DAT` analysis file: beat grid + cue points.
 /// Waveforms are ignored (freedj renders its own). Missing sections are fine.
 pub fn read_anlz(path: &Path) -> Result<RbAnalysis> {
-    let mut r = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    let anlz = ANLZ::read(&mut r).map_err(|e| anyhow!("parse ANLZ: {e}"))?;
+    let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
+    read_anlz_from(&mut f)
+}
+
+/// Parse ANLZ from any reader (e.g. bytes read over NFS).
+pub fn read_anlz_from<R: Read + Seek>(reader: &mut R) -> Result<RbAnalysis> {
+    let anlz = ANLZ::read(reader).map_err(|e| anyhow!("parse ANLZ: {e}"))?;
 
     let mut out = RbAnalysis::default();
     for section in &anlz.sections {
