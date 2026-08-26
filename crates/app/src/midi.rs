@@ -1,362 +1,144 @@
-//! Numark DJ2Go MIDI input.
+//! Numark DJ2Go — a USB MIDI adapter on the input bus.
 //!
-//! The DJ2Go is a class-compliant USB MIDI device.  It sends:
-//!   • Note On/Off    (0x9n / 0x8n)  for buttons
-//!   • Control Change (0xBn)          for the jog wheel (relative encoder)
-//!   • Pitch Bend     (0xEn)          for the pitch fader (14-bit)
+//! Class-compliant MIDI: Note On/Off for buttons, Control Change for the jog
+//! wheel (relative encoder) and pitch slider.  This module only *translates*
+//! MIDI into [`Event`]s and pushes them onto the bus; it holds no deck state.
+//! The jog *nudge* (accumulate a speed offset, snap back when idle) lives in
+//! `DeckApp::apply`, not here — so a wrong jog delta and a wrong nudge can be
+//! told apart (see docs/INPUT_PLAN.md, the S2 lesson).
 //!
-//! Run with RUST_LOG=opendeck::midi=debug to see every incoming MIDI message.
-//! Check the byte values to verify or correct the constants below.
+//! Run with `RUST_LOG=opendeck::midi=debug` to see every incoming message and
+//! check the constants below against a different controller.
 
+use crate::input::{ControlEvent, Event};
 use midir::MidiInput;
-use std::{
-    sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc, Mutex,
-    },
-    thread,
-    time::{Duration, Instant},
-};
+use std::sync::mpsc::Sender;
 
 const DEVICE_NAME: &str = "DJ2Go";
 
-// ── Button mappings — (channel 0-indexed, note) ──────────────────────────────
+// ── Deck A mappings — (channel 0-indexed, note/cc) ───────────────────────────
 const MAP_PLAY:       (u8, u8) = (0, 0x33);
 const MAP_CUE:        (u8, u8) = (0, 0x3B);
-// Pitch ±1% increment buttons (the small buttons next to the pitch slider).
 const MAP_PITCH_UP:   (u8, u8) = (0, 0x43);
 const MAP_PITCH_DOWN: (u8, u8) = (0, 0x44);
 
-// ── Jog wheel — relative Control Change ──────────────────────────────────────
-// Values 1–63 = clockwise (+), 65–127 = counter-clockwise (−).
-const JOG_CC:      u8 = 0x19; // 25
-const JOG_CHANNEL: u8 = 0;
+// The DJ2Go jog sends two CCs: 0x18 (touch plate) and 0x19 (outer ring).
+// Both are relative; treat either as a jog delta.
+const JOG_CC_A:   u8 = 0x18; // 24
+const JOG_CC_B:   u8 = 0x19; // 25, relative: 1–63 = CW (+), 65–127 = CCW (−)
+const PITCH_CC:   u8 = 0x0D; // 13, absolute 0–127, centre 64
+const CH_A:       u8 = 0;
 
-// ── Pitch slider — absolute Control Change ────────────────────────────────────
-// CC 13, 0–127, center = 64.  Lower value = fader up = faster.
-const PITCH_CC:      u8 = 0x0D; // 13
-const PITCH_CHANNEL: u8 = 0;
-const PITCH_CENTER:  u8 = 64;
-/// ±% pitch range — 0.16 = ±16%.
-const PITCH_FADER_RANGE: f32 = 0.16;
-
-// ── Deck B — second beat grid (channel 1, same CC/note numbers) ──────────────
-const JOG_CHANNEL_B:   u8 = 1;
-const PITCH_CHANNEL_B: u8 = 1;
-const MAP_CUE_B:       (u8, u8) = (1, 0x3B); // sets beat2 anchor to current pos
-
-// ── Jog sensitivity ───────────────────────────────────────────────────────────
-/// Scrub (scratch on): samples per jog tick.  Tune to taste.
-#[allow(dead_code)]
-const SCRUB_SAMPLES_PER_TICK: f64 = 1000.0;
-/// Nudge speed offset per jog tick (Deck A).
-const NUDGE_SPEED_PER_TICK: f32 = 0.002;
-/// Nudge BPM offset per jog tick (Deck B).
-const NUDGE_BPM_PER_TICK: f32 = 0.1;
-/// Idle time before speed/BPM snaps back to the pitch fader value.
-const NUDGE_RELEASE_MS: u64 = 150;
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-struct State {
-    // Deck A (audio)
-    fader_speed: f32,
-    last_nudge:  Option<Instant>,
-    // Deck B (second beat grid)
-    bpm2_fader: f32,
-    bpm2_nudge: Option<Instant>,
-}
+/// Pitch step for the ± buttons and the fader range, matching a CDJ.
+const PITCH_STEP:  f32 = 0.01;
 
 pub struct MidiHandle {
-    _conn:   midir::MidiInputConnection<()>,
-    _thread: thread::JoinHandle<()>,
+    _conn: midir::MidiInputConnection<()>,
 }
 
 impl MidiHandle {
-    pub fn connect(
-        playing:      Arc<AtomicBool>,
-        position:     Arc<AtomicU64>,
-        speed:        Arc<AtomicU32>,
-        fader_speed:  Arc<AtomicU32>,
-        _sample_rate: u32,
-        channels:     u8,
-        samples_len:  usize,
-        beat2_bpm:    Arc<AtomicU32>,
-        beat2_anchor: Arc<AtomicU64>,
-        base_bpm:     f32,
-    ) -> Option<Self> {
+    /// Connect to the DJ2Go and forward its controls to `tx` as bus events.
+    pub fn connect(tx: Sender<Event>) -> Option<Self> {
         let midi_in = MidiInput::new("opendeck")
             .map_err(|e| log::warn!("MIDI: init failed: {e}"))
             .ok()?;
 
         let ports = midi_in.ports();
         let port = ports.iter().find(|p| {
-            midi_in.port_name(p)
-                .map(|n| n.contains(DEVICE_NAME))
-                .unwrap_or(false)
+            midi_in.port_name(p).map(|n| n.contains(DEVICE_NAME)).unwrap_or(false)
         });
-
         let port = match port {
             Some(p) => p.clone(),
             None => {
-                log::info!("MIDI: {} not found.  Available ports:", DEVICE_NAME);
+                log::info!("MIDI: {DEVICE_NAME} not found.  Available ports:");
                 for p in &ports {
-                    if let Ok(name) = midi_in.port_name(p) {
-                        log::info!("  - {name}");
-                    }
+                    if let Ok(name) = midi_in.port_name(p) { log::info!("  - {name}"); }
                 }
                 return None;
             }
         };
 
-        log::info!("MIDI: found {} — connecting", DEVICE_NAME);
-
-        let max_pos = samples_len as u64;
-
-        let state = Arc::new(Mutex::new(State {
-            fader_speed: 1.0,
-            last_nudge:  None,
-            bpm2_fader:  base_bpm,
-            bpm2_nudge:  None,
-        }));
-
-        // Clone refs for the MIDI callback.
-        let (playing_cb, position_cb, speed_cb, fader_speed_cb, state_cb) = (
-            Arc::clone(&playing),
-            Arc::clone(&position),
-            Arc::clone(&speed),
-            Arc::clone(&fader_speed),
-            Arc::clone(&state),
-        );
-        let (beat2_bpm_cb, beat2_anchor_cb) = (
-            Arc::clone(&beat2_bpm),
-            Arc::clone(&beat2_anchor),
-        );
-
+        log::info!("MIDI: found {DEVICE_NAME} — connecting");
         let conn = midi_in
-            .connect(
-                &port,
-                "opendeck-dj2go",
-                move |_ts, msg, _| {
-                    handle_message(
-                        msg,
-                        &playing_cb,
-                        &position_cb,
-                        &speed_cb,
-                        &fader_speed_cb,
-                        &beat2_bpm_cb,
-                        &beat2_anchor_cb,
-                        &state_cb,
-                        max_pos,
-                        channels,
-                        base_bpm,
-                    );
-                },
-                (),
-            )
+            .connect(&port, "opendeck-dj2go", move |_ts, msg, _| {
+                if let Some(ev) = translate(msg) {
+                    let _ = tx.send(ev);
+                }
+            }, ())
             .map_err(|e| log::error!("MIDI: connect failed: {e}"))
             .ok()?;
 
-        // Snap-back thread: polls every 20 ms and restores fader values after
-        // the jog has been idle for NUDGE_RELEASE_MS.
-        let (speed_snap, beat2_bpm_snap, state_snap) = (
-            Arc::clone(&speed),
-            Arc::clone(&beat2_bpm),
-            Arc::clone(&state),
-        );
-        let snap_thread = thread::Builder::new()
-            .name("dj2go-snap".into())
-            .spawn(move || loop {
-                thread::sleep(Duration::from_millis(20));
-                let mut st = state_snap.lock().unwrap();
-                if let Some(t) = st.last_nudge {
-                    if t.elapsed() > Duration::from_millis(NUDGE_RELEASE_MS) {
-                        speed_snap.store(st.fader_speed.to_bits(), Ordering::Relaxed);
-                        st.last_nudge = None;
-                    }
-                }
-                if let Some(t) = st.bpm2_nudge {
-                    if t.elapsed() > Duration::from_millis(NUDGE_RELEASE_MS) {
-                        beat2_bpm_snap.store(st.bpm2_fader.to_bits(), Ordering::Relaxed);
-                        st.bpm2_nudge = None;
-                    }
-                }
-            })
-            .expect("failed to spawn snap-back thread");
-
-        Some(MidiHandle { _conn: conn, _thread: snap_thread })
+        Some(MidiHandle { _conn: conn })
     }
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-
-fn handle_message(
-    msg:          &[u8],
-    playing:      &Arc<AtomicBool>,
-    position:     &Arc<AtomicU64>,
-    speed:        &Arc<AtomicU32>,
-    fader_speed:  &Arc<AtomicU32>,
-    beat2_bpm:    &Arc<AtomicU32>,
-    beat2_anchor: &Arc<AtomicU64>,
-    state:        &Arc<Mutex<State>>,
-    max_pos:      u64,
-    channels:     u8,
-    base_bpm:     f32,
-) {
-    if msg.is_empty() { return; }
-
-    let status  = msg[0];
-    let kind    = status & 0xF0;
-    let channel = status & 0x0F;
-
+/// One MIDI message → at most one bus event.  Deck A only; the second-deck
+/// simulation retired when real ProDJ Link began driving the B2 strip.
+fn translate(msg: &[u8]) -> Option<Event> {
+    if msg.len() < 3 { return None; }
+    let kind = msg[0] & 0xF0;
+    let ch   = msg[0] & 0x0F;
     log::debug!("MIDI rx: {:02X?}", msg);
 
     match kind {
-        0x90 if msg.len() >= 3 => {
+        // Note On (velocity 0 = Note Off, ignored).
+        0x90 if msg[2] > 0 => {
             let note = msg[1];
-            let vel  = msg[2];
-            // Note On with velocity 0 is treated as Note Off.
-            if vel > 0 {
-                note_on(channel, note, playing, position, speed, fader_speed, beat2_anchor, state, channels);
+            let deck = |e| Some(Event::Deck(e));
+            match (ch, note) {
+                MAP_PLAY       => deck(ControlEvent::PlayPause),
+                MAP_CUE        => deck(ControlEvent::Cue),
+                MAP_PITCH_UP   => deck(ControlEvent::TempoNudge { delta:  PITCH_STEP }),
+                MAP_PITCH_DOWN => deck(ControlEvent::TempoNudge { delta: -PITCH_STEP }),
+                _ => { log::debug!("MIDI note ch{ch} 0x{note:02X} unmapped"); None }
             }
         }
-
-        0xB0 if msg.len() >= 3 => {
-            let cc    = msg[1];
-            let value = msg[2];
-
-            // Deck A — audio playback
-            if channel == JOG_CHANNEL && cc == JOG_CC {
-                jog_tick(value, position, speed, state, max_pos);
-            } else if channel == PITCH_CHANNEL && cc == PITCH_CC {
-                let s = cc_to_speed(value);
-                let mut st = state.lock().unwrap();
-                st.fader_speed = s;
-                fader_speed.store(s.to_bits(), Ordering::Relaxed);
-                if st.last_nudge.is_none() {
-                    speed.store(s.to_bits(), Ordering::Relaxed);
+        // Control Change.
+        0xB0 if ch == CH_A => {
+            let (cc, value) = (msg[1], msg[2]);
+            match cc {
+                JOG_CC_A | JOG_CC_B => {
+                    // Relative two's-complement delta.
+                    let delta = if value < 64 { value as i32 } else { value as i32 - 128 };
+                    // The DJ2Go gives no velocity; approximate one for scratch
+                    // mode from the delta (33.3 RPM reference).
+                    Some(Event::Deck(ControlEvent::JogDelta { delta, velocity_rpm: delta as f32 * 2.0 }))
                 }
-                log::debug!("MIDI pitch slider A: {value} → {s:.3}×");
-
-            // Deck B — second beat grid
-            } else if channel == JOG_CHANNEL_B && cc == JOG_CC {
-                jog_tick_b(value, beat2_bpm, state);
-            } else if channel == PITCH_CHANNEL_B && cc == PITCH_CC {
-                let bpm = cc_to_bpm(value, base_bpm);
-                let mut st = state.lock().unwrap();
-                st.bpm2_fader = bpm;
-                if st.bpm2_nudge.is_none() {
-                    beat2_bpm.store(bpm.to_bits(), Ordering::Relaxed);
+                PITCH_CC => {
+                    // Centre 64 = 0%; lower value = fader up = faster.
+                    let position = 1.0 - value as f32 / 127.0;
+                    Some(Event::Deck(ControlEvent::TempoFader { position }))
                 }
-                log::debug!("MIDI pitch slider B: {value} → {bpm:.1} BPM");
+                _ => None,
             }
         }
-
-        _ => {}
+        _ => None,
     }
 }
 
-fn note_on(
-    channel:      u8,
-    note:         u8,
-    playing:      &Arc<AtomicBool>,
-    position:     &Arc<AtomicU64>,
-    speed:        &Arc<AtomicU32>,
-    fader_speed:  &Arc<AtomicU32>,
-    beat2_anchor: &Arc<AtomicU64>,
-    state:        &Arc<Mutex<State>>,
-    channels:     u8,
-) {
-    let (play_ch,  play_note)  = MAP_PLAY;
-    let (cue_ch,   cue_note)   = MAP_CUE;
-    let (pup_ch,   pup_note)   = MAP_PITCH_UP;
-    let (pdown_ch, pdown_note) = MAP_PITCH_DOWN;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::input::{ControlEvent as CE, Event};
 
-    if channel == play_ch && note == play_note {
-        let was = playing.load(Ordering::Relaxed);
-        playing.store(!was, Ordering::Relaxed);
-        log::info!("DJ2Go → {}", if was { "paused" } else { "playing" });
-    } else if channel == cue_ch && note == cue_note {
-        position.store(0, Ordering::Relaxed);
-        log::info!("DJ2Go → cue");
-    } else if channel == pup_ch && note == pup_note {
-        // Update fader_speed so snap-back doesn't undo the change.
-        let mut st = state.lock().unwrap();
-        let new = (st.fader_speed + 0.01).clamp(0.25, 4.0);
-        st.fader_speed = new;
-        fader_speed.store(new.to_bits(), Ordering::Relaxed);
-        speed.store(new.to_bits(), Ordering::Relaxed);
-        log::debug!("DJ2Go → pitch +1% ({new:.3}×)");
-    } else if channel == pdown_ch && note == pdown_note {
-        let mut st = state.lock().unwrap();
-        let new = (st.fader_speed - 0.01).clamp(0.25, 4.0);
-        st.fader_speed = new;
-        fader_speed.store(new.to_bits(), Ordering::Relaxed);
-        speed.store(new.to_bits(), Ordering::Relaxed);
-        log::debug!("DJ2Go → pitch −1% ({new:.3}×)");
-    } else {
-        let (cue_b_ch, cue_b_note) = MAP_CUE_B;
-        if channel == cue_b_ch && note == cue_b_note {
-            // Set beat2 anchor to current playhead (in frames).
-            let pos_frames = position.load(Ordering::Relaxed) / channels as u64;
-            beat2_anchor.store(pos_frames, Ordering::Relaxed);
-            log::info!("DJ2Go Deck B → beat2 anchor set at frame {pos_frames}");
-        } else {
-            log::debug!("MIDI note on ch{channel} note 0x{note:02X} (unmapped)");
-        }
+    fn deck(msg: &[u8]) -> Option<CE> {
+        match translate(msg) { Some(Event::Deck(e)) => Some(e), _ => None }
     }
-}
 
-fn jog_tick(
-    value:    u8,
-    position: &Arc<AtomicU64>,
-    speed:    &Arc<AtomicU32>,
-    state:    &Arc<Mutex<State>>,
-    max_pos:  u64,
-) {
-    // Two's complement relative: 1–63 = CW (+), 65–127 = CCW (−).
-    let delta: i32 = if value < 64 { value as i32 } else { value as i32 - 128 };
-    log::debug!("DJ2Go jog: {delta:+}");
-
-    let mut st = state.lock().unwrap();
-    // Nudge: accumulate speed offset from the current value so rapid spinning
-    // keeps growing, then snap-back restores fader_speed after idle.
-    let cur    = f32::from_bits(speed.load(Ordering::Relaxed));
-    let offset = delta as f32 * NUDGE_SPEED_PER_TICK;
-    speed.store((cur + offset).clamp(0.25, 4.0).to_bits(), Ordering::Relaxed);
-    st.last_nudge = Some(Instant::now());
-
-    // If you want scrub (direct seek) instead of nudge, swap in this block:
-    //   let samples = (delta.abs() as f64 * SCRUB_SAMPLES_PER_TICK) as u64;
-    //   let pos = position.load(Ordering::Relaxed);
-    //   if delta > 0 { position.store(pos.saturating_add(samples).min(max_pos), ...) }
-    //   else         { position.store(pos.saturating_sub(samples), ...) }
-    let _ = (position, max_pos);
-}
-
-/// Deck B jog — nudges beat2_bpm by a small amount per tick.
-fn jog_tick_b(value: u8, beat2_bpm: &Arc<AtomicU32>, state: &Arc<Mutex<State>>) {
-    let delta: i32 = if value < 64 { value as i32 } else { value as i32 - 128 };
-    log::debug!("DJ2Go Deck B jog: {delta:+}");
-
-    let mut st  = state.lock().unwrap();
-    let cur_bpm = f32::from_bits(beat2_bpm.load(Ordering::Relaxed));
-    let new_bpm = (cur_bpm + delta as f32 * NUDGE_BPM_PER_TICK).clamp(20.0, 300.0);
-    beat2_bpm.store(new_bpm.to_bits(), Ordering::Relaxed);
-    st.bpm2_nudge = Some(Instant::now());
-}
-
-/// CC pitch slider → speed multiplier (Deck A).
-/// value = 0..=127, center = 64.  Lower value = fader up = faster.
-fn cc_to_speed(value: u8) -> f32 {
-    let offset = PITCH_CENTER as f32 - value as f32;
-    (1.0 + offset / PITCH_CENTER as f32 * PITCH_FADER_RANGE).clamp(0.25, 4.0)
-}
-
-/// CC pitch slider → BPM (Deck B).
-/// Center (64) = base_bpm, range ±PITCH_FADER_RANGE %.
-fn cc_to_bpm(value: u8, base_bpm: f32) -> f32 {
-    let offset = PITCH_CENTER as f32 - value as f32;
-    let factor = 1.0 + offset / PITCH_CENTER as f32 * PITCH_FADER_RANGE;
-    (base_bpm * factor).clamp(20.0, 300.0)
+    #[test]
+    fn dj2go_controls_map_to_deck_events() {
+        assert!(matches!(deck(&[0x90, 0x33, 0x7F]), Some(CE::PlayPause)));
+        assert!(matches!(deck(&[0x90, 0x3B, 0x7F]), Some(CE::Cue)));
+        assert!(matches!(deck(&[0x90, 0x43, 0x7F]), Some(CE::TempoNudge { delta }) if (delta - 0.01).abs() < 1e-6));
+        assert!(matches!(deck(&[0x90, 0x44, 0x7F]), Some(CE::TempoNudge { delta }) if (delta + 0.01).abs() < 1e-6));
+        // Note-off (velocity 0) produces nothing.
+        assert!(translate(&[0x90, 0x33, 0x00]).is_none());
+        // Jog: +5 clockwise, −5 as two's complement (123).
+        assert!(matches!(deck(&[0xB0, 0x19, 5]),   Some(CE::JogDelta { delta:  5, .. })));
+        assert!(matches!(deck(&[0xB0, 0x18, 5]),   Some(CE::JogDelta { delta:  5, .. })));
+        assert!(matches!(deck(&[0xB0, 0x19, 123]), Some(CE::JogDelta { delta: -5, .. })));
+        // Fader: centre 64 → ~0.5, top (0) → 1.0, bottom (127) → 0.0.
+        assert!(matches!(deck(&[0xB0, 0x0D, 64]),  Some(CE::TempoFader { position }) if (position - 0.496).abs() < 0.02));
+        assert!(matches!(deck(&[0xB0, 0x0D, 0]),   Some(CE::TempoFader { position }) if position > 0.99));
+    }
 }

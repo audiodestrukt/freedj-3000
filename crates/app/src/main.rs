@@ -26,7 +26,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicU32, AtomicU64, Ordering},
-        Arc,
+        mpsc, Arc,
     },
     time::{Duration, Instant},
 };
@@ -71,8 +71,13 @@ struct DeckApp {
     zoom_grid_mode:    bool,
     source_link:       bool,
     phase_ticks_view:  bool,
-    /// Input bus: every source pushes here; `apply` drains it once per frame.
+    /// Same-thread sources (keyboard, touch) push here.
     events:            Vec<Event>,
+    /// Off-thread sources (MIDI, later HID/serial) send here; drained per frame.
+    event_rx:          mpsc::Receiver<Event>,
+    /// Jog nudge: a temporary speed offset that snaps back when the wheel stops.
+    jog_offset:        f32,
+    jog_until:         Option<Instant>,
     exit_after_capture: bool,
 
     // Created on first `resumed`.
@@ -133,6 +138,7 @@ impl DeckApp {
         beat2_anchor: Arc<AtomicU64>,
         beat2_player: Arc<AtomicU32>,
         link:         Arc<prodj::LinkState>,
+        event_rx:     mpsc::Receiver<Event>,
     ) -> Self {
         Self {
             path,
@@ -161,6 +167,9 @@ impl DeckApp {
             // Dev: OPENDECK_PHASE_VIEW=ticks starts in the alignment view (for captures).
             phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
             events:            Vec::new(),
+            event_rx,
+            jog_offset:        0.0,
+            jog_until:         None,
             exit_after_capture: false,
             window:      None,
             renderer:    None,
@@ -177,6 +186,28 @@ impl DeckApp {
         match ev {
             Event::Deck(ControlEvent::Play)  => { self.audio.playing.store(true,  Ordering::Relaxed); log::info!("playing"); }
             Event::Deck(ControlEvent::Pause) => { self.audio.playing.store(false, Ordering::Relaxed); log::info!("paused"); }
+            Event::Deck(ControlEvent::PlayPause) => {
+                let was = self.audio.playing.load(Ordering::Relaxed);
+                self.audio.playing.store(!was, Ordering::Relaxed);
+                log::info!("{}", if was { "paused" } else { "playing" });
+            }
+            Event::Deck(ControlEvent::TempoNudge { delta }) => {
+                let step = delta / (2.0 * input::TEMPO_RANGE);
+                let f = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)));
+                self.apply(Event::Deck(ControlEvent::TempoFader { position: f + step }));
+            }
+            Event::Deck(ControlEvent::JogDelta { delta, .. }) => {
+                // Nudge: accumulate a speed offset; snap back after the wheel
+                // is idle.  Overrides SYNC's phase nudge while active, which is
+                // what a CDJ does when you touch the jog while synced.
+                const NUDGE_PER_TICK: f32 = 0.002;
+                self.jog_offset = (self.jog_offset + delta as f32 * NUDGE_PER_TICK).clamp(-0.5, 0.5);
+                self.jog_until  = Some(Instant::now() + Duration::from_millis(150));
+                let f = f32::from_bits(self.fader_speed.load(Ordering::Relaxed));
+                let spd = (f + self.jog_offset).clamp(0.25, 4.0);
+                self.audio.speed.store(spd.to_bits(), Ordering::Relaxed);
+                log::debug!("jog {delta:+} → speed {spd:.3}× (offset {:+.3})", self.jog_offset);
+            }
             Event::Deck(ControlEvent::Cue)   => { self.audio.position.store(0, Ordering::Relaxed); }
             Event::Deck(ControlEvent::NeedleSearch { position }) => {
                 let total = self.audio.samples.len() as f64;
@@ -369,9 +400,20 @@ impl DeckApp {
         let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, &mut touch));
         drop(snap);
         self.events.append(&mut touch);
-        let pending = std::mem::take(&mut self.events);
+        let mut pending = std::mem::take(&mut self.events);
+        pending.extend(self.event_rx.try_iter());
         for ev in pending {
             self.apply(ev);
+        }
+        // Jog nudge snap-back: once the wheel has been still past the window,
+        // return to the pitch-fader speed.
+        if let Some(until) = self.jog_until {
+            if Instant::now() >= until {
+                self.jog_offset = 0.0;
+                self.jog_until  = None;
+                let f = self.fader_speed.load(Ordering::Relaxed);
+                self.audio.speed.store(f, Ordering::Relaxed);
+            }
         }
 
         let platform_output = std::mem::take(&mut output.platform_output);
@@ -624,24 +666,15 @@ fn main() -> Result<()> {
     });
 
     // ── 5. Connect MIDI controller (optional — app runs fine without it) ──────────
-    let _midi = midi::MidiHandle::connect(
-        Arc::clone(&audio.playing),
-        Arc::clone(&audio.position),
-        Arc::clone(&audio.speed),
-        Arc::clone(&fader_speed),
-        audio.sample_rate,
-        audio.channels,
-        audio.samples.len(),
-        Arc::clone(&beat2_bpm),
-        Arc::clone(&beat2_anchor),
-        base_bpm,
-    );
+    // ── 5. Input bus: MIDI (DJ2Go) forwards controls into this channel ────────
+    let (event_tx, event_rx) = mpsc::channel::<Event>();
+    let _midi = midi::MidiHandle::connect(event_tx);
 
     // ── 6. Run the UI event loop ──────────────────────────────────────────────
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, link);
+    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, link, event_rx);
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())

@@ -135,7 +135,11 @@ pub enum ControlEvent {
     JogTouch     { touched: bool },
     Play,
     Pause,
+    /// Toggle play/pause — a single button (DJ2Go, keyboard Space).
+    PlayPause,
     Cue,
+    /// Relative tempo step, as a fraction (0.01 = +1%); the pitch ± buttons.
+    TempoNudge { delta: f32 },
     HotCueTrigger { slot: u8, held: bool },
     HotCueSet     { slot: u8 },
     HotCueDelete  { slot: u8 },
