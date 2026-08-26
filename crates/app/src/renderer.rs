@@ -784,7 +784,11 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
         let adjusted = ((beat_num + p.downbeat_offset) % bpb + bpb) % bpb;
         let is_down  = adjusted < 0.5;
         let tick_w   = select(1.0, 2.0, is_down);
-        if beat_pos < tick_w || beat_pos > p.beat_period_cols - tick_w {
+        // Draw at each beat's LEADING edge only.  Drawing both edges painted the
+        // (wider) downbeat colour at the beat's trailing edge too, which showed
+        // as a second red line one beat after every downbeat — the "doubled"
+        // bar ticks.  One tick per boundary, coloured by the beat starting there.
+        if beat_pos < tick_w {
             let len  = select(0.055, 0.10, is_down) * wave_h;
             let edge = (q.y - r.y) < len || (q.y - r.y) > wave_h - len;
             if edge {
