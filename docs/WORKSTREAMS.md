@@ -167,7 +167,31 @@ captured packets, not to the simulator.
 Doing this first means the two-deck test *is* the compatibility work, rather
 than validating a private format that proves nothing about real gear.
 
-### B2. Link send — **done** (2026-08-26)
+### B2. Link send — **works, but default-off after two XDJ freezes**
+
+The full sender (announce, beat, status, master handoff) is implemented and
+verified against the XDJ. The real unit froze twice (2026-08-26) — but the
+second freeze's symptoms (blinking USB light, browser not reading, Play won't
+latch while hold-cue previews) point at the **USB stick / rekordbox database**,
+which freedj cannot touch, not at Link traffic. Both freezes correlate with
+USB behaviour. So freedj is probably not the cause.
+
+Link send is nonetheless **opt-in** now (`--link-send`; default receive-only)
+as a precaution *and* because there is a real defect to fix first (below).
+Receive-only still follows a master's tempo and cannot ask the deck to do
+anything.
+
+**Prime suspect: the status packet.** It is built by copying the XDJ's own
+0x124-byte status as a template and overwriting the fields we model — which
+means we send back *its* undecoded bytes, possibly including rekordbox
+track/USB pointers, with our device number. A CDJ receiving a status that
+claims a rekordbox track from a USB it knows, with copied pointers, may try to
+resolve metadata (dbserver on 1051) and wedge. **Next step before re-enabling
+send: build the status packet from zero, setting only the documented fields,
+instead of from the template.** Also worth: send status only when we actually
+need the XDJ to see us (master/sync), not continuously.
+
+Original completion note (mechanics verified):
 
 Announce (0x06), beat (0x28), and status (0x0a, unicast to every peer ~5/s)
 are sent as `--player N`; own broadcasts are filtered. Status is built from

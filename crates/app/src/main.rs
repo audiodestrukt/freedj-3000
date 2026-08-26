@@ -636,11 +636,13 @@ fn main() -> Result<()> {
         Some("B") | Some("b") => 1,
         _ => 0,
     };
-    // Link SEND (beat/status/master handoff) is on by default — verified
-    // against the XDJ. `--link-receive-only` (announce + listen only, still
-    // follows a master's tempo, never asks the deck to do anything) is a
-    // conservative fallback if a deck ever misbehaves.
-    let mut link_send = std::env::var("OPENDECK_LINK_SEND").map(|v| v != "0").unwrap_or(true);
+    // Link SEND (beat/status/master handoff) is OFF by default. An XDJ froze
+    // twice during two-deck play; the symptoms point at its USB stick, not our
+    // traffic, but receive-only is a safe default and there is a real defect
+    // to fix first (status built from the XDJ's own packet as a template —
+    // WORKSTREAMS B2). Receive-only still follows a master's tempo. Opt into
+    // full send with `--link-send` (or OPENDECK_LINK_SEND=1).
+    let mut link_send = std::env::var("OPENDECK_LINK_SEND").map(|v| v == "1").unwrap_or(false);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--player" => player = args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6")?,
