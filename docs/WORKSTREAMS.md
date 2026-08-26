@@ -105,7 +105,7 @@ periods (from `refresh_rate_millihertz`) rather than measured wall-clock.
 Acquire never blocks, zero double frames, one skip in 400, motion exactly one
 period per frame. Not yet verified on X11, GLES, or the Pi.
 
-### A3. Real-time thread hardening — **medium**
+### A3. Real-time thread hardening — **medium** — design: `docs/design/rt-audio-isolation.md`
 
 `audio-proc` is a plain thread doing `thread::sleep` polling — no `SCHED_FIFO`,
 no mlock, no priority anywhere in the tree. Underruns are silent:
@@ -234,11 +234,16 @@ dropped its MASTER flag; freedj also correctly yields when a peer
 (prolink_virtual_cdj, or a returning XDJ) asserts a higher counter. Incoming
 0x26 requests and 0x2a sync-control commands from other decks are handled too.
 
-### B3. Audio device selection — **small**
+### B3. Audio device selection — **small, now also a correctness issue**
 
-`AudioHandle::open` takes the default output device. Two instances on one box
-need `--device` so they do not fight, and a real deck needs to choose its
-interface anyway.
+`AudioHandle::open` takes `cpal::default_host()`'s default device. On the Pi 5
+this grabbed an ALSA device that did **not** route through PipeWire and
+produced no audible output (freedj never appeared in `wpctl` streams). So
+device selection is not just "two instances shouldn't fight" — without it we
+cannot reliably reach the intended output at all. Need: `--device` to list and
+pick, and a decision on the backend (PipeWire vs JACK vs ALSA-direct). A USB
+audio interface with a fixed low period is the real deck target, not HDMI.
+Prerequisite for the RT audio work (A3).
 
 ### B4. Status packet parsing — **done** (2026-08-26)
 
