@@ -65,6 +65,9 @@ struct DeckApp {
     beat2_player: Arc<AtomicU32>, // player number of the last Link beat sender
     beat2_bib:    Arc<AtomicU32>, // external deck's beat within its bar (1-4, 0=unknown)
     link:         Arc<prodj::LinkState>,
+    /// Shared with the ProDJ sender; updated on load so Link sync/broadcast use
+    /// the current track's grid.
+    link_grid:    Arc<arc_swap::ArcSwap<Option<BeatGrid>>>,
     beat2_start:  Instant,        // wall-clock time of the last phase reset
     prev_beat2_anchor: u64,       // detect changes in beat2_anchor
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
@@ -197,6 +200,7 @@ impl DeckApp {
         beat2_player: Arc<AtomicU32>,
         beat2_bib:    Arc<AtomicU32>,
         link:         Arc<prodj::LinkState>,
+        link_grid:    Arc<arc_swap::ArcSwap<Option<BeatGrid>>>,
         event_rx:     mpsc::Receiver<Event>,
     ) -> Self {
         let browser = Browser::new(&path, std::sync::Arc::clone(&link));
@@ -215,6 +219,7 @@ impl DeckApp {
             beat2_player,
             beat2_bib,
             link,
+            link_grid,
             beat2_start:       Instant::now(),
             prev_beat2_anchor: 0,
             prev_beat2_bpm:    0.0,
@@ -589,6 +594,10 @@ impl DeckApp {
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&waveform); }
         self.waveform     = waveform;
         self.beat_grid    = beat_grid;
+        // Keep the ProDJ Link sender's grid in step with the loaded track, so
+        // SYNC divides the master BPM by the CURRENT track's BPM (not the one
+        // loaded at startup) and we broadcast our real tempo.
+        self.link_grid.store(Arc::new(self.beat_grid.clone()));
         self.smoothed_pos = 0.0;
         self.prev_pos     = 0;
         self.cue_point    = cue_pt;
@@ -1171,6 +1180,9 @@ fn main() -> Result<()> {
         Arc::clone(&beat2_bib),
     );
     log::info!("ProDJ Link send: {}", if link_send { "full (beat/status/master)" } else { "receive-only (announce + listen)" });
+    // Live beat grid shared with the ProDJ Link sender: the deck updates it on
+    // every LOAD so sync divides by the CURRENT track's BPM, not the startup one.
+    let link_grid = Arc::new(arc_swap::ArcSwap::from_pointee(beat_grid.clone()));
     let _prodj_tx = prodj::ProDjSender::start(Arc::clone(&link), prodj::SenderState {
         send_full:   link_send,
         position:    Arc::clone(&audio.position),
@@ -1180,7 +1192,7 @@ fn main() -> Result<()> {
         speed:       Arc::clone(&audio.speed),
         sample_rate: audio.sample_rate,
         channels:    audio.channels,
-        grid:        beat_grid.clone(),
+        grid:        Arc::clone(&link_grid),
     });
 
     // ── 5. Connect MIDI controller (optional — app runs fine without it) ──────────
@@ -1193,7 +1205,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, event_rx);
+    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, event_rx);
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())

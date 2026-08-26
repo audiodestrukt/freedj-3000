@@ -18,6 +18,7 @@ use opendeck_link::prodj::{
     ProDjLink, Status, StatusFields, BECOME_MASTER, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS,
     SYNC_OFF, SYNC_ON,
 };
+use arc_swap::ArcSwap;
 use opendeck_types::{BeatGrid, EngineSnapshot};
 use socket2::{Domain, Protocol, Socket, Type};
 use std::{
@@ -109,7 +110,9 @@ pub struct SenderState {
     pub speed:       Arc<AtomicU32>,   // f32 bits; phase nudges write this
     pub sample_rate: u32,
     pub channels:    u8,
-    pub grid:        Option<BeatGrid>,
+    /// Live beat grid — updated by the deck on every track load so the
+    /// sender's sync/broadcast use the CURRENT track, not the startup one.
+    pub grid:        Arc<ArcSwap<Option<BeatGrid>>>,
 }
 
 // ── Sockets ───────────────────────────────────────────────────────────────────
@@ -237,21 +240,26 @@ fn listen_beat(
         if let Some(b) = ProDjLink::parse_beat(data) {
             if b.player == link.player { return; }           // our own broadcast
             let master = link.master_player.load(Ordering::Relaxed) as u8;
+            // Effective tempo = track BPM × the sender's pitch.  The beat packet
+            // carries them separately; use the product so a pitched master
+            // reports its real tempo (the status path already does this — the two
+            // must agree or master_bpm hunts between them).
+            let eff = b.bpm * b.pitch;
             // The B2 strip follows the master if there is one, else whoever plays.
             if master == 0 || master == b.player {
                 let old = f32::from_bits(beat2_bpm.load(Ordering::Relaxed));
-                beat2_bpm.store(b.bpm.to_bits(), Ordering::Relaxed);
+                beat2_bpm.store(eff.to_bits(), Ordering::Relaxed);
                 beat2_player.store(b.player as u32, Ordering::Relaxed);
                 beat2_bib.store(b.beat_in_bar as u32, Ordering::Relaxed);
                 beat2_anchor.fetch_add(1, Ordering::Relaxed);
-                if (old - b.bpm).abs() > 0.005 {
-                    log::info!("ProDJ beat: player {} @ {:.2} BPM (was {old:.2})", b.player, b.bpm);
+                if (old - eff).abs() > 0.005 {
+                    log::info!("ProDJ beat: player {} @ {:.2} BPM (was {old:.2})", b.player, eff);
                 } else {
-                    log::debug!("ProDJ beat: player {} @ {:.2} BPM beat {}/4", b.player, b.bpm, b.beat_in_bar);
+                    log::debug!("ProDJ beat: player {} @ {:.2} BPM beat {}/4", b.player, eff, b.beat_in_bar);
                 }
             }
             if master == b.player {
-                link.master_bpm.store(b.bpm.to_bits(), Ordering::Relaxed);
+                link.master_bpm.store(eff.to_bits(), Ordering::Relaxed);
                 link.master_beat_seq.fetch_add(1, Ordering::Relaxed);
             }
             return;
@@ -430,6 +438,9 @@ impl ProDjSender {
                 loop {
                     let now = Instant::now();
                     let dt  = now.duration_since(last_tick).as_secs_f64();
+                    // Load the current track's grid (updated on each LOAD).
+                    let grid_arc = st.grid.load_full();
+                    let cur_grid: &Option<BeatGrid> = &grid_arc;
                     last_tick = now;
                     let playing = st.playing.load(Ordering::Relaxed);
                     let fader   = f32::from_bits(st.fader_speed.load(Ordering::Relaxed)) as f64;
@@ -438,7 +449,7 @@ impl ProDjSender {
                     // ── Audible position estimate ────────────────────────────
                     let mut beat_now: Option<(i64, f64)> = None;   // (index, fractional)
                     if playing {
-                        if let Some(grid) = &st.grid {
+                        if let Some(grid) = cur_grid {
                             let pos   = st.position.load(Ordering::Relaxed);
                             let ahead = st.in_flight.load(Ordering::Relaxed) as f64;
                             ahead_avg += (ahead - ahead_avg) * 0.005;
@@ -467,7 +478,7 @@ impl ProDjSender {
                     }
 
                     // ── Beat packet ──────────────────────────────────────────
-                    if st.send_full { if let (Some(grid), Some((beat, _))) = (&st.grid, beat_now) {
+                    if st.send_full { if let (Some(grid), Some((beat, _))) = (cur_grid, beat_now) {
                         let seek = last_beat.map_or(false, |b| beat < b - 2 || beat > b + 8);
                         if last_beat.map_or(true, |b| beat > b) || seek {
                             let bib  = ((beat + grid.downbeat_offset as i64).rem_euclid(4) + 1) as u8;
@@ -529,8 +540,8 @@ impl ProDjSender {
 
                     // ── SYNC follow ──────────────────────────────────────────
                     let sync = link.sync.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed);
-                    if sync && st.grid.is_some() {
-                        let grid = st.grid.as_ref().unwrap();
+                    if sync && cur_grid.is_some() {
+                        let grid = cur_grid.as_ref().unwrap();
                         let master_bpm = f32::from_bits(link.master_bpm.load(Ordering::Relaxed));
                         if master_bpm > 0.0 {
                             // Tempo: set the fader so our effective BPM equals the master's.
@@ -573,7 +584,7 @@ impl ProDjSender {
                     let flags_changed = flags != last_flags;
                     last_flags = flags;
                     if st.send_full && (flags_changed || now.duration_since(last_status) >= Duration::from_millis(200)) {
-                        let (beat_num, bib) = match (&st.grid, beat_now) {
+                        let (beat_num, bib) = match (cur_grid, beat_now) {
                             (Some(grid), Some((beat, _))) => {
                                 let first = grid.beat_at_sample(0, st.sample_rate).floor() as i64;
                                 (Some((beat - first).max(0) as u32), Some(((beat + grid.downbeat_offset as i64).rem_euclid(4) + 1) as u8))
@@ -587,7 +598,7 @@ impl ProDjSender {
                             sync:    link.sync.load(Ordering::Relaxed),
                             on_air:  false,
                             pitch:   fader as f32,
-                            bpm:     st.grid.as_ref().map(|g| g.bpm as f32),
+                            bpm:     cur_grid.as_ref().map(|g| g.bpm as f32),
                             beat:    beat_num,
                             beat_in_bar: bib,
                             handoff_to: match link.handoff_to.load(Ordering::Relaxed) { 0 => None, p => Some(p as u8) },
