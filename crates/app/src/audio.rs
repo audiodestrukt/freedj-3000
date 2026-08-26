@@ -308,7 +308,14 @@ fn processor_loop(
         }
 
         // ── End of track ──────────────────────────────────────────────────────
+        // The source is exhausted, but the ring buffer still holds already-
+        // decoded audio that the device is playing out.  Keep publishing the
+        // drain distance so the UI's audible-position estimate can actually
+        // reach the end (otherwise in_flight freezes ~93 ms short and the deck
+        // never registers end-of-track).
         if proc_pos >= samples.len() as u64 {
+            let ring_out_frames = (RING_BUFFER_SAMPLES - producer.slots()) / device_ch;
+            in_flight.store(ring_out_frames as u64 * file_ch as u64, Ordering::Relaxed);
             thread::sleep(Duration::from_millis(5));
             continue;
         }

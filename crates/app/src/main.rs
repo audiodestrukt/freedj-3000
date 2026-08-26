@@ -352,6 +352,25 @@ impl DeckApp {
                 self.smoothed_pos = self.smoothed_pos.max(self.prev_pos as f64);
             }
         }
+        // ── End of track ──────────────────────────────────────────────────────
+        // The decoder pins at the end and the ring buffer drains, so the last
+        // sample becomes audible; without this the playhead free-runs past the
+        // end into blank forever (it is clamped monotonic and cannot return),
+        // which reads as the deck "stuck" and still playing.  Stop and pin at
+        // the end, as a CDJ does in SINGLE mode.
+        let total = self.audio.samples.len() as f64;
+        let decoded_to_end = raw_pos >= self.audio.samples.len() as u64;
+        let heard_to_end   = heard >= total - sr_ch * 0.05;   // within ~50 ms of the end
+        if decoded_to_end && heard_to_end {
+            self.smoothed_pos = total;
+            if playing {
+                self.audio.playing.store(false, Ordering::Relaxed);
+                log::info!("end of track — stopped");
+            }
+        } else {
+            self.smoothed_pos = self.smoothed_pos.min(total);   // never overshoot the end
+        }
+
         let pos = self.smoothed_pos.max(0.0) as u64;
 
         // Scroll-smoothness instrument: audio time advanced per frame should

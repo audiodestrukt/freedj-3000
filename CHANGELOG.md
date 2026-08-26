@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — 2026-08-26
+- **Deck got stuck at end of track.** Nothing set `playing` false when a track
+  finished, so the phase-locked playhead free-ran past the end into blank
+  forever (it is clamped monotonic and cannot return) — the deck looked stuck,
+  still "playing", no audio. Now it stops and pins at the end, as a CDJ does in
+  SINGLE mode; Cue + Play restarts. Also: the processor stopped publishing
+  `in_flight` once the source was exhausted, so it froze ~93 ms short and the
+  audible-position estimate never reached the end — it now keeps reporting the
+  ring-buffer drain, so end-of-track is actually detected.
+
 ### Fixed — 2026-08-25
 - **ProDJ Link parser rejected every real packet.** It checked the type byte
   at offset 5 — which in the real 10-byte-magic format (`Qspt1WmJOL`) is the
