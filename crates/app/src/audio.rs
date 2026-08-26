@@ -421,3 +421,67 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize)> {
     );
     Ok((samples, file_sr, file_ch))
 }
+
+/// Offline sample-rate conversion of an interleaved buffer, used at LOAD time so
+/// a track recorded at a different rate than the deck's pipeline plays at the
+/// right pitch.  This is a one-time cost per load, not the real-time SRC that a
+/// 48 kHz *output device* would need (WORKSTREAMS A1) — that is still open.
+pub fn resample_interleaved(
+    samples:  &[f32],
+    channels: usize,
+    src_sr:   u32,
+    dst_sr:   u32,
+) -> Result<Vec<f32>> {
+    use rubato::{Resampler, SincFixedIn, SincInterpolationParameters,
+                 SincInterpolationType, WindowFunction};
+    if src_sr == dst_sr || samples.is_empty() {
+        return Ok(samples.to_vec());
+    }
+    let ratio  = dst_sr as f64 / src_sr as f64;
+    let frames = samples.len() / channels;
+    let chunk  = 16_384;
+
+    let params = SincInterpolationParameters {
+        sinc_len:            256,
+        f_cutoff:            0.95,
+        oversampling_factor: 256,
+        interpolation:       SincInterpolationType::Linear,
+        window:              WindowFunction::BlackmanHarris2,
+    };
+    let mut rs = SincFixedIn::<f32>::new(ratio, 1.0, params, chunk, channels)
+        .context("failed to create resampler")?;
+
+    // De-interleave into per-channel planes.
+    let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); channels];
+    for f in 0..frames {
+        for c in 0..channels {
+            planar[c].push(samples[f * channels + c]);
+        }
+    }
+
+    let mut out_planar: Vec<Vec<f32>> = vec![Vec::new(); channels];
+    let mut pos = 0;
+    let mut inbuf: Vec<Vec<f32>> = vec![vec![0.0f32; chunk]; channels];
+    while pos + chunk <= frames {
+        for c in 0..channels {
+            inbuf[c].copy_from_slice(&planar[c][pos..pos + chunk]);
+        }
+        let out = rs.process(&inbuf, None).context("resample chunk failed")?;
+        for c in 0..channels { out_planar[c].extend_from_slice(&out[c]); }
+        pos += chunk;
+    }
+    if pos < frames {
+        let rem: Vec<Vec<f32>> = (0..channels).map(|c| planar[c][pos..].to_vec()).collect();
+        let out = rs.process_partial(Some(&rem), None).context("resample tail failed")?;
+        for c in 0..channels { out_planar[c].extend_from_slice(&out[c]); }
+    }
+
+    // Re-interleave.
+    let out_frames = out_planar.iter().map(|c| c.len()).min().unwrap_or(0);
+    let mut out = Vec::with_capacity(out_frames * channels);
+    for f in 0..out_frames {
+        for c in 0..channels { out.push(out_planar[c][f]); }
+    }
+    log::info!("resampled {}Hz → {}Hz ({} → {} frames)", src_sr, dst_sr, frames, out_frames);
+    Ok(out)
+}

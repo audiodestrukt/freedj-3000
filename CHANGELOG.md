@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added — 2026-08-26
+- **Load tracks at any sample rate (offline SRC).** The browser LOAD path now
+  resamples a track whose rate differs from the deck's pipeline (e.g. a 48 kHz
+  track into a 44.1 kHz deck) with rubato, once at load — so a mixed-rate library
+  loads and plays at the right pitch. Real-time streaming SRC (the way CDJs do
+  it, no load pass) stays on the roadmap as WORKSTREAMS A1.
+
+### Fixed — 2026-08-26
+- **One malformed MP3 frame no longer kills the whole load.** The decoder skipped
+  to `?` on any codec error (e.g. an MP3 bit-reservoir desync, *"invalid main_data
+  offset"*), failing the entire track. It now logs and skips the bad packet and
+  keeps decoding — a few lost frames beat a track that won't load.
+
 - **File browser (BROWSE screen).** Browse the filesystem like a CDJ reading a
   USB stick without a rekordbox export — folders are categories, audio files are
   rows. The select encoder / `↑``↓` move the highlight, LOAD / `Enter` opens a

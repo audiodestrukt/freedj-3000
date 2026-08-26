@@ -69,16 +69,38 @@ first proof that the bus design holds for two different device classes.
 
 Not visible, but everything downstream inherits these.
 
-### A1. Sample-rate conversion — **broken, small**
+### A1. Sample-rate conversion — **partly done (offline); real-time is roadmap**
 
-`audio.rs:138` logs *"device sample rate != file sample rate — pitch will be
-wrong"* and plays anyway. PipeWire and most USB interfaces run at 48 kHz; most
-tracks are 44.1 kHz. That is +8.8%, about a semitone and a half sharp, on a
-large fraction of machines. `ResampleStage` exists in
-`crates/timestretch/src/lib.rs` but its `process()` is a passthrough with a
-`TODO: run rubato SincFixedOut`.
+Two distinct rate mismatches:
 
-Blocks nothing technically. Makes the deck unusable on other people's hardware.
+1. **Track rate ≠ deck pipeline rate** (e.g. a 48 kHz track loaded into a deck
+   running 44.1 kHz). **Handled (2026-08-26):** the browser LOAD path resamples
+   the whole track offline with rubato (`audio::resample_interleaved`) to the
+   deck rate before swapping it in. A one-time ~1–2 s cost per load; sounds
+   correct. This is what unblocked loading a mixed-rate library.
+
+2. **Deck pipeline rate ≠ output device rate** (PipeWire / most USB interfaces
+   run at 48 kHz; the pipeline is pinned to the first track's rate). Still
+   **open**: `audio.rs` logs *"device sample rate != file sample rate — pitch
+   will be wrong"* and plays anyway. `ResampleStage` in
+   `crates/timestretch/src/lib.rs` is still a passthrough.
+
+**Roadmap — real-time streaming SRC (the proper fix).** Real players/CDJs do
+*not* pre-resample whole tracks; they pin the pipeline to the fixed device clock
+and resample each track's native rate into it in real time, block by block, in
+the DSP chain. The clean design here: a **streaming resampler stage BEFORE the
+timestretch**, pipeline at device rate — no load delay, no extra RAM.
+
+Nuance worth remembering (Dan, 2026-08-26): SRC feels like it should ride along
+"for free" with the timestretch, but **Rubber Band R3 is constructed for a fixed
+sample rate and does not expose input-rate conversion** — so SRC is a *separate*
+resampler stage in the same real-time pass, not something folded inside RB. RB's
+own cost is unchanged; the resampler is *added* CPU. That extra cost matters on
+the Pi 4, where R3 already runs ~65 % of one A72 core (see BENCHMARKS.md) — so
+measure the streaming resampler's Pi-4 headroom before committing. Also: this
+stage lands in the delicate real-time position/`in_flight` accounting (the path
+with the open ~2.9 s jitter bug), which is why it is deliberately *not* being
+bolted on yet.
 
 ### A2. Position truth — **done** (`ea6dd13`)
 

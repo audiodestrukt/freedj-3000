@@ -82,8 +82,13 @@ impl Decoder for SymphoniaDecoder {
                 continue;
             }
 
-            let decoded = self.decoder.decode(&packet)
-                .map_err(|e| DecodeError::Codec(e.to_string()))?;
+            // Skip a packet the codec can't decode (e.g. an MP3 bit-reservoir
+            // desync: "invalid main_data offset") rather than aborting the whole
+            // track — a few lost frames beat a track that won't load at all.
+            let decoded = match self.decoder.decode(&packet) {
+                Ok(d)  => d,
+                Err(e) => { log::debug!("skipping undecodable packet: {e}"); continue; }
+            };
 
             let spec   = *decoded.spec();
             let frames = decoded.frames();

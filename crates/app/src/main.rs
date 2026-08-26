@@ -367,20 +367,29 @@ impl DeckApp {
     fn load_track(&mut self, path: &std::path::Path) -> Result<()> {
         let t0 = Instant::now();
         let (samples, sr, ch) = audio::decode_file(path)?;
-        if sr != self.audio.sample_rate || ch as u8 != self.audio.channels {
-            bail!("track is {}Hz/{}ch but the deck runs {}Hz/{}ch — resampling is A1",
-                  sr, ch, self.audio.sample_rate, self.audio.channels);
+        let deck_sr = self.audio.sample_rate;
+        if ch as u8 != self.audio.channels {
+            bail!("track has {} channels but the deck runs {} — channel conversion not yet implemented",
+                  ch, self.audio.channels);
         }
+        // Offline sample-rate conversion so tracks recorded at a different rate
+        // than the deck's pipeline play at the right pitch.  A one-time cost per
+        // load; real-time streaming SRC is the proper fix (WORKSTREAMS A1).
+        let samples = if sr != deck_sr {
+            audio::resample_interleaved(&samples, ch, sr, deck_sr)?
+        } else {
+            samples
+        };
         let samples = Arc::new(samples);
 
-        let mut wb = WaveformBuilder::new(sr);
-        let mut ba = BeatAnalyzerImpl::new(sr);
+        let mut wb = WaveformBuilder::new(deck_sr);
+        let mut ba = BeatAnalyzerImpl::new(deck_sr);
         wb.push(&samples);
-        ba.push(&samples, sr);
+        ba.push(&samples, deck_sr);
         let waveform  = wb.finish();
         let beat_grid = ba.beat_grid().map(|g| (*g).clone());
 
-        self.audio.load_samples(Arc::clone(&samples), sr, ch as u8)?;
+        self.audio.load_samples(Arc::clone(&samples), deck_sr, ch as u8)?;
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&waveform); }
         self.waveform     = waveform;
         self.beat_grid    = beat_grid;

@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 arc-swap = "1"
+rubato = "0.15"
 opendeck-types       = { workspace = true }
 opendeck-protocol    = { workspace = true }
 opendeck-decode      = { workspace = true }
