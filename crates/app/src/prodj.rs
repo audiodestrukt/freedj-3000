@@ -102,7 +102,9 @@ pub struct SenderState {
     /// When false, only announce packets go out — no beat, status, or master
     /// handoff.  A pure receiver: can follow the XDJ but never asks it to
     /// follow us, which is the conservative, can't-wedge-the-deck mode.
-    pub send_full:   bool,
+    /// Whether we send beats/status/master — a live flag so pressing MASTER
+    /// can enable sending (you can't lead without sending). Off = pure follower.
+    pub send_full:   Arc<AtomicBool>,
     pub position:    Arc<AtomicU64>,   // decoder cursor, interleaved samples
     pub in_flight:   Arc<AtomicU64>,   // samples decoded but not yet audible
     pub playing:     Arc<AtomicBool>,
@@ -478,7 +480,8 @@ impl ProDjSender {
                     }
 
                     // ── Beat packet ──────────────────────────────────────────
-                    if st.send_full { if let (Some(grid), Some((beat, _))) = (cur_grid, beat_now) {
+                    let send_full = st.send_full.load(Ordering::Relaxed);
+                    if send_full { if let (Some(grid), Some((beat, _))) = (cur_grid, beat_now) {
                         let seek = last_beat.map_or(false, |b| beat < b - 2 || beat > b + 8);
                         if last_beat.map_or(true, |b| beat > b) || seek {
                             let bib  = ((beat + grid.downbeat_offset as i64).rem_euclid(4) + 1) as u8;
@@ -505,7 +508,7 @@ impl ProDjSender {
                     }
 
                     // ── Master handoff ───────────────────────────────────────
-                    if st.send_full && link.want_master.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed) {
+                    if send_full && link.want_master.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed) {
                         let since = *want_since.get_or_insert(now);
                         let cur = link.master_player.load(Ordering::Relaxed) as u8;
                         match (cur, link.peer_ip(cur)) {
@@ -583,7 +586,7 @@ impl ProDjSender {
                     let flags = (link.master.load(Ordering::Relaxed), link.sync.load(Ordering::Relaxed));
                     let flags_changed = flags != last_flags;
                     last_flags = flags;
-                    if st.send_full && (flags_changed || now.duration_since(last_status) >= Duration::from_millis(200)) {
+                    if send_full && (flags_changed || now.duration_since(last_status) >= Duration::from_millis(200)) {
                         let (beat_num, bib) = match (cur_grid, beat_now) {
                             (Some(grid), Some((beat, _))) => {
                                 let first = grid.beat_at_sample(0, st.sample_rate).floor() as i64;

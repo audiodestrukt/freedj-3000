@@ -27,7 +27,7 @@ use snapshot::DeckSnapshot;
 use std::{
     path::PathBuf,
     sync::{
-        atomic::{AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc, Arc,
     },
     time::{Duration, Instant},
@@ -68,6 +68,8 @@ struct DeckApp {
     /// Shared with the ProDJ sender; updated on load so Link sync/broadcast use
     /// the current track's grid.
     link_grid:    Arc<arc_swap::ArcSwap<Option<BeatGrid>>>,
+    /// Enable ProDJ Link sending (beats/status/master); set true by MASTER.
+    link_send:    Arc<AtomicBool>,
     beat2_start:  Instant,        // wall-clock time of the last phase reset
     prev_beat2_anchor: u64,       // detect changes in beat2_anchor
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
@@ -201,6 +203,7 @@ impl DeckApp {
         beat2_bib:    Arc<AtomicU32>,
         link:         Arc<prodj::LinkState>,
         link_grid:    Arc<arc_swap::ArcSwap<Option<BeatGrid>>>,
+        link_send:    Arc<AtomicBool>,
         event_rx:     mpsc::Receiver<Event>,
     ) -> Self {
         let browser = Browser::new(&path, std::sync::Arc::clone(&link));
@@ -220,6 +223,7 @@ impl DeckApp {
             beat2_bib,
             link,
             link_grid,
+            link_send,
             beat2_start:       Instant::now(),
             prev_beat2_anchor: 0,
             prev_beat2_bpm:    0.0,
@@ -390,6 +394,11 @@ impl DeckApp {
                 if self.link.master.load(Ordering::Relaxed) {
                     log::info!("already master");
                 } else {
+                    // Enable Link sending: you can't lead without broadcasting
+                    // beats/status. Off by default (pure follower) until MASTER.
+                    if !self.link_send.swap(true, Ordering::Relaxed) {
+                        log::info!("ProDJ Link send enabled (needed to take master)");
+                    }
                     self.link.want_master.store(true, Ordering::Relaxed);
                     log::info!("requesting master");
                 }
@@ -1183,8 +1192,10 @@ fn main() -> Result<()> {
     // Live beat grid shared with the ProDJ Link sender: the deck updates it on
     // every LOAD so sync divides by the CURRENT track's BPM, not the startup one.
     let link_grid = Arc::new(arc_swap::ArcSwap::from_pointee(beat_grid.clone()));
+    // Live send flag: off = pure follower; pressing MASTER turns it on.
+    let link_send_flag = Arc::new(AtomicBool::new(link_send));
     let _prodj_tx = prodj::ProDjSender::start(Arc::clone(&link), prodj::SenderState {
-        send_full:   link_send,
+        send_full:   Arc::clone(&link_send_flag),
         position:    Arc::clone(&audio.position),
         in_flight:   Arc::clone(&audio.in_flight),
         playing:     Arc::clone(&audio.playing),
@@ -1205,7 +1216,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, event_rx);
+    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx);
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())
