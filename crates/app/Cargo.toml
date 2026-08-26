@@ -10,6 +10,7 @@ name = "opendeck"
 path = "src/main.rs"
 
 [dependencies]
+arc-swap = "1"
 opendeck-types       = { workspace = true }
 opendeck-protocol    = { workspace = true }
 opendeck-decode      = { workspace = true }

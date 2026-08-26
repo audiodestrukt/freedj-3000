@@ -88,9 +88,13 @@ Navigation on the unit is the rotary selector (turn = move highlight, press
 = enter / load) plus touch on rows. On the bus that is
 `BrowseEncoderDelta`, `Load`, `Back`, and taps on rows.
 
-Data needed: a library (WORKSTREAMS F1/F2). A first version can browse the
-filesystem — folder = category header, files = rows — which is exactly what
-the unit does for a USB stick without a rekordbox export.
+**Implemented (2026-08-26)** as a first-version *filesystem* browser
+(`crates/app/src/browser.rs` + `screen::draw_browse`): folder = category
+header, subfolders + audio files = rows, select encoder / arrows move the
+highlight, LOAD opens a folder or loads+plays a track, Back goes up. Loading
+swaps the decoded buffer live (`ArcSwap`) and re-uploads the waveform. Still to
+come: a rekordbox library (WORKSTREAMS F1/F2), the right-pane preview waveform,
+and touch-on-rows selection.
 
 ## Implementation note
 

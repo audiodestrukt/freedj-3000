@@ -15,6 +15,7 @@
 //! [`DeckSnapshot`] and holds no deck state of its own.
 
 use crate::input::{ControlEvent, Event, Screen as TopScreen, Source, UiEvent};
+use crate::browser::Browser;
 use crate::snapshot::DeckSnapshot;
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -115,7 +116,13 @@ pub fn layout(size: Vec2) -> Layout {
 // ── Drawing ───────────────────────────────────────────────────────────────────
 
 /// Draw the screen and collect the touch events it produced this frame.
-pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, out: &mut Vec<Event>) {
+pub fn draw(
+    ctx:    &egui::Context,
+    snap:   &DeckSnapshot,
+    lay:    &Layout,
+    browse: Option<&Browser>,
+    out:    &mut Vec<Event>,
+) {
     egui::CentralPanel::default()
         .frame(egui::Frame::none())
         .show(ctx, |ui| {
@@ -129,12 +136,91 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, out: &mut Ve
 
             draw_left(ui, snap, lay, h, out);
             draw_keys(ui, lay, h, out);
-            draw_title(ui, snap, lay, h);
-            draw_phase(ui, snap, lay, h, out);
-            draw_wave_area(ui, snap, lay, h, out);
+            if let Some(browser) = browse {
+                // BROWSE: the middle band (title + phase + enlarged waveform)
+                // becomes the file list.  The source column, info row and the
+                // overview keep running — the loaded track plays while you browse.
+                draw_browse(ui, browser, lay, h);
+            } else {
+                draw_title(ui, snap, lay, h);
+                draw_phase(ui, snap, lay, h, out);
+                draw_wave_area(ui, snap, lay, h, out);
+            }
             draw_info(ui, snap, lay, h, out);
             draw_bottom(ui, snap, lay, h, out);
         });
+}
+
+// ── BROWSE screen ─────────────────────────────────────────────────────────────
+
+/// Filesystem list: a category header (the current folder) over a scrolling row
+/// list with the highlighted row inverted, plus a right-hand detail pane.  Driven
+/// by the select encoder / Load / Back (and the keyboard on desktop); the list
+/// is presentation-only here — navigation state lives in `Browser`.
+fn draw_browse(ui: &Ui, browser: &Browser, lay: &Layout, h: f32) {
+    // Header replaces the title bar with the current folder name.
+    let hdr = lay.title;
+    ui.painter().rect_filled(hdr, 0.0, BAR);
+    let folder = browser.cwd().file_name().and_then(|n| n.to_str()).unwrap_or("/");
+    text(ui, Pos2::new(hdr.min.x + h * 0.02, hdr.center().y), Align2::LEFT_CENTER,
+         folder.to_uppercase(), h * 0.030, TEXT);
+
+    // Body spans the phase + enlarged-waveform region (covering the shader).
+    let body = Rect::from_min_max(
+        Pos2::new(lay.wave.min.x, lay.phase.min.y),
+        Pos2::new(lay.wave.max.x, lay.wave.max.y),
+    );
+    ui.painter().rect_filled(body, 0.0, BG);
+
+    // Split: left list pane, right detail pane.
+    let split   = body.min.x + body.width() * 0.58;
+    let list    = Rect::from_min_max(body.min, Pos2::new(split, body.max.y));
+    let detail  = Rect::from_min_max(Pos2::new(split + h * 0.01, body.min.y), body.max);
+    ui.painter().rect_filled(detail, 0.0, KEY_LO);
+
+    let entries = browser.entries();
+    let row_h   = h * 0.052;
+    let n_vis   = (list.height() / row_h).floor().max(1.0) as usize;
+
+    if entries.is_empty() {
+        text(ui, list.center(), Align2::CENTER_CENTER, "— empty —", h * 0.026, DIM);
+        return;
+    }
+
+    // Scroll so the highlighted row stays roughly centred, clamped to the ends.
+    let sel   = browser.selected;
+    let half  = n_vis / 2;
+    let max_first = entries.len().saturating_sub(n_vis);
+    let first = sel.saturating_sub(half).min(max_first);
+
+    for slot in 0..n_vis {
+        let idx = first + slot;
+        if idx >= entries.len() { break; }
+        let e   = &entries[idx];
+        let y0  = list.min.y + slot as f32 * row_h;
+        let row = Rect::from_min_max(Pos2::new(list.min.x, y0), Pos2::new(list.max.x, y0 + row_h));
+        let selected = idx == sel;
+        if selected {
+            ui.painter().rect_filled(row, 2.0, TEXT);   // inverted highlight
+        }
+        let ink = if selected { BG } else if e.is_dir { TEXT } else { DIM };
+        // egui's default font is Latin + a few symbols: ♪ renders, most arrows do
+        // not.  Folders read as "name/", tracks get a ♪.
+        let label = if e.is_dir { format!("{}/", e.name) } else { format!("♪  {}", e.name) };
+        text(ui, Pos2::new(row.min.x + h * 0.02, row.center().y), Align2::LEFT_CENTER,
+             label, h * 0.026, ink);
+    }
+
+    // Detail pane: the highlighted item.
+    if let Some(e) = browser.selected_entry() {
+        let x = detail.min.x + h * 0.02;
+        text(ui, Pos2::new(x, detail.min.y + h * 0.05), Align2::LEFT_CENTER,
+             if e.is_dir { "FOLDER" } else { "TRACK" }, h * 0.020, if e.is_dir { BLUE } else { ORANGE });
+        text(ui, Pos2::new(x, detail.min.y + h * 0.11), Align2::LEFT_CENTER,
+             &e.name, h * 0.026, TEXT);
+        let hint = if e.is_dir { "LOAD: open folder" } else { "LOAD: play track" };
+        text(ui, Pos2::new(x, detail.max.y - h * 0.04), Align2::LEFT_CENTER, hint, h * 0.018, DIM);
+    }
 }
 
 /// Rects that tile `outer` minus two holes `a` and `b` (a above b, non-overlapping).

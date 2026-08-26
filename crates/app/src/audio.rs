@@ -19,6 +19,7 @@
 //!   drain_flag  — set by processor on seek-detect; cleared by cpal on drain
 
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use opendeck_decode::SymphoniaDecoder;
 use opendeck_timestretch::TimestretechStage;
@@ -59,8 +60,10 @@ const SEEK_THRESHOLD_SAMPLES: u64 = 4096 * 2; // ~46 ms at 44.1kHz stereo
 // ── Public handle ─────────────────────────────────────────────────────────────
 
 pub struct AudioHandle {
-    /// Interleaved f32 PCM from the decoded file.
-    pub samples:     Arc<Vec<f32>>,
+    /// Interleaved f32 PCM from the decoded file.  Swappable so a new track
+    /// can be loaded at runtime without tearing down the audio thread/stream:
+    /// the processor loads the current buffer once per block (lock-free).
+    pub samples:     Arc<ArcSwap<Vec<f32>>>,
     /// Current source read position in samples (not frames).
     /// Updated by the processor thread; read by renderer for waveform scroll.
     pub position:    Arc<AtomicU64>,
@@ -91,6 +94,35 @@ impl AudioHandle {
     pub fn speed_store(&self, speed: f32) {
         self.speed.store(speed.to_bits(), Ordering::Relaxed);
     }
+
+    /// Number of interleaved samples in the currently-loaded track.
+    pub fn len(&self) -> usize { self.samples.load().len() }
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+
+    /// The currently-loaded sample buffer (cheap Arc clone).
+    pub fn current(&self) -> Arc<Vec<f32>> { self.samples.load_full() }
+
+    /// Swap in a freshly-decoded track and rewind to the start.  The processor
+    /// picks up the new buffer on its next block; resetting `position` to 0
+    /// trips its existing seek path (stretcher reset + ring drain).  Playback
+    /// is left paused — the caller resumes, as a CDJ does after LOAD.
+    ///
+    /// The new track must match the running device configuration: same sample
+    /// rate and channel count.  Resampling is WORKSTREAMS A1; until then a
+    /// mismatch is refused rather than played at the wrong pitch or corrupted.
+    pub fn load_samples(&self, new: Arc<Vec<f32>>, sample_rate: u32, channels: u8) -> Result<()> {
+        if sample_rate != self.sample_rate || channels != self.channels {
+            anyhow::bail!(
+                "track is {}Hz/{}ch but the deck is running {}Hz/{}ch —                  resampling/channel-convert not yet implemented (A1)",
+                sample_rate, channels, self.sample_rate, self.channels,
+            );
+        }
+        self.playing.store(false, Ordering::Relaxed);
+        self.samples.store(new);
+        self.in_flight.store(0, Ordering::Relaxed);
+        self.position.store(0, Ordering::Relaxed);
+        Ok(())
+    }
 }
 
 // ── Constructor ───────────────────────────────────────────────────────────────
@@ -98,34 +130,9 @@ impl AudioHandle {
 impl AudioHandle {
     pub fn open(path: &Path) -> Result<Self> {
         // ── 1. Decode entire file to memory ───────────────────────────────────
-        log::info!("decoding {}", path.display());
-        let mut decoder = SymphoniaDecoder::open(path)
-            .with_context(|| format!("failed to open {}", path.display()))?;
-
-        let file_sr   = decoder.sample_rate();
-        let file_ch   = decoder.channels() as usize;
-        let capacity  = decoder
-            .total_frames()
-            .map(|f| f as usize * file_ch)
-            .unwrap_or(44_100 * 2 * 300);
-
-        let mut samples: Vec<f32> = Vec::with_capacity(capacity);
-        let mut buf = vec![0f32; 4096 * file_ch];
-
-        loop {
-            match decoder.decode(&mut buf)? {
-                0 => break,
-                frames => samples.extend_from_slice(&buf[..frames * file_ch]),
-            }
-        }
-        log::info!(
-            "decoded {} frames ({:.1}s) at {}Hz {}ch",
-            samples.len() / file_ch,
-            samples.len() as f64 / file_ch as f64 / file_sr as f64,
-            file_sr, file_ch,
-        );
-
-        let samples = Arc::new(samples);
+        let (decoded, file_sr, file_ch) = decode_file(path)?;
+        let file_ch = file_ch as usize;
+        let samples = Arc::new(ArcSwap::from_pointee(decoded));
 
         // ── 2. Open cpal device ────────────────────────────────────────────────
         let host   = cpal::default_host();
@@ -234,7 +241,7 @@ impl AudioHandle {
 // ── Processor loop ────────────────────────────────────────────────────────────
 
 fn processor_loop(
-    samples:    Arc<Vec<f32>>,
+    samples:    Arc<ArcSwap<Vec<f32>>>,
     position:   Arc<AtomicU64>,
     playing:    Arc<AtomicBool>,
     speed:      Arc<AtomicU32>,
@@ -272,6 +279,12 @@ fn processor_loop(
             thread::sleep(Duration::from_millis(2));
             continue;
         }
+
+        // Load the current track buffer once per block (lock-free).  A runtime
+        // LOAD swaps this pointer; we pick up the new track on the next block,
+        // and the seek path below drains the ring for the position reset.
+        let current = samples.load_full();
+        let samples: &[f32] = &current;
 
         // ── Seek detection ────────────────────────────────────────────────────
         let shared_pos = position.load(Ordering::Relaxed);
@@ -373,4 +386,38 @@ fn processor_loop(
             (ring_out_frames as f32 * spd) as u64 + stretcher.latency_frames() as u64;
         in_flight.store(src_frames_ahead * file_ch as u64, Ordering::Relaxed);
     }
+}
+
+// ── Decoding ──────────────────────────────────────────────────────────────────
+
+/// Decode an entire audio file to interleaved f32 PCM in memory.  Returns the
+/// samples plus their sample rate and channel count.  Shared by `open()` (first
+/// track) and the runtime browser LOAD path.
+pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize)> {
+    log::info!("decoding {}", path.display());
+    let mut decoder = SymphoniaDecoder::open(path)
+        .with_context(|| format!("failed to open {}", path.display()))?;
+
+    let file_sr  = decoder.sample_rate();
+    let file_ch  = decoder.channels() as usize;
+    let capacity = decoder
+        .total_frames()
+        .map(|f| f as usize * file_ch)
+        .unwrap_or(44_100 * 2 * 300);
+
+    let mut samples: Vec<f32> = Vec::with_capacity(capacity);
+    let mut buf = vec![0f32; 4096 * file_ch];
+    loop {
+        match decoder.decode(&mut buf)? {
+            0 => break,
+            frames => samples.extend_from_slice(&buf[..frames * file_ch]),
+        }
+    }
+    log::info!(
+        "decoded {} frames ({:.1}s) at {}Hz {}ch",
+        samples.len() / file_ch,
+        samples.len() as f64 / file_ch as f64 / file_sr as f64,
+        file_sr, file_ch,
+    );
+    Ok((samples, file_sr, file_ch))
 }

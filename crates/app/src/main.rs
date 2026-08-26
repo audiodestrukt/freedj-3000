@@ -8,6 +8,7 @@
 //!   Esc / Q  — quit
 
 mod audio;
+mod browser;
 mod input;
 mod midi;
 mod prodj;
@@ -20,7 +21,8 @@ use audio::AudioHandle;
 use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_types::{BeatAnalyzer, BeatGrid};
 use renderer::Renderer;
-use input::{ControlEvent, Event, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
+use input::{ControlEvent, Event, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
+use browser::{Browser, Enter};
 use snapshot::DeckSnapshot;
 use std::{
     path::PathBuf,
@@ -43,12 +45,18 @@ use winit::{
 /// Target frame interval — 60 fps.
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
+/// Which middle-band mode the deck screen is showing.  PERFORM comes later.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ScreenMode { Playback, Browse }
+
 struct DeckApp {
     // Provided before event loop starts.
     path:         PathBuf,
     waveform:     WaveformCache,
     audio:        AudioHandle,
     beat_grid:    Option<BeatGrid>,
+    screen_mode:  ScreenMode,
+    browser:      Browser,
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
@@ -110,7 +118,7 @@ fn make_snapshot<'a>(
         position:      pos,
         sample_rate:   audio.sample_rate,
         channels:      audio.channels,
-        total_samples: audio.samples.len() as u64,
+        total_samples: audio.len() as u64,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
         remain_mode:   f.remain_mode,
@@ -174,11 +182,14 @@ impl DeckApp {
         link:         Arc<prodj::LinkState>,
         event_rx:     mpsc::Receiver<Event>,
     ) -> Self {
+        let browser = Browser::new(&path);
         Self {
             path,
             waveform,
             audio,
             beat_grid,
+            screen_mode: if std::env::var("OPENDECK_SCREEN").as_deref() == Ok("browse") { ScreenMode::Browse } else { ScreenMode::Playback },
+            browser,
             fader_speed,
             beat2_bpm,
             beat2_anchor,
@@ -245,11 +256,11 @@ impl DeckApp {
             }
             Event::Deck(ControlEvent::Cue)   => { self.audio.position.store(0, Ordering::Relaxed); }
             Event::Deck(ControlEvent::NeedleSearch { position }) => {
-                let total = self.audio.samples.len() as f64;
+                let total = self.audio.len() as f64;
                 // Land on a frame boundary so channels stay interleaved.
                 let ch = self.audio.channels as u64;
                 let target = ((position.clamp(0.0, 1.0) as f64 * total) as u64 / ch) * ch;
-                self.audio.position.store(target.min(self.audio.samples.len() as u64), Ordering::Relaxed);
+                self.audio.position.store(target.min(self.audio.len() as u64), Ordering::Relaxed);
             }
             Event::Deck(ControlEvent::TempoFader { position }) => {
                 let s = input::fader_to_speed(position);
@@ -283,10 +294,31 @@ impl DeckApp {
                 }
             }
             Event::Deck(ControlEvent::BrowseEncoderDelta { delta }) => {
-                log::info!("browse {delta:+} (no browser screen yet)");
+                if self.screen_mode == ScreenMode::Browse {
+                    self.browser.move_selection(delta);
+                } else {
+                    // Outside the browser the selector nudges zoom, as on the unit.
+                    self.apply(Event::Ui(UiEvent::ZoomStep(delta.signum())));
+                }
             }
-            Event::Deck(ControlEvent::Load) => log::info!("load (no browser/load yet)"),
-            Event::Deck(ControlEvent::Back) => log::info!("back (no browser yet)"),
+            Event::Deck(ControlEvent::Load) => {
+                if self.screen_mode != ScreenMode::Browse {
+                    self.screen_mode = ScreenMode::Browse;
+                    self.browser.refresh();
+                } else {
+                    match self.browser.enter() {
+                        Enter::Folder  => {}                       // descended; stay in browser
+                        Enter::Nothing => {}
+                        Enter::Track(path) => match self.load_track(&path) {
+                            Ok(())  => self.screen_mode = ScreenMode::Playback,
+                            Err(e)  => log::warn!("load failed: {e:#}"),
+                        },
+                    }
+                }
+            }
+            Event::Deck(ControlEvent::Back) => {
+                if self.screen_mode == ScreenMode::Browse { self.browser.back(); }
+            }
             Event::Deck(ControlEvent::LoopIn)  => log::info!("loop in (no loop engine yet)"),
             Event::Deck(ControlEvent::LoopOut) => log::info!("loop out (no loop engine yet)"),
             Event::Deck(other) => log::info!("unhandled deck event {other:?}"),
@@ -312,11 +344,69 @@ impl DeckApp {
             Event::Ui(UiEvent::ZoomGridMode) => { self.zoom_grid_mode = !self.zoom_grid_mode; }
             Event::Ui(UiEvent::PhaseMeterView) => { self.phase_ticks_view = !self.phase_ticks_view; log::info!("phase meter → {}", if self.phase_ticks_view { "alignment" } else { "beat display" }); }
             Event::Ui(UiEvent::Source(src))  => { self.source_link = src == Source::Link; log::info!("source {src:?}"); }
-            Event::Ui(UiEvent::Screen(sc))   => log::info!("{sc:?} screen not implemented"),
+            Event::Ui(UiEvent::Screen(sc)) => match sc {
+                TopScreen::Browse => {
+                    self.screen_mode = if self.screen_mode == ScreenMode::Browse {
+                        ScreenMode::Playback
+                    } else {
+                        self.browser.refresh();
+                        ScreenMode::Browse
+                    };
+                    log::info!("screen → {:?}", self.screen_mode);
+                }
+                other => log::info!("{other:?} screen not implemented"),
+            },
         }
     }
 
+    /// Decode, analyse, and swap in a new track selected in the browser.
+    /// Blocks the render thread for the decode + waveform/beat analysis
+    /// (~1-2 s on a Pi) — acceptable for a LOAD, as a CDJ spins up briefly;
+    /// can move to a worker thread later.  Leaves the deck paused at the start,
+    /// as a CDJ does after loading.
+    fn load_track(&mut self, path: &std::path::Path) -> Result<()> {
+        let t0 = Instant::now();
+        let (samples, sr, ch) = audio::decode_file(path)?;
+        if sr != self.audio.sample_rate || ch as u8 != self.audio.channels {
+            bail!("track is {}Hz/{}ch but the deck runs {}Hz/{}ch — resampling is A1",
+                  sr, ch, self.audio.sample_rate, self.audio.channels);
+        }
+        let samples = Arc::new(samples);
+
+        let mut wb = WaveformBuilder::new(sr);
+        let mut ba = BeatAnalyzerImpl::new(sr);
+        wb.push(&samples);
+        ba.push(&samples, sr);
+        let waveform  = wb.finish();
+        let beat_grid = ba.beat_grid().map(|g| (*g).clone());
+
+        self.audio.load_samples(Arc::clone(&samples), sr, ch as u8)?;
+        if let Some(r) = self.renderer.as_mut() { r.set_waveform(&waveform); }
+        self.waveform     = waveform;
+        self.beat_grid    = beat_grid;
+        self.path         = path.to_path_buf();
+        self.smoothed_pos = 0.0;
+        self.heard_avg    = 0.0;
+        self.prev_pos     = 0;
+        log::info!(
+            "loaded {} in {:.1}s ({} BPM)",
+            path.display(), t0.elapsed().as_secs_f32(),
+            self.beat_grid.as_ref().map(|g| format!("{:.1}", g.bpm)).unwrap_or_else(|| "?".into()),
+        );
+        Ok(())
+    }
+
     fn render_frame(&mut self) {
+        // Dev: OPENDECK_AUTOLOAD=path loads that track once at ~frame 150, to
+        // exercise the runtime reload path headlessly (before any borrows).
+        if self.frame_count == 150 {
+            if let Ok(path) = std::env::var("OPENDECK_AUTOLOAD") {
+                match self.load_track(std::path::Path::new(&path)) {
+                    Ok(())  => { self.audio.playing.store(true, Ordering::Relaxed); log::info!("autoload ok"); }
+                    Err(e)  => log::error!("autoload failed: {e:#}"),
+                }
+            }
+        }
         let frame_start = Instant::now();
         let frame_dt    = frame_start.duration_since(self.last_render);
         self.last_render = frame_start;
@@ -389,8 +479,8 @@ impl DeckApp {
         // end into blank forever (it is clamped monotonic and cannot return),
         // which reads as the deck "stuck" and still playing.  Stop and pin at
         // the end, as a CDJ does in SINGLE mode.
-        let total = self.audio.samples.len() as f64;
-        let decoded_to_end = raw_pos >= self.audio.samples.len() as u64;
+        let total = self.audio.len() as f64;
+        let decoded_to_end = raw_pos >= self.audio.len() as u64;
         let heard_to_end   = heard >= total - sr_ch * 0.05;   // within ~50 ms of the end
         if decoded_to_end && heard_to_end {
             self.smoothed_pos = total;
@@ -462,7 +552,8 @@ impl DeckApp {
         let raw = egui_state.take_egui_input(window.as_ref());
         let mut touch = Vec::new();
         let _t_run = Instant::now();
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, &mut touch));
+        let browse = if self.screen_mode == ScreenMode::Browse { Some(&self.browser) } else { None };
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
         self.events.append(&mut touch);
@@ -588,8 +679,24 @@ impl ApplicationHandler for DeckApp {
                 ..
             } => {
                 use KeyCode::*;
+                // In the browser the keys navigate the list, not the transport.
+                if self.screen_mode == ScreenMode::Browse {
+                    let ev = match code {
+                        ArrowDown           => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: 1 })),
+                        ArrowUp             => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: -1 })),
+                        Enter | NumpadEnter => Some(Event::Deck(ControlEvent::Load)),
+                        Backspace           => Some(Event::Deck(ControlEvent::Back)),
+                        KeyB | Escape       => Some(Event::Ui(UiEvent::Screen(TopScreen::Browse))), // toggle off
+                        _ => None,
+                    };
+                    if let Some(ev) = ev {
+                        self.events.push(ev);
+                        if let Some(w) = &self.window { w.request_redraw(); }
+                    }
+                    return;
+                }
                 let playing = self.audio.playing.load(Ordering::Relaxed);
-                let total   = self.audio.samples.len().max(1) as f32;
+                let total   = self.audio.len().max(1) as f32;
                 let frac    = self.audio.position.load(Ordering::Relaxed) as f32 / total;
                 let ten_s   = (self.audio.sample_rate as f32 * self.audio.channels as f32 * 10.0) / total;
                 let fader   = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)));
@@ -606,6 +713,7 @@ impl ApplicationHandler for DeckApp {
                     KeyY => Some(Event::Deck(ControlEvent::SyncToggle)),
                     KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
                     KeyT => Some(Event::Ui(UiEvent::TimeMode)),
+                    KeyB => Some(Event::Ui(UiEvent::Screen(TopScreen::Browse))),
                     KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
                     KeyC => Some(Event::Ui(UiEvent::CycleColor)),
                     KeyZ => Some(Event::Ui(UiEvent::ZoomStep(1))),
@@ -706,12 +814,13 @@ fn main() -> Result<()> {
     let audio = AudioHandle::open(&path)?;
 
     // ── 2. Build waveform + detect beat grid (synchronous, before window opens) ─
-    log::info!("computing waveform ({} samples)...", audio.samples.len());
+    let samples_arc = audio.current();
+    log::info!("computing waveform ({} samples)...", samples_arc.len());
     let t0 = Instant::now();
     let mut waveform_builder = WaveformBuilder::new(audio.sample_rate);
     let mut beat_analyzer    = BeatAnalyzerImpl::new(audio.sample_rate);
-    waveform_builder.push(&audio.samples);
-    beat_analyzer.push(&audio.samples, audio.sample_rate);
+    waveform_builder.push(&samples_arc);
+    beat_analyzer.push(&samples_arc, audio.sample_rate);
     let waveform  = waveform_builder.finish();
     let beat_grid = beat_analyzer.beat_grid().map(|g| (*g).clone());
     match &beat_grid {

@@ -109,7 +109,9 @@ make run TRACK=/path/to/track.mp3
 | `C` | Cycle waveform colour: RGB → 3 BAND → BLUE (the *Waveform Color* setting) |
 | `T` | Toggle time display: TIME (elapsed) ↔ REMAIN |
 | `P` | Phase meter: 4-box beat display ↔ master alignment ticks (also tap it) |
-| `Q` / `Esc` | Quit |
+| `B` | Open / close the file **browser** (also tap BROWSE) |
+| in browser: `↑`/`↓` · `Enter` · `Backspace` | Move selection · open folder / **load track** · up a level |
+| `Q` / `Esc` | Quit (`Esc` closes the browser first) |
 
 ### Touch screen (mouse for now)
 

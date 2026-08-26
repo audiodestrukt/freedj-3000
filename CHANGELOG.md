@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — 2026-08-26
+- **File browser (BROWSE screen).** Browse the filesystem like a CDJ reading a
+  USB stick without a rekordbox export — folders are categories, audio files are
+  rows. The select encoder / `↑``↓` move the highlight, LOAD / `Enter` opens a
+  folder or **loads and plays the highlighted track**, Back / `Backspace` goes
+  up a level, `B` (or the BROWSE key) toggles the screen. The source column,
+  info row and overview keep running while you browse — the loaded track plays
+  on. Loading swaps the decoded audio live (lock-free `ArcSwap`, no audio-thread
+  teardown) and re-uploads the waveform to the GPU; the deck lands paused at the
+  start, as a CDJ does. A new track must match the running device sample
+  rate / channel count (resampling is A1); a mismatch is refused, not corrupted.
+
 ### Fixed — 2026-08-26
 - **Deck got stuck at end of track.** Nothing set `playing` false when a track
   finished, so the phase-locked playhead free-ran past the end into blank

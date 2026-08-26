@@ -76,6 +76,7 @@ pub struct Renderer {
     // Waveform pass
     waveform_pipeline:   wgpu::RenderPipeline,
     waveform_bind_group: wgpu::BindGroup,
+    waveform_bgl:        wgpu::BindGroupLayout,
     params_buf:          wgpu::Buffer,
     num_cols:            u32,
 
@@ -344,6 +345,7 @@ impl Renderer {
             queue,
             waveform_pipeline,
             waveform_bind_group,
+            waveform_bgl: bind_group_layout,
             params_buf,
             num_cols,
             egui_renderer,
@@ -355,6 +357,33 @@ impl Renderer {
             amp_gain,
             capture:    None,
         })
+    }
+
+    /// Replace the waveform on the GPU with a freshly-analysed track: rebuild
+    /// the storage buffer, recompute the display gain, and rebind.  Called by
+    /// the deck when the browser loads a new track.  The params/pipeline are
+    /// untouched — only binding 0 (the waveform data) changes.
+    pub fn set_waveform(&mut self, waveform: &WaveformCache) {
+        let num_cols = waveform.len() as u32;
+        let data: Vec<u32> = waveform.columns.iter().map(|c| u32::from_le_bytes(*c)).collect();
+        let peak = data.iter().map(|v| (v >> 24) & 0xFF).max().unwrap_or(255) as f32 / 255.0;
+        self.amp_gain = (0.62 / peak.max(0.05)).min(6.0);
+        self.num_cols = num_cols;
+        log::info!("waveform reloaded: {} columns, peak {:.2} → gain {:.2}", num_cols, peak, self.amp_gain);
+
+        let waveform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label:    Some("waveform_data"),
+            contents: bytemuck::cast_slice(&data),
+            usage:    wgpu::BufferUsages::STORAGE,
+        });
+        self.waveform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label:  Some("waveform_bg"),
+            layout: &self.waveform_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: waveform_buf.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: self.params_buf.as_entire_binding() },
+            ],
+        });
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
