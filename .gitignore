@@ -7,3 +7,4 @@ Cargo.lock
 /reference/pioneer/
 
 # Photos of our own units are tracked: reference/photos/
+third_party/**/target/

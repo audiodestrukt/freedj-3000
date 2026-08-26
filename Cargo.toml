@@ -10,6 +10,7 @@ members = [
     "crates/timecode",
     "crates/link",
     "crates/db",
+    "crates/rekordbox",
     "crates/ui",
     "crates/app",
 ]
@@ -105,3 +106,8 @@ debug       = 1   # line-level debug info for flamegraph / perf; stripped in dis
 # Use: cargo build --release -p opendeck-app
 [profile.dev]
 opt-level   = 1   # faster builds, still reasonable audio perf for dev
+
+[patch.crates-io]
+# Vendored rekordcrate (MPL-2.0) with pdb/anlz struct fields made pub so we can
+# read track metadata programmatically. See third_party/rekordcrate.
+rekordcrate = { path = "third_party/rekordcrate" }

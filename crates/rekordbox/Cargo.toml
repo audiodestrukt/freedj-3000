@@ -1,0 +1,12 @@
+[package]
+name        = "opendeck-rekordbox"
+description = "Read Pioneer rekordbox device exports (export.pdb + ANLZ) into freedj's library model"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+rekordcrate = { version = "0.3", default-features = false }
+anyhow      = { workspace = true }
+log         = { workspace = true }
+binrw       = "0.14"
