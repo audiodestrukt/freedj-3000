@@ -88,6 +88,7 @@ struct DeckApp {
     jog_offset:        f32,
     jog_until:         Option<Instant>,
     cue_point:         u64,   // start cue, source sample index (CDJ CUE)
+    cue_preview:       bool,  // CUE held → previewing from the cue point
     exit_after_capture: bool,
 
     // Created on first `resumed`.
@@ -222,6 +223,7 @@ impl DeckApp {
             jog_offset:        0.0,
             jog_until:         None,
             cue_point,
+            cue_preview:       false,
             exit_after_capture: false,
             window:      None,
             renderer:    None,
@@ -274,24 +276,27 @@ impl DeckApp {
                     log::debug!("jog vinyl {delta:+} → {:.2}s", new as f64 / sr_ch);
                 }
             }
-            Event::Deck(ControlEvent::Cue) => {
-                // CDJ CUE: playing → return to the cue and pause; paused AT the
-                // cue → play from it; paused elsewhere → set the cue here (which
-                // is how you place the start cue: pause, jog to the drop, CUE).
-                let sr_ch   = self.audio.sample_rate as f64 * self.audio.channels as f64;
-                let playing = self.audio.playing.load(Ordering::Relaxed);
-                let pos     = self.audio.position.load(Ordering::Relaxed);
-                let at_cue  = (pos as i64 - self.cue_point as i64).unsigned_abs() < (sr_ch * 0.05) as u64;
-                if playing {
+            Event::Deck(ControlEvent::Cue { pressed }) => {
+                // Momentary CDJ CUE.  PRESS: playing → return to the cue and pause;
+                // paused → set the cue here and preview (play) while held.
+                // RELEASE (while previewing) → jump back to the cue and pause.
+                let sr_ch = self.audio.sample_rate as f64 * self.audio.channels as f64;
+                if pressed {
+                    if self.audio.playing.load(Ordering::Relaxed) {
+                        self.audio.playing.store(false, Ordering::Relaxed);
+                        self.seek_to(self.cue_point);
+                        log::info!("cue: return to {:.2}s", self.cue_point as f64 / sr_ch);
+                    } else {
+                        self.cue_point   = self.audio.position.load(Ordering::Relaxed);
+                        self.cue_preview = true;
+                        self.audio.playing.store(true, Ordering::Relaxed);
+                        log::info!("cue: set + preview at {:.2}s", self.cue_point as f64 / sr_ch);
+                    }
+                } else if self.cue_preview {
+                    self.cue_preview = false;
                     self.audio.playing.store(false, Ordering::Relaxed);
                     self.seek_to(self.cue_point);
-                    log::info!("cue: return to {:.2}s", self.cue_point as f64 / sr_ch);
-                } else if at_cue {
-                    self.audio.playing.store(true, Ordering::Relaxed);
-                    log::info!("cue: play from cue");
-                } else {
-                    self.cue_point = pos;
-                    log::info!("cue: set at {:.2}s", pos as f64 / sr_ch);
+                    log::debug!("cue: release → back to cue");
                 }
             }
             Event::Deck(ControlEvent::NeedleSearch { position }) => {
@@ -450,6 +455,7 @@ impl DeckApp {
         self.heard_avg    = 0.0;
         self.prev_pos     = 0;
         self.cue_point    = 0;
+        self.cue_preview  = false;
         log::info!(
             "loaded {} in {:.1}s ({} BPM)",
             path.display(), t0.elapsed().as_secs_f32(),
@@ -739,10 +745,21 @@ impl ApplicationHandler for DeckApp {
             WindowEvent::CloseRequested => event_loop.exit(),
 
             WindowEvent::KeyboardInput {
-                event: KeyEvent { physical_key: PhysicalKey::Code(code), state: ElementState::Pressed, .. },
+                event: KeyEvent { physical_key: PhysicalKey::Code(code), state, repeat, .. },
                 ..
             } => {
                 use KeyCode::*;
+                // CUE is momentary: handle both edges (playback mode), ignore the
+                // OS key-repeat.  Enter still means Load in the browser.
+                if self.screen_mode == ScreenMode::Playback && matches!(code, Enter | NumpadEnter) {
+                    if !repeat {
+                        self.events.push(Event::Deck(ControlEvent::Cue { pressed: state == ElementState::Pressed }));
+                        if let Some(w) = &self.window { w.request_redraw(); }
+                    }
+                    return;
+                }
+                // Everything else acts on key-down only.
+                if state != ElementState::Pressed { return; }
                 // In the browser the keys navigate the list, not the transport.
                 if self.screen_mode == ScreenMode::Browse {
                     let ev = match code {
@@ -778,7 +795,6 @@ impl ApplicationHandler for DeckApp {
                     KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
                     KeyT => Some(Event::Ui(UiEvent::TimeMode)),
                     KeyB => Some(Event::Ui(UiEvent::Screen(TopScreen::Browse))),
-                    Enter | NumpadEnter => Some(Event::Deck(ControlEvent::Cue)),
                     Comma  => Some(Event::Deck(ControlEvent::JogDelta { delta: -4, velocity_rpm: 0.0 })),
                     Period => Some(Event::Deck(ControlEvent::JogDelta { delta:  4, velocity_rpm: 0.0 })),
                     KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),

@@ -137,7 +137,9 @@ pub enum ControlEvent {
     Pause,
     /// Toggle play/pause — a single button (DJ2Go, keyboard Space).
     PlayPause,
-    Cue,
+    /// CUE button: momentary. Press = return-to-cue (playing) or set-cue +
+    /// preview (paused); release = jump back to the cue and pause (if previewing).
+    Cue { pressed: bool },
     /// Relative tempo step, as a fraction (0.01 = +1%); the pitch ± buttons.
     TempoNudge { delta: f32 },
     HotCueTrigger { slot: u8, held: bool },

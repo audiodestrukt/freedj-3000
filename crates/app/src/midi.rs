@@ -103,7 +103,7 @@ fn translate(msg: &[u8], m: &DeckMap) -> Option<Event> {
         // ── Note On (button press; velocity 0 = release) ────────────────────
         0x90 if b > 0 => match a {
             n if n == m.play     => deck(ControlEvent::PlayPause),
-            n if n == m.cue      => deck(ControlEvent::Cue),
+            n if n == m.cue      => deck(ControlEvent::Cue { pressed: true }),
             n if n == m.sync     => deck(ControlEvent::SyncToggle),
             n if n == m.loop_in  => deck(ControlEvent::LoopIn),
             n if n == m.loop_out => deck(ControlEvent::LoopOut),
@@ -112,7 +112,14 @@ fn translate(msg: &[u8], m: &DeckMap) -> Option<Event> {
             _ => { log::debug!("MIDI note-on 0x{a:02X} unmapped"); None }
         },
         // ── Note Off — Load / Back / Enter fire here on the DJ2Go ───────────
+        // Some controllers send Note On velocity 0 as release; the DJ2Go's CUE
+        // release matters for the momentary preview.
+        0x90 => match a {
+            n if n == m.cue => deck(ControlEvent::Cue { pressed: false }),
+            _ => None,
+        },
         0x80 => match a {
+            n if n == m.cue  => deck(ControlEvent::Cue { pressed: false }),
             n if n == m.load => deck(ControlEvent::Load),
             BACK_NOTE        => deck(ControlEvent::Back),
             ENTER_NOTE       => deck(ControlEvent::Load),   // Enter loads the selection
@@ -154,7 +161,7 @@ mod tests {
     #[test]
     fn deck_a_controls() {
         assert!(matches!(ev(&[0x90, 0x3B, 0x7F], false), Some(CE::PlayPause)));      // play
-        assert!(matches!(ev(&[0x90, 0x33, 0x7F], false), Some(CE::Cue)));            // cue
+        assert!(matches!(ev(&[0x90, 0x33, 0x7F], false), Some(CE::Cue { pressed: true })));  // cue press
         assert!(matches!(ev(&[0x90, 0x40, 0x7F], false), Some(CE::SyncToggle)));     // sync
         assert!(matches!(ev(&[0x90, 0x44, 0x7F], false), Some(CE::LoopIn)));         // loop in
         assert!(matches!(ev(&[0x90, 0x43, 0x7F], false), Some(CE::LoopOut)));        // loop out
@@ -166,7 +173,7 @@ mod tests {
     #[test]
     fn deck_b_uses_its_own_numbers() {
         assert!(matches!(ev(&[0x90, 0x42, 0x7F], true), Some(CE::PlayPause)));       // play B
-        assert!(matches!(ev(&[0x90, 0x3C, 0x7F], true), Some(CE::Cue)));             // cue B
+        assert!(matches!(ev(&[0x90, 0x3C, 0x7F], true), Some(CE::Cue { pressed: true })));   // cue B press
         assert!(matches!(ev(&[0x90, 0x47, 0x7F], true), Some(CE::SyncToggle)));      // sync B
         assert!(matches!(ev(&[0xB0, 0x18, 5],    true), Some(CE::JogDelta { delta: 5, .. })));
         assert!(matches!(ev(&[0xB0, 0x0E, 64],   true), Some(CE::TempoFader { .. })));
