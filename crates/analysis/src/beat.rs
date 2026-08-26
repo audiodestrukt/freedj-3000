@@ -11,8 +11,12 @@ use std::sync::Arc;
 use opendeck_types::{BeatAnalyzer, BeatGrid};
 use minibpm_sys::MiniBpm;
 
-/// Analysis window length in seconds fed to MiniBPM.
+/// Minimum audio (seconds) before a grid can be fit at all.
 const AC_WINDOW_SEC: f32 = 6.0;
+/// Upper bound (seconds) on the leading span analysed for tempo + phase.  Long
+/// enough for a rock-solid global phase fit, bounded so a 10-minute track does
+/// not pay for its whole length at load.
+const ANALYSIS_SPAN_SEC: f32 = 120.0;
 /// Minimum BPM to consider.
 const BPM_MIN: f32 = 60.0;
 /// Maximum BPM to consider.
@@ -53,9 +57,16 @@ impl BeatAnalyzerImpl {
             return;
         }
 
-        // Use the last AC_WINDOW_SEC of audio.
-        let window_start = self.samples.len() - ac_len;
-        let window = &self.samples[window_start..];
+        // Analyse as much of the track as we have — bounded so a very long
+        // track can't blow up load time.  Crucially this is the *leading* span,
+        // not the trailing one: the earlier code fit the grid to the LAST 6 s
+        // of the track (an outro / breakdown / filter sweep — the worst place
+        // to find the beat), which threw the phase off for the clean kicks at
+        // the start.  Fitting over a long leading span both picks a steadier
+        // BPM and least-squares-aligns the phase to every kick, so the grid
+        // lines up where the beat is actually visible.
+        let span = self.samples.len().min((ANALYSIS_SPAN_SEC * sr) as usize);
+        let window = &self.samples[..span];
 
         // ── Stage 1: tempo via MiniBPM ────────────────────────────────────────
         let mut detector = MiniBpm::new(sr);
@@ -72,8 +83,11 @@ impl BeatAnalyzerImpl {
         };
 
         // ── Stage 2: beat phase ───────────────────────────────────────────────
+        // Global phase fit across the whole analysed span: the anchor is chosen
+        // to maximise onset energy summed over grid positions spanning the
+        // track, so it best-fits every beat rather than one 6 s window.
         let onset = onset_strength(window, sr);
-        let anchor_sample = estimate_anchor(&onset, bpm, sr, window_start);
+        let anchor_sample = estimate_anchor(&onset, bpm, sr, 0);
 
         // ── Stage 3: downbeat ─────────────────────────────────────────────────
         // TODO: implement bar-level autocorrelation

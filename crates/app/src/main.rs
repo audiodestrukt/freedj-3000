@@ -71,6 +71,7 @@ struct DeckApp {
     prev_pos:          u64,       // previous frame's audio position (scroll instrument)
     smoothed_pos:      f64,       // phase-locked playhead, source samples
     heard_avg:         f64,       // low-passed reference the playhead locks to
+    resync_frames:     u32,       // consecutive frames the reference has been far off
     refresh_interval:  Duration,  // display period; each frame lands in one of these
     frame_count:       u64,
     remain_mode:       bool,      // time display: REMAIN vs TIME
@@ -209,6 +210,7 @@ impl DeckApp {
             prev_pos:          0,
             smoothed_pos:      0.0,
             heard_avg:         0.0,
+            resync_frames:     0,
             refresh_interval:  FRAME_INTERVAL,
             frame_count:       0,
             remain_mode:       false,   // the reference unit was in TIME mode
@@ -533,10 +535,30 @@ impl DeckApp {
         let sr_ch  = self.audio.sample_rate as f64 * self.audio.channels as f64;
         let heard  = raw_pos.saturating_sub(in_flight) as f64;
 
-        if self.smoothed_pos <= 0.0 || (heard - self.smoothed_pos).abs() > sr_ch * 0.5 {
-            // First frame, or a seek — snap, and reset the reference filter.
-            self.smoothed_pos = heard;
-            self.heard_avg    = heard;
+        // A far-off reference is almost always a transient: `in_flight` is
+        // sampled at decode-block boundaries and spikes for a frame whenever the
+        // audio-proc thread wakes late, which momentarily craters
+        // `heard = raw_pos - in_flight`.  Chasing that single sample is the
+        // visible periodic "jump".  Genuine seeks don't come through here — they
+        // reset smoothed_pos directly in seek_to — so the only thing this snap
+        // ever follows is an unexpected jump we do NOT want on screen.  Require
+        // the deviation to persist for a few frames before believing it; a
+        // one-frame spike is ignored and the free-run carries through it.
+        let far_off = (heard - self.smoothed_pos).abs() > sr_ch * 0.5;
+        if far_off { self.resync_frames += 1; } else { self.resync_frames = 0; }
+        if self.smoothed_pos <= 0.0 || self.resync_frames >= 4 {
+            // First frame, or a sustained desync — snap and reset the filter.
+            self.smoothed_pos  = heard;
+            self.heard_avg     = heard;
+            self.resync_frames = 0;
+        } else if far_off {
+            // Transient outlier: hold the free-run, don't poison the reference.
+            let period  = self.refresh_interval.as_secs_f64();
+            let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
+            if playing {
+                self.smoothed_pos += periods * period * sr_ch * speed as f64;
+                self.smoothed_pos  = self.smoothed_pos.max(self.prev_pos as f64);
+            }
         } else {
             // The phase-lock only runs while PLAYING.  When paused the audio is
             // silent (the cpal callback fills zeros without draining the ring),

@@ -149,7 +149,7 @@ impl Transport {
         match ev {
             ControlEvent::Play => self.cmd_play(),
             ControlEvent::Pause => self.cmd_pause(),
-            ControlEvent::Cue => self.cmd_cue(),
+            ControlEvent::Cue { pressed } => if pressed { self.cmd_cue() },
             ControlEvent::JogDelta { delta, velocity_rpm } => {
                 self.cmd_jog_delta(delta, velocity_rpm);
             }

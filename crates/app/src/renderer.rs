@@ -783,7 +783,12 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
         let bpb      = p.beats_per_bar;
         let adjusted = ((beat_num + p.downbeat_offset) % bpb + bpb) % bpb;
         let is_down  = adjusted < 0.5;
-        let tick_w   = select(1.0, 2.0, is_down);
+        // Tick width is fixed in PIXELS, then converted to columns for the
+        // `beat_pos` (column-space) test — otherwise the line thins or fattens
+        // as the zoom (cols_visible) changes the pixels-per-column ratio.
+        let cols_per_px = p.cols_visible / r.z;
+        let tick_w_px   = select(1.5, 2.5, is_down);
+        let tick_w      = tick_w_px * cols_per_px;
         // Draw at each beat's LEADING edge only.  Drawing both edges painted the
         // (wider) downbeat colour at the beat's trailing edge too, which showed
         // as a second red line one beat after every downbeat — the "doubled"
