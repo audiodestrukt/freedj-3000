@@ -26,6 +26,15 @@ pub const PORT_STATUS:    u16 = 50002;
 pub const PKT_ANNOUNCE:   u8 = 0x06;
 pub const PKT_BEAT:       u8 = 0x28;
 pub const PKT_STATUS:     u8 = 0x0A;
+/// Tempo-master handoff: request (to the current master, port 50001) and
+/// its yield response (back to the requester, port 50001).
+pub const PKT_MASTER_REQ: u8 = 0x26;
+pub const PKT_MASTER_RSP: u8 = 0x27;
+/// Sync control (port 50001): tell a player to sync, unsync, or become master.
+pub const PKT_SYNC_CTRL:  u8 = 0x2A;
+pub const SYNC_ON:        u32 = 0x10;
+pub const SYNC_OFF:       u32 = 0x20;
+pub const BECOME_MASTER:  u32 = 0x01;
 
 /// Magic header present in all ProDJ Link packets: "Qspt1WmJOL".
 pub const MAGIC: &[u8; 10] = b"Qspt1WmJOL";
@@ -58,6 +67,7 @@ mod status {
     pub const TRACK_TYPE: usize = 0x2a;  // 0 none, 1 rekordbox, 2 unanalysed, 5 CD
     pub const PLAY:      usize = 0x7b;   // P1, see PlayState
     pub const FIRMWARE:  usize = 0x7c;   // 4 ASCII bytes
+    pub const SYNC_N:    usize = 0x84;   // u32 BE sync counter: a new master sets largest-seen + 1
     pub const FLAGS:     usize = 0x89;   // bit6 play, bit5 master, bit4 sync, bit3 on-air
     pub const PITCH:     usize = 0x8c;   // u32 BE, 0x00100000 = +0%
     pub const BPM:       usize = 0x92;   // u16 BE ×100, 0xffff = no track
@@ -118,6 +128,31 @@ pub struct Status {
     pub track_loaded: bool,
     pub firmware:     [u8; 4],
     pub counter:      u32,
+    /// Sync counter: a device taking master sets this to the largest value
+    /// it has seen on the network plus one; the old master yields only to a
+    /// claim with a higher value.
+    pub sync_counter: u32,
+}
+
+/// What we put in our own status packets.
+#[derive(Debug, Clone, Copy)]
+pub struct StatusFields {
+    pub playing:      bool,
+    pub track_loaded: bool,
+    pub master:       bool,
+    pub sync:         bool,
+    pub on_air:       bool,
+    /// 1.0 = +0%.
+    pub pitch:        f32,
+    /// Track BPM, unpitched.
+    pub bpm:          Option<f32>,
+    /// Cumulative beat number from the start of the track.
+    pub beat:         Option<u32>,
+    pub beat_in_bar:  Option<u8>,
+    /// Player we are handing master to, during a handoff.
+    pub handoff_to:   Option<u8>,
+    pub counter:      u32,
+    pub sync_counter: u32,
 }
 
 pub struct ProDjLink {
@@ -200,6 +235,113 @@ impl ProDjLink {
         pkt
     }
 
+    /// Build a CDJ status packet (0x0a) from the XDJ-1000MK2 template,
+    /// overwriting the documented dynamic fields.  Unicast to every known
+    /// device's port 50002 about five times a second.
+    pub fn build_status(&self, f: &StatusFields) -> Vec<u8> {
+        use crate::status_template::STATUS_TEMPLATE as T;
+        let mut p = T.to_vec();
+        p[0x0b..0x0b + 20].copy_from_slice(&self.device_name);
+        p[status::DEVICE] = self.player_num;
+        p[0x24] = self.player_num;
+        // Track source: our own player, "USB", rekordbox-analysed — so peers
+        // trust the BPM and grid we report.
+        p[0x28] = if f.track_loaded { self.player_num } else { 0 };
+        p[status::SLOT] = if f.track_loaded { 0x03 } else { 0 };
+        p[status::TRACK_TYPE] = if f.track_loaded { 0x01 } else { 0 };
+        p[status::PLAY] = match (f.track_loaded, f.playing) {
+            (false, _)   => 0x00,
+            (true, true) => 0x03,
+            (true, false) => 0x05,
+        };
+        p[status::FIRMWARE..status::FIRMWARE + 4].copy_from_slice(b"0.1 ");
+        p[status::FLAGS] = 0x84
+            | if f.playing { 0x40 } else { 0 }
+            | if f.master  { 0x20 } else { 0 }
+            | if f.sync    { 0x10 } else { 0 }
+            | if f.on_air  { 0x08 } else { 0 };
+        p[0x8a] = if f.playing { 0xFF } else { 0x8D };
+        p[0x8b] = if f.playing { 0xFA } else { 0xFE };
+        let pitch = ((f.pitch.max(0.0)) * PITCH_UNITY as f32) as u32;
+        for o in [status::PITCH, 0x98, 0xc0, 0xc4] {
+            p[o..o + 4].copy_from_slice(&pitch.to_be_bytes());
+        }
+        let (mv, bpm) = match f.bpm { Some(b) => (0x8000u16, (b * 100.0).round() as u16), None => (0x7FFF, 0xFFFF) };
+        p[0x90..0x92].copy_from_slice(&mv.to_be_bytes());
+        p[status::BPM..status::BPM + 2].copy_from_slice(&bpm.to_be_bytes());
+        p[0x9d] = if f.playing { 0x0D } else { 0x01 };   // CDJ mode / paused
+        p[status::MASTER]  = if f.master { 0x01 } else { 0x00 };
+        p[status::HANDOFF] = f.handoff_to.unwrap_or(0xFF);
+        p[status::BEAT..status::BEAT + 4].copy_from_slice(&f.beat.unwrap_or(0xFFFF_FFFF).to_be_bytes());
+        p[status::CUE_CD..status::CUE_CD + 2].copy_from_slice(&0x01FFu16.to_be_bytes());
+        p[status::BEAT_BAR] = f.beat_in_bar.unwrap_or(0);
+        p[status::COUNTER..status::COUNTER + 4].copy_from_slice(&f.counter.to_be_bytes());
+        p[status::SYNC_N..status::SYNC_N + 4].copy_from_slice(&f.sync_counter.to_be_bytes());
+        p
+    }
+
+    /// Common header for the small control packets on port 50001:
+    /// magic, type, name, 01 00, our device number, remaining length.
+    fn control_header(&self, kind: u8, payload_len: u16) -> Vec<u8> {
+        let mut p = vec![0u8; 0x24 + payload_len as usize];
+        p[..10].copy_from_slice(MAGIC);
+        p[0x0a] = kind;
+        p[0x0b..0x0b + 20].copy_from_slice(&self.device_name);
+        p[0x1f] = 0x01;
+        p[0x21] = self.player_num;
+        p[0x22..0x24].copy_from_slice(&payload_len.to_be_bytes());
+        p
+    }
+
+    /// Master handoff request (0x26): send to the current master's port 50001.
+    pub fn build_master_request(&self) -> Vec<u8> {
+        let mut p = self.control_header(PKT_MASTER_REQ, 4);
+        p[0x24..0x28].copy_from_slice(&(self.player_num as u32).to_be_bytes());
+        p
+    }
+
+    /// Master handoff response (0x27): send to the requester's port 50001.
+    pub fn build_master_response(&self, yield_ok: bool) -> Vec<u8> {
+        let mut p = self.control_header(PKT_MASTER_RSP, 8);
+        p[0x24..0x28].copy_from_slice(&(self.player_num as u32).to_be_bytes());
+        p[0x28..0x2c].copy_from_slice(&(yield_ok as u32).to_be_bytes());
+        p
+    }
+
+    /// Sync control (0x2a): send to the target player's port 50001.
+    pub fn build_sync_control(&self, target: u8, command: u32) -> Vec<u8> {
+        let mut p = self.control_header(PKT_SYNC_CTRL, 8);
+        p[0x24..0x28].copy_from_slice(&(target as u32).to_be_bytes());
+        p[0x28..0x2c].copy_from_slice(&command.to_be_bytes());
+        p
+    }
+
+    /// Parse a master handoff request: the requesting player number.
+    pub fn parse_master_request(data: &[u8]) -> Option<u8> {
+        (Self::packet_type(data)? == PKT_MASTER_REQ && data.len() >= 0x28)
+            .then(|| data[0x27])
+    }
+
+    /// Parse a master handoff response: (responding player, yielded).
+    pub fn parse_master_response(data: &[u8]) -> Option<(u8, bool)> {
+        (Self::packet_type(data)? == PKT_MASTER_RSP && data.len() >= 0x2c)
+            .then(|| (data[0x27], data[0x2b] == 1))
+    }
+
+    /// Parse a sync-control command: (sender, target, command).
+    pub fn parse_sync_control(data: &[u8]) -> Option<(u8, u8, u32)> {
+        (Self::packet_type(data)? == PKT_SYNC_CTRL && data.len() >= 0x2c).then(|| {
+            (data[0x21], data[0x27], u32::from_be_bytes([data[0x28], data[0x29], data[0x2a], data[0x2b]]))
+        })
+    }
+
+    /// Parse an announce / keep-alive: (player, ip).
+    pub fn parse_announce(data: &[u8]) -> Option<(u8, Ipv4Addr)> {
+        (Self::packet_type(data)? == PKT_ANNOUNCE && data.len() >= 0x30).then(|| {
+            (data[announce::DEVICE], Ipv4Addr::new(data[0x2c], data[0x2d], data[0x2e], data[0x2f]))
+        })
+    }
+
     /// Packet type, if this is a ProDJ Link packet at all.
     pub fn packet_type(data: &[u8]) -> Option<u8> {
         if data.len() < 0x0b || &data[..10] != MAGIC {
@@ -258,6 +400,7 @@ impl ProDjLink {
             track_loaded: data[status::TRACK_TYPE] != 0,
             firmware:     [data[status::FIRMWARE], data[status::FIRMWARE + 1], data[status::FIRMWARE + 2], data[status::FIRMWARE + 3]],
             counter:      u32_at(status::COUNTER),
+            sync_counter: u32_at(status::SYNC_N),
         })
     }
 
@@ -371,6 +514,42 @@ mod tests {
         assert_eq!(st.handoff_to, None);
         assert!(!st.track_loaded);
         assert_eq!(st.counter, 268);
+        assert_eq!(st.sync_counter, 1);
+    }
+
+    #[test]
+    fn status_round_trips_through_the_parser() {
+        let link = ProDjLink::new(2);
+        let f = StatusFields {
+            playing: true, track_loaded: true, master: true, sync: false, on_air: false,
+            pitch: 1.02, bpm: Some(134.7), beat: Some(77), beat_in_bar: Some(3),
+            handoff_to: None, counter: 9, sync_counter: 7,
+        };
+        let pkt = link.build_status(&f);
+        assert_eq!(pkt.len(), 0x124);
+        let st = ProDjLink::parse_status(&pkt).unwrap();
+        assert_eq!(st.player, 2);
+        assert_eq!(st.play, PlayState::Playing);
+        assert!(st.playing && st.master && !st.sync);
+        assert!((st.pitch - 1.02).abs() < 1e-4);
+        assert_eq!(st.bpm, Some(134.7));
+        assert_eq!(st.beat, Some(77));
+        assert_eq!(st.beat_in_bar, Some(3));
+        assert_eq!(st.handoff_to, None);
+        assert!(st.track_loaded);
+        assert_eq!(&st.firmware, b"0.1 ");
+        assert_eq!(st.counter, 9);
+        assert_eq!(st.sync_counter, 7);
+    }
+
+    #[test]
+    fn handoff_and_sync_control_round_trip() {
+        let me = ProDjLink::new(3);
+        assert_eq!(ProDjLink::parse_master_request(&me.build_master_request()), Some(3));
+        assert_eq!(ProDjLink::parse_master_response(&me.build_master_response(true)), Some((3, true)));
+        assert_eq!(ProDjLink::parse_sync_control(&me.build_sync_control(1, SYNC_ON)), Some((3, 1, SYNC_ON)));
+        let ann = me.build_announce(Ipv4Addr::new(10, 0, 0, 7), [1, 2, 3, 4, 5, 6]);
+        assert_eq!(ProDjLink::parse_announce(&ann), Some((3, Ipv4Addr::new(10, 0, 0, 7))));
     }
 
     #[test]

@@ -1,0 +1,8 @@
+2026-08-26T04:20:27.719519  ProDJ Link: taking master (no master on the network), sync counter 2
+2026-08-26T04:20:27.719548  ProDJ tx: status master=true sync=false → 1 peer(s)
+2026-08-26T04:17:07.655491  ProDJ Link: player 1 is tempo master
+2026-08-26T04:17:09.663009  ProDJ Link: player 1 yields master
+2026-08-26T04:17:09.663023  ProDJ Link: taking master (player 1 yielded), sync counter 2
+2026-08-26T04:17:09.664022  ProDJ tx: status master=true sync=false → 1 peer(s)
+2026-08-26T04:17:11.863229  ProDJ Link: player 1 asserts master (sync 1 vs ours 2, held 2200 ms) — no longer master
+2026-08-26T04:17:11.863457  ProDJ tx: status master=false sync=false → 1 peer(s)

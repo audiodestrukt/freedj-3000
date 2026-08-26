@@ -55,6 +55,7 @@ struct DeckApp {
     beat2_bpm:    Arc<AtomicU32>,  // f32 bits; BPM of the second grid
     beat2_anchor: Arc<AtomicU64>, // written by MIDI Cue B to signal a phase reset
     beat2_player: Arc<AtomicU32>, // player number of the last Link beat sender
+    link:         Arc<prodj::LinkState>,
     beat2_start:  Instant,        // wall-clock time of the last phase reset
     prev_beat2_anchor: u64,       // detect changes in beat2_anchor
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
@@ -66,8 +67,6 @@ struct DeckApp {
     remain_mode:       bool,      // time display: REMAIN vs TIME
     key_lock:          bool,      // MT indicator (Rubber Band path is always on today)
     slip:              bool,
-    sync:              bool,
-    master:            bool,
     zoom_level:        usize,     // index into ZOOM_LEVELS
     zoom_grid_mode:    bool,
     source_link:       bool,
@@ -133,6 +132,7 @@ impl DeckApp {
         beat2_bpm:    Arc<AtomicU32>,
         beat2_anchor: Arc<AtomicU64>,
         beat2_player: Arc<AtomicU32>,
+        link:         Arc<prodj::LinkState>,
     ) -> Self {
         Self {
             path,
@@ -143,6 +143,7 @@ impl DeckApp {
             beat2_bpm,
             beat2_anchor,
             beat2_player,
+            link,
             beat2_start:       Instant::now(),
             prev_beat2_anchor: 0,
             prev_beat2_bpm:    0.0,
@@ -154,8 +155,6 @@ impl DeckApp {
             remain_mode:       false,   // the reference unit was in TIME mode
             key_lock:          true,
             slip:              false,
-            sync:              false,
-            master:            false,
             zoom_level:        ZOOM_DEFAULT,
             zoom_grid_mode:    false,
             source_link:       false,
@@ -199,8 +198,24 @@ impl DeckApp {
                 log::info!("master tempo {} (display only for now)", if self.key_lock { "on" } else { "off" });
             }
             Event::Deck(ControlEvent::SlipToggle)    => { self.slip   = !self.slip;   log::info!("slip {} (no engine yet)", self.slip); }
-            Event::Deck(ControlEvent::SyncToggle)    => { self.sync   = !self.sync;   log::info!("sync {} (Link send not implemented)", self.sync); }
-            Event::Deck(ControlEvent::MasterRequest) => { self.master = !self.master; log::info!("master {} (Link send not implemented)", self.master); }
+            Event::Deck(ControlEvent::SyncToggle) => {
+                let on = !self.link.sync.load(Ordering::Relaxed);
+                self.link.sync.store(on, Ordering::Relaxed);
+                if !on {
+                    // Leaving SYNC: keep the tempo we ended on, drop any nudge.
+                    let f = self.fader_speed.load(Ordering::Relaxed);
+                    self.audio.speed.store(f, Ordering::Relaxed);
+                }
+                log::info!("sync {}", if on { "on" } else { "off" });
+            }
+            Event::Deck(ControlEvent::MasterRequest) => {
+                if self.link.master.load(Ordering::Relaxed) {
+                    log::info!("already master");
+                } else {
+                    self.link.want_master.store(true, Ordering::Relaxed);
+                    log::info!("requesting master");
+                }
+            }
             Event::Deck(other) => log::info!("unhandled deck event {other:?}"),
 
             Event::Ui(UiEvent::TimeMode) => {
@@ -334,9 +349,10 @@ impl DeckApp {
         };
         let flags = UiFlags {
             key_lock: self.key_lock, remain_mode: self.remain_mode, slip: self.slip,
-            sync: self.sync, master: self.master, zoom_grid_mode: self.zoom_grid_mode,
+            sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
-            linked: beat2_player > 0, master_player: beat2_player as u8,
+            linked: beat2_player > 0,
+            master_player: match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 },
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats);
 
@@ -370,9 +386,10 @@ impl DeckApp {
         egui_state.handle_platform_output(window.as_ref(), platform_output);
         let flags = UiFlags {
             key_lock: self.key_lock, remain_mode: self.remain_mode, slip: self.slip,
-            sync: self.sync, master: self.master, zoom_grid_mode: self.zoom_grid_mode,
+            sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
-            linked: beat2_player > 0, master_player: beat2_player as u8,
+            linked: beat2_player > 0,
+            master_player: match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 },
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats);
 
@@ -585,17 +602,22 @@ fn main() -> Result<()> {
     let beat2_player = Arc::new(AtomicU32::new(0));
 
     // ── 4. Start ProDJ Link listener (optional — app runs fine without it) ────────
+    let link = prodj::LinkState::new(player);
+    // Dev hooks for headless tests: OPENDECK_SYNC=1 / OPENDECK_MASTER=1.
+    if std::env::var("OPENDECK_SYNC").map(|v| v == "1").unwrap_or(false)   { link.sync.store(true, Ordering::Relaxed); }
+    if std::env::var("OPENDECK_MASTER").map(|v| v == "1").unwrap_or(false) { link.want_master.store(true, Ordering::Relaxed); }
     let _prodj = prodj::ProDjHandle::listen(
+        Arc::clone(&link),
         Arc::clone(&beat2_bpm),
         Arc::clone(&beat2_anchor),
         Arc::clone(&beat2_player),
-        player,
     );
-    let _prodj_tx = prodj::ProDjSender::start(player, prodj::SenderState {
+    let _prodj_tx = prodj::ProDjSender::start(Arc::clone(&link), prodj::SenderState {
         position:    Arc::clone(&audio.position),
         in_flight:   Arc::clone(&audio.in_flight),
         playing:     Arc::clone(&audio.playing),
         fader_speed: Arc::clone(&fader_speed),
+        speed:       Arc::clone(&audio.speed),
         sample_rate: audio.sample_rate,
         channels:    audio.channels,
         grid:        beat_grid.clone(),
@@ -619,7 +641,7 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player);
+    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, link);
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())
