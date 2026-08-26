@@ -519,17 +519,22 @@ impl ProDjSender {
                             }
                             (0, _) => {}
                             (p, Some(ip)) => {
-                                // Send the polite 0x26 request once, then take
-                                // master by assertion (higher sync counter) —
-                                // which is what a real CDJ does and what the
-                                // old master actually responds to.
-                                if now.duration_since(last_request) >= Duration::from_millis(5000) {
+                                // Send the 0x26 takeover request and WAIT for the
+                                // handshake: the master replies 0x27 and sets Mh
+                                // (handoff) = us in its status, at which point we
+                                // assert master (see listen_status handing_to_us /
+                                // listen_beat 0x27 handler).  Do NOT assert now —
+                                // a real CDJ only takes master after the current
+                                // master agrees, per the DJ Link spec.  Re-request
+                                // ~1/s until the handoff completes or the user
+                                // cancels; if the master never agrees we simply
+                                // don't take it (better than a rogue second
+                                // master the deck ignores).
+                                if now.duration_since(last_request) >= Duration::from_millis(1000) {
                                     log::info!("ProDJ Link: requesting master from player {p} at {ip}");
                                     let _ = sock.send_to(&me.build_master_request(), (ip, PORT_BEAT));
                                     last_request = now;
                                 }
-                                link.take_master(&format!("asserting over player {p}"));
-                                want_since = None;
                             }
                             (p, None) if now.duration_since(last_request) >= Duration::from_millis(500) => {
                                 log::warn!("ProDJ Link: master is player {p} but its address is unknown yet");
