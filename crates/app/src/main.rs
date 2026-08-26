@@ -70,7 +70,6 @@ struct DeckApp {
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
     prev_pos:          u64,       // previous frame's audio position (scroll instrument)
     smoothed_pos:      f64,       // phase-locked playhead, source samples
-    heard_avg:         f64,       // low-passed reference the playhead locks to
     resync_frames:     u32,       // consecutive frames the reference has been far off
     refresh_interval:  Duration,  // display period; each frame lands in one of these
     frame_count:       u64,
@@ -221,7 +220,6 @@ impl DeckApp {
             prev_beat2_bpm:    0.0,
             prev_pos:          0,
             smoothed_pos:      0.0,
-            heard_avg:         0.0,
             resync_frames:     0,
             refresh_interval:  FRAME_INTERVAL,
             frame_count:       0,
@@ -463,7 +461,6 @@ impl DeckApp {
         self.audio.position.store(pos, Ordering::Relaxed);
         self.audio.in_flight.store(0, Ordering::Relaxed);
         self.smoothed_pos = pos as f64;
-        self.heard_avg    = pos as f64;
         self.prev_pos     = pos;
     }
 
@@ -503,7 +500,6 @@ impl DeckApp {
         self.beat_grid    = beat_grid;
         self.path         = path.to_path_buf();
         self.smoothed_pos = 0.0;
-        self.heard_avg    = 0.0;
         self.prev_pos     = 0;
         self.cue_point    = 0;
         self.cue_preview  = false;
@@ -621,7 +617,6 @@ impl DeckApp {
         if self.smoothed_pos <= 0.0 || self.resync_frames >= 4 {
             // First frame, or a sustained desync — snap and reset the filter.
             self.smoothed_pos  = heard;
-            self.heard_avg     = heard;
             self.resync_frames = 0;
         } else if far_off {
             // Transient outlier: hold the free-run, don't poison the reference.
@@ -641,21 +636,24 @@ impl DeckApp {
             // A proper spin-down (vinyl brake) replaces the hold later — see
             // docs/design/varispeed-engine.md.
             if playing {
-                // `in_flight` is sampled once per decode block, right after a
-                // push, so it is biased high and noisy (±35 ms). Low-pass it
-                // before phase-locking, or the jitter walks the waveform.
-                self.heard_avg += (heard - self.heard_avg) * 0.05;
-
-                // Advance by whole display periods, not measured wall-clock:
-                // each frame is shown for an integer number of refreshes, and
-                // the CPU-side frame_dt carries ±2 ms of wake-up slop.
+                // Free-run at the true playback rate.  Advance by whole display
+                // periods, not measured wall-clock: each frame is shown for an
+                // integer number of refreshes and the CPU-side frame_dt carries
+                // ±2 ms of wake-up slop.  This is the velocity model.
                 let period  = self.refresh_interval.as_secs_f64();
                 let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
                 self.smoothed_pos += periods * period * sr_ch * speed as f64;
 
-                // Gentle pull toward the filtered reference — stops drift over
-                // minutes, far too slow to see as a step.
-                self.smoothed_pos += (self.heard_avg - self.smoothed_pos) * 0.02;
+                // Phase-correct toward the FRESH heard position.  The free-run
+                // above already supplies the velocity, so this pull only has to
+                // null a constant phase offset — which means it has *zero*
+                // steady-state lag on the moving playhead.  (The old code pulled
+                // toward a 0.05-LPF of `heard`, τ≈0.33 s, which dragged the whole
+                // playhead ~0.33 s behind the audio — the perceptible beat-counter
+                // delay.)  The low gain still averages `heard`'s ±35 ms block
+                // jitter (0.08·35 ≈ 3 ms, sub-pixel) without adding lag, because
+                // the averaging is of the *offset*, not the position.
+                self.smoothed_pos += (heard - self.smoothed_pos) * 0.08;
 
                 // Never run backwards during playback: a stall reads as a hitch,
                 // a reversal as a glitch (worse).
