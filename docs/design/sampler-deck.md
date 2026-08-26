@@ -56,6 +56,10 @@ ways to schedule them against the grid."
 - **Auto-cue set** — semantic cue points (first downbeat, each phrase boundary at
   8/16/32 bars, the drop, the vocal start) instead of one "auto cue to first
   sound". Placed on the grid.
+- **Energy-based cues (drops / breakdowns / big volume changes)** — the cheap,
+  robust bootstrap of the above: a smoothed loudness + low-band curve, big-step
+  detection, grid-snapped. Directly useful and shippable before full structure
+  analysis. Tracked in **#26**; pairs with beat-jump navigation (below).
 - **Cheap bootstrap first:** the waveform already carries per-column low/mid/high
   band energy — "mid/high present, low absent" is a serviceable first pass at
   "vocal/melodic, no kick" without source separation. Ship the heuristic, add
@@ -77,6 +81,10 @@ ways to schedule them against the grid."
 
 ### C. Scheduling & sequencing
 
+- **Beat jump (Traktor-style)** — grid-relative jump by a selectable N bars per
+  encoder click, phase-preserving, so you can count clicks to a section. The
+  dynamic navigation that pairs with energy auto-cues ("jump to next drop").
+  Tracked in **#25**.
 - **Arm-to-grid** — arm a cue/region to auto-fire at the next downbeat / next
   phrase, hands-free (this is "cue point scheduling").
 - **Rolls / beat-repeat** — loop a region at 1/1…1/16 for the duration of a hold.
