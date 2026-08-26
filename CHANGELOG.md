@@ -41,6 +41,27 @@ All notable changes to this project will be documented in this file.
   from the monitor. Zero double frames, one skip in 400. Verified on
   NVIDIA/Vulkan/Wayland only.
 
+### Added — 2026-08-26
+- **ProDJ Link send** (`--player N`): announce every 1.5 s on 50000, a beat
+  packet on 50001 at every beat of the *audible* position, own broadcasts
+  filtered. Two instances link to each other (`make link-pair`). Verified
+  against a real XDJ-1000MK2 (fw 1.44): its LINK status reads *connected*
+  and it unicasts status to us. Status packets from us are not sent yet.
+- **Beat timing at Pioneer's level**: the sender free-runs a phase-locked
+  audible clock (τ ≈ 200 ms) with a sleep-to-deadline for the last 1.5 ms.
+  Measured at the same receiver in the same run: XDJ sd 1.33 ms, freedj
+  sd 1.23 ms. Method and history in `PERFORMANCE.md`.
+- **Status packet parser** (`ProDjLink::parse_status`): play state, PLAY /
+  MASTER / SYNC / ON-AIR flags, pitch, BPM, beat, beat-in-bar, master
+  handoff, firmware. Tested against a packet captured from the XDJ, as is
+  its beat packet (25/25 decoded at 126.00 BPM).
+- **Linked-player screen states** from photos of two linked units: two
+  phase-meter views (`P` / tap), Bars readouts as cue countdowns (dashes),
+  gold MASTER key and BPM box, blue PLAYER box when linked. Photos tracked
+  in `reference/photos/`; captures in `reference/link-captures/`.
+- **Touch via mouse** on a single input bus (`Event` → `DeckApp::apply`):
+  needle search, zoom, SLIP / SYNC / MASTER / MT, time mode, source keys.
+
 ### Added — 2026-08-25
 - **XDJ-1000MK2 playback screen** (`crates/app/src/screen.rs`): laid out first
   from the manual's *Normal playback screen* diagram, then re-measured against
