@@ -55,7 +55,8 @@ const BACK_PRESSURE_SLOTS: usize = BLOCK_FRAMES * 4 * 2; // = 4 096
 
 /// If position jumps by more than this many source samples the processor
 /// treats it as a seek and resets the timestretch engine.
-const SEEK_THRESHOLD_SAMPLES: u64 = 4096 * 2; // ~46 ms at 44.1kHz stereo
+/// Sentinel for `seek_request`: no seek pending.
+const NO_SEEK: u64 = u64::MAX;
 
 // ── Public handle ─────────────────────────────────────────────────────────────
 
@@ -78,6 +79,10 @@ pub struct AudioHandle {
     /// `position` is the *decoder's* cursor and runs ahead of what the listener
     /// hears by this much.  Subtract it to get the true playhead.
     pub in_flight:   Arc<AtomicU64>,
+    /// UI → processor seek channel (source sample index, or NO_SEEK). Separate
+    /// from `position` so a seek can't be clobbered by the processor's own
+    /// per-block progress store and lost.
+    pub seek_request: Arc<AtomicU64>,
     pub sample_rate: u32,
     pub channels:    u8,
     _stream:     cpal::Stream,
@@ -121,6 +126,7 @@ impl AudioHandle {
         self.samples.store(new);
         self.in_flight.store(0, Ordering::Relaxed);
         self.position.store(0, Ordering::Relaxed);
+        self.seek_request.store(0, Ordering::Relaxed);
         Ok(())
     }
 }
@@ -166,6 +172,7 @@ impl AudioHandle {
         let speed      = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let drain_flag = Arc::new(AtomicBool::new(false));
         let in_flight  = Arc::new(AtomicU64::new(0));
+        let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
 
         // ── 4. Ring buffer ─────────────────────────────────────────────────────
         let (producer, mut consumer) = rtrb::RingBuffer::<f32>::new(RING_BUFFER_SAMPLES);
@@ -177,6 +184,7 @@ impl AudioHandle {
         let proc_speed      = Arc::clone(&speed);
         let proc_drain_flag = Arc::clone(&drain_flag);
         let proc_in_flight  = Arc::clone(&in_flight);
+        let proc_seek       = Arc::clone(&seek_request);
 
         let processor = thread::Builder::new()
             .name("audio-proc".into())
@@ -188,6 +196,7 @@ impl AudioHandle {
                     proc_speed,
                     proc_drain_flag,
                     proc_in_flight,
+                    proc_seek,
                     file_sr,
                     file_ch,
                     device_ch,
@@ -230,6 +239,7 @@ impl AudioHandle {
             playing,
             speed,
             in_flight,
+            seek_request,
             sample_rate: file_sr,
             channels: file_ch as u8,
             _stream: stream,
@@ -247,6 +257,7 @@ fn processor_loop(
     speed:      Arc<AtomicU32>,
     drain_flag: Arc<AtomicBool>,
     in_flight:  Arc<AtomicU64>,
+    seek_request: Arc<AtomicU64>,
     sample_rate: u32,
     file_ch:    usize,
     device_ch:  usize,
@@ -287,11 +298,12 @@ fn processor_loop(
         let samples: &[f32] = &current;
 
         // ── Seek detection ────────────────────────────────────────────────────
-        let shared_pos = position.load(Ordering::Relaxed);
-        if shared_pos.abs_diff(proc_pos) > SEEK_THRESHOLD_SAMPLES {
-            log::debug!("proc: seek detected {proc_pos} → {shared_pos}");
+        let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
+        if req != NO_SEEK {
+            log::debug!("proc: seek {proc_pos} → {req}");
             stretcher.reset();
-            proc_pos = shared_pos;
+            proc_pos = req;
+            position.store(proc_pos, Ordering::Relaxed);   // reflect immediately
             // Tell the cpal callback to flush stale buffered audio.
             drain_flag.store(true, Ordering::Release);
         }

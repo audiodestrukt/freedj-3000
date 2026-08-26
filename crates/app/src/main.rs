@@ -321,7 +321,7 @@ impl DeckApp {
                 // Land on a frame boundary so channels stay interleaved.
                 let ch = self.audio.channels as u64;
                 let target = ((position.clamp(0.0, 1.0) as f64 * total) as u64 / ch) * ch;
-                self.audio.position.store(target.min(self.audio.len() as u64), Ordering::Relaxed);
+                self.seek_to(target);
                 self.cued = false;   // searched away from the cue
             }
             Event::Deck(ControlEvent::TempoFader { position }) => {
@@ -427,6 +427,11 @@ impl DeckApp {
     /// nothing is queued, and on resume the processor re-derives it.
     fn seek_to(&mut self, pos: u64) {
         let pos = pos.min(self.audio.len() as u64);
+        // The seek_request channel is what the processor actually acts on; it
+        // can't be clobbered by the processor's own progress store (which lost
+        // seeks and made CUE sometimes not return).  `position` is set too, as
+        // an immediate UI hint and so a paused cue-set reads the sought spot.
+        self.audio.seek_request.store(pos, Ordering::Relaxed);
         self.audio.position.store(pos, Ordering::Relaxed);
         self.audio.in_flight.store(0, Ordering::Relaxed);
         self.smoothed_pos = pos as f64;
