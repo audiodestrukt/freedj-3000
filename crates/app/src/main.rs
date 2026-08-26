@@ -514,30 +514,33 @@ impl DeckApp {
             self.smoothed_pos = heard;
             self.heard_avg    = heard;
         } else {
-            // `in_flight` is sampled once per decode block, right after a push,
-            // so it is both biased high and noisy — measured swinging ±35 ms.
-            // Low-pass it before phase-locking, or that jitter goes straight
-            // into the playhead and the waveform visibly walks backwards.
-            self.heard_avg += (heard - self.heard_avg) * 0.05;
-
+            // The phase-lock only runs while PLAYING.  When paused the audio is
+            // silent (the cpal callback fills zeros without draining the ring),
+            // so the playhead must simply hold where it stopped — running the
+            // low-pass + pull while paused made it ease toward the reference for
+            // ~1–2 s after STOP, the visible "drift".  While paused, smoothed_pos
+            // holds its value (and is moved directly by seek_to for scrub/cue).
+            // A proper spin-down (vinyl brake) replaces the hold later — see
+            // docs/design/varispeed-engine.md.
             if playing {
-                // Advance by whole display periods, not by measured wall-clock.
-                // Each rendered frame is shown for an integer number of
-                // refreshes; the CPU-side `frame_dt` carries ±2ms of wake-up
-                // slop that is not reflected on screen.  Snapping dt to the
-                // nearest multiple of the refresh period keeps motion exact
-                // per refresh and still accounts for a genuinely dropped frame.
+                // `in_flight` is sampled once per decode block, right after a
+                // push, so it is biased high and noisy (±35 ms). Low-pass it
+                // before phase-locking, or the jitter walks the waveform.
+                self.heard_avg += (heard - self.heard_avg) * 0.05;
+
+                // Advance by whole display periods, not measured wall-clock:
+                // each frame is shown for an integer number of refreshes, and
+                // the CPU-side frame_dt carries ±2 ms of wake-up slop.
                 let period  = self.refresh_interval.as_secs_f64();
                 let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
                 self.smoothed_pos += periods * period * sr_ch * speed as f64;
-            }
-            // Gentle pull toward the filtered reference: enough to stop drift
-            // over minutes, far too slow to see as a step.
-            self.smoothed_pos += (self.heard_avg - self.smoothed_pos) * 0.02;
 
-            // Never let the playhead run backwards during playback.  A stall
-            // reads as a hitch; reversal reads as a glitch, which is worse.
-            if playing {
+                // Gentle pull toward the filtered reference — stops drift over
+                // minutes, far too slow to see as a step.
+                self.smoothed_pos += (self.heard_avg - self.smoothed_pos) * 0.02;
+
+                // Never run backwards during playback: a stall reads as a hitch,
+                // a reversal as a glitch (worse).
                 self.smoothed_pos = self.smoothed_pos.max(self.prev_pos as f64);
             }
         }
