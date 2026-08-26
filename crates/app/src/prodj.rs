@@ -263,14 +263,32 @@ impl ProDjSender {
                             let pos    = st.position.load(Ordering::Relaxed);
                             let ahead  = st.in_flight.load(Ordering::Relaxed) as f64;
                             let fader  = f32::from_bits(st.fader_speed.load(Ordering::Relaxed)) as f64;
-                            ahead_avg += (ahead - ahead_avg) * 0.02;
+                            // Reference smoothing: the XDJ-1000MK2 sends beats
+                            // with sd 1.3 ms and that is the target.  Gains
+                            // are per 1 ms tick: τ ≈ 200 ms on in_flight and
+                            // on the pull, so block-rate noise (±35 ms every
+                            // 11.6 ms) is attenuated well below a millisecond
+                            // while long-term drift is still corrected.
+                            ahead_avg += (ahead - ahead_avg) * 0.005;
                             let reference = (pos as f64 - ahead_avg).max(0.0) / st.channels as f64;
                             let dt = now.duration_since(last_tick).as_secs_f64();
+                            let rate = st.sample_rate as f64 * fader;   // audible frames per second
                             if est_frames < 0.0 || (reference - est_frames).abs() > st.sample_rate as f64 * 0.5 {
                                 est_frames = reference;                       // start, or a seek
                             } else {
-                                est_frames += dt * st.sample_rate as f64 * fader;
-                                est_frames += (reference - est_frames) * 0.02;
+                                est_frames += dt * rate;
+                                est_frames += (reference - est_frames) * 0.005;
+                            }
+                            // Sleep-to-deadline: if the next beat is due within
+                            // this tick, wait for exactly it instead of
+                            // rounding to the poll edge.
+                            let period = grid.samples_per_beat_at(est_frames.max(0.0) as u64, st.sample_rate);
+                            let beat_f = grid.beat_at_sample(est_frames.max(0.0) as u64, st.sample_rate);
+                            let to_next = ((beat_f.floor() + 1.0) - beat_f) * period / rate;   // seconds
+                            if to_next > 0.0 && to_next < 0.0015 {
+                                let target = now + Duration::from_secs_f64(to_next);
+                                while std::time::Instant::now() < target { std::hint::spin_loop(); }
+                                est_frames += to_next * rate;
                             }
                             let frames = est_frames.max(0.0) as u64;
                             let beat   = grid.beat_at_sample(frames, st.sample_rate).floor() as i64;
@@ -285,10 +303,10 @@ impl ProDjSender {
                                     deck_id: player, timestamp_ns: 0,
                                 };
                                 let pkt = link.build_beat(&snap, bib);
+                                let sent_at = std::time::Instant::now();   // the instant that matters
                                 let _ = sock.send_to(&pkt, (bcast, PORT_BEAT));
-                                let now = std::time::Instant::now();
-                                log::debug!("ProDJ tx: beat {beat} ({bib}/4) @ {:.2} BPM  +{:.1}ms", snap.bpm, now.duration_since(last_sent).as_secs_f64() * 1000.0);
-                                last_sent = now;
+                                log::debug!("ProDJ tx: beat {beat} ({bib}/4) @ {:.2} BPM  +{:.2}ms", snap.bpm, sent_at.duration_since(last_sent).as_secs_f64() * 1000.0);
+                                last_sent = sent_at;
                                 last_beat = Some(beat);
                             }
                         }

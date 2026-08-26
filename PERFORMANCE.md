@@ -108,3 +108,74 @@ often as needed to stay ahead of the device callback.
   waveform.
 - **Wayland compositor** and **Vulkan driver** overhead are outside our
   control and account for some of the mutex contention visible in the profile.
+
+## ProDJ Link beat timing
+
+A CDJ sends one beat packet per beat; every other deck on the network aligns
+its phase meter — and, with SYNC, its playback — to those packets. Their
+timing is therefore a direct measure of how good a peer we are.
+
+### The benchmark
+
+XDJ-1000MK2, firmware 1.44, playing at 126.00 BPM, measured at a freedj
+instance on the same switch from microsecond log timestamps at packet arrival:
+
+```
+interval 476.14 ms   sd 1.33 ms   min 473.7   max 477.3      (60000 / 126 = 476.19)
+```
+
+That is the target: **beat-to-beat jitter ≈ 1.3 ms as received by a peer.**
+
+### Where our jitter came from, and what it is now
+
+The sender derives beat crossings from the *audible* position — the decoder
+cursor minus what is still queued in the ring buffer and the stretcher. Three
+successive designs, each measured with two freedj instances (`make
+link-pair`) and, for the last, alongside the XDJ in the same run:
+
+| Sender | sent (self-timed) | received by peer | cause of the remainder |
+|---|---|---|---|
+| raw `position − in_flight`, 1 ms poll | double-fired (46 beats where 18 were due) | — | `in_flight` swings ±35 ms between decode blocks; the beat index crossed the same boundary repeatedly |
+| + monotonic guard, low-passed `in_flight` (τ 50 ms) | 446.6, **sd 14.7** | sd 14.4 | crossings land on 512-frame block edges; intervals alternate 430 / 463 ms |
+| + phase-locked estimate at true rate, pull 2 %/tick | 445.2, **sd 3.1** | sd 2.8 | 1 ms poll rounds each crossing to a tick edge (±0.5 ms); the pull still admits block-rate noise |
+| + τ 200 ms on both filters, sleep-to-deadline for the last 1.5 ms | 446.0 | **sd 1.23** | at the benchmark |
+
+The self-timed column overstates the last row (sd 3.8 with one 465 ms
+outlier the peer never saw) because the timestamp was taken at loop top,
+before the spin-wait; fixed to stamp at the send. The received column is
+the comparable number: identical method to the XDJ measurement, same
+receiver, same run.
+
+### Why the estimate, not the reference
+
+The audio thread only ever gives the sender a *quantised* fact: which
+512-frame block it is on and how much of the ring buffer is unplayed. Both
+step, and the second is noisy. No amount of clever polling of that reference
+yields sub-millisecond crossings. What works is the same idea as the
+renderer's playhead: run a local clock at the true audible rate
+(`sample_rate × fader_speed`), pull it toward the reference slowly enough
+that block-rate noise averages out (τ ≈ 200 ms), snap only on a real seek,
+and take beat crossings from the clock. Then the only jitter left is the
+poll granularity, and a sleep-to-deadline removes that too.
+
+### Method
+
+```
+make link-pair                          # or: run --player 2 next to the XDJ
+RUST_LOG=opendeck=debug ... | grep 'ProDJ beat: player N'   # at the receiver
+```
+
+Intervals are differences of the log timestamps (`env_logger` prints
+microseconds). Drop the first two: the first send lands mid-beat, so the
+first interval is partial. `sd` over ≥ 20 intervals. The receiver's own
+scheduling adds to both the XDJ's and our numbers equally, which is why the
+same-run comparison is the fair one.
+
+### Still to do
+
+- Give `prodj-tx` real-time priority. It currently shares the default
+  scheduler with everything else; under load the spin-wait can be
+  preempted.
+- Measure against the XDJ *as the receiver*: put freedj as MASTER, the XDJ
+  on SYNC, and see whether its phase meter holds still. That needs status
+  packets from us first.
