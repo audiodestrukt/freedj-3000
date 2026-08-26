@@ -110,6 +110,9 @@ struct DeckApp {
     /// OPENDECK_PACE=hybrid: add a safety-net timer so a late/missing compositor
     /// frame callback doesn't freeze the UI — we self-drive a frame instead.
     hybrid_pace: bool,
+    /// Last-seen audio glitch counters, to log only on change.
+    prev_underruns: u64,
+    prev_drops:     u64,
 }
 
 /// Display/deck flags copied out of DeckApp so a snapshot can borrow only
@@ -246,6 +249,8 @@ impl DeckApp {
             last_frame_total: Duration::ZERO,
             frame_spikes: 0,
             hybrid_pace: std::env::var("OPENDECK_PACE").map(|v| v == "hybrid").unwrap_or(false),
+            prev_underruns: 0,
+            prev_drops:     0,
         }
     }
 
@@ -549,6 +554,27 @@ impl DeckApp {
                 "frame spike #{}: gap {:.1}ms (~{:.1} refreshes)  prev-render {:.1}ms  idle {:.1}ms → {}",
                 self.frame_spikes, dt_s * 1000.0, dt_s / refresh, ours * 1000.0, idle * 1000.0, verdict,
             );
+        }
+
+        // ── Audio-integrity watch ─────────────────────────────────────────────
+        // Surface RT-path glitches the moment they happen.  An underrun is a
+        // real dropout (the callback played silence because the ring was empty);
+        // a dropped frame is the producer overrunning a full ring.  Either is a
+        // click a performance deck must never hide — logged at WARN on change.
+        let underruns = self.audio.stats.underrun_events.load(Ordering::Relaxed);
+        if underruns != self.prev_underruns {
+            let samples = self.audio.stats.underrun_samples.load(Ordering::Relaxed);
+            let ms = samples as f64 / (self.audio.sample_rate as f64 * self.audio.channels as f64) * 1000.0;
+            log::warn!(
+                "AUDIO UNDERRUN: {} events, {} samples of silence ({:.1} ms total) — ring starved",
+                underruns, samples, ms,
+            );
+            self.prev_underruns = underruns;
+        }
+        let drops = self.audio.stats.dropped_frames.load(Ordering::Relaxed);
+        if drops != self.prev_drops {
+            log::warn!("AUDIO OVERRUN: producer dropped {} frames (ring full)", drops);
+            self.prev_drops = drops;
         }
 
         let (egui_state, window) = match (self.egui_state.as_mut(), self.window.as_ref()) {

@@ -58,6 +58,23 @@ const BACK_PRESSURE_SLOTS: usize = BLOCK_FRAMES * 4 * 2; // = 4 096
 /// Sentinel for `seek_request`: no seek pending.
 const NO_SEEK: u64 = u64::MAX;
 
+// ── Audio integrity counters ──────────────────────────────────────────────────
+
+/// Glitch counters for the real-time path.  A performance deck must never
+/// dropout silently: the RT callback fills zeros when the ring is empty, so we
+/// count those samples and surface them.  All Relaxed — these are diagnostics,
+/// not synchronisation, and the RT callback only touches them on a glitch.
+#[derive(Default)]
+pub struct AudioStats {
+    /// Samples of silence the callback filled because the ring was empty while
+    /// playing — audible underruns (clicks / dropouts).
+    pub underrun_samples: AtomicU64,
+    /// Callbacks that hit ≥1 underrun (distinct glitch events).
+    pub underrun_events:  AtomicU64,
+    /// Frames the producer dropped because the ring was full (overrun).
+    pub dropped_frames:   AtomicU64,
+}
+
 // ── Public handle ─────────────────────────────────────────────────────────────
 
 pub struct AudioHandle {
@@ -83,6 +100,8 @@ pub struct AudioHandle {
     /// from `position` so a seek can't be clobbered by the processor's own
     /// per-block progress store and lost.
     pub seek_request: Arc<AtomicU64>,
+    /// Real-time glitch counters (underruns / dropped frames).
+    pub stats:       Arc<AudioStats>,
     pub sample_rate: u32,
     pub channels:    u8,
     _stream:     cpal::Stream,
@@ -176,6 +195,7 @@ impl AudioHandle {
 
         // ── 4. Ring buffer ─────────────────────────────────────────────────────
         let (producer, mut consumer) = rtrb::RingBuffer::<f32>::new(RING_BUFFER_SAMPLES);
+        let stats = Arc::new(AudioStats::default());
 
         // ── 5. Processor thread ────────────────────────────────────────────────
         let proc_samples    = Arc::clone(&samples);
@@ -185,6 +205,7 @@ impl AudioHandle {
         let proc_drain_flag = Arc::clone(&drain_flag);
         let proc_in_flight  = Arc::clone(&in_flight);
         let proc_seek       = Arc::clone(&seek_request);
+        let proc_stats      = Arc::clone(&stats);
 
         let processor = thread::Builder::new()
             .name("audio-proc".into())
@@ -201,12 +222,14 @@ impl AudioHandle {
                     file_ch,
                     device_ch,
                     producer,
+                    proc_stats,
                 );
             })
             .context("failed to spawn processor thread")?;
 
         // ── 6. cpal stream (RT callback, no allocation) ────────────────────────
         let cpal_playing    = Arc::clone(&playing);
+        let cpal_stats      = Arc::clone(&stats);
         let stream = device
             .build_output_stream::<f32, _, _>(
                 &stream_config,
@@ -221,8 +244,20 @@ impl AudioHandle {
                         return;
                     }
 
+                    // Fill from the ring; count any sample we had to invent as
+                    // silence — that is an audible underrun.  No allocation, and
+                    // the atomics are touched only when a glitch actually
+                    // happens, so the clean path stays a bare pop().
+                    let mut underran = 0u64;
                     for sample in out.iter_mut() {
-                        *sample = consumer.pop().unwrap_or(0.0);
+                        match consumer.pop() {
+                            Ok(s)  => *sample = s,
+                            Err(_) => { *sample = 0.0; underran += 1; }
+                        }
+                    }
+                    if underran > 0 {
+                        cpal_stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
+                        cpal_stats.underrun_events.fetch_add(1, Ordering::Relaxed);
                     }
                 },
                 |err| log::error!("audio stream error: {err}"),
@@ -240,6 +275,7 @@ impl AudioHandle {
             speed,
             in_flight,
             seek_request,
+            stats,
             sample_rate: file_sr,
             channels: file_ch as u8,
             _stream: stream,
@@ -262,6 +298,7 @@ fn processor_loop(
     file_ch:    usize,
     device_ch:  usize,
     mut producer: rtrb::Producer<f32>,
+    stats:      Arc<AudioStats>,
 ) {
     let mut stretcher = TimestretechStage::new(sample_rate, file_ch as u8);
 
@@ -377,7 +414,9 @@ fn processor_loop(
         let frames_to_push = out_frames.min(slots_free / device_ch);
 
         if frames_to_push < out_frames {
-            log::warn!("proc: ring buffer full, dropped {} frames", out_frames - frames_to_push);
+            let dropped = (out_frames - frames_to_push) as u64;
+            stats.dropped_frames.fetch_add(dropped, Ordering::Relaxed);
+            log::warn!("proc: ring buffer full, dropped {} frames", dropped);
         }
 
         for i in 0..frames_to_push {
