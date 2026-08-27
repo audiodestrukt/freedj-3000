@@ -135,11 +135,21 @@ that's a later optimization — start with the model in freedj.
 
 1. **Touch skin** on the current stack (egui/wgpu) — full face, touch adapters on
    the bus. Immediately useful, and the layout/mockup for hardware.
-   *First pass landed:* run with `--faceplate` (or `OPENDECK_FACEPLATE=1`) to
-   render the deck body, jog, tempo fader, transport, loop/sync/master keys and
-   browse rotary around the screen; default stays screen-only. Proportions are
-   approximate and want tuning against the real unit (`screen::faceplate_layout`),
-   and the jog is a placeholder feel — see step 2.
+   *Landed:* run with `--faceplate` (`make chrome`, or `OPENDECK_FACEPLATE=1`).
+   The skin is **photo-backed** — a photograph of the deck is drawn as the body,
+   the freedj screen renders into the display rectangle, and the live bits are
+   overlaid on top: jog rotation marker, fader handle at the real pitch, lit
+   states, and invisible touch targets that emit the same `ControlEvent`s a
+   physical control would. The earlier hand-drawn vector chrome was dropped — it
+   didn't read as a real unit.
+
+   **The photo is not bundled** (Pioneer trade dress / copyright). It loads from a
+   path — `OPENDECK_FACEPLATE_IMG=...`, else `~/Downloads/XDJ1000Mk2-xlarge.jpg`;
+   if none loads, `--faceplate` falls back to screen-only. The Pioneer/rekordbox
+   branding on the image is redacted at draw time and signed "freedj-3000". For
+   any public release, swap in an **original or licensed** faceplate asset.
+   Control positions are fractions of the image in `screen::faceplate_layout`
+   (measured from the photo — tune there); the jog is a placeholder feel (step 2).
 2. **Jog feel model** — tune the existing vinyl/nudge curves against captured XDJ
    response; land it as part of (or feeding) the
    [varispeed engine](varispeed-engine.md).
