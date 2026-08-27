@@ -1201,12 +1201,26 @@ fn fit_contain(ts: egui::Vec2, win: egui::Rect) -> egui::Rect {
     egui::Rect::from_center_size(win.center(), ts * s)
 }
 
-fn main() -> Result<()> {
+/// Everything `run` needs to start a deck.  On desktop this is filled from CLI
+/// args; a mobile entry point (iOS `main` / Android `android_main`) fills it from
+/// bundled resources / platform config and calls `run` directly.
+pub struct Config {
+    pub track:        PathBuf,
+    pub player:       u8,
+    pub deck_channel: u8,   // 0 = A/left (MIDI ch 0), 1 = B/right (ch 1)
+    pub link_send:    bool,
+}
+
+fn init_logging() {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,wgpu=warn,naga=warn"),
     )
     .format_timestamp_micros()   // beat and frame timing are measured from the log
     .init();
+}
+
+fn main() -> Result<()> {
+    init_logging();
 
     // Args: <file> [--player N].  OPENDECK_PLAYER also works.
     let mut args = std::env::args().skip(1);
@@ -1239,11 +1253,20 @@ fn main() -> Result<()> {
         }
     }
     let path = path.context("usage: opendeck <path/to/file.mp3> [--player N]")?;
-    let player = player.clamp(1, 6);
-
     if !path.exists() {
         bail!("file not found: {}", path.display());
     }
+
+    run(Config { track: path, player, deck_channel, link_send })
+}
+
+/// Start a deck and run the UI event loop.  Platform-agnostic: every entry point
+/// (desktop `main`, iOS/Android) builds a `Config` and calls this.
+pub fn run(cfg: Config) -> Result<()> {
+    let path         = cfg.track;
+    let player       = cfg.player.clamp(1, 6);
+    let deck_channel = cfg.deck_channel;
+    let link_send    = cfg.link_send;
 
     // ── 1. Decode audio ───────────────────────────────────────────────────────
     let audio = AudioHandle::open(&path)?;
