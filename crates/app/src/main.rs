@@ -831,13 +831,16 @@ impl DeckApp {
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
-            // When we hold master, show our own player number — otherwise the
-            // indicator falls back to beat2_player (the XDJ) and wrongly names
-            // the deck we just took master from.
+            // Master indicator (phase-ticks view): the real XDJ shows a flat
+            // line (no number) when THIS deck is master, and another deck's
+            // number only when following that deck.  So report 0 (→ "-") when we
+            // hold master, else the tracked master player (also 0 → "-" if none).
+            // No beat2_player fallback — that wrongly named the last-seen deck
+            // (the XDJ) as master whenever master_player was 0.
             master_player: if self.link.master.load(Ordering::Relaxed) {
-                self.link.player
+                0
             } else {
-                match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 }
+                self.link.master_player.load(Ordering::Relaxed) as u8
             },
             cue_point: self.cue_point,
         };
@@ -892,13 +895,16 @@ impl DeckApp {
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
-            // When we hold master, show our own player number — otherwise the
-            // indicator falls back to beat2_player (the XDJ) and wrongly names
-            // the deck we just took master from.
+            // Master indicator (phase-ticks view): the real XDJ shows a flat
+            // line (no number) when THIS deck is master, and another deck's
+            // number only when following that deck.  So report 0 (→ "-") when we
+            // hold master, else the tracked master player (also 0 → "-" if none).
+            // No beat2_player fallback — that wrongly named the last-seen deck
+            // (the XDJ) as master whenever master_player was 0.
             master_player: if self.link.master.load(Ordering::Relaxed) {
-                self.link.player
+                0
             } else {
-                match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 }
+                self.link.master_player.load(Ordering::Relaxed) as u8
             },
             cue_point: self.cue_point,
         };
