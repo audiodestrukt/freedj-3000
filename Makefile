@@ -30,7 +30,7 @@ REF_URL    := https://downloads.support.alphatheta.com/manuals/dj-players/CDJ-30
 RUST_LOG   ?= info,wgpu=warn,naga=warn
 
 .DEFAULT_GOAL := help
-.PHONY: help build debug relink run dev two-deck link-pair beat virtual-cdj shot check fmt clippy test perf clean reference distclean
+.PHONY: help build debug relink run chrome dev two-deck link-pair beat virtual-cdj shot check fmt clippy test perf clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -51,6 +51,10 @@ relink: ## Force a relink — fixes "librubberband.so.N: cannot open shared obje
 run: build ## Play TRACK (default: techno.mp3)
 	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; echo "usage: make run TRACK=path/to/file.mp3"; exit 1; }
 	RUST_LOG=$(RUST_LOG) ./$(BIN) "$(TRACK)"
+
+chrome: build ## Play TRACK with the full deck faceplate (jog, fader, buttons)
+	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; echo "usage: make chrome TRACK=path/to/file.mp3"; exit 1; }
+	RUST_LOG=$(RUST_LOG) ./$(BIN) "$(TRACK)" --faceplate
 
 dev: debug ## Play TRACK with debug logging (verbose: MIDI + ProDJ packets)
 	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; exit 1; }
