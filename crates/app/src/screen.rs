@@ -430,14 +430,18 @@ fn draw_phase_boxes(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
 /// playhead.  Phase offset between the decks reads as horizontal displacement.
 fn draw_phase_ticks(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
     let p = ui.painter();
-    // Tag at the left.
+    // "MASTER PLAYER" tag + number at the left — but only when following ANOTHER
+    // deck.  When we are the master the XDJ hides this label entirely (you are
+    // the reference; there is no other player to name).
     let tag_w = h * 0.115;
-    text(ui, Pos2::new(r.min.x, r.min.y + h * 0.012), Align2::LEFT_CENTER, "MASTER", h * 0.016, TEXT);
-    text(ui, Pos2::new(r.min.x, r.min.y + h * 0.032), Align2::LEFT_CENTER, "PLAYER", h * 0.016, TEXT);
-    let nb = Rect::from_min_size(Pos2::new(r.min.x + h * 0.070, r.min.y + h * 0.010), Vec2::new(h * 0.028, h * 0.028));
-    let master_txt = if snap.master_player > 0 { snap.master_player.to_string() } else { "-".into() };
-    p.rect_filled(nb, 1.0, GOLD);
-    text(ui, nb.center(), Align2::CENTER_CENTER, master_txt, h * 0.018, Color32::BLACK);
+    if !snap.master {
+        text(ui, Pos2::new(r.min.x, r.min.y + h * 0.012), Align2::LEFT_CENTER, "MASTER", h * 0.016, TEXT);
+        text(ui, Pos2::new(r.min.x, r.min.y + h * 0.032), Align2::LEFT_CENTER, "PLAYER", h * 0.016, TEXT);
+        let nb = Rect::from_min_size(Pos2::new(r.min.x + h * 0.070, r.min.y + h * 0.010), Vec2::new(h * 0.028, h * 0.028));
+        let master_txt = if snap.master_player > 0 { snap.master_player.to_string() } else { "-".into() };
+        p.rect_filled(nb, 1.0, GOLD);
+        text(ui, nb.center(), Align2::CENTER_CENTER, master_txt, h * 0.018, Color32::BLACK);
+    }
 
     // Tick rows.
     let x0 = r.min.x + tag_w;
@@ -453,8 +457,12 @@ fn draw_phase_ticks(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
     // master's phase).
     let master_bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
     let our_bib    = snap.beat_in_bar().unwrap_or(1) as i32;
+    // Top row = the master deck's grid; bottom = ours.  When WE are master
+    // there is no external master to plot, so the top row's phase is None and
+    // it renders as a flat baseline (no ticks) — matching the XDJ, which flattens
+    // that grid when it holds master rather than tracking a follower's beats.
     let rows = [
-        (r.min.y + r.height() * 0.30, (snap.beat2_bpm > 0.0).then_some(snap.beat2_phase_beats), master_bib, ORANGE),
+        (r.min.y + r.height() * 0.30, (!snap.master && snap.beat2_bpm > 0.0).then_some(snap.beat2_phase_beats), master_bib, ORANGE),
         (r.min.y + r.height() * 0.78, snap.beat_phase(), our_bib, BLUE),
     ];
     for (y, phase, row_bib, bar_col) in rows {
