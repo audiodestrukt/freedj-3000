@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Required to send/receive UDP multicast AND broadcast (Pro DJ Link's
+         announce + beat clock). Apple must GRANT this entitlement to your App ID
+         (request form; paid developer account) or the build won't provision.
+         See ios/README.md. -->
+    <key>com.apple.developer.networking.multicast</key>
+    <true/>
+</dict>
+</plist>

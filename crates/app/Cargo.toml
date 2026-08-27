@@ -5,6 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[lib]
+name = "opendeck_app"
+path = "src/lib.rs"
+# rlib for the desktop bin; staticlib for the iOS app (linked by Xcode).
+crate-type = ["rlib", "staticlib"]
+
 [[bin]]
 name = "opendeck"
 path = "src/main.rs"

@@ -1,0 +1,176 @@
+// !$*UTF8*$!
+// Minimal iPad app that links the opendeck-app Rust staticlib and calls
+// freedj_ios_main(). Hand-authored (generated without Xcode) — open on a Mac and
+// set DEVELOPMENT_TEAM + PRODUCT_BUNDLE_IDENTIFIER; if it fights you, regenerate
+// with `cargo-mobile2 init` (see ios/README.md). Frameworks are linked via
+// OTHER_LDFLAGS to keep this file small.
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		AA0000000000000000000040 /* main.m in Sources */ = {isa = PBXBuildFile; fileRef = AA0000000000000000000030 /* main.m */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		AA0000000000000000000030 /* main.m */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
+		AA0000000000000000000031 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		AA0000000000000000000032 /* freedj.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = freedj.entitlements; sourceTree = "<group>"; };
+		AA0000000000000000000033 /* freedj.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = freedj.app; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		AA0000000000000000000021 /* Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		AA0000000000000000000002 = {isa = PBXGroup; children = (AA0000000000000000000004 /* freedj */, AA0000000000000000000003 /* Products */); sourceTree = "<group>"; };
+		AA0000000000000000000003 /* Products */ = {isa = PBXGroup; children = (AA0000000000000000000033 /* freedj.app */); name = Products; sourceTree = "<group>"; };
+		AA0000000000000000000004 /* freedj */ = {isa = PBXGroup; children = (AA0000000000000000000030 /* main.m */, AA0000000000000000000031 /* Info.plist */, AA0000000000000000000032 /* freedj.entitlements */); path = freedj; sourceTree = "<group>"; };
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		AA0000000000000000000010 /* freedj */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AA0000000000000000000011 /* Build configuration list for PBXNativeTarget "freedj" */;
+			buildPhases = (
+				AA0000000000000000000023 /* Build Rust */,
+				AA0000000000000000000020 /* Sources */,
+				AA0000000000000000000021 /* Frameworks */,
+				AA0000000000000000000022 /* Resources */,
+			);
+			buildRules = ();
+			dependencies = ();
+			name = freedj;
+			productName = freedj;
+			productReference = AA0000000000000000000033 /* freedj.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		AA0000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				LastUpgradeCheck = 1500;
+				TargetAttributes = {
+					AA0000000000000000000010 = {CreatedOnToolsVersion = 15.0; };
+				};
+			};
+			buildConfigurationList = AA0000000000000000000012 /* Build configuration list for PBXProject "freedj" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (en, Base);
+			mainGroup = AA0000000000000000000002;
+			productRefGroup = AA0000000000000000000003 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (AA0000000000000000000010 /* freedj */);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		AA0000000000000000000022 /* Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		AA0000000000000000000023 /* Build Rust */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ();
+			name = "Build Rust";
+			outputPaths = ("$(BUILT_PRODUCTS_DIR)/libopendeck_app.a");
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/build-rust.sh\"\n";
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		AA0000000000000000000020 /* Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (AA0000000000000000000040 /* main.m in Sources */); runOnlyForDeploymentPostprocessing = 0; };
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		AA0000000000000000000015 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				ENABLE_BITCODE = NO;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 2;
+			};
+			name = Debug;
+		};
+		AA0000000000000000000016 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				ENABLE_BITCODE = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = iphoneos;
+				TARGETED_DEVICE_FAMILY = 2;
+				VALIDATE_PRODUCT = YES;
+			};
+			name = Release;
+		};
+		AA0000000000000000000013 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = freedj/freedj.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = freedj/Info.plist;
+				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
+				OTHER_LDFLAGS = "-lopendeck_app -lc++ -framework Metal -framework QuartzCore -framework UIKit -framework AudioToolbox -framework AVFAudio -framework CoreAudio -framework CoreMIDI -framework Foundation -framework Security -framework SystemConfiguration";
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.freedj;
+				PRODUCT_NAME = freedj;
+			};
+			name = Debug;
+		};
+		AA0000000000000000000014 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = freedj/freedj.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				DEVELOPMENT_TEAM = "";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = freedj/Info.plist;
+				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
+				OTHER_LDFLAGS = "-lopendeck_app -lc++ -framework Metal -framework QuartzCore -framework UIKit -framework AudioToolbox -framework AVFAudio -framework CoreAudio -framework CoreMIDI -framework Foundation -framework Security -framework SystemConfiguration";
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.freedj;
+				PRODUCT_NAME = freedj;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		AA0000000000000000000012 /* Build configuration list for PBXProject "freedj" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (AA0000000000000000000015 /* Debug */, AA0000000000000000000016 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AA0000000000000000000011 /* Build configuration list for PBXNativeTarget "freedj" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (AA0000000000000000000013 /* Debug */, AA0000000000000000000014 /* Release */);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = AA0000000000000000000001 /* Project object */;
+}
