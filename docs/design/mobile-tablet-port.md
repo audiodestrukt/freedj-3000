@@ -1,9 +1,43 @@
 # Design: porting freedj to tablets (iPad / Android)
 
-Status: **research + plan, not started** (2026-08-27). What it would take to run
-freedj — screen-only or as the `--faceplate` touch deck — on an iPad or an
+Status: **iPad spike WORKING end-to-end, standalone** (2026-08-27). What it takes
+to run freedj — screen-only or as the `--faceplate` touch deck — on an iPad or an
 Android tablet. The touch faceplate is the natural mobile form, so this pairs
 with [`faceplate-and-hardware.md`](faceplate-and-hardware.md).
+
+## Spike result (2026-08-27): runs on iPad; sync still gated
+
+freedj runs on a 13" iPad — full photo faceplate, our LCD, clean audio. Over a
+USB-C ethernet dongle to the XDJ's network it **loads tracks from the XDJ's
+library**. What we learned, including a correction:
+
+- **Unicast works standalone; broadcast does not (no entitlement).** Track
+  loading is **unicast** (NFS / dbserver straight to the XDJ's IP) and works on
+  the iPad alone with just the local-network permission. Pro DJ Link **sync** is
+  **broadcast** (the XDJ's beat clock + freedj's announce) — and it worked *only
+  while the iPad was USB-tethered to the Mac*, which was relaying broadcast. With
+  the Mac disconnected, track loads still work but **sync stops**. So the
+  `com.apple.developer.networking.multicast` **entitlement gate is real for
+  broadcast**, even over wired — the Mac was the enabler, not the dongle. (Earlier
+  in this spike we briefly thought wired sidestepped it; the sync-stops-when-
+  untethered result disproved that.)
+- **Implication for a self-contained demo:** standalone **sync** needs either the
+  Apple multicast entitlement (paid account + request), or a **unicast
+  tempo-follow** path — freedj unicasts its announce to the XDJ's known IP and
+  reads BPM from the XDJ's unicast status packets (tempo only, no tight phase; and
+  it must not depend on receiving broadcast beats). Track loading needs neither.
+- **cpal does not configure the `AVAudioSession` on iOS** → glitchy/underrunning
+  audio until you set it up. Fix (in the app's ObjC entry, before audio starts):
+  category `Playback`, preferred sample rate 48 kHz, IO buffer ~10–20 ms, then
+  activate. Link `-framework AVFoundation`.
+- The `run(Config)` split + `[lib]` staticlib target were all the Rust structure
+  the port needed; the iOS entry is one `#[no_mangle] extern "C"` fn.
+
+Remaining: confirm the entitlement path (or the unicast tempo-follow fallback) for
+standalone sync; bundle the default track/faceplate as app resources; scale the
+GUI up for the 13" screen (#33); XDJ-style jog center spinner (#34) and touch
+feedback (#35). iOS build scaffold + guide live under `ios/` (and the `ios`
+branch).
 
 ## TL;DR
 
