@@ -117,6 +117,8 @@ struct DeckApp {
     last_frame_total: Duration,
     /// Count of inter-frame gaps that exceeded the spike threshold.
     frame_spikes: u64,
+    /// Start of the current frame-rate measurement window (heartbeat log).
+    fps_window: Instant,
     /// OPENDECK_PACE=hybrid: add a safety-net timer so a late/missing compositor
     /// frame callback doesn't freeze the UI — we self-drive a frame instead.
     hybrid_pace: bool,
@@ -264,7 +266,15 @@ impl DeckApp {
             last_render: Instant::now(),
             last_frame_total: Duration::ZERO,
             frame_spikes: 0,
-            hybrid_pace: std::env::var("OPENDECK_PACE").map(|v| v == "hybrid").unwrap_or(false),
+            fps_window: Instant::now(),
+            // iOS defaults to the hybrid pacer.  The plain path relies entirely
+            // on the platform calling us back after request_redraw; where that
+            // callback doesn't arrive the UI simply stops until the next touch,
+            // with no fallback.  The safety-net timer costs nothing when the
+            // callback is on time and turns a freeze into a self-driven frame.
+            hybrid_pace: std::env::var("OPENDECK_PACE")
+                .map(|v| v == "hybrid")
+                .unwrap_or(cfg!(target_os = "ios")),
             prev_underruns: 0,
             prev_drops:     0,
         }
@@ -867,9 +877,18 @@ impl DeckApp {
             self.face_tex_tried = true;
             self.face_tex = load_face_texture(&self.egui_ctx);
         }
-        // Faceplate renders the screen into a sub-rect over the deck photo; with
-        // no photo (or --faceplate off) we fill the whole window, screen-only.
-        let base = self.face_tex.as_ref().map(|t| fit_contain(t.size_vec2(), win));
+        // Faceplate renders the screen into a sub-rect of the deck body; with
+        // --faceplate off we fill the whole window, screen-only.
+        // The faceplate's control fractions are measured off the deck photo, so
+        // the layout needs a rect with the deck's proportions — but NOT the photo
+        // itself, which is optional (not redistributable, so usually absent).
+        // Deriving the rect from a fixed aspect when there is no photo keeps the
+        // faceplate usable: the screen stays correctly proportioned inside the
+        // window instead of stretching to it, and the transport stays reachable.
+        let base = self.faceplate.then(|| {
+            let aspect = self.face_tex.as_ref().map_or(screen::FACE_ASPECT, |t| t.size_vec2());
+            fit_contain(aspect, win)
+        });
         let (screen_rect, face) = match base {
             Some(b) => { let (s, f) = screen::faceplate_layout(b); (s, Some(f)) }
             None    => (win, None),
@@ -950,6 +969,19 @@ impl DeckApp {
         self.last_frame_total = total;   // fed to next frame's spike detector
         perf_accum("FRAME_TOTAL", total);
         perf_tick();
+
+        // Heartbeat: measured frame rate and playhead, every ~5s at 60fps.  The
+        // spike detector only fires on gaps, so a UI that has stopped entirely
+        // produces no output at all — which is indistinguishable in a log from a
+        // UI that is running fine.  This says which.
+        if self.frame_count % 300 == 0 {
+            let fps = 300.0 / self.fps_window.elapsed().as_secs_f64();
+            self.fps_window = Instant::now();
+            log::info!(
+                "frames: {} @ {:.1} fps, playhead {:.2}s, {} spikes",
+                self.frame_count, fps, pos as f64 / sr_ch, self.frame_spikes,
+            );
+        }
     }
 }
 
@@ -962,15 +994,27 @@ impl ApplicationHandler for DeckApp {
         // Screen-only is the 7" panel; the faceplate window matches the deck
         // photo's aspect (the image is aspect-fit inside it).
         let (win_w, win_h) = if self.faceplate { (860u32, 1090u32) } else { (1024u32, 600u32) };
-        let attrs = WindowAttributes::default()
-            .with_title("freedj-3000")
-            .with_inner_size(winit::dpi::LogicalSize::new(win_w, win_h));
+        let mut attrs = WindowAttributes::default().with_title("freedj-3000");
+        // Only ask for a size where a window manager can grant one.  On iOS the
+        // requested size is applied to the UIWindow, so asking for 860x1090 got
+        // the deck drawn into a box that size in the corner of the iPad instead
+        // of filling the display; the layout aspect-fits the screen it is given,
+        // so letting it have the whole thing is both correct and what we want.
+        #[cfg(not(target_os = "ios"))]
+        {
+            attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(win_w, win_h));
+        }
+        #[cfg(target_os = "ios")]
+        let _ = (win_w, win_h);
 
         let window = Arc::new(
             event_loop
                 .create_window(attrs)
                 .expect("failed to create window"),
         );
+
+        let sz = window.inner_size();
+        log::info!("window {}x{} px, scale {:.2}", sz.width, sz.height, window.scale_factor());
 
         // The display's refresh period is the unit the playhead advances in.
         // On Wayland `current_monitor()` is None until the surface has entered
@@ -1155,11 +1199,14 @@ impl ApplicationHandler for DeckApp {
 fn load_face_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let path = std::env::var("OPENDECK_FACEPLATE_IMG")
         .unwrap_or_else(|_| "reference/photos/XDJ1000Mk2-faceplate.jpg".to_string());
+    // No photo is the normal case (it is not redistributable): the faceplate
+    // still lays out and its controls still work, they are just drawn as
+    // outlines over a plain body instead of tinting the photo.
     let bytes = std::fs::read(&path)
-        .map_err(|e| log::warn!("faceplate image: cannot read {path}: {e} — screen-only"))
+        .map_err(|e| log::warn!("faceplate image: cannot read {path}: {e} — plain deck body"))
         .ok()?;
     let (rgba, w, h) = decode_rgba(&bytes, &path).or_else(|| {
-        log::warn!("faceplate image: could not decode {path} (need jpg/png) — screen-only");
+        log::warn!("faceplate image: could not decode {path} (need jpg/png) — plain deck body");
         None
     })?;
     log::info!("faceplate image: {path} ({w}x{h})");
@@ -1434,11 +1481,55 @@ mod nfs_load_tests {
 #[no_mangle]
 pub extern "C" fn freedj_ios_main() {
     init_logging();
-    // Demo config: full faceplate, player 1, Link send on. Swap the track for a
-    // bundled resource path once the app bundles one (ios/README.md).
+
+    // iOS gives the process no useful working directory, so every relative path
+    // the desktop build uses (the track, `reference/photos/...`) would miss.
+    // Resources live flat inside `freedj.app`, which is the executable's parent
+    // — chdir there and the existing relative paths resolve against the bundle.
+    let bundle = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
+    match &bundle {
+        Some(dir) => {
+            let _ = std::env::set_current_dir(dir);
+            log::info!("bundle: {}", dir.display());
+        }
+        None => log::warn!("could not locate the app bundle — relative resources will not resolve"),
+    }
+
+    // Demo config: full faceplate, player 1, Link send on.
     std::env::set_var("OPENDECK_FACEPLATE", "1");
-    let track = std::path::PathBuf::from("techno.mp3");
+
+    let track = match bundle.as_deref().and_then(bundled_track) {
+        Some(t) => t,
+        None => {
+            log::error!(
+                "no audio file in the app bundle — add one to the target's \
+                 Copy Bundle Resources phase (see ios/README.md)"
+            );
+            return;
+        }
+    };
+    log::info!("track: {}", track.display());
     if let Err(e) = run(Config { track, player: 1, deck_channel: 0, link_send: true }) {
         log::error!("freedj_ios_main: {e:#}");
     }
+}
+
+/// First playable audio file sitting in the app bundle, so whichever track is
+/// dragged into Copy Bundle Resources is the one that loads — no rebuild of the
+/// Rust side to change it.  Sorted for a stable pick when there is more than one.
+#[cfg(target_os = "ios")]
+fn bundled_track(bundle: &std::path::Path) -> Option<PathBuf> {
+    const EXTS: [&str; 6] = ["mp3", "m4a", "aac", "wav", "aiff", "flac"];
+    let mut found: Vec<PathBuf> = std::fs::read_dir(bundle)
+        .ok()?
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| EXTS.contains(&e.to_ascii_lowercase().as_str()))
+        })
+        .collect();
+    found.sort();
+    found.into_iter().next()
 }

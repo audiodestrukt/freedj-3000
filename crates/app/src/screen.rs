@@ -38,6 +38,7 @@ const GREEN:   Color32 = Color32::from_rgb(0x3c, 0xc8, 0x50);
 const GOLD:    Color32 = Color32::from_rgb(0xf0, 0xb0, 0x20);   // MASTER state
 // Faceplate (chrome) — the physical deck body around the screen.
 const BODY:    Color32 = Color32::from_rgb(0x18, 0x1a, 0x1d);   // letterbox + redaction fill
+const FACE_BODY: Color32 = Color32::from_rgb(0x2b, 0x2e, 0x33); // stand-in deck body (no photo)
 const SILVER:  Color32 = Color32::from_rgb(0xc6, 0xca, 0xce);   // fader handle overlay
 
 /// Same RGB, custom alpha — a translucent lit overlay to lay over the photo.
@@ -134,6 +135,10 @@ pub fn layout(screen: Rect) -> Layout {
 /// XDJ-1000MK2 photo — tune here.  SYNC/MASTER are on the SCREEN (touch), not
 /// physical, so they are not chrome.
 pub struct FaceLayout {
+    /// The deck body's drawn rect — the photo's letterboxed rect, or the same
+    /// proportions synthesised when there is no photo.  Kept so the no-photo
+    /// path can paint a stand-in body without re-deriving it.
+    pub base:     Rect,
     pub jog:      Rect,
     pub fader:    Rect,
     pub play:     Rect,
@@ -144,6 +149,11 @@ pub struct FaceLayout {
     pub browse:   Rect,
     pub mt:       Rect,   // MASTER TEMPO (key lock)
 }
+
+/// Proportions of the deck photo the `faceplate_layout` fractions were measured
+/// against.  Used to place the faceplate when no photo is available, so the
+/// control fractions still land where they should.
+pub const FACE_ASPECT: Vec2 = Vec2::new(860.0, 1090.0);
 
 fn face_rect(base: Rect, x0: f32, y0: f32, x1: f32, y1: f32) -> Rect {
     let (w, h) = (base.width(), base.height());
@@ -159,6 +169,7 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
     // Coordinates measured off a labelled grid over the photo (2026-08-27).
     let screen = face_rect(base, 0.250, 0.075, 0.735, 0.290);   // the display panel
     let face = FaceLayout {
+        base,
         jog:      disk(0.500, 0.645, 0.340),
         fader:    face_rect(base, 0.895, 0.615, 0.930, 0.940),
         play:     disk(0.070, 0.887, 0.057),
@@ -192,10 +203,41 @@ fn rect_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<Ev
 /// Draw the faceplate over the photo: redact the branding, paint the live
 /// overlays (jog marker, fader handle, lit states), and register the invisible
 /// touch targets that emit `ControlEvent`s.
-fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, out: &mut Vec<Event>) {
+fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, out: &mut Vec<Event>) {
     let p = ui.painter();
     // Branding is redacted in the asset itself (reference/photos), so nothing to
     // paint over here — just the live overlays and touch targets.
+
+    // With no photo the controls below are invisible (they only tint what the
+    // photo already draws), so outline and label them first.  Drawn under the
+    // live overlays, which then read as lit state exactly as they do on the photo.
+    if !photo {
+        let lbl = f.base.width() * 0.018;
+        let ring = |r: Rect| p.circle_stroke(r.center(), r.width() * 0.5, Stroke::new(1.5, FAINT));
+        let slab = |r: Rect| {
+            p.rect_filled(r, 3.0, KEY_LO);
+            p.rect_stroke(r, 3.0, Stroke::new(1.0, FAINT));
+        };
+        // Jog: platter face plus a rim, so the drag target reads as a wheel.
+        p.circle_filled(f.jog.center(), f.jog.width() * 0.5, KEY_LO);
+        p.circle_stroke(f.jog.center(), f.jog.width() * 0.5, Stroke::new(2.0, FAINT));
+        p.circle_stroke(f.jog.center(), f.jog.width() * 0.17, Stroke::new(1.0, FAINT));
+        // Tempo fader: slot with a centre detent mark.
+        p.rect_filled(f.fader, 2.0, Color32::BLACK);
+        p.rect_stroke(f.fader, 2.0, Stroke::new(1.0, FAINT));
+        p.line_segment(
+            [Pos2::new(f.fader.min.x, f.fader.center().y), Pos2::new(f.fader.max.x, f.fader.center().y)],
+            Stroke::new(1.0, DIM),
+        );
+        ring(f.play); ring(f.cue); ring(f.reloop); ring(f.browse); ring(f.mt);
+        slab(f.loop_in); slab(f.loop_out);
+        let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
+        cap(f.play, "PLAY/PAUSE");
+        cap(f.cue,  "CUE");
+        cap(f.browse, "BROWSE");
+        cap(f.loop_in,  "IN");
+        cap(f.loop_out, "OUT");
+    }
 
     // ── Jog: rotation marker on the photo platter ────────────────────────────
     let c = f.jog.center();
@@ -279,6 +321,18 @@ pub fn draw(
                 for part in cover(irect, lay.screen, lay.screen) {
                     image_part(ui.painter(), tex, irect, part);
                 }
+            } else if let Some(f) = face {
+                // Faceplate without the photo (it is not redistributable, so this
+                // is the normal case on a fresh checkout and on mobile).  Paint a
+                // plain deck body in its place: same rect, same control
+                // positions, so the transport is still reachable — the controls
+                // are overlays and would otherwise be invisible.
+                for m in cover(ui.max_rect(), f.base, f.base) {
+                    ui.painter().rect_filled(m, 0.0, BODY);
+                }
+                for part in cover(f.base, lay.screen, lay.screen) {
+                    ui.painter().rect_filled(part, 0.0, FACE_BODY);
+                }
             }
 
             // Ground everything except the two shader rects.  egui paints
@@ -303,7 +357,7 @@ pub fn draw(
             draw_bottom(ui, snap, lay, h, out);
 
             if let Some(f) = face {
-                draw_faceplate(ui, snap, f, out);
+                draw_faceplate(ui, snap, f, face_img.is_some(), out);
             }
         });
 }
