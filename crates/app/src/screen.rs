@@ -268,11 +268,14 @@ pub fn draw(
             // Faceplate: paint the deck photo behind everything (letterboxing the
             // window). The screen renders into its sub-rect over the photo.
             if let Some((tex, irect)) = face_img {
-                ui.painter().rect_filled(ui.max_rect(), 0.0, BODY);
+                // Fill only the letterbox margins (outside the image) — filling
+                // the whole window would paint over the waveform shader rects,
+                // which render underneath.
+                for m in cover(ui.max_rect(), irect, irect) {
+                    ui.painter().rect_filled(m, 0.0, BODY);
+                }
                 // Paint the photo for the deck body only, leaving the whole LCD
-                // area (lay.screen) to our GUI — nothing from the photo is drawn
-                // there (the deck's own rekordbox screen would otherwise show
-                // through around/behind our render).
+                // area (lay.screen) to our GUI.
                 for part in cover(irect, lay.screen, lay.screen) {
                     image_part(ui.painter(), tex, irect, part);
                 }
