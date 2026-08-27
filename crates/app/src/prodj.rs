@@ -448,7 +448,6 @@ impl ProDjSender {
                 // Status goes out immediately when our master/sync flags change:
                 // the old master waits only briefly for the new one's claim.
                 let mut last_flags = (false, false);
-                let mut last_diag = Instant::now();
 
                 loop {
                     let now = Instant::now();
@@ -494,11 +493,6 @@ impl ProDjSender {
 
                     // ── Beat packet ──────────────────────────────────────────
                     let send_full = st.send_full.load(Ordering::Relaxed);
-                    if send_full && now.duration_since(last_diag) >= Duration::from_secs(1) {
-                        last_diag = now;
-                        log::info!("ProDJ tx diag: playing={playing} grid={} beat_now={:?} last_beat={:?} fader={fader:.3} est_frames={:.0}",
-                            cur_grid.is_some(), beat_now, last_beat, est_frames);
-                    }
                     if send_full { if let (Some(grid), Some((beat, _))) = (cur_grid, beat_now) {
                         let seek = last_beat.map_or(false, |b| beat < b - 2 || beat > b + 8);
                         if last_beat.map_or(true, |b| beat > b) || seek {
