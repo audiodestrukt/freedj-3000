@@ -29,8 +29,31 @@ REF_URL    := https://downloads.support.alphatheta.com/manuals/dj-players/CDJ-30
 
 RUST_LOG   ?= info,wgpu=warn,naga=warn
 
+# iOS / iPad app (macOS host only; see ios/README.md).
+#   IOS_SIM     simulator name or UDID   (xcrun simctl list devices)
+#   IOS_DEVICE  a real iPad's identifier (xcrun devicectl list devices);
+#               defaults to the first connected iPad
+#   MULTICAST=1 include the Link multicast entitlement — only once Apple has
+#               granted it for the App ID, otherwise signing fails
+IOS_CONFIG    ?= Debug
+IOS_SIM       ?= iPad Pro 11-inch (M4)
+IOS_BUNDLE_ID ?= com.audiodestruct.opendeck
+IOS_DEVICE    ?= $(shell xcrun devicectl list devices 2>/dev/null | grep -i ipad | \
+                   grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' | head -1)
+IOS_ENT        = $(if $(MULTICAST),FREEDJ_ENTITLEMENTS=freedj/freedj.entitlements,)
+# Only override the track if TRACK actually names a file — otherwise let
+# bundle-track.sh do its own look in the repo root (TRACK's default, techno.mp3,
+# is gitignored and often absent).
+IOS_TRACK      = $(if $(wildcard $(TRACK)),FREEDJ_TRACK="$(abspath $(TRACK))",)
+IOS_SIM_APP    = $(call ios_app,iphonesimulator)
+IOS_APP        = $(call ios_app,iphoneos)
+# Ask xcodebuild where it put the .app rather than hardcoding a DerivedData path.
+ios_app        = $(shell cd ios && xcodebuild -project freedj.xcodeproj -scheme freedj \
+                   -configuration $(IOS_CONFIG) -sdk $(1) -showBuildSettings 2>/dev/null \
+                   | awk '/ BUILT_PRODUCTS_DIR =/{print $$3}')/freedj.app
+
 .DEFAULT_GOAL := help
-.PHONY: help build debug relink run chrome dev two-deck link-pair beat virtual-cdj shot check fmt clippy test perf clean reference distclean
+.PHONY: help build debug relink ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot check fmt clippy test perf clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -45,6 +68,29 @@ relink: ## Force a relink — fixes "librubberband.so.N: cannot open shared obje
 	@rm -f $(BIN)
 	$(CARGO) build --release -p $(PKG)
 	@ldd $(BIN) | grep -E 'rubberband|not found' || true
+
+## ── iOS (macOS host only; see ios/README.md) ───────────────────────────────
+
+ios: ## Build the signed iPad app, bundling TRACK into it
+	cd ios && xcodebuild -project freedj.xcodeproj -scheme freedj \
+	    -configuration $(IOS_CONFIG) -sdk iphoneos -arch arm64 \
+	    -allowProvisioningUpdates $(IOS_TRACK) $(IOS_ENT) build
+
+ios-device: ios ## Install + launch on a connected iPad, streaming its log
+	@test -n "$(IOS_DEVICE)" || { echo "no iPad found — connect one over USB-C, or set IOS_DEVICE="; exit 1; }
+	xcrun devicectl device install app --device $(IOS_DEVICE) "$(IOS_APP)"
+	xcrun devicectl device process launch --console --terminate-existing \
+	    --device $(IOS_DEVICE) $(IOS_BUNDLE_ID)
+
+ios-sim: ## Build + run the iPad app in IOS_SIM (see: xcrun simctl list devices)
+	cd ios && xcodebuild -project freedj.xcodeproj -scheme freedj \
+	    -configuration $(IOS_CONFIG) -sdk iphonesimulator -arch arm64 \
+	    CODE_SIGNING_ALLOWED=NO build
+	@test -f "$(TRACK)" || { echo "no such track: $(TRACK) — set TRACK=path/to/file.mp3"; exit 1; }
+	@cp "$(TRACK)" "$(IOS_SIM_APP)/$(notdir $(TRACK))"
+	xcrun simctl bootstatus "$(IOS_SIM)" -b
+	xcrun simctl install "$(IOS_SIM)" "$(IOS_SIM_APP)"
+	xcrun simctl launch --console-pty "$(IOS_SIM)" $(IOS_BUNDLE_ID)
 
 ## ── Run ────────────────────────────────────────────────────────────────────
 
