@@ -88,6 +88,7 @@ struct DeckApp {
     /// Render the full physical faceplate (jog, fader, buttons) around the
     /// screen.  Off by default — the Pi/hardware target runs screen-only.
     faceplate:         bool,
+    portrait:          bool,   // iPad 13" portrait chrome (OPENDECK_PORTRAIT=1)
     /// Same-thread sources (keyboard, touch) push here.
     events:            Vec<Event>,
     /// Off-thread sources (MIDI, later HID/serial) send here; drained per frame.
@@ -252,6 +253,7 @@ impl DeckApp {
             // Dev: OPENDECK_PHASE_VIEW=ticks starts in the alignment view (for captures).
             phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
             faceplate:         std::env::var("OPENDECK_FACEPLATE").map(|v| v == "1").unwrap_or(false),
+            portrait:          std::env::var("OPENDECK_PORTRAIT").map(|v| v == "1").unwrap_or(false),
             events:            Vec::new(),
             event_rx,
             jog_offset:        0.0,
@@ -877,7 +879,9 @@ impl DeckApp {
         let win  = egui::Rect::from_min_size(egui::Pos2::ZERO,
                        egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
         // Load the faceplate photo once (from a path; never bundled in the repo).
-        if self.faceplate && !self.face_tex_tried {
+        // Landscape faceplate only: the portrait chrome is synthesised, not
+        // photo-backed (the photo is the landscape XDJ).
+        if self.faceplate && !self.portrait && !self.face_tex_tried {
             self.face_tex_tried = true;
             self.face_tex = load_face_texture(&self.egui_ctx);
         }
@@ -889,13 +893,18 @@ impl DeckApp {
         // Deriving the rect from a fixed aspect when there is no photo keeps the
         // faceplate usable: the screen stays correctly proportioned inside the
         // window instead of stretching to it, and the transport stays reachable.
-        let base = self.faceplate.then(|| {
-            let aspect = self.face_tex.as_ref().map_or(screen::FACE_ASPECT, |t| t.size_vec2());
+        let chrome = self.faceplate || self.portrait;
+        let base = chrome.then(|| {
+            let aspect = if self.portrait { screen::PORTRAIT_ASPECT }
+                         else { self.face_tex.as_ref().map_or(screen::FACE_ASPECT, |t| t.size_vec2()) };
             fit_contain(aspect, win)
         });
         let (screen_rect, face) = match base {
-            Some(b) => { let (s, f) = screen::faceplate_layout(b); (s, Some(f)) }
-            None    => (win, None),
+            Some(b) => {
+                let (s, f) = if self.portrait { screen::portrait_layout(b) } else { screen::faceplate_layout(b) };
+                (s, Some(f))
+            }
+            None => (win, None),
         };
         let lay  = screen::layout(screen_rect);
         let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
@@ -998,7 +1007,8 @@ impl ApplicationHandler for DeckApp {
 
         // Screen-only is the 7" panel; the faceplate window matches the deck
         // photo's aspect (the image is aspect-fit inside it).
-        let (win_w, win_h) = if self.faceplate { (860u32, 1090u32) } else { (1024u32, 600u32) };
+        let (win_w, win_h) = if self.portrait { (966u32, 1288u32) }   // iPad 13" portrait (0.75)
+                             else if self.faceplate { (860u32, 1090u32) } else { (1024u32, 600u32) };
         let mut attrs = WindowAttributes::default().with_title("freedj-3000");
         // Only ask for a size where a window manager can grant one.  On iOS the
         // requested size is applied to the UIWindow, so asking for 860x1090 got
@@ -1302,6 +1312,7 @@ pub fn desktop_main() -> Result<()> {
             "--link-send" => link_send = true,
             "--link-receive-only" => link_send = false,
             "--faceplate" => std::env::set_var("OPENDECK_FACEPLATE", "1"),
+            "--portrait"  => std::env::set_var("OPENDECK_PORTRAIT", "1"),  // iPad 13" portrait chrome
             _ => path = Some(a.into()),
         }
     }

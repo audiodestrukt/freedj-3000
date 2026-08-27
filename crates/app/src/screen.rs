@@ -148,6 +148,10 @@ pub struct FaceLayout {
     pub reloop:   Rect,
     pub browse:   Rect,
     pub mt:       Rect,   // MASTER TEMPO (key lock)
+    /// Portrait-only physical buttons left of the screen (None in landscape,
+    /// where TIME/AUTO CUE live inside the LCD as on the real XDJ faceplate).
+    pub time_mode: Option<Rect>,
+    pub auto_cue:  Option<Rect>,
 }
 
 /// Proportions of the deck photo the `faceplate_layout` fractions were measured
@@ -179,6 +183,41 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
         reloop:   disk(0.255, 0.370, 0.025),
         browse:   disk(0.845, 0.205, 0.065),
         mt:       disk(0.925, 0.565, 0.018),
+        time_mode: None,
+        auto_cue:  None,
+    };
+    (screen, face)
+}
+
+/// iPad 13" portrait pixel size — the aspect the portrait dev window and the
+/// on-device layout are proportioned to.
+pub const PORTRAIT_ASPECT: Vec2 = Vec2::new(2064.0, 2752.0);
+
+/// Portrait chrome for the iPad (`OPENDECK_PORTRAIT=1`): the LCD spans most of
+/// the top, the BROWSE rotary sits top-right, and TIME/AUTO CUE stack in a left
+/// column beside the screen (as physical buttons on a real XDJ).  Big jog wheel
+/// centred below, tempo fader down the right, transport along the bottom.
+/// Fractions of `base` (the portrait window rect); tune here against screenshots.
+pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
+    let w = base.width();
+    let disk = |cx: f32, cy: f32, rw: f32|
+        Rect::from_center_size(base.min + Vec2::new(cx * w, cy * base.height()), Vec2::splat(2.0 * rw * w));
+
+    // Top band: screen wide across the top, left button column, browse at right.
+    let screen = face_rect(base, 0.150, 0.028, 0.865, 0.400);
+    let face = FaceLayout {
+        base,
+        jog:      disk(0.500, 0.610, 0.300),
+        fader:    face_rect(base, 0.895, 0.470, 0.955, 0.800),
+        play:     disk(0.340, 0.900, 0.062),
+        cue:      disk(0.170, 0.900, 0.062),
+        loop_in:  face_rect(base, 0.520, 0.878, 0.605, 0.918),
+        loop_out: face_rect(base, 0.625, 0.878, 0.710, 0.918),
+        reloop:   disk(0.775, 0.898, 0.026),
+        browse:   disk(0.930, 0.098, 0.056),
+        mt:       disk(0.845, 0.448, 0.020),
+        time_mode: Some(face_rect(base, 0.022, 0.070, 0.128, 0.135)),
+        auto_cue:  Some(face_rect(base, 0.022, 0.170, 0.128, 0.235)),
     };
     (screen, face)
 }
@@ -237,6 +276,14 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, out
         cap(f.browse, "BROWSE");
         cap(f.loop_in,  "IN");
         cap(f.loop_out, "OUT");
+        // Portrait-only left column: TIME (elapsed/remain) + AUTO CUE.  Labelled
+        // inside the slab since they sit in open space, not on a photo.
+        for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE")] {
+            if let Some(r) = rect {
+                slab(r);
+                text(ui, r.center(), Align2::CENTER_CENTER, s, lbl * 0.85, DIM);
+            }
+        }
     }
 
     // ── Jog: rotation marker on the photo platter ────────────────────────────
@@ -288,6 +335,20 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, out
         if d.abs() > 4.0 { out.push(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: if d > 0.0 { 1 } else { -1 } })); }
     }
     if brr.clicked() { out.push(Event::Deck(ControlEvent::Load)); }
+
+    // ── Portrait left column: TIME toggles elapsed/remain; AUTO CUE is a
+    //    placeholder button until an auto-cue engine exists (#: see backlog). ──
+    if let Some(r) = f.time_mode {
+        let resp = ui.interact(r, Id::new("fp-time"), Sense::click());
+        if snap.remain_mode { p.rect_filled(r, 3.0, tint(BLUE, 120)); }
+        else if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
+        if resp.clicked() { out.push(Event::Ui(UiEvent::TimeMode)); }
+    }
+    if let Some(r) = f.auto_cue {
+        let resp = ui.interact(r, Id::new("fp-acue"), Sense::click());
+        if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
+        // No auto-cue engine yet — visible/tappable, wired when the feature lands.
+    }
 }
 
 // ── Drawing ───────────────────────────────────────────────────────────────────

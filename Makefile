@@ -102,6 +102,9 @@ chrome: build ## Play TRACK with the full deck faceplate (jog, fader, buttons)
 	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; echo "usage: make chrome TRACK=path/to/file.mp3"; exit 1; }
 	RUST_LOG=$(RUST_LOG) ./$(BIN) "$(TRACK)" --faceplate
 
+portrait: build ## Local iPad 13" portrait chrome dev loop (TRACK optional, empty deck if none)
+	RUST_LOG=$(RUST_LOG) ./$(BIN) $(if $(wildcard $(TRACK)),"$(TRACK)",) --portrait
+
 dev: debug ## Play TRACK with debug logging (verbose: MIDI + ProDJ packets)
 	@test -f "$(TRACK)" || { echo "no such track: $(TRACK)"; exit 1; }
 	RUST_LOG=debug,wgpu=warn,naga=warn ./target/debug/opendeck "$(TRACK)"
