@@ -14,3 +14,8 @@ Cargo.lock
 /assets/faceplate/
 
 third_party/**/target/
+
+# Xcode state regenerated on every open/build — the .pbxproj is the source of
+# truth, and the implicit workspace is derived from it.
+xcuserdata/
+project.xcworkspace/

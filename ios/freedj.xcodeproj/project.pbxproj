@@ -41,6 +41,7 @@
 				AA0000000000000000000020 /* Sources */,
 				AA0000000000000000000021 /* Frameworks */,
 				AA0000000000000000000022 /* Resources */,
+				AA0000000000000000000024 /* Bundle Track */,
 			);
 			buildRules = ();
 			dependencies = ();
@@ -90,6 +91,18 @@
 			shellPath = /bin/sh;
 			shellScript = "\"$SRCROOT/build-rust.sh\"\n";
 		};
+		AA0000000000000000000024 /* Bundle Track */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = ();
+			inputPaths = ();
+			name = "Bundle Track";
+			outputPaths = ();
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "\"$SRCROOT/bundle-track.sh\"\n";
+		};
 /* End PBXShellScriptBuildPhase section */
 
 /* Begin PBXSourcesBuildPhase section */
@@ -128,14 +141,15 @@
 		AA0000000000000000000013 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = freedj/freedj.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "$(FREEDJ_ENTITLEMENTS)";
+				FREEDJ_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = W527ZN3X52;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = freedj/Info.plist;
 				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
-				OTHER_LDFLAGS = "-lopendeck_app -lc++ -framework Metal -framework QuartzCore -framework UIKit -framework AudioToolbox -framework AVFAudio -framework CoreAudio -framework CoreMIDI -framework Foundation -framework Security -framework SystemConfiguration";
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.freedj;
+				OTHER_LDFLAGS = "-lopendeck_app -lc++ -framework Accelerate -framework Metal -framework QuartzCore -framework UIKit -framework AudioToolbox -framework AVFAudio -framework CoreAudio -framework CoreMIDI -framework Foundation -framework Security -framework SystemConfiguration";
+				PRODUCT_BUNDLE_IDENTIFIER = com.audiodestruct.opendeck;
 				PRODUCT_NAME = freedj;
 			};
 			name = Debug;
@@ -143,14 +157,15 @@
 		AA0000000000000000000014 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CODE_SIGN_ENTITLEMENTS = freedj/freedj.entitlements;
+				CODE_SIGN_ENTITLEMENTS = "$(FREEDJ_ENTITLEMENTS)";
+				FREEDJ_ENTITLEMENTS = "";
 				CODE_SIGN_STYLE = Automatic;
-				DEVELOPMENT_TEAM = "";
+				DEVELOPMENT_TEAM = W527ZN3X52;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = freedj/Info.plist;
 				LIBRARY_SEARCH_PATHS = "$(BUILT_PRODUCTS_DIR)";
-				OTHER_LDFLAGS = "-lopendeck_app -lc++ -framework Metal -framework QuartzCore -framework UIKit -framework AudioToolbox -framework AVFAudio -framework CoreAudio -framework CoreMIDI -framework Foundation -framework Security -framework SystemConfiguration";
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.freedj;
+				OTHER_LDFLAGS = "-lopendeck_app -lc++ -framework Accelerate -framework Metal -framework QuartzCore -framework UIKit -framework AudioToolbox -framework AVFAudio -framework CoreAudio -framework CoreMIDI -framework Foundation -framework Security -framework SystemConfiguration";
+				PRODUCT_BUNDLE_IDENTIFIER = com.audiodestruct.opendeck;
 				PRODUCT_NAME = freedj;
 			};
 			name = Release;
