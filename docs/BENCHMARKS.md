@@ -32,6 +32,30 @@ Both Pis: hardware Vulkan via V3DV, Mailbox available, clean pacing (0 stalls),
 audio at 44.1 kHz. The Pi 4's frame rate is the *display's* 30 Hz mode, not a
 freedj limit.
 
+## iPad (on-device baseline — 2026-08-27)
+
+First on-device numbers from the iOS build (`ios/`), read off Xcode's Debug
+Navigator gauges while running the `--faceplate` deck synced to a real XDJ. These
+are gauge-level (not `/proc` per-thread like the Pi rows), so it's a baseline to
+watch as we go, not a directly comparable column.
+
+| Metric | 13-inch iPad |
+|---|---|
+| CPU | ~26 % of one core |
+| Memory | ~200 MB |
+| Frame rate | ~53 fps |
+| Workload | `--faceplate`, R3 key-lock timestretch @ 1.0×, Link + track loaded from the XDJ |
+
+Caveats to resolve before treating these as a reference:
+- **Build config unconfirmed — likely Debug.** The Rust lib is only built
+  `--release` under Xcode's Release scheme; a Debug run inflates CPU and drops
+  frames. Re-read under Release.
+- **~53 fps, not a clean 60/120.** ProMotion is 120 Hz and freedj advances the
+  playhead in display-refresh units, so the iOS pacing target needs confirming
+  (partly the Debug build, partly render pacing).
+- As on the Pi, the CPU is dominated by the R3 timestretch; Master-Tempo-off via
+  the [varispeed engine](design/varispeed-engine.md) would cut it.
+
 ## What the numbers say
 
 - **The graphics path holds on both Pis.** V3DV exposes Mailbox on the Pi 5
