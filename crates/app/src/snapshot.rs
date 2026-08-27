@@ -46,6 +46,8 @@ pub struct DeckSnapshot<'a> {
     pub linked:       bool,
     /// Player number of the external master (0 = unknown / none).
     pub master_player: u8,
+    /// Our own Pro DJ Link player number (1-6).
+    pub player:       u8,
 
     pub beat_grid:    Option<&'a BeatGrid>,
 

@@ -536,7 +536,7 @@ fn draw_left(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
         (FAINT, FAINT)
     };
     text(ui, Pos2::new(pl.center().x, pl.min.y + h * 0.018), Align2::CENTER_CENTER, "PLAYER", h * 0.018, cap_c);
-    text(ui, Pos2::new(pl.center().x, pl.center().y + h * 0.020), Align2::CENTER_CENTER, "1", h * 0.075, num_c);
+    text(ui, Pos2::new(pl.center().x, pl.center().y + h * 0.020), Align2::CENTER_CENTER, &snap.player.to_string(), h * 0.075, num_c);
 
     if key(ui, lay.slip, "slip", "SLIP", "", h, snap.slip.then_some(BLUE)) {
         out.push(Event::Deck(ControlEvent::SlipToggle));

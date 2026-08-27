@@ -134,6 +134,7 @@ struct DeckApp {
 struct UiFlags {
     key_lock: bool, remain_mode: bool, slip: bool, sync: bool, master: bool,
     zoom_grid_mode: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
+    player: u8,
     cue_point: u64,
 }
 
@@ -161,6 +162,7 @@ fn make_snapshot<'a>(
         phase_ticks_view: f.phase_ticks_view,
         linked:        f.linked,
         master_player: f.master_player,
+        player:        f.player,
         beat_grid,
         beat2_bpm,
         beat2_phase_beats,
@@ -862,6 +864,7 @@ impl DeckApp {
             } else {
                 self.link.master_player.load(Ordering::Relaxed) as u8
             },
+            player: self.link.player,
             cue_point: self.cue_point,
         };
         let _t_snap = Instant::now();
@@ -951,6 +954,7 @@ impl DeckApp {
             } else {
                 self.link.master_player.load(Ordering::Relaxed) as u8
             },
+            player: self.link.player,
             cue_point: self.cue_point,
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
