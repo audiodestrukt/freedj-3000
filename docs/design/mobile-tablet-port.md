@@ -71,15 +71,43 @@ MIDI all reach freedj through midir's iOS backend — no shim needed.
   AltStore-style). No free "drop a file on it."
 
 **iOS-specific gotchas to verify:**
-- **ProDJ Link ↔ local-network privacy.** iOS 14+ requires
-  `NSLocalNetworkUsageDescription` (Info.plist) + a user permission prompt for
-  *any* local-network traffic. Broadcast/multicast discovery may additionally
-  need the `com.apple.developer.networking.multicast` **entitlement, which Apple
-  must approve** — a real risk for the Link feature; verify early.
 - **cpal RT latency** on iOS AudioUnit differs; re-validate the timestretch
   budget (`docs/design/rt-audio-isolation.md`, `PERFORMANCE.md`).
 - **Trade dress.** The Pioneer-derived faceplate (even redacted) is a review/
   legal risk for App Store distribution; fine for your own device / TestFlight.
+
+### ProDJ Link on iPad (the one Apple-gated feature)
+
+Link makes the demo compelling (real-XDJ sync), so it's worth the gate. freedj's
+Link *code* should port — it's std/`socket2` UDP + `getifaddrs` interface
+detection, all of which work on iOS, and a USB-C **ethernet dongle** gets
+enumerated like any interface. The physical layer (dongle → XDJ's network) is
+fine. The gate is entirely iOS's network policy, applied at the socket layer
+regardless of Wi-Fi vs ethernet:
+
+1. **`NSLocalNetworkUsageDescription`** (Info.plist) + a user permission prompt —
+   needed for any local-network traffic. Easy.
+2. **`com.apple.developer.networking.multicast` entitlement** — required to send
+   or receive custom multicast **and broadcast**. It needs a **paid** developer
+   account and an Apple **request form** (usually granted in days). The free
+   7-day sideload can't hold this entitlement.
+
+**The one genuine unknown — verify FIRST, before building the full app:** does
+iOS actually pass UDP **broadcast** (send + receive) with the multicast
+entitlement? ProDJ Link discovery + beat clock are broadcast; the whole iOS
+regime was built around multicast/Wi-Fi, and broadcast-over-ethernet is untested.
+The very first on-device test should be a minimal build that just tries to
+announce and receive the XDJ's broadcast beats. Two outcomes:
+- **Broadcast works** → full Link, compelling demo. Done.
+- **Broadcast blocked** → fall back to reading tempo from the XDJ's **unicast**
+  status packets (50002 carries BPM), which gives tempo-follow but not tight
+  phase — a lesser demo. Knowing which world we're in gates the rest, so front-
+  load this test; don't discover it at the end.
+
+Possible code tweak: on iOS the broadcast socket may need explicit binding to the
+dongle's interface address (freedj already picks the interface in
+`link_interface()`; verify it selects the ethernet one and that `SO_BROADCAST` +
+subnet-directed sends egress it).
 
 ## Android
 
@@ -141,19 +169,23 @@ The `main.rs` entry-point restructure is the only real code change; everything
 else is additive. This small footprint is the direct payoff of the portable
 stack and the single `ControlEvent` input bus.
 
-## Recommended first spike
+## Recommended sequence (iPad demo, Link required)
 
-**Screen-only, touch, one platform, no Link, no MIDI** — the smallest thing that
-proves the toolchain:
+The demo target is an **iPad running the full faceplate, synced to a real XDJ over
+Link** (a USB-C ethernet dongle to the XDJ's network). Because Link is the gated,
+uncertain part, front-load it:
 
-1. Pick **Android** if the goal is "a deck on a tablet I own, cheaply" (free
-   sideload, no Mac); pick **iPad** if MIDI-controller support or the nicer
-   touch/audio stack matters more (and you have a Mac).
-2. Get freedj **building and launching** with the platform entry point +
-   `cargo-ndk`/Xcode — just the screen rendering and audio out.
-3. Then add, in order of payoff: **touch faceplate** (already built), **track
-   file picking**, **MIDI** (free on iPad; JNI shim on Android), **ProDJ Link**
-   (the permission/entitlement work).
+1. **Groundwork (done / Linux):** `main()` split into `run(Config)` (commit
+   `cba1dba`) so the iOS entry just calls `run`. No Mac needed.
+2. **Apple prerequisites (parallel, no code):** paid dev account; request the
+   `com.apple.developer.networking.multicast` entitlement.
+3. **Minimal iOS build + the broadcast probe:** get freedj launching on the iPad
+   (faceplate + audio + a bundled track) and — as the *first* on-device test —
+   confirm ProDJ Link broadcast send/receive works with the entitlement over the
+   dongle. This decides whether the compelling (full sync) demo is possible or we
+   fall back to unicast tempo-follow.
+4. **Polish the demo:** track file picking, faceplate touch already works, and
+   (free on iPad) MIDI if a controller is wanted.
 
-Nothing here is committed — this is the reference for when a tablet build moves
-up the list.
+If Link broadcast turns out blocked, reassess: unicast tempo-follow, or pivot the
+demo framing. Nothing past step 1 is committed.
