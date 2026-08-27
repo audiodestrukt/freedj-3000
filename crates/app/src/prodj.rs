@@ -395,7 +395,9 @@ impl ProDjSender {
         let sock = UdpSocket::bind("0.0.0.0:0")
             .map_err(|e| log::warn!("ProDJ Link: sender socket failed: {e}"))
             .ok()?;
-        sock.set_broadcast(true).ok();
+        if let Err(e) = sock.set_broadcast(true) {
+            log::warn!("ProDJ Link: set_broadcast failed: {e} (announces/beats will not go out)");
+        }
         let (ip, bcast, mac, iface) = link_interface();
         let player = link.player;
         log::info!("ProDJ Link: sending as player {player} from {ip} ({iface}) to {bcast}");
@@ -405,6 +407,7 @@ impl ProDjSender {
             .name("prodj-tx".into())
             .spawn(move || {
                 let announce = me.build_announce(ip, mac);
+                let mut bcast_warned = false;
                 let mut last_announce = Instant::now() - Duration::from_secs(5);
                 let mut last_status   = Instant::now() - Duration::from_secs(5);
                 let mut last_request  = Instant::now() - Duration::from_secs(5);
@@ -496,7 +499,12 @@ impl ProDjSender {
                             };
                             let pkt = me.build_beat(&snap, bib);
                             let sent_at = Instant::now();
-                            let _ = sock.send_to(&pkt, (bcast, PORT_BEAT));
+                            if let Err(e) = sock.send_to(&pkt, (bcast, PORT_BEAT)) {
+                                if !bcast_warned {
+                                    bcast_warned = true;
+                                    log::warn!("ProDJ Link: beat broadcast to {bcast}:{PORT_BEAT} failed: {e}");
+                                }
+                            }
                             log::debug!("ProDJ tx: beat {beat} ({bib}/4) @ {:.2} BPM  +{:.2}ms", snap.bpm, sent_at.duration_since(last_sent).as_secs_f64() * 1000.0);
                             last_sent = sent_at;
                             last_beat = Some(beat);
@@ -505,7 +513,12 @@ impl ProDjSender {
 
                     // ── Announce ─────────────────────────────────────────────
                     if now.duration_since(last_announce) >= Duration::from_millis(1500) {
-                        let _ = sock.send_to(&announce, (bcast, PORT_ANNOUNCE));
+                        if let Err(e) = sock.send_to(&announce, (bcast, PORT_ANNOUNCE)) {
+                            if !bcast_warned {
+                                bcast_warned = true;
+                                log::warn!("ProDJ Link: announce broadcast to {bcast}:{PORT_ANNOUNCE} failed: {e}");
+                            }
+                        }
                         last_announce = now;
                     }
 
