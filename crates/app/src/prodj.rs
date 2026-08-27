@@ -204,7 +204,13 @@ fn spawn(name: &str, sock: UdpSocket, mut f: impl FnMut(&[u8], SocketAddr) + Sen
                 match sock.recv_from(&mut buf) {
                     Ok((n, addr)) => f(&buf[..n], addr),
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
-                    Err(e) => log::error!("ProDJ Link recv: {e}"),
+                    // Benign on Linux UDP: a prior unicast to a peer that has
+                    // gone draws an ICMP port-unreachable, surfaced on the next
+                    // recv as ConnectionRefused/Reset.  The listener keeps
+                    // running, so this never affects playback or sync.
+                    Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset) =>
+                        log::debug!("ProDJ Link recv (transient, ignored): {e}"),
+                    Err(e) => log::warn!("ProDJ Link recv: {e}"),
                 }
             }
         })

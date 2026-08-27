@@ -831,7 +831,14 @@ impl DeckApp {
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
-            master_player: match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 },
+            // When we hold master, show our own player number — otherwise the
+            // indicator falls back to beat2_player (the XDJ) and wrongly names
+            // the deck we just took master from.
+            master_player: if self.link.master.load(Ordering::Relaxed) {
+                self.link.player
+            } else {
+                match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 }
+            },
             cue_point: self.cue_point,
         };
         let _t_snap = Instant::now();
@@ -885,7 +892,14 @@ impl DeckApp {
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
-            master_player: match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 },
+            // When we hold master, show our own player number — otherwise the
+            // indicator falls back to beat2_player (the XDJ) and wrongly names
+            // the deck we just took master from.
+            master_player: if self.link.master.load(Ordering::Relaxed) {
+                self.link.player
+            } else {
+                match self.link.master_player.load(Ordering::Relaxed) { 0 => beat2_player as u8, p => p as u8 }
+            },
             cue_point: self.cue_point,
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
