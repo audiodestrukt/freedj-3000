@@ -36,9 +36,13 @@ syncs to a real XDJ, and can take tempo master (the `0x1f` status-byte fix).
    conflict**. Today freedj *skips* the Pro DJ Link claim/defend handshake and
    asserts a hardcoded number — fine solo against one XDJ, wrong in a populated
    rig. Needs the real arbitration so it slots in as player 3/4 automatically.
-2. **Standalone Link broadcast.** Sync is UDP broadcast; on iPad it must work
-   with no Mac relaying (see the iOS entitlement-vs-interface-pick question in
-   [`mobile-tablet-port.md`](mobile-tablet-port.md)).
+2. **Standalone Link broadcast — PROVEN (2026-08-27).** Sync is UDP broadcast;
+   on iPad it now works standalone over a wired USB-C ethernet dongle, Wi-Fi off,
+   no Mac and **no multicast entitlement** required. The earlier failures were a
+   startup interface-binding issue (freedj latches its Link interface once at
+   launch; if the dongle isn't up yet it binds nothing) — a restart with ethernet
+   already present fixes it. Remaining work is only robustness: re-evaluate/re-bind
+   the interface on network change so no restart is needed (issue #36).
 3. **Robust shared-library discovery.** Find which deck/USB is exporting the
    library (USB vs rekordbox source; any player, not just a hardcoded XDJ). See
    the LINK source issues (#30 rekordbox dbserver, #31 pipeline NFS reads, #32

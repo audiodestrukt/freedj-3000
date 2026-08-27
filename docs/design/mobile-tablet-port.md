@@ -11,29 +11,25 @@ freedj runs on a 13" iPad — full photo faceplate, our LCD, clean audio. Over a
 USB-C ethernet dongle to the XDJ's network it **loads tracks from the XDJ's
 library**. What we learned, including a correction:
 
-- **Unicast works standalone; broadcast doesn't (cause not yet pinned down).**
-  Track loading is **unicast** (NFS / dbserver straight to the XDJ's IP) and works
-  on the iPad alone with just the local-network permission. Pro DJ Link **sync**
-  is **broadcast** (the XDJ's beat clock + freedj's announce) — it worked while
-  USB-tethered to the Mac (which relayed broadcast), but a wired dongle straight
-  to the XDJ's network (no Mac) loads tracks yet **does not sync**. TWO candidate
-  causes, indistinguishable from the outside:
-  1. **iOS blocks broadcast** without `com.apple.developer.networking.multicast`.
-  2. **freedj picks the wrong interface.** `link_interface()` takes the *first*
-     non-loopback IPv4 with a broadcast address — on iOS, if Wi-Fi is also up,
-     freedj may be broadcasting onto Wi-Fi, not the dongle's subnet, even though
-     unicast-to-the-XDJ routes fine.
-
-  Diagnose from the Xcode console (`RUST_LOG=debug`): the line `ProDJ Link:
-  sending as player N from <IP> (<iface>) to <bcast>`. Right iface/subnet →
-  it's the entitlement; Wi-Fi/wrong subnet → it's the interface pick (a freedj
-  bug to fix). Quick test: turn Wi-Fi off (dongle only) and retry — if sync then
-  works, it was the interface pick, not the entitlement.
-- **Implication for a self-contained demo:** standalone **sync** needs either the
-  Apple multicast entitlement (paid account + request), or a **unicast
-  tempo-follow** path — freedj unicasts its announce to the XDJ's known IP and
-  reads BPM from the XDJ's unicast status packets (tempo only, no tight phase; and
-  it must not depend on receiving broadcast beats). Track loading needs neither.
+- **Standalone Link broadcast WORKS — no entitlement, no Mac (resolved 2026-08-27).**
+  On the iPad alone, over a wired USB-C ethernet dongle with **Wi-Fi off**, Pro DJ
+  Link **sync** works: freedj broadcasts its announce and receives the XDJ's beat
+  clock, and the XDJ syncs. No `com.apple.developer.networking.multicast`
+  entitlement and no Mac relay were needed. Track loading (unicast NFS / dbserver
+  to the XDJ's IP) also works standalone with just the local-network permission.
+  - **What the earlier failures actually were:** a **startup interface-binding**
+    issue, not an iOS broadcast block. freedj latches its Link interface once at
+    launch (`link_interface()` = first non-loopback IPv4 with a broadcast addr);
+    if the dongle wasn't up/addressed yet, it bound nothing usable and broadcast
+    went nowhere. **Restarting the app with ethernet already present** made it
+    bind the dongle and sync came up. The Mac-tether "relay" was a red herring —
+    plain wired ethernet is sufficient.
+  - This kills the entitlement-vs-interface question entirely: it was neither the
+    entitlement nor Wi-Fi-vs-dongle *selection* — it was launch **timing**.
+- **Remaining (robustness only, issue #36):** re-evaluate/re-bind the Link
+  interface on network change (dongle hotplug, address assigned after launch) so
+  no restart is ever needed. Nice-to-have for a true out-of-the-box experience,
+  not a blocker — the demo works today by launching with ethernet connected.
 - **cpal does not configure the `AVAudioSession` on iOS** → glitchy/underrunning
   audio until you set it up. Fix (in the app's ObjC entry, before audio starts):
   category `Playback`, preferred sample rate 48 kHz, IO buffer ~10–20 ms, then
@@ -41,8 +37,8 @@ library**. What we learned, including a correction:
 - The `run(Config)` split + `[lib]` staticlib target were all the Rust structure
   the port needed; the iOS entry is one `#[no_mangle] extern "C"` fn.
 
-Remaining: confirm the entitlement path (or the unicast tempo-follow fallback) for
-standalone sync; bundle the default track/faceplate as app resources; scale the
+Remaining: interface re-bind robustness so no restart is needed (#36); bundle the
+default track/faceplate as app resources; scale the
 GUI up for the 13" screen (#33); XDJ-style jog center spinner (#34) and touch
 feedback (#35). iOS build scaffold + guide live under `ios/` (and the `ios`
 branch).
@@ -129,27 +125,28 @@ regardless of Wi-Fi vs ethernet:
 
 1. **`NSLocalNetworkUsageDescription`** (Info.plist) + a user permission prompt —
    needed for any local-network traffic. Easy.
-2. **`com.apple.developer.networking.multicast` entitlement** — required to send
-   or receive custom multicast **and broadcast**. It needs a **paid** developer
-   account and an Apple **request form** (usually granted in days). The free
-   7-day sideload can't hold this entitlement.
+2. **`com.apple.developer.networking.multicast` entitlement** — turned out **not
+   required** for our case (see below). It gates custom multicast/broadcast and
+   needs a paid account + Apple request form, but ProDJ Link over **wired
+   ethernet, Wi-Fi off** works without it.
 
-**The one genuine unknown — verify FIRST, before building the full app:** does
-iOS actually pass UDP **broadcast** (send + receive) with the multicast
-entitlement? ProDJ Link discovery + beat clock are broadcast; the whole iOS
-regime was built around multicast/Wi-Fi, and broadcast-over-ethernet is untested.
-The very first on-device test should be a minimal build that just tries to
-announce and receive the XDJ's broadcast beats. Two outcomes:
-- **Broadcast works** → full Link, compelling demo. Done.
-- **Broadcast blocked** → fall back to reading tempo from the XDJ's **unicast**
-  status packets (50002 carries BPM), which gives tempo-follow but not tight
-  phase — a lesser demo. Knowing which world we're in gates the rest, so front-
-  load this test; don't discover it at the end.
+**RESOLVED on device (2026-08-27): UDP broadcast passes on iOS over wired
+ethernet with no multicast entitlement.** freedj announces and receives the XDJ's
+broadcast beat clock over a USB-C ethernet dongle (Wi-Fi off), and the XDJ syncs.
+The earlier "does iOS even pass broadcast?" unknown is answered — yes. The initial
+failures were a **startup interface-binding** bug (freedj binds its Link interface
+once at launch; if the dongle isn't addressed yet it binds nothing), fixed by
+launching/relaunching with ethernet already connected. So the unicast tempo-follow
+fallback below is **not needed** for the demo; it's kept only as historical context.
 
-Possible code tweak: on iOS the broadcast socket may need explicit binding to the
-dongle's interface address (freedj already picks the interface in
-`link_interface()`; verify it selects the ethernet one and that `SO_BROADCAST` +
-subnet-directed sends egress it).
+Historical fallback (unused): if broadcast had been blocked, freedj would read
+tempo from the XDJ's **unicast** status packets (50002 carries BPM) — tempo-follow
+without tight phase, a lesser demo.
+
+Remaining code work (issue #36, robustness only): freedj picks the interface once
+in `link_interface()`; re-evaluate/re-bind it on network change (dongle hotplug,
+late address assignment) so no restart is needed. Not a blocker — launch with
+ethernet connected and it works today.
 
 ## Android
 
@@ -174,7 +171,7 @@ cpal(AAudio/oboe). Sideloading an APK is free — no signing gatekeeper.
 | Render/UI/audio stack | ✓ | ✓ | ✓ |
 | Touch | mouse-as-touch | native ✓ | native ✓ |
 | **MIDI controllers** | ✓ (ALSA) | ✓ (CoreMIDI, in midir) | ✗ midir → **JNI shim** |
-| ProDJ Link | ✓ | local-network perm + maybe multicast **entitlement** | **MulticastLock** |
+| ProDJ Link | ✓ | local-network perm (broadcast over **wired ethernet** works w/o multicast entitlement) | **MulticastLock** |
 | Build | `cargo`/`make` | Xcode + **Mac** + cross-compile | `cargo-ndk` + Gradle |
 | Signing | none | **Apple cert required** | self-sign, free |
 | Distribution | run it | App Store / TestFlight / limited sideload | **free sideload** APK |
@@ -219,15 +216,14 @@ uncertain part, front-load it:
 
 1. **Groundwork (done / Linux):** `main()` split into `run(Config)` (commit
    `cba1dba`) so the iOS entry just calls `run`. No Mac needed.
-2. **Apple prerequisites (parallel, no code):** paid dev account; request the
-   `com.apple.developer.networking.multicast` entitlement.
-3. **Minimal iOS build + the broadcast probe:** get freedj launching on the iPad
-   (faceplate + audio + a bundled track) and — as the *first* on-device test —
-   confirm ProDJ Link broadcast send/receive works with the entitlement over the
-   dongle. This decides whether the compelling (full sync) demo is possible or we
-   fall back to unicast tempo-follow.
+2. **Apple prerequisites (parallel, no code):** paid dev account for on-device
+   install. The multicast entitlement turned out **not** to be needed (broadcast
+   works over wired ethernet).
+3. **DONE — minimal iOS build + broadcast proven:** freedj launches on the iPad
+   (faceplate + audio + a bundled track), and ProDJ Link broadcast send/receive
+   works standalone over the dongle (Wi-Fi off), so the full-sync demo is live.
 4. **Polish the demo:** track file picking, faceplate touch already works, and
    (free on iPad) MIDI if a controller is wanted.
 
-If Link broadcast turns out blocked, reassess: unicast tempo-follow, or pivot the
-demo framing. Nothing past step 1 is committed.
+Remaining Link work is robustness only: interface re-bind on network change so no
+restart is needed (#36).
