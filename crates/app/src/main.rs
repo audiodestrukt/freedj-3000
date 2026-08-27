@@ -85,6 +85,9 @@ struct DeckApp {
     zoom_grid_mode:    bool,
     source_link:       bool,
     phase_ticks_view:  bool,
+    /// Render the full physical faceplate (jog, fader, buttons) around the
+    /// screen.  Off by default — the Pi/hardware target runs screen-only.
+    faceplate:         bool,
     /// Same-thread sources (keyboard, touch) push here.
     events:            Vec<Event>,
     /// Off-thread sources (MIDI, later HID/serial) send here; drained per frame.
@@ -240,6 +243,7 @@ impl DeckApp {
             source_link:       false,
             // Dev: OPENDECK_PHASE_VIEW=ticks starts in the alignment view (for captures).
             phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
+            faceplate:         std::env::var("OPENDECK_FACEPLATE").map(|v| v == "1").unwrap_or(false),
             events:            Vec::new(),
             event_rx,
             jog_offset:        0.0,
@@ -851,7 +855,17 @@ impl DeckApp {
         // Screen layout in logical points; the shader gets its two rects in pixels.
         let ppp  = window.scale_factor() as f32;
         let size = window.inner_size();
-        let lay  = screen::layout(egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
+        let win  = egui::Rect::from_min_size(egui::Pos2::ZERO,
+                       egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
+        // Faceplate mode renders the screen into a sub-rect and the deck body
+        // around it; screen-only mode fills the whole window as before.
+        let (screen_rect, face) = if self.faceplate {
+            let (s, f) = screen::faceplate_layout(win);
+            (s, Some(f))
+        } else {
+            (win, None)
+        };
+        let lay  = screen::layout(screen_rect);
         let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
         let vp   = renderer::Viewports { wave: px(lay.wave), overview: px(lay.overview), dim_played: self.remain_mode };
 
@@ -860,7 +874,8 @@ impl DeckApp {
         let mut touch = Vec::new();
         let _t_run = Instant::now();
         let browse = if self.screen_mode == ScreenMode::Browse { Some(&self.browser) } else { None };
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, &mut touch));
+        let face_ref = face.as_ref();
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, face_ref, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
         self.events.append(&mut touch);
@@ -934,9 +949,12 @@ impl ApplicationHandler for DeckApp {
             return; // already initialised (e.g. Android resume)
         }
 
+        // Screen-only is the 7" panel; the faceplate adds the deck body around
+        // it, at roughly the XDJ-1000MK2 face aspect (212 × 320 mm ≈ 1:1.5).
+        let (win_w, win_h) = if self.faceplate { (760u32, 1180u32) } else { (1024u32, 600u32) };
         let attrs = WindowAttributes::default()
             .with_title("freedj-3000")
-            .with_inner_size(winit::dpi::LogicalSize::new(1024u32, 600u32));   // XDJ-1000MK2 7" panel
+            .with_inner_size(winit::dpi::LogicalSize::new(win_w, win_h));
 
         let window = Arc::new(
             event_loop
@@ -1154,6 +1172,7 @@ fn main() -> Result<()> {
             },
             "--link-send" => link_send = true,
             "--link-receive-only" => link_send = false,
+            "--faceplate" => std::env::set_var("OPENDECK_FACEPLATE", "1"),
             _ => path = Some(a.into()),
         }
     }

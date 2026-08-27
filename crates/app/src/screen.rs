@@ -36,6 +36,10 @@ const ORANGE:  Color32 = Color32::from_rgb(0xf0, 0x8a, 0x1e);
 const RED:     Color32 = Color32::from_rgb(0xe0, 0x2a, 0x2a);
 const GREEN:   Color32 = Color32::from_rgb(0x3c, 0xc8, 0x50);
 const GOLD:    Color32 = Color32::from_rgb(0xf0, 0xb0, 0x20);   // MASTER state
+// Faceplate (chrome) — the physical deck body around the screen.
+const BODY:    Color32 = Color32::from_rgb(0x18, 0x1a, 0x1d);   // matte deck panel
+const BODY_HI: Color32 = Color32::from_rgb(0x2a, 0x2d, 0x32);   // raised platter/knob
+const BODY_LO: Color32 = Color32::from_rgb(0x0d, 0x0e, 0x10);   // recessed / shadow
 
 // ── Layout ────────────────────────────────────────────────────────────────────
 
@@ -73,11 +77,12 @@ pub struct Layout {
     pub bpm:      Rect,
 }
 
-pub fn layout(size: Vec2) -> Layout {
-    let w = size.x;
-    let h = size.y;
+pub fn layout(screen: Rect) -> Layout {
+    let (ox, oy) = (screen.min.x, screen.min.y);
+    let w = screen.width();
+    let h = screen.height();
     let r = |x0: f32, y0: f32, x1: f32, y1: f32| {
-        Rect::from_min_max(Pos2::new(x0 * w, y0 * h), Pos2::new(x1 * w, y1 * h))
+        Rect::from_min_max(Pos2::new(ox + x0 * w, oy + y0 * h), Pos2::new(ox + x1 * w, oy + y1 * h))
     };
     let lc = 0.092;   // left column right edge
     let rc = 0.805;   // right column left edge
@@ -113,6 +118,147 @@ pub fn layout(size: Vec2) -> Layout {
     }
 }
 
+// ── Faceplate (chrome) ────────────────────────────────────────────────────────
+//
+// The full physical XDJ-1000MK2 deck rendered around the screen, enabled with
+// `--faceplate` (default is screen-only, what the Pi/hardware target wants).
+// FIRST PASS: proportions are approximate and want tuning against the real unit;
+// all region fractions live in `faceplate_layout` so they are easy to nudge.
+// Every control emits the same `ControlEvent`s a physical control would, so this
+// doubles as the touch adapter and as the dimensioned mockup for the panel.
+
+/// Physical faceplate regions, in the same logical coordinates as the window.
+pub struct FaceLayout {
+    pub win:      Rect,
+    pub jog:      Rect,   // bounding square of the platter
+    pub fader:    Rect,   // tempo-fader track
+    pub play:     Rect,
+    pub cue:      Rect,
+    pub loop_in:  Rect,
+    pub loop_out: Rect,
+    pub reloop:   Rect,
+    pub sync:     Rect,
+    pub master:   Rect,
+    pub browse:   Rect,   // browse rotary (bounding square)
+    pub range:    Rect,   // TEMPO RANGE
+    pub mt:       Rect,   // MASTER TEMPO (key lock)
+}
+
+/// Lay out the whole deck within `win`; returns (screen_rect, chrome).
+pub fn faceplate_layout(win: Rect) -> (Rect, FaceLayout) {
+    let w = win.width();
+    let h = win.height();
+    let at = |x0: f32, y0: f32, x1: f32, y1: f32|
+        Rect::from_min_max(win.min + Vec2::new(x0 * w, y0 * h), win.min + Vec2::new(x1 * w, y1 * h));
+
+    // Screen near the top, at the XDJ 1024:600 aspect.
+    let sx  = 0.06;
+    let s_w = 1.0 - 2.0 * sx;
+    let s_h = (s_w * w / (1024.0 / 600.0)) / h;
+    let screen = at(sx, 0.04, 1.0 - sx, 0.04 + s_h);
+
+    // Jog: dominant platter, lower-middle, nudged left so the fader clears it.
+    let jog = Rect::from_center_size(win.min + Vec2::new(0.43 * w, 0.66 * h), Vec2::splat(0.60 * w));
+
+    let face = FaceLayout {
+        win,
+        jog,
+        fader:    at(0.905, 0.45, 0.965, 0.83),
+        play:     at(0.09,  0.90, 0.25,  0.975),
+        cue:      at(0.27,  0.90, 0.43,  0.975),
+        loop_in:  at(0.015, 0.48, 0.10,  0.545),
+        loop_out: at(0.015, 0.56, 0.10,  0.625),
+        reloop:   at(0.015, 0.64, 0.10,  0.705),
+        sync:     at(0.78,  0.90, 0.875, 0.975),
+        master:   at(0.885, 0.90, 0.98,  0.975),
+        browse:   Rect::from_center_size(win.min + Vec2::new(0.955 * w, 0.055 * h), Vec2::splat(0.06 * w)),
+        range:    at(0.90,  0.865, 0.965, 0.90),
+        mt:       at(0.90,  0.40,  0.965, 0.435),
+    };
+    (screen, face)
+}
+
+fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, out: &mut Vec<Event>) {
+    let p  = ui.painter();
+    let hh = f.win.height() * 0.42;   // text-scale reference for chrome keys
+
+    // ── Jog wheel ────────────────────────────────────────────────────────────
+    let c = f.jog.center();
+    let r = f.jog.width() * 0.5;
+    p.circle_filled(c, r,        BODY_LO);
+    p.circle_stroke(c, r,        Stroke::new(2.0, Color32::BLACK));
+    p.circle_filled(c, r * 0.90, BODY_HI);
+    p.circle_stroke(c, r * 0.90, Stroke::new(1.0, FAINT));
+    p.circle_filled(c, r * 0.42, BODY);
+    p.circle_stroke(c, r * 0.42, Stroke::new(1.0, FAINT));
+    // Position marker — spins while playing, like a platter.
+    let secs = snap.position as f32 / (snap.sample_rate as f32 * snap.channels as f32).max(1.0);
+    let ang  = secs * 0.6 * std::f32::consts::TAU;
+    let dir  = Vec2::new(ang.cos(), ang.sin());
+    p.line_segment([c + dir * (r * 0.44), c + dir * (r * 0.88)],
+                   Stroke::new(3.0, if snap.master { ORANGE } else { BLUE }));
+    text(ui, c, Align2::CENTER_CENTER, format!("{:.1}", snap.bpm().unwrap_or(0.0)), r * 0.15, TEXT);
+    let jr = ui.interact(f.jog, Id::new("fp-jog"), Sense::click_and_drag());
+    if jr.drag_started() { out.push(Event::Deck(ControlEvent::JogTouch { touched: true })); }
+    if jr.drag_stopped() { out.push(Event::Deck(ControlEvent::JogTouch { touched: false })); }
+    if jr.dragged() {
+        let dx = jr.drag_delta().x;
+        if dx.abs() > 0.01 {
+            out.push(Event::Deck(ControlEvent::JogDelta { delta: dx as i32, velocity_rpm: dx * 2.0 }));
+        }
+    }
+
+    // ── Tempo fader ──────────────────────────────────────────────────────────
+    let ft = f.fader;
+    p.rect_filled(ft, 3.0, BODY_LO);
+    p.line_segment([Pos2::new(ft.center().x, ft.min.y), Pos2::new(ft.center().x, ft.max.y)],
+                   Stroke::new(2.0, FAINT));
+    let pos   = crate::input::speed_to_fader(snap.fader_speed).clamp(0.0, 1.0);
+    let hy    = ft.max.y - pos * ft.height();
+    let hrect = Rect::from_center_size(Pos2::new(ft.center().x, hy),
+                                       Vec2::new(ft.width() * 1.7, ft.height() * 0.05));
+    p.rect_filled(hrect, 2.0, BODY_HI);
+    p.rect_stroke(hrect, 2.0, Stroke::new(1.0, Color32::BLACK));
+    let fr = ui.interact(ft, Id::new("fp-fader"), Sense::click_and_drag());
+    if fr.dragged() || fr.clicked() {
+        if let Some(pp) = fr.interact_pointer_pos() {
+            let np = ((ft.max.y - pp.y) / ft.height()).clamp(0.0, 1.0);
+            out.push(Event::Deck(ControlEvent::TempoFader { position: np }));
+        }
+    }
+
+    // ── Transport + buttons ──────────────────────────────────────────────────
+    if key(ui, f.play, "fp-play", "PLAY", "", hh, snap.playing.then_some(GREEN)) {
+        out.push(Event::Deck(ControlEvent::PlayPause));
+    }
+    let cr = ui.interact(f.cue, Id::new("fp-cue"), Sense::click_and_drag());
+    p.rect_filled(f.cue, 2.0, if cr.is_pointer_button_down_on() { KEY_HI } else { KEY });
+    text(ui, f.cue.center(), Align2::CENTER_CENTER, "CUE", hh * 0.032, ORANGE);
+    if cr.drag_started() || cr.clicked() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
+    if cr.drag_stopped()                 { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
+
+    if key(ui, f.loop_in,  "fp-loopin",  "IN",     "", hh, None) { out.push(Event::Deck(ControlEvent::LoopIn)); }
+    if key(ui, f.loop_out, "fp-loopout", "OUT",    "", hh, None) { out.push(Event::Deck(ControlEvent::LoopOut)); }
+    if key(ui, f.reloop,   "fp-reloop",  "RELOOP", "", hh, None) { out.push(Event::Deck(ControlEvent::Reloop)); }
+    if key(ui, f.sync,     "fp-sync",    "SYNC",   "", hh, snap.sync.then_some(BLUE))    { out.push(Event::Deck(ControlEvent::SyncToggle)); }
+    if key(ui, f.master,   "fp-master",  "MASTER", "", hh, snap.master.then_some(GOLD))  { out.push(Event::Deck(ControlEvent::MasterRequest)); }
+    if key(ui, f.range,    "fp-range",   "RANGE",  "", hh, None) { /* tempo-range cycle: no event yet */ }
+    if key(ui, f.mt,       "fp-mt",      "M.T.",   "", hh, snap.key_lock.then_some(ORANGE)) { out.push(Event::Deck(ControlEvent::KeyLockToggle)); }
+
+    // ── Browse rotary ────────────────────────────────────────────────────────
+    let bc = f.browse.center();
+    let br = f.browse.width() * 0.5;
+    p.circle_filled(bc, br,        BODY_HI);
+    p.circle_stroke(bc, br,        Stroke::new(1.0, FAINT));
+    p.circle_filled(bc, br * 0.35, BODY_LO);
+    let brr = ui.interact(f.browse, Id::new("fp-browse"), Sense::click_and_drag());
+    if brr.dragged() {
+        let d = brr.drag_delta().y;
+        if d.abs() > 4.0 { out.push(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: if d > 0.0 { 1 } else { -1 } })); }
+    }
+    if brr.clicked() { out.push(Event::Deck(ControlEvent::Load)); }
+}
+
 // ── Drawing ───────────────────────────────────────────────────────────────────
 
 /// Draw the screen and collect the touch events it produced this frame.
@@ -121,12 +267,23 @@ pub fn draw(
     snap:   &DeckSnapshot,
     lay:    &Layout,
     browse: Option<&Browser>,
+    face:   Option<&FaceLayout>,
     out:    &mut Vec<Event>,
 ) {
     egui::CentralPanel::default()
         .frame(egui::Frame::none())
         .show(ctx, |ui| {
             let h = lay.screen.height();
+
+            // Faceplate: fill the deck body around the screen, then a bezel.
+            // The screen's own shader rects sit inside `lay.screen`, so filling
+            // only the region OUTSIDE the screen leaves them untouched.
+            if let Some(f) = face {
+                for r in cover(f.win, lay.screen, lay.screen) {
+                    ui.painter().rect_filled(r, 0.0, BODY);
+                }
+                ui.painter().rect_stroke(lay.screen.expand(h * 0.02), 0.0, Stroke::new(3.0, Color32::BLACK));
+            }
 
             // Ground everything except the two shader rects.  egui paints
             // after the waveform pass, so those must be left alone.
@@ -148,6 +305,10 @@ pub fn draw(
             }
             draw_info(ui, snap, lay, h, out);
             draw_bottom(ui, snap, lay, h, out);
+
+            if let Some(f) = face {
+                draw_faceplate(ui, snap, f, out);
+            }
         });
 }
 
