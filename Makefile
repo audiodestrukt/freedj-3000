@@ -148,6 +148,10 @@ shot: build ## Capture the playback screen to SHOT (default docs/screenshots/pla
 	@mkdir -p $(dir $(SHOT))
 	OPENDECK_SCREENSHOT=$(SHOT) RUST_LOG=opendeck=info,wgpu=off,naga=off,egui=off ./$(BIN) "$(TRACK)" 2>&1 | grep -E "captured|error" || true
 
+shot-portrait: build ## Capture the iPad portrait chrome to SHOT (TRACK optional)
+	@mkdir -p $(dir $(SHOT))
+	OPENDECK_PORTRAIT=1 OPENDECK_SCREENSHOT=$(SHOT) RUST_LOG=opendeck=info,wgpu=off,naga=off,egui=off ./$(BIN) $(if $(wildcard $(TRACK)),"$(TRACK)",) 2>&1 | grep -E "captured|error" || true
+
 ## ── Quality ────────────────────────────────────────────────────────────────
 
 check: ## Type-check the whole workspace
