@@ -134,7 +134,6 @@ pub fn layout(screen: Rect) -> Layout {
 /// XDJ-1000MK2 photo — tune here.  SYNC/MASTER are on the SCREEN (touch), not
 /// physical, so they are not chrome.
 pub struct FaceLayout {
-    pub base:     Rect,   // deck-image rect the controls sit within
     pub jog:      Rect,
     pub fader:    Rect,
     pub play:     Rect,
@@ -160,11 +159,10 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
     // Coordinates measured off a labelled grid over the photo (2026-08-27).
     let screen = face_rect(base, 0.250, 0.075, 0.735, 0.290);   // the display panel
     let face = FaceLayout {
-        base,
         jog:      disk(0.500, 0.645, 0.340),
         fader:    face_rect(base, 0.895, 0.615, 0.930, 0.940),
-        play:     disk(0.075, 0.900, 0.055),
-        cue:      disk(0.075, 0.795, 0.055),
+        play:     disk(0.070, 0.887, 0.057),
+        cue:      disk(0.077, 0.771, 0.057),
         loop_in:  face_rect(base, 0.040, 0.345, 0.110, 0.390),
         loop_out: face_rect(base, 0.125, 0.345, 0.185, 0.390),
         reloop:   disk(0.255, 0.370, 0.025),
@@ -196,18 +194,8 @@ fn rect_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<Ev
 /// touch targets that emit `ControlEvent`s.
 fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, out: &mut Vec<Event>) {
     let p = ui.painter();
-
-    // Redact Pioneer / rekordbox branding and sign it freedj.
-    for (x0, y0, x1, y1) in [
-        (0.280, 0.000, 0.720, 0.045),   // top "Pioneer DJ"
-        (0.210, 0.040, 0.640, 0.072),   // "rekordbox  MP3/AAC/…"
-        (0.360, 0.945, 0.640, 0.978),   // bottom "Pioneer DJ"
-        (0.795, 0.948, 0.997, 0.992),   // "MULTI PLAYER XDJ-1000MK2"
-    ] {
-        p.rect_filled(face_rect(f.base, x0, y0, x1, y1), 0.0, BODY);
-    }
-    text(ui, f.base.min + Vec2::new(0.50 * f.base.width(), 0.960 * f.base.height()),
-         Align2::CENTER_CENTER, "freedj-3000", f.base.width() * 0.024, TEXT);
+    // Branding is redacted in the asset itself (reference/photos), so nothing to
+    // paint over here — just the live overlays and touch targets.
 
     // ── Jog: rotation marker on the photo platter ────────────────────────────
     let c = f.jog.center();
@@ -281,8 +269,13 @@ pub fn draw(
             // window). The screen renders into its sub-rect over the photo.
             if let Some((tex, irect)) = face_img {
                 ui.painter().rect_filled(ui.max_rect(), 0.0, BODY);
-                let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
-                ui.painter().image(tex.id(), irect, uv, Color32::WHITE);
+                // Paint the photo for the deck body only, leaving the whole LCD
+                // area (lay.screen) to our GUI — nothing from the photo is drawn
+                // there (the deck's own rekordbox screen would otherwise show
+                // through around/behind our render).
+                for part in cover(irect, lay.screen, lay.screen) {
+                    image_part(ui.painter(), tex, irect, part);
+                }
             }
 
             // Ground everything except the two shader rects.  egui paints
@@ -385,6 +378,17 @@ fn draw_browse(ui: &Ui, browser: &Browser, lay: &Layout, h: f32) {
 }
 
 /// Rects that tile `outer` minus two holes `a` and `b` (a above b, non-overlapping).
+/// Paint a sub-rect of a texture, mapping `part` (a sub-rect of `irect`) to the
+/// matching UV region — used to paint the deck photo around the shader rects.
+fn image_part(p: &egui::Painter, tex: &egui::TextureHandle, irect: Rect, part: Rect) {
+    if part.width() <= 0.5 || part.height() <= 0.5 { return; }
+    let uv = Rect::from_min_max(
+        Pos2::new((part.min.x - irect.min.x) / irect.width(), (part.min.y - irect.min.y) / irect.height()),
+        Pos2::new((part.max.x - irect.min.x) / irect.width(), (part.max.y - irect.min.y) / irect.height()),
+    );
+    p.image(tex.id(), part, uv, Color32::WHITE);
+}
+
 fn cover(outer: Rect, a: Rect, b: Rect) -> Vec<Rect> {
     let band = |y0: f32, y1: f32| Rect::from_min_max(Pos2::new(outer.min.x, y0), Pos2::new(outer.max.x, y1));
     vec![

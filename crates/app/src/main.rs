@@ -1153,9 +1153,8 @@ impl ApplicationHandler for DeckApp {
 /// override with OPENDECK_FACEPLATE_IMG).  The image is NOT bundled in the repo —
 /// supply your own; use an original/licensed faceplate for any public release.
 fn load_face_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let path = std::env::var("OPENDECK_FACEPLATE_IMG").unwrap_or_else(|_| {
-        format!("{}/Downloads/XDJ1000Mk2-xlarge.jpg", std::env::var("HOME").unwrap_or_default())
-    });
+    let path = std::env::var("OPENDECK_FACEPLATE_IMG")
+        .unwrap_or_else(|_| "reference/photos/XDJ1000Mk2-faceplate.jpg".to_string());
     let bytes = std::fs::read(&path)
         .map_err(|e| log::warn!("faceplate image: cannot read {path}: {e} — screen-only"))
         .ok()?;
