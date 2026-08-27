@@ -203,8 +203,19 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
     let disk = |cx: f32, cy: f32, rw: f32|
         Rect::from_center_size(base.min + Vec2::new(cx * w, cy * base.height()), Vec2::splat(2.0 * rw * w));
 
-    // Top band: screen wide across the top, left button column, browse at right.
-    let screen = face_rect(base, 0.150, 0.028, 0.865, 0.400);
+    // LCD: the real XDJ-1000MK2 display is 800x480 (5:3) and 6" wide.  Size it to
+    // 6" (the minimum asked for), keep the 5:3 aspect EXACTLY, and centre it
+    // horizontally at the top.  A 13" iPad in portrait is ~7.82" wide (2064 px
+    // @264 ppi), so 6" is ~0.767 of the window width.  Deriving the height from
+    // the true base w/h ratio keeps the LCD 5:3 regardless of the window.
+    const SCREEN_ASPECT: f32 = 800.0 / 480.0;   // 5:3
+    const IPAD_W_IN:     f32 = 7.75;            // 13" iPad portrait width, inches (measured)
+    let sw  = (6.0 / IPAD_W_IN).min(0.98);                          // 6" of the width
+    let sh  = sw * (base.width() / base.height()) / SCREEN_ASPECT;  // 5:3 in pixels
+    let sx0 = (1.0 - sw) / 2.0;                                     // centred
+    let sy0 = 0.030;
+    let screen = face_rect(base, sx0, sy0, sx0 + sw, sy0 + sh);
+
     let face = FaceLayout {
         base,
         jog:      disk(0.500, 0.610, 0.300),
@@ -214,10 +225,12 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         loop_in:  face_rect(base, 0.520, 0.878, 0.605, 0.918),
         loop_out: face_rect(base, 0.625, 0.878, 0.710, 0.918),
         reloop:   disk(0.775, 0.898, 0.026),
-        browse:   disk(0.930, 0.098, 0.056),
+        // Browse knob in the right margin beside the screen; TIME/AUTO CUE stacked
+        // in the left margin.  (Margins are (1-sw)/2 ≈ 0.117 wide at 6".)
+        browse:   disk(0.945, 0.105, 0.048),
         mt:       disk(0.845, 0.448, 0.020),
-        time_mode: Some(face_rect(base, 0.022, 0.070, 0.128, 0.135)),
-        auto_cue:  Some(face_rect(base, 0.022, 0.170, 0.128, 0.235)),
+        time_mode: Some(face_rect(base, 0.012, 0.055, 0.104, 0.120)),
+        auto_cue:  Some(face_rect(base, 0.012, 0.150, 0.104, 0.215)),
     };
     (screen, face)
 }
