@@ -6,6 +6,10 @@ controller, a test script, or eventually the RP2350 surface over serial.
 Anything that can be tested with a script can be tested without hardware,
 and a recorded session from real hardware can be replayed as a script.
 
+The full XDJ-1000MK2 control surface that would ride this bus — touch skin first,
+then a physical faceplate (jog, fader, buttons) — is designed in
+[`design/faceplate-and-hardware.md`](design/faceplate-and-hardware.md).
+
 ## What exists today
 
 Three input paths, none shared:
