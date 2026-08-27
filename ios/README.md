@@ -15,16 +15,18 @@ in [`docs/design/mobile-tablet-port.md`](../docs/design/mobile-tablet-port.md).
 > - MiniBPM detects the grid; playback of a normal MP3 sounds correct.
 > - **Pro DJ Link, both directions, against a real XDJ-1000MK2:** receives its
 >   announces and status, takes tempo master from it, sends pitch, and the XDJ
->   follows freedj's tempo. Link *receive* worked **without** the multicast
->   entitlement, which the design doc did not assume.
+>   follows freedj's tempo. Both broadcast *and* receive worked **without** the
+>   multicast entitlement, over wired ethernet with Wi-Fi off — which the design
+>   doc did not assume.
 >
 > Also builds and runs on the `iphonesimulator` (arm64) — but note the simulator
 > shares the Mac's network stack, so Link working there says nothing about the
 > device sandbox, and simulator audio glitches regardless. Only the device
 > results above count.
 >
-> Still open: the multicast entitlement has not been requested, so the beat
-> broadcast currently depends on plain UDP broadcast being permitted.
+> Confirmed (2026-08-27): plain UDP broadcast over wired ethernet is permitted
+> on device with no multicast entitlement, so standalone sync needs neither the
+> entitlement nor a Mac. Remaining Link work is interface re-bind robustness (#36).
 
 ## What's here
 
@@ -52,9 +54,11 @@ Signing is already wired up in the project: team `W527ZN3X52`, bundle id
 `com.audiodestruct.opendeck`, automatic signing. `make ios` passes
 `-allowProvisioningUpdates` so the profile is created/refreshed as needed.
 
-A paid developer account is needed for on-device installs plus the multicast
-entitlement. A free account gives 7-day installs but **not** the multicast
-entitlement, so Link won't work under a free account.
+A paid developer account is needed for on-device installs. The multicast
+entitlement turned out **not** to be required: Pro DJ Link sync works on device
+over a wired USB-C ethernet dongle (Wi-Fi off) **without** it (verified
+2026-08-27). A free 7-day sideload should therefore be enough for wired-ethernet
+Link; the entitlement only matters if you later need Wi-Fi multicast.
 
 ### Your Xcode must be newer than the device
 
@@ -152,24 +156,24 @@ staticlib, so Accelerate is also listed in the Xcode target's `OTHER_LDFLAGS`
 alongside the other frameworks. Anything else the Rust side starts linking must
 be added there too.
 
-## Before the demo: prove Link broadcast works on the device
+## Link broadcast on the device — verified working
 
-1. **Request the multicast entitlement** from Apple for your App ID (a form; paid
-   account; usually granted in a few days), then make sure the provisioning
-   profile includes it.
+Pro DJ Link sync is confirmed on device (2026-08-27) over a USB-C ethernet
+dongle with **Wi-Fi off**, with **no multicast entitlement** and no Mac relay:
+freedj announces, receives the XDJ's broadcast beat clock, and the XDJ syncs.
 
-   Because an ungranted entitlement makes the build fail to provision, the
-   entitlements file is **off by default**: `CODE_SIGN_ENTITLEMENTS` reads
-   `$(FREEDJ_ENTITLEMENTS)`, which is empty. Opt in once Apple approves:
+1. **Launch with the dongle already connected.** freedj binds its Link interface
+   at startup, then re-selects onto a discovered player's subnet once it hears
+   one; if you plug the dongle in *after* launch and it hasn't been addressed
+   yet, relaunch. Making this fully automatic on hotplug is issue #36.
+2. **Confirm it's up:** watch the log for `ProDJ status: player N ...` (freedj is
+   receiving the XDJ's broadcast) and `ProDJ Link: sending as player N from <IP>
+   (<iface>) to <bcast>` (it chose the right interface).
 
-   ```sh
-   make ios-device MULTICAST=1
-   ```
-2. **Verify Pro DJ Link broadcast on the iPad itself** (over a USB-C ethernet
-   dongle to the XDJ's network). Watch the log for `ProDJ status: player N ...`
-   — that means freedj is receiving the XDJ's broadcast. If broadcast is silently
-   dropped despite the entitlement, fall back to unicast tempo-follow (see the
-   design doc). This gates the whole demo, so test it before polishing anything.
+The multicast entitlement is **not** needed for wired ethernet. If you ever do
+want it (Wi-Fi multicast), the entitlements file is off by default —
+`CODE_SIGN_ENTITLEMENTS` reads `$(FREEDJ_ENTITLEMENTS)`, empty unless you opt in
+with `make ios-device MULTICAST=1` once Apple grants it for your App ID.
 
-   Note the simulator shares the Mac's network stack, so Link working there says
-   nothing about the device sandbox — only the on-device test counts.
+Note the simulator shares the Mac's network stack, so Link working there says
+nothing about the device sandbox — only the on-device test counts.
