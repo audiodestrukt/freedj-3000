@@ -1495,8 +1495,14 @@ pub extern "C" fn freedj_ios_main() {
         None => log::warn!("could not locate the app bundle — relative resources will not resolve"),
     }
 
-    // Demo config: full faceplate, player 1, Link send on.
+    // Demo config: full faceplate, player 3 (the ADK-1000 is a drop-in "deck 3"
+    // next to CDJs 1-2, so 3 avoids the default collision), Link send on.
+    // OPENDECK_PLAYER overrides, matching the desktop `--player` arg; a Utility
+    // -style config menu to set this on device is on the backlog.
     std::env::set_var("OPENDECK_FACEPLATE", "1");
+    let player: u8 = std::env::var("OPENDECK_PLAYER").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(3);
 
     let track = match bundle.as_deref().and_then(bundled_track) {
         Some(t) => t,
@@ -1509,7 +1515,7 @@ pub extern "C" fn freedj_ios_main() {
         }
     };
     log::info!("track: {}", track.display());
-    if let Err(e) = run(Config { track, player: 1, deck_channel: 0, link_send: true }) {
+    if let Err(e) = run(Config { track, player, deck_channel: 0, link_send: true }) {
         log::error!("freedj_ios_main: {e:#}");
     }
 }
