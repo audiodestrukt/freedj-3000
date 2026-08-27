@@ -242,6 +242,12 @@ impl ProDjLink {
         use crate::status_template::STATUS_TEMPLATE as T;
         let mut p = T.to_vec();
         p[0x0b..0x0b + 20].copy_from_slice(&self.device_name);
+        // Byte 0x1f is 0x01 in every real device's status (verified on the wire
+        // against an XDJ-1000MK2 and Beat Link's VirtualCdj); our template had
+        // 0x00 here.  The XDJ tolerates it for normal status but aborts a master
+        // handoff to us over it — the one structural byte where our status
+        // differed from both a real XDJ and Beat Link.
+        p[0x1f] = 0x01;
         p[status::DEVICE] = self.player_num;
         p[0x24] = self.player_num;
         // Track source: our own player, "USB", rekordbox-analysed — so peers

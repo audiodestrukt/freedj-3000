@@ -63,12 +63,6 @@ pub struct LinkState {
     /// `masterYieldedFrom`: once set we stop re-requesting and wait to see our
     /// own number in the master's Mh byte before actually taking master.
     pub yielded_from:  AtomicU32,
-    /// ms since `epoch` when we first saw the outgoing master advertise Mh==us
-    /// (0 = not currently in a handoff).  We must DWELL here — staying silent
-    /// on master — for ~one of the master's status cycles before asserting, or
-    /// the XDJ aborts the handoff (reverts Mh, keeps MASTER).  Beat Link gets
-    /// this dwell for free because it only emits status on a ~200 ms timer.
-    pub mh_seen_ms:    AtomicU64,
     /// player → ip, from announces.
     pub peers:         Mutex<HashMap<u8, Ipv4Addr>>,
 }
@@ -89,7 +83,6 @@ impl LinkState {
             largest_sync: AtomicU32::new(0),
             our_sync: AtomicU32::new(0),
             yielded_from: AtomicU32::new(0),
-            mh_seen_ms: AtomicU64::new(0),
             peers: Mutex::new(HashMap::new()),
         })
     }
@@ -101,7 +94,6 @@ impl LinkState {
         self.master.store(true, Ordering::Relaxed);
         self.want_master.store(false, Ordering::Relaxed);
         self.yielded_from.store(0, Ordering::Relaxed);
-        self.mh_seen_ms.store(0, Ordering::Relaxed);
         self.master_since_ms.store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
         log::info!("ProDJ Link: taking master ({why}), sync counter {n}");
     }
@@ -367,32 +359,10 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
         // MASTER flag is not a claim against ours.
         if st.master && handing_to_us {
             if !link.master.load(Ordering::Relaxed) {
-                // DWELL before asserting.  Asserting on the FIRST Mh==us packet
-                // (what we did before) makes the XDJ abort ~60 ms later: it has
-                // only just committed to the handoff and sees our master claim
-                // race in, so it reverts Mh and keeps MASTER.  Beat Link only
-                // emits status on a ~200 ms timer, so its claim lands ~200 ms
-                // after Mh==us and the XDJ completes.  Reproduce that: wait for
-                // the master to advertise Mh==us for ~one status cycle, staying
-                // silent on master, then assert.  (Wire-measured: XDJ holds
-                // Mh==us ≥200 ms when we don't jump the gun; Beat Link asserts
-                // ~196 ms in.)
-                let now_ms = link.epoch.elapsed().as_millis() as u64;
-                let first = link.mh_seen_ms.load(Ordering::Relaxed);
-                if first == 0 {
-                    link.mh_seen_ms.store(now_ms.max(1), Ordering::Relaxed);
-                } else if now_ms.saturating_sub(first) >= 175 {
-                    link.take_master(&format!("player {} handed off (dwelled {} ms)",
-                                              st.player, now_ms - first));
-                }
+                link.take_master(&format!("player {} is handing off", st.player));
             }
             if cur != st.player { link.master_player.store(st.player as u32, Ordering::Relaxed); }
             return;
-        }
-        // Master with Mh not pointing at us: no handoff in progress — reset the
-        // dwell so a later handoff starts its clock fresh.
-        if st.master && !handing_to_us {
-            link.mh_seen_ms.store(0, Ordering::Relaxed);
         }
 
         if st.master && cur != st.player {
