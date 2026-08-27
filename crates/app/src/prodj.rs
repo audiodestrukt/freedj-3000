@@ -144,31 +144,67 @@ fn bind_shared(port: u16) -> Option<UdpSocket> {
     Some(sock)
 }
 
-/// Pick the interface to speak Link on: first non-loopback, non-bridge IPv4
-/// with a broadcast address, else loopback (which still reaches a second
-/// instance on this machine).  Returns (ip, broadcast, mac, name).
-fn link_interface() -> (Ipv4Addr, Ipv4Addr, [u8; 6], String) {
+/// An IPv4 address is link-local (APIPA) when it is in 169.254.0.0/16.  That
+/// means DHCP never answered — which is exactly what an idle USB-C ethernet
+/// dongle looks like while the real network is on another interface.  Broadcasts
+/// there fail with "no route to host".
+fn is_link_local(ip: Ipv4Addr) -> bool {
+    let o = ip.octets();
+    o[0] == 169 && o[1] == 254
+}
+
+fn same_subnet(a: Ipv4Addr, b: Ipv4Addr, mask: Ipv4Addr) -> bool {
+    let (a, b, m) = (u32::from(a), u32::from(b), u32::from(mask));
+    a & m == b & m
+}
+
+/// Pick the interface to speak Link on, best first, else loopback (which still
+/// reaches a second instance on this machine).  Returns (ip, broadcast, mac,
+/// name).
+///
+/// `peers` are players we have already heard from.  Discovery happens on the
+/// listener threads *after* the sender starts, so the first choice is made
+/// blind; once a player is known, only an interface on that player's subnet can
+/// reach it by broadcast, so such an interface wins outright.  Failing that,
+/// prefer a properly configured interface over a link-local one.
+///
+/// Taking simply the first candidate — as this did — put an iPad's beat
+/// broadcasts onto a link-local USB-C dongle that enumerated ahead of Wi-Fi,
+/// while the XDJ sat on the Wi-Fi subnet.  Status packets are unicast to each
+/// discovered peer, so master handoff and tempo kept working and only the
+/// broadcast beat clock was lost.
+fn link_interface(peers: &[Ipv4Addr]) -> (Ipv4Addr, Ipv4Addr, [u8; 6], String) {
+    let mut best: Option<(u8, Ipv4Addr, Ipv4Addr, [u8; 6], String)> = None;
     if let Ok(ifs) = if_addrs::get_if_addrs() {
         for i in ifs {
             if i.is_loopback() { continue; }
-            if let if_addrs::IfAddr::V4(v4) = &i.addr {
-                if let Some(bc) = v4.broadcast {
-                    if i.name.starts_with("docker") || i.name.starts_with("br-") || i.name.starts_with("lxc") || i.name.starts_with("virbr") {
-                        continue;
-                    }
-                    let mac = std::fs::read_to_string(format!("/sys/class/net/{}/address", i.name))
-                        .ok()
-                        .and_then(|m| {
-                            let b: Vec<u8> = m.trim().split(':').filter_map(|h| u8::from_str_radix(h, 16).ok()).collect();
-                            b.try_into().ok()
-                        })
-                        .unwrap_or([0x02, 0xfd, 0, 0, 0, 1]);
-                    return (v4.ip, bc, mac, i.name.clone());
-                }
+            let if_addrs::IfAddr::V4(v4) = &i.addr else { continue };
+            let Some(bc) = v4.broadcast else { continue };
+            if i.name.starts_with("docker") || i.name.starts_with("br-") || i.name.starts_with("lxc") || i.name.starts_with("virbr") {
+                continue;
             }
+            let reaches_peer = peers.iter().any(|p| same_subnet(v4.ip, *p, v4.netmask));
+            let score = match (reaches_peer, is_link_local(v4.ip)) {
+                (true,  _)     => 3,   // on a known player's subnet
+                (false, false) => 2,   // configured, but no player seen there yet
+                (false, true)  => 1,   // link-local: DHCP never answered
+            };
+            // Strictly greater keeps the original first-wins order on a tie.
+            if best.as_ref().is_some_and(|(b, ..)| *b >= score) { continue; }
+            let mac = std::fs::read_to_string(format!("/sys/class/net/{}/address", i.name))
+                .ok()
+                .and_then(|m| {
+                    let b: Vec<u8> = m.trim().split(':').filter_map(|h| u8::from_str_radix(h, 16).ok()).collect();
+                    b.try_into().ok()
+                })
+                .unwrap_or([0x02, 0xfd, 0, 0, 0, 1]);
+            best = Some((score, v4.ip, bc, mac, i.name.clone()));
         }
     }
-    (Ipv4Addr::LOCALHOST, Ipv4Addr::LOCALHOST, [0x02, 0xfd, 0, 0, 0, 1], "lo".into())
+    match best {
+        Some((_, ip, bc, mac, name)) => (ip, bc, mac, name),
+        None => (Ipv4Addr::LOCALHOST, Ipv4Addr::LOCALHOST, [0x02, 0xfd, 0, 0, 0, 1], "lo".into()),
+    }
 }
 
 // ── Listeners ─────────────────────────────────────────────────────────────────
@@ -417,7 +453,7 @@ impl ProDjSender {
         if let Err(e) = sock.set_broadcast(true) {
             log::warn!("ProDJ Link: set_broadcast failed: {e} (announces/beats will not go out)");
         }
-        let (ip, bcast, mac, iface) = link_interface();
+        let (ip, bcast, mac, iface) = link_interface(&[]);
         let player = link.player;
         log::info!("ProDJ Link: sending as player {player} from {ip} ({iface}) to {bcast}");
 
@@ -425,7 +461,10 @@ impl ProDjSender {
         let t = thread::Builder::new()
             .name("prodj-tx".into())
             .spawn(move || {
-                let announce = me.build_announce(ip, mac);
+                // Re-selected below once players are discovered.
+                let (mut ip, mut bcast, mut mac) = (ip, bcast, mac);
+                let mut announce = me.build_announce(ip, mac);
+                let mut known_peers: Vec<Ipv4Addr> = Vec::new();
                 let mut bcast_warned = false;
                 let mut last_announce = Instant::now() - Duration::from_secs(5);
                 let mut last_status   = Instant::now() - Duration::from_secs(5);
@@ -526,6 +565,26 @@ impl ProDjSender {
 
                     // ── Announce ─────────────────────────────────────────────
                     if now.duration_since(last_announce) >= Duration::from_millis(1500) {
+                        // The interface was chosen before any player was known.
+                        // Now that some are, re-check: only an interface on a
+                        // player's subnet can reach it by broadcast.  Cheap, and
+                        // only when the peer set actually changed.
+                        let mut peers: Vec<Ipv4Addr> = link.peers.lock()
+                            .map(|p| p.values().copied().collect()).unwrap_or_default();
+                        peers.sort();
+                        if peers != known_peers {
+                            known_peers = peers;
+                            let (nip, nbc, nmac, niface) = link_interface(&known_peers);
+                            if nbc != bcast {
+                                log::info!(
+                                    "ProDJ Link: moving to {nip} ({niface}) to {nbc} — reaches {} player(s), was {ip} to {bcast}",
+                                    known_peers.len(),
+                                );
+                                ip = nip; bcast = nbc; mac = nmac;
+                                announce = me.build_announce(ip, mac);
+                                bcast_warned = false;   // re-warn if the new one also fails
+                            }
+                        }
                         if let Err(e) = sock.send_to(&announce, (bcast, PORT_ANNOUNCE)) {
                             if !bcast_warned {
                                 bcast_warned = true;
@@ -663,5 +722,40 @@ impl ProDjSender {
             })
             .ok()?;
         Some(ProDjSender { _thread: t })
+    }
+}
+
+#[cfg(test)]
+mod interface_tests {
+    use super::*;
+
+    #[test]
+    fn link_local_is_recognised() {
+        // What an idle USB-C ethernet dongle self-assigns when DHCP is silent.
+        assert!(is_link_local("169.254.247.12".parse().unwrap()));
+        assert!(!is_link_local("192.168.68.51".parse().unwrap()));
+        assert!(!is_link_local("10.0.0.4".parse().unwrap()));
+        // Neighbouring /16s must not be swept up.
+        assert!(!is_link_local("169.253.0.1".parse().unwrap()));
+        assert!(!is_link_local("169.255.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn subnet_match_picks_the_players_network() {
+        let mask: Ipv4Addr = "255.255.255.0".parse().unwrap();
+        let wifi: Ipv4Addr = "192.168.68.51".parse().unwrap();
+        let xdj:  Ipv4Addr = "192.168.68.58".parse().unwrap();
+        assert!(same_subnet(wifi, xdj, mask));
+
+        // The dongle the iPad was broadcasting onto cannot reach the XDJ.
+        let dongle: Ipv4Addr = "169.254.247.12".parse().unwrap();
+        assert!(!same_subnet(dongle, xdj, "255.255.0.0".parse().unwrap()));
+
+        // A wider mask genuinely does cover it.
+        assert!(same_subnet("192.168.1.1".parse().unwrap(), xdj, "255.255.0.0".parse().unwrap()));
+        // ...and a narrower one splits them: /29 puts .51 in .48-.55 and .58 in
+        // .56-.63.  (/28 would NOT — both sit in .48-.63.)
+        assert!(!same_subnet(wifi, xdj, "255.255.255.248".parse().unwrap()));
+        assert!(same_subnet(wifi, xdj, "255.255.255.240".parse().unwrap()));
     }
 }

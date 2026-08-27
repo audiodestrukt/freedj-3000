@@ -8,7 +8,14 @@ set -eu
 
 REPO="$SRCROOT/.."
 cd "$REPO"
-export PATH="$HOME/.cargo/bin:$PATH"
+# Xcode's build environment does NOT source the login shell, so cargo is almost
+# never on PATH.  Cover both installs: rustup.rs (~/.cargo/bin) and Homebrew's
+# rustup formula (shims in /opt/homebrew/opt/rustup/bin, nothing in ~/.cargo).
+export PATH="$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:/usr/local/opt/rustup/bin:$PATH"
+command -v cargo >/dev/null || {
+    echo "error: cargo not found on PATH — install rustup, or add its bin dir here" >&2
+    exit 1
+}
 
 # Map Xcode's platform/arch to a Rust target triple.
 if [ "$PLATFORM_NAME" = "iphonesimulator" ]; then
