@@ -1293,7 +1293,7 @@ pub fn desktop_main() -> Result<()> {
     let mut link_send = std::env::var("OPENDECK_LINK_SEND").map(|v| v == "1").unwrap_or(false);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--player" => player = args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6")?,
+            "--player" => player = args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6 (5-6 only on an all-CDJ-3000 network)")?,
             "--deck" => deck_channel = match args.next().as_deref() {
                 Some("A") | Some("a") => 0,
                 Some("B") | Some("b") => 1,
@@ -1319,6 +1319,11 @@ pub fn desktop_main() -> Result<()> {
 /// (desktop `main`, iOS/Android) builds a `Config` and calls this.
 pub fn run(cfg: Config) -> Result<()> {
     let track        = cfg.track;
+    // Pro DJ Link player numbers: 1-4 is the universal space (CDJ-2000/NXS2,
+    // XDJ, mixed rigs). The CDJ-3000 raised it to 6, but ONLY when every linked
+    // device is a CDJ-3000; against an XDJ/mixed network 5-6 are invalid and the
+    // player refuses master handoff to one. We allow 1-6; picking 5-6 only works
+    // on an all-CDJ-3000 network. See docs/design/prodj-link-players.md.
     let player       = cfg.player.clamp(1, 6);
     let deck_channel = cfg.deck_channel;
     let link_send    = cfg.link_send;
