@@ -61,8 +61,9 @@ mod beat {
 /// (0xd0 / 0xd4 / 0x11c / 0x124); an XDJ-1000MK2 on firmware 1.44 sends 0x124.
 mod status {
     pub const DEVICE:    usize = 0x21;
-    pub const LEN:       usize = 0x22;   // u16 BE, remaining length
-    pub const ACTIVITY:  usize = 0x27;   // 0 idle, 1 active
+    // Documented wire offsets we don't parse yet — keep for reference.
+    #[allow(dead_code)] pub const LEN:      usize = 0x22;   // u16 BE, remaining length
+    #[allow(dead_code)] pub const ACTIVITY: usize = 0x27;   // 0 idle, 1 active
     pub const SLOT:      usize = 0x29;   // 1 CD, 2 SD, 3 USB, 4 rekordbox, 6 streaming
     pub const TRACK_TYPE: usize = 0x2a;  // 0 none, 1 rekordbox, 2 unanalysed, 5 CD
     pub const PLAY:      usize = 0x7b;   // P1, see PlayState

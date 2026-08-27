@@ -23,6 +23,7 @@ pub struct XwaxTimecodeDecoder {
     bit_accum:      f32,
     // Output
     last_speed:     f32,
+    #[allow(dead_code)] // DVS decode is WIP
     last_pos:       f64,
     last_confidence:f32,
 }
@@ -54,6 +55,7 @@ impl XwaxTimecodeDecoder {
         }
     }
 
+    #[allow(dead_code)] // DVS decode is WIP
     fn lfsr_taps(&self) -> u32 {
         // Polynomial for a 12-bit LFSR (4095 positions = ~8 minutes at 1000 bps).
         // Actual polynomials per format sourced from xwax timecoder.c.

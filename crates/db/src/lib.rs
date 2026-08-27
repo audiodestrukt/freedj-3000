@@ -1,4 +1,4 @@
-use opendeck_types::{BeatGrid, CueMap, CuePoint, CueKind, Rgb, SavedLoop, TrackInfo};
+use opendeck_types::{BeatGrid, CueMap, CuePoint, CueKind, Rgb, TrackInfo};
 use rusqlite::{Connection, Result, params};
 use std::path::Path;
 

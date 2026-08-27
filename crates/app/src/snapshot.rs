@@ -20,8 +20,12 @@ pub struct DeckSnapshot<'a> {
     /// Start-cue position in source samples (CDJ CUE).
     pub cue_point:    u64,
 
+    /// Populated for completeness; the renderer derives play/tempo from other
+    /// fields today. Kept for a future TEMPO/eject readout, hence allow(dead_code).
+    #[allow(dead_code)]
     pub playing:      bool,
     /// Instantaneous playback speed including jog nudges.
+    #[allow(dead_code)]
     pub speed:        f32,
     /// Stable pitch-fader speed — what the TEMPO readout shows.
     pub fader_speed:  f32,

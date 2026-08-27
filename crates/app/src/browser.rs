@@ -38,7 +38,10 @@ pub enum Load {
 pub struct Entry {
     pub name:   String,
     pub is_dir: bool,
+    /// Parsed rekordbox metadata; not yet drawn in the row (planned).
+    #[allow(dead_code)]
     pub artist: Option<String>,
+    #[allow(dead_code)]
     pub bpm:    Option<f32>,
     kind:       EntryKind,
 }

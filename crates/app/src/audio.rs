@@ -126,6 +126,7 @@ impl AudioHandle {
 
     /// Number of interleaved samples in the currently-loaded track.
     pub fn len(&self) -> usize { self.samples.load().len() }
+    #[allow(dead_code)] // companion to len(); clippy expects it to exist
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
     /// The currently-loaded sample buffer (cheap Arc clone).

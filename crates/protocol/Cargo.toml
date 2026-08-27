@@ -7,3 +7,7 @@ license.workspace = true
 
 [dependencies]
 bytemuck = { workspace = true }
+
+[features]
+# no_std by default (runs on the MCU); enable `std` for host-side builds/tests.
+std = []

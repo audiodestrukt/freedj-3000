@@ -419,7 +419,6 @@ impl Renderer {
         let sample_rate       = snap.sample_rate;
         let channels          = snap.channels;
         let beat_grid         = snap.beat_grid;
-        let fader_speed       = snap.fader_speed;
         let beat2_bpm         = snap.beat2_bpm;
         let beat2_phase_beats = snap.beat2_phase_beats;
         let pixels_per_point = full_output.pixels_per_point;

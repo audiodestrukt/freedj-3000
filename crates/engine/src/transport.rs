@@ -111,7 +111,6 @@ impl Transport {
                 let t        = smooth_step(xf.sample_index as f32 / xf.length as f32);
                 xf.sample_index += 1;
                 let done = xf.sample_index >= xf.length;
-                drop(xf);
                 let from     = self.read_frame_at(from_pos, pcm_ring);
                 let to       = self.read_frame_at(to_pos,   pcm_ring);
                 let new_from = self.advance(from_pos, 1.0);

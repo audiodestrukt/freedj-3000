@@ -1,3 +1,4 @@
+#![allow(dead_code)] // complete FFI surface; not every binding is called yet
 //! Raw FFI bindings for rubberband-c.h (Rubber Band Library 3.x).
 //!
 //! Only the subset of the API that we actually use is bound here.
