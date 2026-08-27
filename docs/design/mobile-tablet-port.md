@@ -11,16 +11,24 @@ freedj runs on a 13" iPad — full photo faceplate, our LCD, clean audio. Over a
 USB-C ethernet dongle to the XDJ's network it **loads tracks from the XDJ's
 library**. What we learned, including a correction:
 
-- **Unicast works standalone; broadcast does not (no entitlement).** Track
-  loading is **unicast** (NFS / dbserver straight to the XDJ's IP) and works on
-  the iPad alone with just the local-network permission. Pro DJ Link **sync** is
-  **broadcast** (the XDJ's beat clock + freedj's announce) — and it worked *only
-  while the iPad was USB-tethered to the Mac*, which was relaying broadcast. With
-  the Mac disconnected, track loads still work but **sync stops**. So the
-  `com.apple.developer.networking.multicast` **entitlement gate is real for
-  broadcast**, even over wired — the Mac was the enabler, not the dongle. (Earlier
-  in this spike we briefly thought wired sidestepped it; the sync-stops-when-
-  untethered result disproved that.)
+- **Unicast works standalone; broadcast doesn't (cause not yet pinned down).**
+  Track loading is **unicast** (NFS / dbserver straight to the XDJ's IP) and works
+  on the iPad alone with just the local-network permission. Pro DJ Link **sync**
+  is **broadcast** (the XDJ's beat clock + freedj's announce) — it worked while
+  USB-tethered to the Mac (which relayed broadcast), but a wired dongle straight
+  to the XDJ's network (no Mac) loads tracks yet **does not sync**. TWO candidate
+  causes, indistinguishable from the outside:
+  1. **iOS blocks broadcast** without `com.apple.developer.networking.multicast`.
+  2. **freedj picks the wrong interface.** `link_interface()` takes the *first*
+     non-loopback IPv4 with a broadcast address — on iOS, if Wi-Fi is also up,
+     freedj may be broadcasting onto Wi-Fi, not the dongle's subnet, even though
+     unicast-to-the-XDJ routes fine.
+
+  Diagnose from the Xcode console (`RUST_LOG=debug`): the line `ProDJ Link:
+  sending as player N from <IP> (<iface>) to <bcast>`. Right iface/subnet →
+  it's the entitlement; Wi-Fi/wrong subnet → it's the interface pick (a freedj
+  bug to fix). Quick test: turn Wi-Fi off (dongle only) and retry — if sync then
+  works, it was the interface pick, not the entitlement.
 - **Implication for a self-contained demo:** standalone **sync** needs either the
   Apple multicast entitlement (paid account + request), or a **unicast
   tempo-follow** path — freedj unicasts its announce to the XDJ's known IP and
