@@ -220,8 +220,10 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         base,
         jog:      disk(0.500, 0.610, 0.300),
         fader:    face_rect(base, 0.895, 0.470, 0.955, 0.800),
-        play:     disk(0.340, 0.900, 0.062),
-        cue:      disk(0.170, 0.900, 0.062),
+        // CUE above PLAY/PAUSE, stacked vertically at the bottom-left, as on the
+        // real XDJ (CUE upper, PLAY the bottom-left corner button).
+        cue:      disk(0.115, 0.775, 0.060),
+        play:     disk(0.115, 0.905, 0.060),
         loop_in:  face_rect(base, 0.520, 0.878, 0.605, 0.918),
         loop_out: face_rect(base, 0.625, 0.878, 0.710, 0.918),
         reloop:   disk(0.775, 0.898, 0.026),
