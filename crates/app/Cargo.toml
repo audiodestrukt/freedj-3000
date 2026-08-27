@@ -36,3 +36,4 @@ opendeck-link     = { workspace = true }
 socket2           = { workspace = true }
 if-addrs          = "0.13"
 png               = "0.17"
+jpeg-decoder      = "0.3"   # faceplate background photo (--faceplate)

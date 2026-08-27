@@ -85,6 +85,9 @@ struct DeckApp {
     zoom_grid_mode:    bool,
     source_link:       bool,
     phase_ticks_view:  bool,
+    /// Render the full physical faceplate (jog, fader, buttons) around the
+    /// screen.  Off by default — the Pi/hardware target runs screen-only.
+    faceplate:         bool,
     /// Same-thread sources (keyboard, touch) push here.
     events:            Vec<Event>,
     /// Off-thread sources (MIDI, later HID/serial) send here; drained per frame.
@@ -102,6 +105,9 @@ struct DeckApp {
     renderer:    Option<Renderer>,
     egui_ctx:    egui::Context,
     egui_state:  Option<egui_winit::State>,
+    /// Faceplate background photo (loaded once from a path; see load_face_texture).
+    face_tex:       Option<egui::TextureHandle>,
+    face_tex_tried: bool,
 
     /// Time of the last rendered frame, used to cap to FRAME_INTERVAL.
     last_render: Instant,
@@ -240,6 +246,7 @@ impl DeckApp {
             source_link:       false,
             // Dev: OPENDECK_PHASE_VIEW=ticks starts in the alignment view (for captures).
             phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
+            faceplate:         std::env::var("OPENDECK_FACEPLATE").map(|v| v == "1").unwrap_or(false),
             events:            Vec::new(),
             event_rx,
             jog_offset:        0.0,
@@ -252,6 +259,8 @@ impl DeckApp {
             renderer:    None,
             egui_ctx:    egui::Context::default(),
             egui_state:  None,
+            face_tex:       None,
+            face_tex_tried: false,
             last_render: Instant::now(),
             last_frame_total: Duration::ZERO,
             frame_spikes: 0,
@@ -851,7 +860,21 @@ impl DeckApp {
         // Screen layout in logical points; the shader gets its two rects in pixels.
         let ppp  = window.scale_factor() as f32;
         let size = window.inner_size();
-        let lay  = screen::layout(egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
+        let win  = egui::Rect::from_min_size(egui::Pos2::ZERO,
+                       egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
+        // Load the faceplate photo once (from a path; never bundled in the repo).
+        if self.faceplate && !self.face_tex_tried {
+            self.face_tex_tried = true;
+            self.face_tex = load_face_texture(&self.egui_ctx);
+        }
+        // Faceplate renders the screen into a sub-rect over the deck photo; with
+        // no photo (or --faceplate off) we fill the whole window, screen-only.
+        let base = self.face_tex.as_ref().map(|t| fit_contain(t.size_vec2(), win));
+        let (screen_rect, face) = match base {
+            Some(b) => { let (s, f) = screen::faceplate_layout(b); (s, Some(f)) }
+            None    => (win, None),
+        };
+        let lay  = screen::layout(screen_rect);
         let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
         let vp   = renderer::Viewports { wave: px(lay.wave), overview: px(lay.overview), dim_played: self.remain_mode };
 
@@ -860,7 +883,9 @@ impl DeckApp {
         let mut touch = Vec::new();
         let _t_run = Instant::now();
         let browse = if self.screen_mode == ScreenMode::Browse { Some(&self.browser) } else { None };
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, &mut touch));
+        let face_ref = face.as_ref();
+        let face_img = match (self.face_tex.as_ref(), base) { (Some(t), Some(b)) => Some((t, b)), _ => None };
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, face_ref, face_img, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
         self.events.append(&mut touch);
@@ -934,9 +959,12 @@ impl ApplicationHandler for DeckApp {
             return; // already initialised (e.g. Android resume)
         }
 
+        // Screen-only is the 7" panel; the faceplate window matches the deck
+        // photo's aspect (the image is aspect-fit inside it).
+        let (win_w, win_h) = if self.faceplate { (860u32, 1090u32) } else { (1024u32, 600u32) };
         let attrs = WindowAttributes::default()
             .with_title("freedj-3000")
-            .with_inner_size(winit::dpi::LogicalSize::new(1024u32, 600u32));   // XDJ-1000MK2 7" panel
+            .with_inner_size(winit::dpi::LogicalSize::new(win_w, win_h));
 
         let window = Arc::new(
             event_loop
@@ -1121,6 +1149,59 @@ impl ApplicationHandler for DeckApp {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
+/// Load the faceplate background image from a path (default the local XDJ photo,
+/// override with OPENDECK_FACEPLATE_IMG).  The image is NOT bundled in the repo —
+/// supply your own; use an original/licensed faceplate for any public release.
+fn load_face_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    let path = std::env::var("OPENDECK_FACEPLATE_IMG").unwrap_or_else(|_| {
+        format!("{}/Downloads/XDJ1000Mk2-xlarge.jpg", std::env::var("HOME").unwrap_or_default())
+    });
+    let bytes = std::fs::read(&path)
+        .map_err(|e| log::warn!("faceplate image: cannot read {path}: {e} — screen-only"))
+        .ok()?;
+    let (rgba, w, h) = decode_rgba(&bytes, &path).or_else(|| {
+        log::warn!("faceplate image: could not decode {path} (need jpg/png) — screen-only");
+        None
+    })?;
+    log::info!("faceplate image: {path} ({w}x{h})");
+    let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
+    Some(ctx.load_texture("faceplate", img, egui::TextureOptions::LINEAR))
+}
+
+/// Decode a JPEG or PNG to RGBA8 (jpeg-decoder + the png crate already vendored).
+fn decode_rgba(bytes: &[u8], path: &str) -> Option<(Vec<u8>, usize, usize)> {
+    if path.to_ascii_lowercase().ends_with(".png") {
+        let mut reader = png::Decoder::new(bytes).read_info().ok()?;
+        let mut buf = vec![0u8; reader.output_buffer_size()];
+        let info = reader.next_frame(&mut buf).ok()?;
+        let (w, h) = (info.width as usize, info.height as usize);
+        let rgba = match info.color_type {
+            png::ColorType::Rgba      => buf[..w * h * 4].to_vec(),
+            png::ColorType::Rgb       => buf[..w * h * 3].chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+            png::ColorType::Grayscale => buf[..w * h].iter().flat_map(|&v| [v, v, v, 255]).collect(),
+            _ => return None,
+        };
+        Some((rgba, w, h))
+    } else {
+        let mut dec = jpeg_decoder::Decoder::new(bytes);
+        let pixels = dec.decode().ok()?;
+        let info = dec.info()?;
+        let (w, h) = (info.width as usize, info.height as usize);
+        let rgba = match info.pixel_format {
+            jpeg_decoder::PixelFormat::RGB24 => pixels.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+            jpeg_decoder::PixelFormat::L8    => pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
+            _ => return None,
+        };
+        Some((rgba, w, h))
+    }
+}
+
+/// Aspect-fit (contain) a texture of size `ts` into `win`, centered.
+fn fit_contain(ts: egui::Vec2, win: egui::Rect) -> egui::Rect {
+    let s = (win.width() / ts.x).min(win.height() / ts.y);
+    egui::Rect::from_center_size(win.center(), ts * s)
+}
+
 fn main() -> Result<()> {
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,wgpu=warn,naga=warn"),
@@ -1154,6 +1235,7 @@ fn main() -> Result<()> {
             },
             "--link-send" => link_send = true,
             "--link-receive-only" => link_send = false,
+            "--faceplate" => std::env::set_var("OPENDECK_FACEPLATE", "1"),
             _ => path = Some(a.into()),
         }
     }
