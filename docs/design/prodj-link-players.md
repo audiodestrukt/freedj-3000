@@ -28,14 +28,30 @@ work in `crates/app/src/prodj.rs` / `crates/link/src/prodj.rs`.
 - The ADK-1000 is a drop-in **deck 3** next to CDJs 1–2, so the iOS default of
   **3** is the right choice; a mixed rig can only go 1–4 anyway.
 
-## You can't renumber a player while it's linked
+## Changing the XDJ PLAYER No. — TWO conditions must both be met
 
-Changing a CDJ/XDJ's **PLAYER No.** in Utility requires **removing every other
-device from the LINK network first** — the XDJ shows an error ("remove all
-devices from the linked players to change PLAYER No.") otherwise. Player numbers
-are a manual, deliberate assignment, and the network won't let two devices race
-to the same slot. This is why freedj uses a manually-set number (not automatic
-negotiation yet — see below), matching how you'd set a real deck.
+Changing a CDJ/XDJ's **PLAYER No.** (Utility → hold MENU >1s) is blocked unless
+**both** of these are true. Verified on an XDJ-1000MK2, 2026-08-27:
+
+1. **No other device on the LINK network.** The XDJ errors ("remove all devices
+   from the linked players to change PLAYER No.") if anything else is present —
+   another CDJ/XDJ, a **LINK-connected DJM mixer**, a laptop running rekordbox,
+   **or freedj itself** (a running freedj is a linked player). Easiest: **unplug
+   the XDJ's LINK ethernet cable** so it's guaranteed alone.
+2. **No USB/SD medium loaded.** Per the manual, "the player number cannot be
+   changed when a medium is loaded" — you must **eject the USB drive** first.
+   This is the one that's easy to miss: even with the network unplugged and the
+   deck showing *not linked*, the setting stays locked until the stick is out.
+
+So the full recipe: unplug LINK (or quit every other device) **and** eject the
+USB → change PLAYER No. → reinsert USB / reconnect LINK.
+
+Player numbers are a manual, deliberate assignment, and the network won't let two
+devices race to the same slot. This is why freedj uses a manually-set number (not
+automatic negotiation yet — see below), matching how you'd set a real deck.
+
+**Note:** you usually don't need to touch the XDJ at all — leave it at its number
+and just set *freedj's* (`--player`, or the iPad default 3) to something free.
 
 ## The "Duplication" Utility setting (unrelated to sync)
 
@@ -74,5 +90,7 @@ build in prod"). Build the iPad demo Release (`make ios-device IOS_CONFIG=Releas
 
 - Pioneer CDJ Utility "Duplication" — operating instructions (ManualsLib);
   Pioneer DJ forums on changing player number / duplication while linked.
+- XDJ-1000MK2 PLAYER No. (medium-loaded lock): XDJ-1000MK2 Operating Instructions
+  (ManualsLib p.35 / the kuvo.com PDF).
 - Pro DJ Link overview (player counts): community protocol guides + the CDJ-3000
   6-player announcement.
