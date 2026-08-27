@@ -4,17 +4,27 @@ A minimal iPad app that links the `opendeck-app` Rust **staticlib** and calls it
 `freedj_ios_main()` entry (`crates/app/src/lib.rs`). The design + rationale live
 in [`docs/design/mobile-tablet-port.md`](../docs/design/mobile-tablet-port.md).
 
-> **Status: builds and runs.** Verified on Xcode 16.4 / iOS 18.5 SDK: builds for
-> both `iphonesimulator` (arm64) and `iphoneos` (arm64), installs in an iPad Pro
-> 11" simulator, and comes up with the deck UI rendering over Metal, the Rubber
-> Band R3 audio pipeline running, MiniBPM detecting the grid, and the Pro DJ Link
-> listener receiving status from a real XDJ-1000MK2 on the LAN.
+> **Status: runs on device, and Pro DJ Link works against real hardware.**
+> Verified 2026-08-27 on an iPad Air 13" (M4), iPadOS 26.5, built with Xcode 26.6
+> / iOS 26.5 SDK:
 >
-> Not yet verified **on device**. The build signs cleanly ("Apple Development:
-> Dan Newcome" / "iOS Team Provisioning Profile: \*") and produces a complete
-> `.app` with the track bundled, but installing was blocked by Xcode 16.4 being
-> older than the target iPad — see *Your Xcode must be newer than the device*.
-> The on-device Link broadcast probe remains the test that gates the demo.
+> - Deck UI renders over Metal on the M4 GPU, full screen, ~55 fps sustained with
+>   no frame spikes.
+> - Rubber Band R3 timestretch pipeline runs clean — **zero audio underruns or
+>   overruns** across every device run.
+> - MiniBPM detects the grid; playback of a normal MP3 sounds correct.
+> - **Pro DJ Link, both directions, against a real XDJ-1000MK2:** receives its
+>   announces and status, takes tempo master from it, sends pitch, and the XDJ
+>   follows freedj's tempo. Link *receive* worked **without** the multicast
+>   entitlement, which the design doc did not assume.
+>
+> Also builds and runs on the `iphonesimulator` (arm64) — but note the simulator
+> shares the Mac's network stack, so Link working there says nothing about the
+> device sandbox, and simulator audio glitches regardless. Only the device
+> results above count.
+>
+> Still open: the multicast entitlement has not been requested, so the beat
+> broadcast currently depends on plain UDP broadcast being permitted.
 
 ## What's here
 
@@ -65,7 +75,16 @@ provisioning profile's device list; and `devicectl device install` fails to
 mount the DDI. Another tell is Xcode naming the device model wrongly (it falls
 back to the nearest model it knows) — a reliable sign it predates the hardware.
 
-There is no workaround inside the old Xcode. Install a newer one.
+There is no workaround inside the old Xcode. Install a newer one — this port cost
+an afternoon to Xcode 16.4 against an iPadOS 26.5 device before that was clear.
+Xcode 26 also splits platform support out of the base install, so after
+installing it: `sudo xcodebuild -license accept`, `sudo xcodebuild -runFirstLaunch`,
+then `xcodebuild -downloadPlatform iOS` (~8.5 GB) — without that last one the
+build fails with `iOS 26.5 must be installed to run the scheme`.
+
+Automatic signing also needs the Apple ID signed in under Xcode → Settings →
+Accounts before it can register a new device; `-allowProvisioningUpdates` alone
+will not do it, and reports the device as not registered.
 
 ### First-time device setup
 
