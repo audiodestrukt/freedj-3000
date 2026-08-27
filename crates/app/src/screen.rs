@@ -755,7 +755,11 @@ fn draw_info(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
 
     // TRACK
     let t = lay.track;
-    text(ui, Pos2::new(t.min.x, t.min.y + h * 0.006), Align2::LEFT_TOP, "TRACK", cap, TEXT);
+    // Play mode, as the XDJ shows it here: SINGLE = stop at end of track,
+    // CONTINUE = roll on to the next in the list.  freedj plays one loaded track
+    // and stops, so it's SINGLE (revisit if auto-continue is ever added).  The
+    // number is the track's position in the browsed list (placeholder for now).
+    text(ui, Pos2::new(t.min.x, t.min.y + h * 0.006), Align2::LEFT_TOP, "SINGLE", cap, TEXT);
     text(ui, Pos2::new(t.min.x, base_y(t)), Align2::LEFT_BOTTOM, "01", big, TEXT);
 
     // A.CUE — shown only when on (auto cue is on by default on the unit).
