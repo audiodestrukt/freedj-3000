@@ -7,10 +7,4 @@ Cargo.lock
 /reference/pioneer/
 
 # Photos of our own units are tracked: reference/photos/
-
-# Faceplate background image for --faceplate is NOT bundled (trade dress /
-# copyright). Supply your own via OPENDECK_FACEPLATE_IMG or ~/Downloads; if you
-# drop one in the repo under assets/faceplate/ it stays untracked.
-/assets/faceplate/
-
 third_party/**/target/
