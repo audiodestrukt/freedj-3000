@@ -143,7 +143,8 @@ fn make_snapshot<'a>(
     pos: u64, playing: bool, speed: f32, fader_speed: f32, beat2_bpm: f32, beat2_phase_beats: f32, beat2_beat_in_bar: u8,
 ) -> DeckSnapshot<'a> {
     DeckSnapshot {
-        title:         path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown"),
+        title:         if path.as_os_str().is_empty() { "NO TRACK" }
+                       else { path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown") },
         position:      pos,
         sample_rate:   audio.sample_rate,
         channels:      audio.channels,
@@ -1252,7 +1253,8 @@ fn fit_contain(ts: egui::Vec2, win: egui::Rect) -> egui::Rect {
 /// args; a mobile entry point (iOS `main` / Android `android_main`) fills it from
 /// bundled resources / platform config and calls `run` directly.
 pub struct Config {
-    pub track:        PathBuf,
+    /// The track to load at startup; `None` boots to an empty deck (browse + LOAD).
+    pub track:        Option<PathBuf>,
     pub player:       u8,
     pub deck_channel: u8,   // 0 = A/left (MIDI ch 0), 1 = B/right (ch 1)
     pub link_send:    bool,
@@ -1299,9 +1301,11 @@ pub fn desktop_main() -> Result<()> {
             _ => path = Some(a.into()),
         }
     }
-    let path = path.context("usage: opendeck <path/to/file.mp3> [--player N]")?;
-    if !path.exists() {
-        bail!("file not found: {}", path.display());
+    // A track is optional now: with none, freedj boots to an empty deck.
+    if let Some(p) = &path {
+        if !p.exists() {
+            bail!("file not found: {}", p.display());
+        }
     }
 
     run(Config { track: path, player, deck_channel, link_send })
@@ -1310,13 +1314,19 @@ pub fn desktop_main() -> Result<()> {
 /// Start a deck and run the UI event loop.  Platform-agnostic: every entry point
 /// (desktop `main`, iOS/Android) builds a `Config` and calls this.
 pub fn run(cfg: Config) -> Result<()> {
-    let path         = cfg.track;
+    let track        = cfg.track;
     let player       = cfg.player.clamp(1, 6);
     let deck_channel = cfg.deck_channel;
     let link_send    = cfg.link_send;
 
-    // ── 1. Decode audio ───────────────────────────────────────────────────────
-    let audio = AudioHandle::open(&path)?;
+    // ── 1. Decode audio (or boot to an empty deck when no track is given) ─────
+    let audio = match &track {
+        Some(p) => AudioHandle::open(p)?,
+        None => {
+            log::info!("no track given — booting to an empty deck (browse + LOAD to play)");
+            AudioHandle::open_empty()?
+        }
+    };
 
     // ── 2. Build waveform + detect beat grid (synchronous, before window opens) ─
     let samples_arc = audio.current();
@@ -1324,8 +1334,10 @@ pub fn run(cfg: Config) -> Result<()> {
     let t0 = Instant::now();
     let mut waveform_builder = WaveformBuilder::new(audio.sample_rate);
     let mut beat_analyzer    = BeatAnalyzerImpl::new(audio.sample_rate);
-    waveform_builder.push(&samples_arc);
-    beat_analyzer.push(&samples_arc, audio.sample_rate);
+    if !samples_arc.is_empty() {
+        waveform_builder.push(&samples_arc);
+        beat_analyzer.push(&samples_arc, audio.sample_rate);
+    }
     let waveform  = waveform_builder.finish();
     let beat_grid = beat_analyzer.beat_grid().map(|g| (*g).clone());
     match &beat_grid {
@@ -1387,7 +1399,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(path, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx);
+    let mut app = DeckApp::new(track.unwrap_or_default(), waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx);
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())
@@ -1504,17 +1516,14 @@ pub extern "C" fn freedj_ios_main() {
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
 
-    let track = match bundle.as_deref().and_then(bundled_track) {
-        Some(t) => t,
-        None => {
-            log::error!(
-                "no audio file in the app bundle — add one to the target's \
-                 Copy Bundle Resources phase (see ios/README.md)"
-            );
-            return;
-        }
-    };
-    log::info!("track: {}", track.display());
+    let track = bundle.as_deref().and_then(bundled_track);
+    match &track {
+        Some(t) => log::info!("track: {}", t.display()),
+        None => log::info!(
+            "no audio file in the app bundle — booting to an empty deck; add one to \
+             the target's Copy Bundle Resources phase to preload (see ios/README.md)"
+        ),
+    }
     if let Err(e) = run(Config { track, player, deck_channel: 0, link_send: true }) {
         log::error!("freedj_ios_main: {e:#}");
     }

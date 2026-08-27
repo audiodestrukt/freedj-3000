@@ -212,9 +212,13 @@ impl Renderer {
         // Pack each [R,G,B,A] column into a single u32 (little-endian bytes).
         // No texture dimension limits — storage buffers handle arbitrary sizes.
         let num_cols = waveform.len() as u32;
-        let waveform_data: Vec<u32> = waveform.columns.iter()
+        let mut waveform_data: Vec<u32> = waveform.columns.iter()
             .map(|col| u32::from_le_bytes(*col))
             .collect();
+        // wgpu rejects a zero-sized storage buffer, so an empty deck (no track
+        // yet) needs at least one column here; `num_cols` stays the true count
+        // (0), so the shader simply draws nothing until a track is loaded.
+        if waveform_data.is_empty() { waveform_data.push(0); }
 
         // Peak amplitude byte across the track sets the display gain.
         let peak = waveform_data.iter().map(|v| (v >> 24) & 0xFF).max().unwrap_or(255) as f32 / 255.0;
@@ -368,7 +372,8 @@ impl Renderer {
     /// untouched — only binding 0 (the waveform data) changes.
     pub fn set_waveform(&mut self, waveform: &WaveformCache) {
         let num_cols = waveform.len() as u32;
-        let data: Vec<u32> = waveform.columns.iter().map(|c| u32::from_le_bytes(*c)).collect();
+        let mut data: Vec<u32> = waveform.columns.iter().map(|c| u32::from_le_bytes(*c)).collect();
+        if data.is_empty() { data.push(0); }   // wgpu rejects a zero-sized storage buffer
         let peak = data.iter().map(|v| (v >> 24) & 0xFF).max().unwrap_or(255) as f32 / 255.0;
         self.amp_gain = (0.62 / peak.max(0.05)).min(6.0);
         self.num_cols = num_cols;

@@ -159,12 +159,20 @@ impl AudioHandle {
 // ── Constructor ───────────────────────────────────────────────────────────────
 
 impl AudioHandle {
+    /// Open a deck with a decoded track.
     pub fn open(path: &Path) -> Result<Self> {
-        // ── 1. Decode entire file to memory ───────────────────────────────────
         let (decoded, file_sr, file_ch) = decode_file(path)?;
-        let file_ch = file_ch as usize;
-        let samples = Arc::new(ArcSwap::from_pointee(decoded));
+        Self::open_inner(Some((decoded, file_sr, file_ch as usize)))
+    }
 
+    /// Open an empty deck: device up, no track, paused.  The deck rate/channels
+    /// follow the output device; a later LOAD resamples the track to them in
+    /// `finish_load`.  Lets freedj boot to a browse-and-load state like a CDJ.
+    pub fn open_empty() -> Result<Self> {
+        Self::open_inner(None)
+    }
+
+    fn open_inner(initial: Option<(Vec<f32>, u32, usize)>) -> Result<Self> {
         // ── 2. Open cpal device ────────────────────────────────────────────────
         let host   = cpal::default_host();
         let device = host
@@ -177,13 +185,20 @@ impl AudioHandle {
         let device_sr = supported.sample_rate().0;
         let device_ch = supported.channels() as usize;
 
-        if device_sr != file_sr {
+        // ── 1. Initial track, or an empty deck.  Empty takes the device rate/ch
+        //       and starts paused; the processor idles until a track loads. ─────
+        let (decoded, file_sr, file_ch, playing_init) = match initial {
+            Some((d, sr, ch)) => (d, sr, ch, true),
+            None              => (Vec::new(), device_sr, device_ch, false),
+        };
+        if !decoded.is_empty() && device_sr != file_sr {
             log::warn!(
                 "device sample rate {}Hz != file sample rate {}Hz — pitch will be wrong \
                  (resampling not yet implemented)",
                 device_sr, file_sr,
             );
         }
+        let samples = Arc::new(ArcSwap::from_pointee(decoded));
 
         let stream_config = cpal::StreamConfig {
             channels:    device_ch as u16,
@@ -193,7 +208,7 @@ impl AudioHandle {
 
         // ── 3. Shared state ────────────────────────────────────────────────────
         let position   = Arc::new(AtomicU64::new(0));
-        let playing    = Arc::new(AtomicBool::new(true));
+        let playing    = Arc::new(AtomicBool::new(playing_init));
         let speed      = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let drain_flag = Arc::new(AtomicBool::new(false));
         let in_flight  = Arc::new(AtomicU64::new(0));
@@ -349,6 +364,13 @@ fn processor_loop(
         // and the seek path below drains the ring for the position reset.
         let current = samples.load_full();
         let samples: &[f32] = &current;
+
+        // Empty deck (no track loaded yet): idle exactly like the paused path so
+        // nothing indexes a zero-length buffer even if PLAY is pressed.
+        if samples.is_empty() {
+            thread::sleep(Duration::from_millis(2));
+            continue;
+        }
 
         // ── Seek detection ────────────────────────────────────────────────────
         let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
