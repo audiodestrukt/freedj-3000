@@ -59,6 +59,10 @@ pub struct LinkState {
     pub largest_sync:  AtomicU32,
     /// Our sync counter: set to largest_sync + 1 when we take master.
     pub our_sync:      AtomicU32,
+    /// The master that agreed (0x27) to yield to us (0 = none).  Beat Link's
+    /// `masterYieldedFrom`: once set we stop re-requesting and wait to see our
+    /// own number in the master's Mh byte before actually taking master.
+    pub yielded_from:  AtomicU32,
     /// player → ip, from announces.
     pub peers:         Mutex<HashMap<u8, Ipv4Addr>>,
 }
@@ -78,6 +82,7 @@ impl LinkState {
             epoch: Instant::now(),
             largest_sync: AtomicU32::new(0),
             our_sync: AtomicU32::new(0),
+            yielded_from: AtomicU32::new(0),
             peers: Mutex::new(HashMap::new()),
         })
     }
@@ -88,6 +93,7 @@ impl LinkState {
         self.our_sync.store(n, Ordering::Relaxed);
         self.master.store(true, Ordering::Relaxed);
         self.want_master.store(false, Ordering::Relaxed);
+        self.yielded_from.store(0, Ordering::Relaxed);
         self.master_since_ms.store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
         log::info!("ProDJ Link: taking master ({why}), sync counter {n}");
     }
@@ -277,8 +283,15 @@ fn listen_beat(
         }
         if let Some((from, yielded)) = ProDjLink::parse_master_response(data) {
             log::info!("ProDJ Link: player {from} {} master", if yielded { "yields" } else { "refuses" });
+            // Beat Link parity (`yieldResponse`): the 0x27 response means only
+            // that the master AGREED to yield.  We must NOT assert master here —
+            // we record the agreement and wait until we see our own number in
+            // the master's Mh (handoff) byte in its status, then take it (see
+            // `listen_status`).  Claiming master on the 0x27 jumps the handshake
+            // out of order and the XDJ aborts it (reverts Mh, keeps MASTER).
             if yielded && link.want_master.load(Ordering::Relaxed) {
-                link.take_master(&format!("player {from} yielded"));
+                link.yielded_from.store(from as u32, Ordering::Relaxed);
+                log::info!("ProDJ Link: player {from} agreed to yield; waiting for it to hand off (Mh)");
             }
             return;
         }
@@ -545,7 +558,12 @@ impl ProDjSender {
                                 // cancels; if the master never agrees we simply
                                 // don't take it (better than a rogue second
                                 // master the deck ignores).
-                                if now.duration_since(last_request) >= Duration::from_millis(1000) {
+                                // Re-request until the master agrees (0x27,
+                                // sets yielded_from); after that, stop and wait
+                                // for it to name us in Mh — like Beat Link, which
+                                // sends the request once and waits.
+                                if link.yielded_from.load(Ordering::Relaxed) == 0
+                                    && now.duration_since(last_request) >= Duration::from_millis(1000) {
                                     log::info!("ProDJ Link: requesting master from player {p} at {ip}");
                                     let _ = sock.send_to(&me.build_master_request(), (ip, PORT_BEAT));
                                     last_request = now;
