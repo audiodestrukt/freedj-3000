@@ -1380,7 +1380,12 @@ pub fn run(cfg: Config) -> Result<()> {
 
     // ── 3. Create second beat grid state ─────────────────────────────────────
     let base_bpm     = beat_grid.as_ref().map(|g| g.bpm as f32).unwrap_or(120.0);
-    let fader_speed  = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+    // Dev hook: OPENDECK_PITCH=+0.06 sets the initial fader for layout screenshots.
+    let init_pitch = std::env::var("OPENDECK_PITCH").ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map(|p| (1.0 + p).clamp(1.0 - 0.16, 1.0 + 0.16))
+        .unwrap_or(1.0);
+    let fader_speed  = Arc::new(AtomicU32::new(init_pitch.to_bits()));
     let beat2_bpm    = Arc::new(AtomicU32::new(base_bpm.to_bits()));
     let beat2_anchor = Arc::new(AtomicU64::new(0));
     let beat2_player = Arc::new(AtomicU32::new(0));

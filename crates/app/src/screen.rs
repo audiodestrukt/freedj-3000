@@ -284,9 +284,11 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
                 p.image(tex.id(), dst, Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)), Color32::WHITE);
 
             disc(f.jog.center(), f.jog.width() * 0.5, Pos2::new(0.500, 0.645), 0.340);
-            // Tempo track — the full ridged rail; crop stops above the TEMPO /
-            // MULTI PLAYER labels printed below the slider on the photo.
-            crop(f.fader, 0.868, 0.582, 0.928, 0.898);
+            // Tempo track background: a knob-free slice of the ridged rail (the
+            // clean stretch just above the centre knob), stretched down the whole
+            // travel.  The knob itself is drawn separately at the live pitch so it
+            // moves — see the handle section below.
+            crop(f.fader, 0.862, 0.616, 0.950, 0.735);
             // Silver transport buttons (CUE above PLAY/PAUSE, bottom-left); live
             // green/press tints draw over them.
             disc(f.cue.center(),  f.cue.width()  * 0.5, Pos2::new(0.077, 0.771), 0.057);
@@ -353,9 +355,20 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
     let ft  = f.fader;
     let pos = crate::input::speed_to_fader(snap.fader_speed).clamp(0.0, 1.0);
     let hy  = ft.max.y - pos * ft.height();
-    let hrect = Rect::from_center_size(Pos2::new(ft.center().x, hy), Vec2::new(ft.width() * 2.0, ft.height() * 0.045));
-    p.rect_filled(hrect, 2.0, SILVER);
-    p.rect_stroke(hrect, 2.0, Stroke::new(1.0, Color32::BLACK));
+    if let Some(tex) = chrome_tex {
+        // The photographed knob, drawn at the live pitch so the styled knob
+        // actually moves (the track behind it is a knob-free rail crop).
+        let kw = ft.width() * 1.7;
+        let kh = kw * 0.53;                       // knob is ~1.9:1 in the photo
+        let krect = Rect::from_center_size(Pos2::new(ft.center().x, hy), Vec2::new(kw, kh));
+        p.image(tex.id(), krect,
+                Rect::from_min_max(Pos2::new(0.881, 0.739), Pos2::new(0.955, 0.770)),
+                Color32::WHITE);
+    } else {
+        let hrect = Rect::from_center_size(Pos2::new(ft.center().x, hy), Vec2::new(ft.width() * 2.0, ft.height() * 0.045));
+        p.rect_filled(hrect, 2.0, SILVER);
+        p.rect_stroke(hrect, 2.0, Stroke::new(1.0, Color32::BLACK));
+    }
     let fr = ui.interact(ft, Id::new("fp-fader"), Sense::click_and_drag());
     if fr.dragged() || fr.clicked() {
         if let Some(pp) = fr.interact_pointer_pos() {
