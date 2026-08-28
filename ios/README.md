@@ -133,13 +133,14 @@ resource path the desktop build uses resolves against the bundle too. With no
 audio file present, the app logs an actionable error rather than failing inside
 the decoder.
 
-The **faceplate photo** (`reference/photos/XDJ1000Mk2-faceplate.jpg`) is
-deliberately not in the repo (trade dress). Without it the app logs
-`faceplate image: cannot read ... — screen-only` and falls back to the
-screen-only layout, which is landscape — and therefore overflows the
-portrait-locked iPad window. Bundle a faceplate photo to get the intended
-portrait layout, or unset `OPENDECK_FACEPLATE` in `freedj_ios_main` and allow
-landscape in `Info.plist`.
+The **faceplate photo** (`reference/photos/XDJ1000Mk2-faceplate.jpg`, a tracked
+photo of our own unit) is bundled automatically: the same `Bundle Track` phase
+copies it flat into the `.app`, and the loader's basename fallback finds it
+there. The iOS entry sets `OPENDECK_PORTRAIT=1`, so the app boots the portrait
+iPad chrome that lifts the jog, fader and buttons from that photo. If the photo
+is ever missing the app logs `faceplate image: cannot read … — plain deck body`
+and the portrait deck still works, just with drawn primitives instead of the
+photo. `OPENDECK_FACEPLATE_IMG` overrides the path.
 
 ## Rubber Band is vendored, not a system library
 

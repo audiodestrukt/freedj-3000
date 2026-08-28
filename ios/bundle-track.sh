@@ -40,3 +40,14 @@ find "$APP" -maxdepth 1 -type f \( -name '*.mp3' -o -name '*.m4a' -o -name '*.aa
 
 cp "$track" "$APP/$(basename "$track")"
 echo "bundled track: $(basename "$track")"
+
+# The faceplate photo (tracked, unlike the track) — the portrait chrome lifts the
+# jog/fader/buttons from it.  Copy it FLAT into the app; the loader's basename
+# fallback finds it there (OPENDECK_FACEPLATE_IMG can override).
+photo="$REPO/reference/photos/XDJ1000Mk2-faceplate.jpg"
+if [ -f "$photo" ]; then
+    cp "$photo" "$APP/$(basename "$photo")"
+    echo "bundled faceplate: $(basename "$photo")"
+else
+    echo "warning: faceplate photo missing ($photo) — deck falls back to drawn primitives"
+fi

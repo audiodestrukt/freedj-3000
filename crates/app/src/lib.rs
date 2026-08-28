@@ -878,7 +878,6 @@ impl DeckApp {
         let size = window.inner_size();
         let win  = egui::Rect::from_min_size(egui::Pos2::ZERO,
                        egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
-        // Load the faceplate photo once (from a path; never bundled in the repo).
         // Load the deck photo for any chrome mode.  Landscape paints it as the
         // whole body; portrait keeps a synthesised body but lifts the jog platter
         // and fader slot out of the photo (see chrome_tex below).
@@ -1215,13 +1214,18 @@ impl ApplicationHandler for DeckApp {
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Load the faceplate background image from a path (default the local XDJ photo,
-/// override with OPENDECK_FACEPLATE_IMG).  The image is NOT bundled in the repo —
-/// supply your own; use an original/licensed faceplate for any public release.
+/// Load the faceplate background image (default `reference/photos/XDJ1000Mk2-
+/// faceplate.jpg`, a tracked photo of our own unit; override with
+/// OPENDECK_FACEPLATE_IMG).  On iOS the file is bundled flat in the .app, so we
+/// also try the basename.  Absent → the deck falls back to drawn primitives.
 fn load_face_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let path = std::env::var("OPENDECK_FACEPLATE_IMG")
+    let configured = std::env::var("OPENDECK_FACEPLATE_IMG")
         .unwrap_or_else(|_| "reference/photos/XDJ1000Mk2-faceplate.jpg".to_string());
-    // No photo is the normal case (it is not redistributable): the faceplate
+    // Try the configured path, then its basename (the flat iOS bundle layout).
+    let base = std::path::Path::new(&configured).file_name().map(|n| n.to_string_lossy().into_owned());
+    let path = if std::path::Path::new(&configured).exists() { configured }
+               else { base.filter(|b| std::path::Path::new(b).exists()).unwrap_or(configured) };
+    // A missing photo is fine — the faceplate
     // still lays out and its controls still work, they are just drawn as
     // outlines over a plain body instead of tinting the photo.
     let bytes = std::fs::read(&path)
@@ -1539,11 +1543,11 @@ pub extern "C" fn freedj_ios_main() {
         None => log::warn!("could not locate the app bundle — relative resources will not resolve"),
     }
 
-    // Demo config: full faceplate, player 3 (the ADK-1000 is a drop-in "deck 3"
-    // next to CDJs 1-2, so 3 avoids the default collision), Link send on.
+    // Demo config: portrait iPad chrome, player 3 (the ADK-1000 is a drop-in
+    // "deck 3" next to CDJs 1-2, so 3 avoids the default collision), Link send on.
     // OPENDECK_PLAYER overrides, matching the desktop `--player` arg; a Utility
     // -style config menu to set this on device is on the backlog.
-    std::env::set_var("OPENDECK_FACEPLATE", "1");
+    std::env::set_var("OPENDECK_PORTRAIT", "1");
     let player: u8 = std::env::var("OPENDECK_PLAYER").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(3);
