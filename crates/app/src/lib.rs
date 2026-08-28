@@ -895,9 +895,18 @@ impl DeckApp {
         // window instead of stretching to it, and the transport stays reachable.
         let chrome = self.faceplate || self.portrait;
         let base = chrome.then(|| {
-            let aspect = if self.portrait { screen::PORTRAIT_ASPECT }
-                         else { self.face_tex.as_ref().map_or(screen::FACE_ASPECT, |t| t.size_vec2()) };
-            fit_contain(aspect, win)
+            if self.portrait {
+                // Portrait chrome is synthesised (no fixed-aspect photo body to
+                // preserve), so it should fill the whole screen.  On iOS the
+                // window already IS the iPad — use it directly; fit_contain would
+                // leave a thin letterbox border whenever the device aspect isn't
+                // exactly PORTRAIT_ASPECT.  On desktop, letterbox to the iPad
+                // aspect so the preview stays true to the device.
+                if cfg!(target_os = "ios") { win } else { fit_contain(screen::PORTRAIT_ASPECT, win) }
+            } else {
+                let aspect = self.face_tex.as_ref().map_or(screen::FACE_ASPECT, |t| t.size_vec2());
+                fit_contain(aspect, win)
+            }
         });
         let (screen_rect, face) = match base {
             Some(b) => {
