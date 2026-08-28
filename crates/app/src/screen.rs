@@ -278,13 +278,18 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         // UV regions match faceplate_layout's landscape jog/fader placements.
         if let Some(tex) = chrome_tex {
             let a = tex.size_vec2();
+            let vr = |rw: f32| rw * a.x / a.y;   // circle's UV v-radius (aspect-corrected)
             textured_disc(p, tex, f.jog.center(), f.jog.width() * 0.5,
-                          Pos2::new(0.500, 0.645), 0.340, 0.340 * a.x / a.y);
+                          Pos2::new(0.500, 0.645), 0.340, vr(0.340));
             // Crop the ridged tempo track only — stop above the TEMPO / MULTI
             // PLAYER labels printed below the slider on the photo.
             p.image(tex.id(), f.fader,
                     Rect::from_min_max(Pos2::new(0.876, 0.585), Pos2::new(0.924, 0.892)),
                     Color32::WHITE);
+            // The two silver transport buttons, lifted from the photo (CUE above
+            // PLAY/PAUSE, bottom-left).  Live green/press tints draw over them.
+            textured_disc(p, tex, f.cue.center(),  f.cue.width()  * 0.5, Pos2::new(0.077, 0.771), 0.057, vr(0.057));
+            textured_disc(p, tex, f.play.center(), f.play.width() * 0.5, Pos2::new(0.070, 0.887), 0.057, vr(0.057));
         } else {
             // Jog: platter face plus a rim, so the drag target reads as a wheel.
             p.circle_filled(f.jog.center(), f.jog.width() * 0.5, KEY_LO);
@@ -298,7 +303,10 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
                 Stroke::new(1.0, DIM),
             );
         }
-        ring(f.play); ring(f.cue); ring(f.reloop); ring(f.browse); ring(f.mt);
+        ring(f.reloop); ring(f.browse); ring(f.mt);
+        // play/cue get the photo disc above when we have it; only ring them here
+        // as the no-photo fallback so there's no outline over the real buttons.
+        if chrome_tex.is_none() { ring(f.play); ring(f.cue); }
         slab(f.loop_in); slab(f.loop_out);
         let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
         cap(f.play, "PLAY/PAUSE");
