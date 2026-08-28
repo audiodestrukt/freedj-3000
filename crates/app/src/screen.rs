@@ -219,7 +219,7 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
     let face = FaceLayout {
         base,
         jog:      disk(0.500, 0.610, 0.300),
-        fader:    face_rect(base, 0.905, 0.465, 0.945, 0.815),
+        fader:    face_rect(base, 0.886, 0.462, 0.950, 0.818),
         // CUE above PLAY/PAUSE, stacked vertically at the bottom-left, as on the
         // real XDJ (CUE upper, PLAY the bottom-left corner button).
         cue:      disk(0.115, 0.775, 0.060),
@@ -279,17 +279,25 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         if let Some(tex) = chrome_tex {
             let a = tex.size_vec2();
             let vr = |rw: f32| rw * a.x / a.y;   // circle's UV v-radius (aspect-corrected)
-            textured_disc(p, tex, f.jog.center(), f.jog.width() * 0.5,
-                          Pos2::new(0.500, 0.645), 0.340, vr(0.340));
-            // Crop the ridged tempo track only — stop above the TEMPO / MULTI
-            // PLAYER labels printed below the slider on the photo.
-            p.image(tex.id(), f.fader,
-                    Rect::from_min_max(Pos2::new(0.876, 0.585), Pos2::new(0.924, 0.892)),
-                    Color32::WHITE);
-            // The two silver transport buttons, lifted from the photo (CUE above
-            // PLAY/PAUSE, bottom-left).  Live green/press tints draw over them.
-            textured_disc(p, tex, f.cue.center(),  f.cue.width()  * 0.5, Pos2::new(0.077, 0.771), 0.057, vr(0.057));
-            textured_disc(p, tex, f.play.center(), f.play.width() * 0.5, Pos2::new(0.070, 0.887), 0.057, vr(0.057));
+            let disc = |c: Pos2, r: f32, uc: Pos2, rw: f32| textured_disc(p, tex, c, r, uc, rw, vr(rw));
+            let crop = |dst: Rect, u0: f32, v0: f32, u1: f32, v1: f32|
+                p.image(tex.id(), dst, Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)), Color32::WHITE);
+
+            disc(f.jog.center(), f.jog.width() * 0.5, Pos2::new(0.500, 0.645), 0.340);
+            // Tempo track — the full ridged rail; crop stops above the TEMPO /
+            // MULTI PLAYER labels printed below the slider on the photo.
+            crop(f.fader, 0.868, 0.582, 0.928, 0.898);
+            // Silver transport buttons (CUE above PLAY/PAUSE, bottom-left); live
+            // green/press tints draw over them.
+            disc(f.cue.center(),  f.cue.width()  * 0.5, Pos2::new(0.077, 0.771), 0.057);
+            disc(f.play.center(), f.play.width() * 0.5, Pos2::new(0.070, 0.887), 0.057);
+            // Browse rotary (top-right), RELOOP, the small MASTER-TEMPO button,
+            // and the yellow LOOP IN / OUT buttons — all from the photo.
+            disc(f.browse.center(), f.browse.width() * 0.5, Pos2::new(0.845, 0.205), 0.065);
+            disc(f.reloop.center(), f.reloop.width() * 0.5, Pos2::new(0.255, 0.370), 0.025);
+            disc(f.mt.center(),     f.mt.width()     * 0.5, Pos2::new(0.925, 0.565), 0.018);
+            crop(f.loop_in,  0.040, 0.345, 0.110, 0.390);
+            crop(f.loop_out, 0.125, 0.345, 0.185, 0.390);
         } else {
             // Jog: platter face plus a rim, so the drag target reads as a wheel.
             p.circle_filled(f.jog.center(), f.jog.width() * 0.5, KEY_LO);
@@ -303,11 +311,13 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
                 Stroke::new(1.0, DIM),
             );
         }
-        ring(f.reloop); ring(f.browse); ring(f.mt);
-        // play/cue get the photo disc above when we have it; only ring them here
-        // as the no-photo fallback so there's no outline over the real buttons.
-        if chrome_tex.is_none() { ring(f.play); ring(f.cue); }
-        slab(f.loop_in); slab(f.loop_out);
+        // With the photo, every control above is a real crop; only draw the
+        // primitive outlines/slabs as the no-photo fallback.
+        if chrome_tex.is_none() {
+            ring(f.reloop); ring(f.browse); ring(f.mt);
+            ring(f.play); ring(f.cue);
+            slab(f.loop_in); slab(f.loop_out);
+        }
         let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
         cap(f.play, "PLAY/PAUSE");
         cap(f.cue,  "CUE");
