@@ -879,9 +879,10 @@ impl DeckApp {
         let win  = egui::Rect::from_min_size(egui::Pos2::ZERO,
                        egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
         // Load the faceplate photo once (from a path; never bundled in the repo).
-        // Landscape faceplate only: the portrait chrome is synthesised, not
-        // photo-backed (the photo is the landscape XDJ).
-        if self.faceplate && !self.portrait && !self.face_tex_tried {
+        // Load the deck photo for any chrome mode.  Landscape paints it as the
+        // whole body; portrait keeps a synthesised body but lifts the jog platter
+        // and fader slot out of the photo (see chrome_tex below).
+        if (self.faceplate || self.portrait) && !self.face_tex_tried {
             self.face_tex_tried = true;
             self.face_tex = load_face_texture(&self.egui_ctx);
         }
@@ -916,8 +917,14 @@ impl DeckApp {
         let _t_run = Instant::now();
         let browse = if self.screen_mode == ScreenMode::Browse { Some(&self.browser) } else { None };
         let face_ref = face.as_ref();
-        let face_img = match (self.face_tex.as_ref(), base) { (Some(t), Some(b)) => Some((t, b)), _ => None };
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, face_ref, face_img, &mut touch));
+        // Landscape paints the photo as the deck body; portrait doesn't (its body
+        // is synthesised) but passes the texture as chrome_tex for jog/fader sprites.
+        let face_img = match (self.face_tex.as_ref(), base) {
+            (Some(t), Some(b)) if !self.portrait => Some((t, b)),
+            _ => None,
+        };
+        let chrome_tex = if self.portrait { self.face_tex.as_ref() } else { None };
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, face_ref, face_img, chrome_tex, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
         self.events.append(&mut touch);

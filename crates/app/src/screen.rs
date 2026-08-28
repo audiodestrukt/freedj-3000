@@ -219,7 +219,7 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
     let face = FaceLayout {
         base,
         jog:      disk(0.500, 0.610, 0.300),
-        fader:    face_rect(base, 0.895, 0.470, 0.955, 0.800),
+        fader:    face_rect(base, 0.905, 0.465, 0.945, 0.815),
         // CUE above PLAY/PAUSE, stacked vertically at the bottom-left, as on the
         // real XDJ (CUE upper, PLAY the bottom-left corner button).
         cue:      disk(0.115, 0.775, 0.060),
@@ -257,7 +257,8 @@ fn rect_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<Ev
 /// Draw the faceplate over the photo: redact the branding, paint the live
 /// overlays (jog marker, fader handle, lit states), and register the invisible
 /// touch targets that emit `ControlEvent`s.
-fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, out: &mut Vec<Event>) {
+fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
+                  chrome_tex: Option<&egui::TextureHandle>, out: &mut Vec<Event>) {
     let p = ui.painter();
     // Branding is redacted in the asset itself (reference/photos), so nothing to
     // paint over here — just the live overlays and touch targets.
@@ -272,17 +273,31 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, out
             p.rect_filled(r, 3.0, KEY_LO);
             p.rect_stroke(r, 3.0, Stroke::new(1.0, FAINT));
         };
-        // Jog: platter face plus a rim, so the drag target reads as a wheel.
-        p.circle_filled(f.jog.center(), f.jog.width() * 0.5, KEY_LO);
-        p.circle_stroke(f.jog.center(), f.jog.width() * 0.5, Stroke::new(2.0, FAINT));
-        p.circle_stroke(f.jog.center(), f.jog.width() * 0.17, Stroke::new(1.0, FAINT));
-        // Tempo fader: slot with a centre detent mark.
-        p.rect_filled(f.fader, 2.0, Color32::BLACK);
-        p.rect_stroke(f.fader, 2.0, Stroke::new(1.0, FAINT));
-        p.line_segment(
-            [Pos2::new(f.fader.min.x, f.fader.center().y), Pos2::new(f.fader.max.x, f.fader.center().y)],
-            Stroke::new(1.0, DIM),
-        );
+        // Jog + fader: lift them straight out of the deck photo when we have it
+        // (real platter + fader slot); fall back to drawn primitives otherwise.
+        // UV regions match faceplate_layout's landscape jog/fader placements.
+        if let Some(tex) = chrome_tex {
+            let a = tex.size_vec2();
+            textured_disc(p, tex, f.jog.center(), f.jog.width() * 0.5,
+                          Pos2::new(0.500, 0.645), 0.340, 0.340 * a.x / a.y);
+            // Crop the ridged tempo track only — stop above the TEMPO / MULTI
+            // PLAYER labels printed below the slider on the photo.
+            p.image(tex.id(), f.fader,
+                    Rect::from_min_max(Pos2::new(0.876, 0.585), Pos2::new(0.924, 0.892)),
+                    Color32::WHITE);
+        } else {
+            // Jog: platter face plus a rim, so the drag target reads as a wheel.
+            p.circle_filled(f.jog.center(), f.jog.width() * 0.5, KEY_LO);
+            p.circle_stroke(f.jog.center(), f.jog.width() * 0.5, Stroke::new(2.0, FAINT));
+            p.circle_stroke(f.jog.center(), f.jog.width() * 0.17, Stroke::new(1.0, FAINT));
+            // Tempo fader: slot with a centre detent mark.
+            p.rect_filled(f.fader, 2.0, Color32::BLACK);
+            p.rect_stroke(f.fader, 2.0, Stroke::new(1.0, FAINT));
+            p.line_segment(
+                [Pos2::new(f.fader.min.x, f.fader.center().y), Pos2::new(f.fader.max.x, f.fader.center().y)],
+                Stroke::new(1.0, DIM),
+            );
+        }
         ring(f.play); ring(f.cue); ring(f.reloop); ring(f.browse); ring(f.mt);
         slab(f.loop_in); slab(f.loop_out);
         let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
@@ -376,6 +391,7 @@ pub fn draw(
     browse: Option<&Browser>,
     face:   Option<&FaceLayout>,
     face_img: Option<(&egui::TextureHandle, Rect)>,
+    chrome_tex: Option<&egui::TextureHandle>,   // photo for jog/fader sprites (portrait)
     out:    &mut Vec<Event>,
 ) {
     egui::CentralPanel::default()
@@ -433,7 +449,7 @@ pub fn draw(
             draw_bottom(ui, snap, lay, h, out);
 
             if let Some(f) = face {
-                draw_faceplate(ui, snap, f, face_img.is_some(), out);
+                draw_faceplate(ui, snap, f, face_img.is_some(), chrome_tex, out);
             }
         });
 }
@@ -513,6 +529,29 @@ fn draw_browse(ui: &Ui, browser: &Browser, lay: &Layout, h: f32) {
 /// Rects that tile `outer` minus two holes `a` and `b` (a above b, non-overlapping).
 /// Paint a sub-rect of a texture, mapping `part` (a sub-rect of `irect`) to the
 /// matching UV region — used to paint the deck photo around the shader rects.
+/// Draw a circular crop of `tex` (a triangle-fan disc) — used to lift the round
+/// jog platter out of the deck photo with no square edge.  `uvc` is the crop's
+/// centre in texture UV (0..1); `uvrx`/`uvry` its UV radii (different because UV
+/// normalises each axis, so a circle in the image is an ellipse in UV).
+fn textured_disc(p: &egui::Painter, tex: &egui::TextureHandle, center: Pos2, r: f32,
+                 uvc: Pos2, uvrx: f32, uvry: f32) {
+    use egui::epaint::{Mesh, Vertex};
+    let mut mesh = Mesh::with_texture(tex.id());
+    let n = 72u32;
+    mesh.vertices.push(Vertex { pos: center, uv: uvc, color: Color32::WHITE });
+    for i in 0..=n {
+        let a = i as f32 / n as f32 * std::f32::consts::TAU;
+        let (c, s) = (a.cos(), a.sin());
+        mesh.vertices.push(Vertex {
+            pos: Pos2::new(center.x + c * r, center.y + s * r),
+            uv:  Pos2::new(uvc.x + c * uvrx, uvc.y + s * uvry),
+            color: Color32::WHITE,
+        });
+    }
+    for i in 1..=n { mesh.indices.extend_from_slice(&[0, i, i + 1]); }
+    p.add(egui::Shape::mesh(mesh));
+}
+
 fn image_part(p: &egui::Painter, tex: &egui::TextureHandle, irect: Rect, part: Rect) {
     if part.width() <= 0.5 || part.height() <= 0.5 { return; }
     let uv = Rect::from_min_max(
