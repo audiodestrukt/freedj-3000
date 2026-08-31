@@ -53,7 +53,7 @@ ios_app        = $(shell cd ios && xcodebuild -project freedj.xcodeproj -scheme 
                    | awk '/ BUILT_PRODUCTS_DIR =/{print $$3}')/freedj.app
 
 .DEFAULT_GOAL := help
-.PHONY: help build debug relink ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot check fmt clippy test perf clean reference distclean
+.PHONY: help build debug relink ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot check fmt clippy test perf cad clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -168,6 +168,9 @@ test: ## Run tests
 
 perf: ## Run the DSP real-time-factor guard, printing the measured RTF
 	$(CARGO) test --release -p opendeck-timestretch perf -- --nocapture
+
+cad: ## Build the hardware CAD parts to STL (hardware/cad/build/)
+	python3 hardware/cad/jog_wheel.py
 
 ## ── Reference material ─────────────────────────────────────────────────────
 
