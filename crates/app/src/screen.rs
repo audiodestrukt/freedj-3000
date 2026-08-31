@@ -336,13 +336,12 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         }
     }
 
-    // ── Jog: rotation marker on the photo platter ────────────────────────────
-    let c = f.jog.center();
+    // ── Jog: spinning centre display (CDJ/XDJ platter position indicator) ────
     let r = f.jog.width() * 0.5;
-    let secs = snap.position as f32 / (snap.sample_rate as f32 * snap.channels as f32).max(1.0);
-    let ang  = secs * 0.6 * std::f32::consts::TAU;
-    let dir  = Vec2::new(ang.cos(), ang.sin());
-    p.circle_filled(c + dir * (r * 0.70), r * 0.045, if snap.master { ORANGE } else { BLUE });
+    // The platter hub sits slightly up-and-left of the jog rect centre in the
+    // faceplate photo; nudge the synthetic display onto it (tune via capture).
+    let pc = f.jog.center() + Vec2::new(JOG_HUB_DX * r, JOG_HUB_DY * r);
+    draw_jog_center(p, pc, r * JOG_HUB_R, snap);
     let jr = ui.interact(f.jog, Id::new("fp-jog"), Sense::click_and_drag());
     if jr.drag_started() { out.push(Event::Deck(ControlEvent::JogTouch { touched: true })); }
     if jr.drag_stopped() { out.push(Event::Deck(ControlEvent::JogTouch { touched: false })); }
@@ -607,6 +606,85 @@ fn cover(outer: Rect, a: Rect, b: Rect) -> Vec<Rect> {
 
 fn text(ui: &Ui, pos: Pos2, a: Align2, s: impl ToString, size: f32, c: Color32) {
     ui.painter().text(pos, a, s, FontId::proportional(size), c);
+}
+
+// ── Jog-wheel centre display ────────────────────────────────────────────────
+//
+// The CDJ/XDJ jog centre: a "record" of fine radial spokes with a dark notch
+// that sweeps clockwise at the playback position, a red cue-point hash fixed on
+// the platter, a white segmented ring, and (in VINYL mode) a blue Vinyl badge at
+// the hub.  Tune these against a `--faceplate` capture.
+
+/// Hub offset from the jog rect centre onto the platter's photographed hub,
+/// and the spoke-ring outer radius — both as fractions of the jog radius.
+const JOG_HUB_DX: f32 = -0.013;
+const JOG_HUB_DY: f32 = -0.006;
+const JOG_HUB_R:  f32 =  0.280;
+
+/// Draw the jog centre display. `center` is the platter hub in screen pixels,
+/// `radius` the outer edge of the spoke ring.
+fn draw_jog_center(p: &egui::Painter, center: Pos2, radius: f32, snap: &DeckSnapshot) {
+    use std::f32::consts::{PI, TAU};
+    let sr       = (snap.sample_rate as f32 * snap.channels as f32).max(1.0);
+    let secs     = snap.position  as f32 / sr;
+    let cue_secs = snap.cue_point as f32 / sr;
+    const RPS: f32 = 100.0 / 3.0 / 60.0;              // 33⅓ rpm, like real vinyl
+    let pos_ang = (secs     * RPS).fract() * TAU;     // playback notch angle
+    let cue_ang = (cue_secs * RPS).fract() * TAU;     // cue hash angle (fixed)
+
+    let spoke_out = radius;
+    let spoke_in  = radius * 0.60;
+    let ring_r    = radius * 0.52;
+    let badge_r   = radius * 0.34;
+    let dir = |a: f32| Vec2::new(a.cos(), a.sin());   // +angle = clockwise (y down)
+
+    // Dark backing disc so the display reads on any platter photo.
+    p.circle_filled(center, radius * 1.08, Color32::from_rgb(0x0c, 0x0c, 0x0e));
+
+    // Spoke "record", with a swept dark notch at the playback position.
+    let spokes   = 128;
+    let gap_half = 0.10;                              // notch half-width, radians
+    let grey     = Color32::from_rgb(0x96, 0x98, 0x9e);
+    for i in 0..spokes {
+        let a = i as f32 / spokes as f32 * TAU;
+        let mut d = (a - pos_ang).rem_euclid(TAU);
+        if d > PI { d -= TAU; }
+        if d.abs() < gap_half { continue; }          // leave the notch dark
+        p.line_segment([center + dir(a) * spoke_in, center + dir(a) * spoke_out],
+                       Stroke::new(1.2, grey));
+    }
+    // Bright leading edge of the notch = exact playback position (kept in-band).
+    p.line_segment([center + dir(pos_ang) * spoke_in, center + dir(pos_ang) * spoke_out],
+                   Stroke::new(2.2, Color32::WHITE));
+
+    // Cue-point hash (red): a short bold tick on the outer edge, fixed on the
+    // platter at the cue angle.
+    p.line_segment([center + dir(cue_ang) * (spoke_in + (spoke_out - spoke_in) * 0.45),
+                    center + dir(cue_ang) * spoke_out],
+                   Stroke::new(3.2, RED));
+
+    // White segmented inner ring.
+    let segs = 36;
+    for i in 0..segs {
+        let a0 = i as f32 / segs as f32 * TAU;
+        let a1 = a0 + (TAU / segs as f32) * 0.55;
+        let mut prev = center + dir(a0) * ring_r;
+        for s in 1..=3 {
+            let a = a0 + (a1 - a0) * s as f32 / 3.0;
+            let cur = center + dir(a) * ring_r;
+            p.line_segment([prev, cur], Stroke::new(2.0, Color32::from_gray(0xeb)));
+            prev = cur;
+        }
+    }
+    p.circle_stroke(center, ring_r * 0.86, Stroke::new(1.5, Color32::from_gray(0xd2)));
+
+    // VINYL badge at the hub.
+    // TODO: gate on the real JOG MODE = VINYL state once the input layer exposes
+    // it; the reference (and the default) is vinyl mode.
+    p.circle_filled(center, badge_r, Color32::from_rgb(0x60, 0x96, 0xc4));
+    p.circle_stroke(center, badge_r, Stroke::new(1.5, Color32::from_gray(0xe6)));
+    p.text(center, Align2::CENTER_CENTER, "Vinyl",
+           FontId::proportional(badge_r * 0.62), Color32::from_rgb(0x14, 0x1e, 0x2d));
 }
 
 /// A touch target.  Returns true on tap (press + release inside).
