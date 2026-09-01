@@ -1,0 +1,59 @@
+name: CI
+
+# Build and test the Rust workspace on every push to main and every PR.
+# Doc-only changes skip CI (nothing to compile).
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'devlog/**'
+      - 'docs/**'
+      - 'hardware/**'
+      - '.gitignore'
+  pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'devlog/**'
+      - 'docs/**'
+      - 'hardware/**'
+      - '.gitignore'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # System libraries the workspace links against (see README "Dependencies").
+      # cpal -> ALSA; winit/wgpu -> Wayland/xkbcommon/Vulkan; timestretch prefers
+      # the system Rubber Band (librubberband-dev) over its vendored fallback.
+      # g++ (build-essential) compiles minibpm-sys and the vendored Rubber Band.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libvulkan-dev libwayland-dev libxkbcommon-dev \
+            librubberband-dev pkg-config build-essential
+
+      # rust-toolchain.toml pins the channel + components (rustfmt/clippy) and the
+      # cross targets; `rustup show` materialises exactly that toolchain here.
+      - name: Set up Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build workspace
+        run: cargo build --workspace
+
+      # Skip timestretch_realtime_factor: it asserts an ABSOLUTE real-time factor
+      # sized for the Pi 5 target, which false-fails on shared CI runners. It is a
+      # local/hardware guard — run it with `make perf` (add OPENDECK_RTF_CEIL to
+      # relax it on slower machines).
+      - name: Test workspace
+        run: cargo test --workspace -- --skip timestretch_realtime_factor
