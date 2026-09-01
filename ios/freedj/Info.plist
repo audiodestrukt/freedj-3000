@@ -29,7 +29,7 @@
     <key>LSRequiresIPhoneOS</key>
     <true/>
     <key>MinimumOSVersion</key>
-    <string>14.0</string>
+    <string>$(IPHONEOS_DEPLOYMENT_TARGET)</string>
     <!-- The faceplate is portrait (taller than wide); lock to portrait. -->
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>
