@@ -37,7 +37,7 @@ RUST_LOG   ?= info,wgpu=warn,naga=warn
 #               granted it for the App ID, otherwise signing fails
 IOS_CONFIG    ?= Debug
 IOS_SIM       ?= iPad Pro 11-inch (M4)
-IOS_BUNDLE_ID ?= com.audiodestruct.opendeck
+IOS_BUNDLE_ID ?= com.audiodestrukt.opendeck
 IOS_DEVICE    ?= $(shell xcrun devicectl list devices 2>/dev/null | grep -i ipad | \
                    grep -oE '[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}' | head -1)
 IOS_ENT        = $(if $(MULTICAST),FREEDJ_ENTITLEMENTS=freedj/freedj.entitlements,)

@@ -13,7 +13,13 @@
     <key>CFBundleName</key>
     <string>freedj</string>
     <key>CFBundleDisplayName</key>
-    <string>freedj-3000</string>
+    <string>OpenDeck DJ</string>
+    <key>CFBundleIconName</key>
+    <string>AppIcon</string>
+    <!-- Pro DJ Link is plain UDP; no non-exempt encryption. Declaring this
+         skips the per-build export-compliance prompt in App Store Connect. -->
+    <key>ITSAppUsesNonExemptEncryption</key>
+    <false/>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
