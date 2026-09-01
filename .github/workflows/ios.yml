@@ -1,0 +1,107 @@
+name: iOS TestFlight
+
+# Builds + uploads to TestFlight on a release tag (cut a build intentionally;
+# macOS runners bill ~10x, so we don't build on every push), plus manual
+# dispatch from the Actions tab. The build number is the Unix epoch, so it is
+# always the latest — never a duplicate.
+#
+#   git tag ios-v0.1.0 && git push origin ios-v0.1.0   →  builds & uploads
+#
+on:
+  push:
+    tags:
+      - 'ios-v*'
+  workflow_dispatch:
+
+jobs:
+  build-and-upload:
+    # macos-26 ships Xcode 26 (iOS 26 SDK) — App Store Connect rejects
+    # uploads built with anything older.
+    runs-on: macos-26
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Select latest Xcode (iOS 26 SDK)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      # The Xcode "Build Rust" phase (ios/build-rust.sh) compiles the
+      # opendeck-app staticlib for the device triple; rustup is preinstalled on
+      # the runner but the iOS target is not. Run from the repo root so the pin
+      # in rust-toolchain.toml selects the toolchain the target is added to.
+      - name: Add iOS Rust target
+        run: rustup target add aarch64-apple-ios
+
+      # Marketing version (x.y.z) from the tag (ios-v0.1.0 → 0.1.0), else the
+      # project default. Build number = Unix epoch seconds: always large and
+      # monotonically increasing, so an older manual upload can never outrank it
+      # (TestFlight orders by build number).
+      - name: Compute version + build number
+        id: ver
+        run: |
+          REF="${{ github.ref_name }}"
+          if [[ "$REF" == ios-v* ]]; then
+            VERSION="${REF#ios-v}"
+          else
+            VERSION="0.1"
+          fi
+          BUILD=$(date -u +%s)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "Building $VERSION (+$BUILD)"
+
+      # The App Store Connect API key drives EVERYTHING below: cloud signing
+      # (xcodebuild fetches/creates the distribution cert + profile itself) and
+      # the TestFlight upload. No .p12, no keychain. The key's role must be App
+      # Manager or Admin. Same secret names as the other repos' iOS workflows.
+      - name: Install App Store Connect API key
+        env:
+          P8: ${{ secrets.APP_STORE_CONNECT_P8 }}
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+        run: |
+          mkdir -p ~/private_keys
+          printf '%s' "$P8" > ~/private_keys/AuthKey_${KEY_ID}.p8
+
+      # Archive. The Build Rust phase runs inside this (cargo on the runner's
+      # ~/.cargo/bin, which build-rust.sh puts on PATH). No track is bundled —
+      # *.mp3 is gitignored, so a fresh checkout has none; the faceplate photo
+      # is tracked and still bundles.
+      - name: Archive with cloud signing
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcodebuild -project ios/freedj.xcodeproj \
+            -scheme freedj -configuration Release \
+            -archivePath build/freedj.xcarchive archive \
+            -destination 'generic/platform=iOS' \
+            -allowProvisioningUpdates \
+            -allowProvisioningDeviceRegistration \
+            -authenticationKeyPath ~/private_keys/AuthKey_${KEY_ID}.p8 \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER_ID" \
+            CODE_SIGN_STYLE=Automatic \
+            DEVELOPMENT_TEAM=W527ZN3X52 \
+            MARKETING_VERSION=${{ steps.ver.outputs.version }} \
+            CURRENT_PROJECT_VERSION=${{ steps.ver.outputs.build }}
+
+      - name: Export and upload to TestFlight
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath build/freedj.xcarchive \
+            -exportOptionsPlist ios/ExportOptionsCI.plist \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${KEY_ID}.p8 \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER_ID"
+
+      - name: Clean up key
+        if: always()
+        run: rm -rf ~/private_keys
