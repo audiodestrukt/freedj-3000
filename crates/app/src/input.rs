@@ -22,6 +22,8 @@ pub enum Event {
 pub enum UiEvent {
     /// Toggle TIME (elapsed) ↔ REMAIN.
     TimeMode,
+    /// Toggle AUTO CUE: on load, cue at the first audible sound instead of 0:00.
+    AutoCue,
     /// Cycle Waveform Color: RGB → 3 BAND → BLUE.
     CycleColor,
     /// Zoom the enlarged waveform by whole steps; negative = out.

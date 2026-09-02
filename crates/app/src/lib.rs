@@ -80,6 +80,7 @@ struct DeckApp {
     frame_count:       u64,
     remain_mode:       bool,      // time display: REMAIN vs TIME
     key_lock:          bool,      // Master Tempo: mirrors audio.key_lock (DSP truth)
+    auto_cue:          bool,      // AUTO CUE: cue at first sound on load (on by default, as the unit)
     slip:              bool,
     zoom_level:        usize,     // index into ZOOM_LEVELS
     zoom_grid_mode:    bool,
@@ -137,7 +138,7 @@ struct DeckApp {
 /// mutably in the same frame.
 #[derive(Clone, Copy)]
 struct UiFlags {
-    key_lock: bool, remain_mode: bool, slip: bool, sync: bool, master: bool,
+    key_lock: bool, remain_mode: bool, auto_cue: bool, slip: bool, sync: bool, master: bool,
     zoom_grid_mode: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
     player: u8,
     cue_point: u64,
@@ -159,6 +160,7 @@ fn make_snapshot<'a>(
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
         remain_mode:   f.remain_mode,
+        auto_cue:      f.auto_cue,
         slip:          f.slip,
         sync:          f.sync,
         master:        f.master,
@@ -225,6 +227,12 @@ impl DeckApp {
         let browser = Browser::new(&path, std::sync::Arc::clone(&link));
         let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
             .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
+        // AUTO CUE (on by default, as the unit): with no explicit cue, the
+        // startup track cues at its first audible sound rather than 0:00 — the
+        // same rule finish_load applies to tracks loaded from the browser.
+        let cue_point = if cue_point == 0 {
+            first_sound(audio.samples.load().as_slice(), audio.channels as usize)
+        } else { cue_point };
         Self {
             path,
             waveform,
@@ -250,6 +258,7 @@ impl DeckApp {
             frame_count:       0,
             remain_mode:       false,   // the reference unit was in TIME mode
             key_lock:          true,
+            auto_cue:          true,
             slip:              false,
             zoom_level:        ZOOM_DEFAULT,
             zoom_grid_mode:    false,
@@ -467,6 +476,19 @@ impl DeckApp {
                 self.remain_mode = !self.remain_mode;
                 log::info!("time display → {}", if self.remain_mode { "REMAIN" } else { "TIME" });
             }
+            Event::Ui(UiEvent::AutoCue) => {
+                self.auto_cue = !self.auto_cue;
+                log::info!("auto cue {}", if self.auto_cue { "on" } else { "off" });
+                // Turning it on applies to the loaded track too when it's cued at
+                // 0:00 and paused: re-cue to the first sound so the change shows
+                // immediately (turning it off leaves an existing cue alone, as
+                // the unit does — AUTO CUE otherwise governs future loads).
+                if self.auto_cue && self.cue_point == 0 && !self.audio.playing.load(Ordering::Relaxed) {
+                    let ch = self.audio.channels as usize;
+                    let fs = { let s = self.audio.samples.load(); first_sound(s.as_slice(), ch) };
+                    if fs > 0 { self.cue_point = fs; self.seek_to(fs); self.cued = true; }
+                }
+            }
             Event::Ui(UiEvent::CycleColor) => {
                 if let Some(r) = &mut self.renderer {
                     use renderer::ColorMode::*;
@@ -628,6 +650,10 @@ impl DeckApp {
                 (ba.beat_grid().map(|g| (*g).clone()), 0, "freedj")
             }
         };
+        // AUTO CUE: with no rekordbox memory cue, cue at the first audible sound
+        // rather than 0:00 (the unit's behaviour; the A.CUE badge).  A memory
+        // cue still wins — that is the DJ's own choice.
+        let cue_pt = if self.auto_cue && cue_pt == 0 { first_sound(&samples, ch) } else { cue_pt };
 
         self.audio.load_samples(Arc::clone(&samples), deck_sr, ch as u8)?;
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&waveform); }
@@ -642,6 +668,9 @@ impl DeckApp {
         self.cue_point    = cue_pt;
         self.cue_preview  = false;
         self.cued         = true;
+        // Park the deck at the cue (a CDJ sits at the cue after load) so PLAY
+        // starts there — with AUTO CUE that's the first sound, not the leader.
+        if cue_pt > 0 { self.seek_to(cue_pt); }
         log::info!(
             "loaded {} in {:.1}s ({} BPM, {} grid, cue {:.2}s)",
             name, t0.elapsed().as_secs_f32(),
@@ -862,7 +891,7 @@ impl DeckApp {
             0.0
         };
         let flags = UiFlags {
-            key_lock: self.key_lock, remain_mode: self.remain_mode, slip: self.slip,
+            key_lock: self.key_lock, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
@@ -974,7 +1003,7 @@ impl DeckApp {
         };
         egui_state.handle_platform_output(window.as_ref(), platform_output);
         let flags = UiFlags {
-            key_lock: self.key_lock, remain_mode: self.remain_mode, slip: self.slip,
+            key_lock: self.key_lock, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
@@ -1038,6 +1067,21 @@ fn set_idle_timer_disabled(disabled: bool) {
     unsafe { freedj_set_idle_timer_disabled(disabled); }
     #[cfg(not(target_os = "ios"))]
     let _ = disabled;
+}
+
+/// AUTO CUE level: the amplitude a sample must exceed to count as "sound".  The
+/// unit offers -36…-78 dB; -48 dB is a sensible default — skips leader silence
+/// and low noise without eating a soft intro.  Worth exposing in MENU later.
+const AUTO_CUE_LEVEL_DB: f32 = -48.0;
+
+/// Interleaved index of the first sample louder than `AUTO_CUE_LEVEL_DB`,
+/// frame-aligned — where AUTO CUE places the cue on load.  0 if silent.
+fn first_sound(samples: &[f32], ch: usize) -> u64 {
+    let thr = 10f32.powf(AUTO_CUE_LEVEL_DB / 20.0);
+    match samples.iter().position(|&s| s.abs() > thr) {
+        Some(i) => ((i / ch) * ch) as u64,
+        None => 0,
+    }
 }
 
 impl ApplicationHandler for DeckApp {
@@ -1547,6 +1591,9 @@ pub fn run(cfg: Config) -> Result<()> {
     event_loop.set_control_flow(ControlFlow::Wait);
 
     let mut app = DeckApp::new(track.unwrap_or_default(), waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx);
+    // Park the startup track at its cue (AUTO CUE's first sound, or the
+    // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
+    if app.cue_point > 0 { let c = app.cue_point; app.seek_to(c); }
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())

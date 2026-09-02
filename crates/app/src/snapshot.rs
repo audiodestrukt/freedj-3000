@@ -33,6 +33,8 @@ pub struct DeckSnapshot<'a> {
     pub key_lock:     bool,
     /// Time display shows remaining (REMAIN) rather than elapsed (TIME).
     pub remain_mode:  bool,
+    /// AUTO CUE engaged: loads cue at the first audible sound (A.CUE badge).
+    pub auto_cue:     bool,
     pub slip:         bool,
     pub sync:         bool,
     pub master:       bool,

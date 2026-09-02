@@ -476,8 +476,8 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
     }
     if brr.clicked() { out.push(Event::Deck(ControlEvent::Load)); }
 
-    // ── Portrait left column: TIME toggles elapsed/remain; AUTO CUE is a
-    //    placeholder button until an auto-cue engine exists (#: see backlog). ──
+    // ── Portrait left column: TIME toggles elapsed/remain; AUTO CUE toggles
+    //    cue-at-first-sound on load (lit while on, mirrored by the A.CUE badge). ──
     if let Some(r) = f.time_mode {
         let resp = ui.interact(r, Id::new("fp-time"), Sense::click());
         if snap.remain_mode { p.rect_filled(r, 3.0, tint(BLUE, 120)); }
@@ -486,8 +486,9 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
     }
     if let Some(r) = f.auto_cue {
         let resp = ui.interact(r, Id::new("fp-acue"), Sense::click());
-        if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
-        // No auto-cue engine yet — visible/tappable, wired when the feature lands.
+        if snap.auto_cue { p.rect_filled(r, 3.0, tint(BLUE, 120)); }
+        else if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
+        if resp.clicked() { out.push(Event::Ui(UiEvent::AutoCue)); }
     }
 }
 
@@ -1066,10 +1067,12 @@ fn draw_info(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
     text(ui, Pos2::new(t.min.x, t.min.y + h * 0.006), Align2::LEFT_TOP, "SINGLE", cap, TEXT);
     text(ui, Pos2::new(t.min.x, base_y(t)), Align2::LEFT_BOTTOM, "01", big, TEXT);
 
-    // A.CUE — shown only when on (auto cue is on by default on the unit).
-    let a = lay.acue;
-    ui.painter().rect_stroke(a, 2.0, Stroke::new(1.0, TEXT));
-    text(ui, a.center(), Align2::CENTER_CENTER, "A.CUE", h * 0.018, TEXT);
+    // A.CUE — shown only while AUTO CUE is on (on by default on the unit).
+    if snap.auto_cue {
+        let a = lay.acue;
+        ui.painter().rect_stroke(a, 2.0, Stroke::new(1.0, TEXT));
+        text(ui, a.center(), Align2::CENTER_CENTER, "A.CUE", h * 0.018, TEXT);
+    }
 
     // Time: tap toggles TIME / REMAIN (a hard button on the unit; handy here).
     let tm = lay.time;
