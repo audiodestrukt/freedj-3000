@@ -1319,6 +1319,27 @@ fn draw_phase_at(ui: &Ui, snap: &DeckSnapshot, r: Rect, b: Rect, h: f32, out: &m
         draw_phase_boxes(ui, snap, r, h);
     }
 
+    // GRID ADJUST: the Bars slot carries the three grid keys instead, as on
+    // the unit — RESET, SNAP GRID (CUE), SHIFT GRID (CUE).
+    if snap.zoom_grid_mode {
+        use crate::input::GridAdjust as GA;
+        let gap = h * 0.006;
+        let kw = (b.width() - 2.0 * gap) / 3.0;
+        for (i, (main, sub, op)) in [("RESET", "", GA::Reset), ("SNAP", "GRID(CUE)", GA::SnapCue), ("SHIFT", "GRID(CUE)", GA::ShiftCue)].into_iter().enumerate() {
+            let kr = Rect::from_min_size(Pos2::new(b.min.x + i as f32 * (kw + gap), b.min.y), Vec2::new(kw, b.height()));
+            let (clicked, down) = tap(ui, kr, &format!("grid-key-{i}"));
+            ui.painter().rect_filled(kr, 2.0, if down { KEY_HI } else { KEY });
+            if sub.is_empty() {
+                text(ui, kr.center(), Align2::CENTER_CENTER, main, h * 0.022, TEXT);
+            } else {
+                text(ui, Pos2::new(kr.center().x, kr.center().y - h * 0.011), Align2::CENTER_CENTER, main, h * 0.022, TEXT);
+                text(ui, Pos2::new(kr.center().x, kr.center().y + h * 0.012), Align2::CENTER_CENTER, sub, h * 0.015, DIM);
+            }
+            if clicked { out.push(Event::Ui(UiEvent::GridAdjust(op))); }
+        }
+        return;
+    }
+
     // "Bars" readouts: orange counts bars.beats to the next memory point,
     // blue to the next hot cue.
     let row = r.height() / 2.0;

@@ -9,6 +9,7 @@
 
 mod audio;
 mod browser;
+mod grids;
 mod input;
 mod midi;
 mod prodj;
@@ -57,6 +58,11 @@ struct DeckApp {
     waveform:     WaveformCache,
     audio:        AudioHandle,
     beat_grid:    Option<BeatGrid>,
+    /// The grid as analysed / read from rekordbox, before any GRID ADJUST —
+    /// what RESET restores.
+    grid_orig:    Option<BeatGrid>,
+    /// Hand-corrected grids by track path (grids.json).
+    grids:        grids::GridStore,
     screen_mode:  ScreenMode,
     browser:      Browser,
     /// TAG LIST — the on-the-fly playlist; persisted (see taglist.rs).
@@ -309,11 +315,21 @@ impl DeckApp {
             }
         }
         let track_tags = audio.tags.clone();
+        // A grid corrected by hand on an earlier run wins over the analysis.
+        let grids = grids::GridStore::open();
+        let grid_orig = beat_grid.clone();
+        let beat_grid = match grids.get(&path.to_string_lossy()) {
+            Some(g) => { log::info!("grid: hand-adjusted (grids.json)"); Some(g.clone()) }
+            None => beat_grid,
+        };
+        link_grid.store(Arc::new(beat_grid.clone()));
         Self {
             path,
             waveform,
             audio,
             beat_grid,
+            grid_orig,
+            grids,
             screen_mode: match std::env::var("OPENDECK_SCREEN").as_deref() {
                 Ok("browse")  => ScreenMode::Browse,
                 Ok("info")    => ScreenMode::Info,
@@ -347,7 +363,7 @@ impl DeckApp {
             auto_cue:          true,
             slip:              false,
             zoom_level:        ZOOM_DEFAULT,
-            zoom_grid_mode:    false,
+            zoom_grid_mode:    std::env::var("OPENDECK_GRID_ADJUST").map(|v| v == "1").unwrap_or(false),   // dev: start in GRID ADJUST
             source_link:       false,
             // Dev: OPENDECK_PHASE_VIEW=ticks starts in the alignment view (for captures).
             phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
@@ -649,7 +665,15 @@ impl DeckApp {
                         let last = settings::MENU.len() as i32 - 1;
                         self.menu_cursor = (self.menu_cursor as i32 + delta).clamp(0, last) as usize;
                     }
-                    // Outside a list the selector nudges zoom, as on the unit.
+                    // Outside a list the selector nudges zoom — or, in GRID
+                    // ADJUST, slides the grid 1/64 beat per detent.
+                    _ if self.zoom_grid_mode => {
+                        if let Some(g) = self.beat_grid.as_mut() {
+                            let per = grids::period_frames(g, self.audio.sample_rate);
+                            grids::shift(g, (delta as f64 * per / 64.0).round() as i64, per);
+                            self.grid_changed();
+                        }
+                    }
                     _ => self.apply(Event::Ui(UiEvent::ZoomStep(delta.signum()))),
                 }
             }
@@ -803,6 +827,25 @@ impl DeckApp {
                 log::info!("zoom {} cols", ZOOM_LEVELS[self.zoom_level]);
             }
             Event::Ui(UiEvent::ZoomGridMode) => { self.zoom_grid_mode = !self.zoom_grid_mode; }
+            Event::Ui(UiEvent::GridAdjust(op)) => {
+                use input::GridAdjust::*;
+                match op {
+                    Reset => {
+                        self.beat_grid = self.grid_orig.clone();
+                        self.grids.remove(&self.path.to_string_lossy());
+                        self.link_grid.store(Arc::new(self.beat_grid.clone()));
+                        log::info!("grid: reset to analysed");
+                    }
+                    SnapCue | ShiftCue => {
+                        let frame = self.cue_point / self.audio.channels as u64;
+                        if let Some(g) = self.beat_grid.as_mut() {
+                            let per = grids::period_frames(g, self.audio.sample_rate);
+                            grids::snap_to(g, frame, per, op == ShiftCue);
+                            self.grid_changed();
+                        }
+                    }
+                }
+            }
             Event::Ui(UiEvent::PhaseMeterView) => { self.phase_ticks_view = !self.phase_ticks_view; log::info!("phase meter → {}", if self.phase_ticks_view { "alignment" } else { "beat display" }); }
             Event::Ui(UiEvent::Source(src))  => { self.source_link = src == Source::Link; log::info!("source {src:?}"); }
             Event::Ui(UiEvent::Screen(sc)) => match sc {
@@ -886,6 +929,16 @@ impl DeckApp {
     // ── Loop helpers ─────────────────────────────────────────────────────────
 
     /// Interleaved samples per beat from the beat grid; None without a grid.
+    /// After a GRID ADJUST edit: the Link sender follows the new grid, and it
+    /// is remembered for this track.
+    fn grid_changed(&mut self) {
+        self.link_grid.store(Arc::new(self.beat_grid.clone()));
+        if let Some(g) = &self.beat_grid {
+            self.grids.set(&self.path.to_string_lossy(), g);
+            log::info!("grid: anchor {} frames, downbeat offset {}", g.anchor_sample, g.downbeat_offset);
+        }
+    }
+
     fn samples_per_beat(&self) -> Option<f64> {
         let g = self.beat_grid.as_ref()?;
         if g.bpm <= 0.0 { return None; }
@@ -1123,7 +1176,11 @@ impl DeckApp {
         self.audio.load_samples(Arc::clone(&samples), deck_sr, ch as u8)?;
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&waveform); }
         self.waveform     = waveform;
-        self.beat_grid    = beat_grid;
+        self.grid_orig    = beat_grid.clone();
+        self.beat_grid    = match self.grids.get(&self.path.to_string_lossy()) {
+            Some(g) => { log::info!("grid: hand-adjusted (grids.json)"); Some(g.clone()) }
+            None => beat_grid,
+        };
         // Keep the ProDJ Link sender's grid in step with the loaded track, so
         // SYNC divides the master BPM by the CURRENT track's BPM (not the one
         // loaded at startup) and we broadcast our real tempo.
@@ -1768,6 +1825,7 @@ impl ApplicationHandler for DeckApp {
                     Comma  => Some(Event::Deck(ControlEvent::JogDelta { delta: -4, velocity_rpm: 0.0 })),
                     Period => Some(Event::Deck(ControlEvent::JogDelta { delta:  4, velocity_rpm: 0.0 })),
                     KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
+                    KeyA => Some(Event::Ui(UiEvent::ZoomGridMode)),   // GRID ADJUST (knob = arrows)
                     KeyC => Some(Event::Ui(UiEvent::CycleColor)),
                     KeyZ => Some(Event::Ui(UiEvent::ZoomStep(1))),
                     KeyX => Some(Event::Ui(UiEvent::ZoomStep(-1))),

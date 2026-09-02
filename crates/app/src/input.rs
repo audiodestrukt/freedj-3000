@@ -47,6 +47,19 @@ pub enum UiEvent {
     TagTrack,
     /// MENU: a row was tapped — select it and step its value.
     MenuTap(usize),
+    /// GRID ADJUST touch keys (shown in place of the Bars readouts while the
+    /// "– GRID" half of the ZOOM pill is selected).
+    GridAdjust(GridAdjust),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GridAdjust {
+    /// Back to the analysed / rekordbox grid.
+    Reset,
+    /// SNAP GRID (CUE): the nearest beat moves onto the cue point.
+    SnapCue,
+    /// SHIFT GRID (CUE): the cue point becomes beat 1.
+    ShiftCue,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
