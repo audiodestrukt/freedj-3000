@@ -479,6 +479,15 @@ impl Renderer {
         let t_acquire = std::time::Instant::now();
         let output = match self.surface.get_current_texture() {
             Ok(t)  => t,
+            // A Lost/Outdated surface is recoverable — reconfigure and skip this
+            // frame; the next acquire succeeds.  This self-heals a surface the OS
+            // invalidated (iOS background→foreground) even if the Occluded path
+            // didn't already reconfigure it, so we never spin on a dead surface.
+            Err(e @ (wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated)) => {
+                log::warn!("surface {e} — reconfiguring");
+                self.surface.configure(&self.device, &self.surface_config);
+                return;
+            }
             Err(e) => { log::warn!("surface error: {e}"); return; }
         };
         let acquire_ms = t_acquire.elapsed().as_secs_f64() * 1000.0;

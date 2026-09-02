@@ -123,6 +123,10 @@ struct DeckApp {
     /// OPENDECK_PACE=hybrid: add a safety-net timer so a late/missing compositor
     /// frame callback doesn't freeze the UI — we self-drive a frame instead.
     hybrid_pace: bool,
+    /// True while the window is occluded (iOS background).  We stop rendering and
+    /// stop requesting redraws so the app can quiesce and be suspended cleanly;
+    /// see the WindowEvent::Occluded handler for the full rationale.
+    occluded: bool,
     /// Last-seen audio glitch counters, to log only on change.
     prev_underruns: u64,
     prev_drops:     u64,
@@ -282,6 +286,7 @@ impl DeckApp {
                 .unwrap_or(cfg!(target_os = "ios")),
             prev_underruns: 0,
             prev_drops:     0,
+            occluded:       false,
         }
     }
 
@@ -646,6 +651,11 @@ impl DeckApp {
     }
 
     fn render_frame(&mut self) {
+        // While occluded (iOS background) don't touch the GPU: the surface is
+        // invalid and any acquire/present risks the background scene-update
+        // watchdog.  A stray redraw in this state is a no-op until Occluded(false)
+        // reconfigures and resumes.
+        if self.occluded { return; }
         // Dev: OPENDECK_AUTOLOAD=path loads that track once at ~frame 150, to
         // exercise the runtime reload path headlessly (before any borrows).
         if self.frame_count == 150 {
@@ -1079,24 +1089,13 @@ impl ApplicationHandler for DeckApp {
         window.request_redraw();
     }
 
-    // Backgrounding on iOS/Android invalidates the window's native surface
-    // (the CAMetalLayer on iOS): the wgpu Surface built from it is dead the
-    // moment we come back, and every get_current_texture() then fails.  winit's
-    // documented lifecycle is to DROP the graphics context here and rebuild it
-    // in resumed() — which we already do, since resumed() rebuilds whenever
-    // `window` is None.  Without this, a background→foreground cycle left us
-    // rendering against the stale surface: the deck never repainted and the
-    // main thread could not finish the foreground scene-update transaction, so
-    // iOS killed us with the 10s scene-update watchdog (0x8BADF00D).  Drop the
-    // surface-holders first, then the window; all playback/Link/waveform state
-    // lives elsewhere on `self`, so it survives across the cycle untouched.
-    // (Desktop compositors don't emit Suspended, so this is a no-op there.)
-    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-        log::info!("suspended: releasing window + GPU surface until resume");
-        self.egui_state = None;
-        self.renderer   = None;
-        self.window     = None;
-    }
+    // Deliberately no `suspended()` teardown.  On winit's iOS backend Suspended
+    // fires on `applicationWillResignActive` — every Control Center pull, banner,
+    // or alert, not just a real background — so tearing the window/surface down
+    // here would churn the UIWindow constantly and could leave us frozen on a
+    // stale frame.  Background handling instead hangs off WindowEvent::Occluded
+    // (applicationDidEnterBackground/willEnterForeground), which is the true,
+    // stable foreground/background signal; see the Occluded arm below.
 
     fn window_event(
         &mut self,
@@ -1187,6 +1186,29 @@ impl ApplicationHandler for DeckApp {
                 }
             }
 
+            // iOS background/foreground (Occluded true = went to background).
+            // In background the CAMetalLayer surface is invalidated AND we must
+            // not keep the main thread busy: 0.1.0 spun the redraw loop against
+            // the dead surface, burning 86s of CPU until iOS killed it with the
+            // background scene-update watchdog (0x8BADF00D).  So: stop rendering
+            // and stop requesting redraws while occluded — the run loop goes idle
+            // and the app suspends cleanly.  On return, reconfigure the surface
+            // (re-establishes drawables the background invalidated) and kick a
+            // redraw to resume.  Desktop never emits this, so it's iOS-only.
+            WindowEvent::Occluded(occluded) => {
+                self.occluded = occluded;
+                if occluded {
+                    log::info!("occluded (background): pausing render");
+                } else {
+                    log::info!("un-occluded (foreground): reconfiguring surface, resuming");
+                    if let (Some(r), Some(w)) = (&mut self.renderer, &self.window) {
+                        let sz = w.inner_size();
+                        r.resize(sz.width, sz.height);   // reconfigure at current size
+                        w.request_redraw();
+                    }
+                }
+            }
+
             WindowEvent::RedrawRequested => {
                 self.render_frame();
                 if self.exit_after_capture {
@@ -1202,9 +1224,13 @@ impl ApplicationHandler for DeckApp {
                 // <2ms after the previous one and 50 arrived 20–65ms late.
                 // The compositor shows those twice or skips them.  No amount of
                 // position smoothing can fix a frame that lands in the wrong
-                // vsync slot.
-                if let Some(w) = &self.window {
-                    w.request_redraw();
+                // vsync slot.  While occluded (iOS background) we stop the loop
+                // here so the app can idle and suspend; Occluded(false) restarts
+                // it.
+                if !self.occluded {
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
                 }
             }
 
@@ -1213,6 +1239,13 @@ impl ApplicationHandler for DeckApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Occluded (iOS background): idle completely — no self-driven frames, no
+        // WaitUntil timer to keep waking us.  Occluded(false) requests a redraw
+        // to restart the loop.
+        if self.occluded {
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        }
         // Default: redraws are requested from RedrawRequested and paced entirely
         // by the compositor's frame callback (ControlFlow::Wait).  Clean phase-
         // lock, but no fallback — if the compositor is late calling us back the
