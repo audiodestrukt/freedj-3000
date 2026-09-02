@@ -309,7 +309,9 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         // Browse knob in the right margin beside the screen; TIME/AUTO CUE stacked
         // in the left margin.  (Margins are (1-sw)/2 ≈ 0.117 wide at 6".)
         browse:   disk(0.945, 0.105, 0.048),
-        mt:       disk(0.845, 0.448, 0.020),
+        // MASTER TEMPO: centred above the tempo fader (x = the fader's centre),
+        // in the gap between the LCD's lower edge (~0.37) and the fader top.
+        mt:       disk(0.918, 0.400, 0.020),
         time_mode: Some(face_rect(base, 0.012, 0.055, 0.104, 0.120)),
         auto_cue:  Some(face_rect(base, 0.012, 0.150, 0.104, 0.215)),
         // Under the BROWSE knob's caption, right of the LCD (which ends ~0.887):
