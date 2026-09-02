@@ -27,6 +27,25 @@ TestFlight. You can also run it from the Actions tab (**workflow_dispatch**).
 3. Add yourself under **Internal Testing** (no Beta App Review — instant).
 4. Install the **TestFlight** app on the iPad, sign in, and the build appears.
 
+## Zero-click delivery (set up once)
+
+Two one-time toggles turn the loop into: **push a tag → wait → it's on the
+iPad**, with no manual attaching or tapping Update. After this, the only wait is
+Apple's ~5–15 min processing, which no setting can skip.
+
+1. **Auto-attach the build (App Store Connect).** OpenDeck DJ → TestFlight → your
+   Internal group → enable **Automatic distribution**. Every processed build then
+   joins the group automatically — no per-build attaching. Two things keep this
+   from stalling, both already handled here:
+   - **Internal testing only** (testers who are users on the team) — internal
+     builds get **no Beta App Review**, so they're live the moment processing
+     ends. External groups need review, which breaks "automatic."
+   - **Export compliance auto-clears** via `ITSAppUsesNonExemptEncryption=false`
+     in `Info.plist` — otherwise every build waits on that prompt.
+2. **Auto-install (iPad).** TestFlight app → OpenDeck DJ → turn on **Automatic
+   Updates** (and allow TestFlight notifications). New builds download and install
+   themselves; just open the app.
+
 ## Signing / secrets
 
 Cloud signing via an App Store Connect API key — no `.p12`, no keychain. Three
