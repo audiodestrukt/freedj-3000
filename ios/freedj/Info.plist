@@ -40,6 +40,12 @@
     <dict/>
     <key>UIRequiresFullScreen</key>
     <true/>
+    <!-- Documents is the music folder: expose it in the Files app / Finder so
+         tracks can be dropped in (and the seeded demo track removed). -->
+    <key>UIFileSharingEnabled</key>
+    <true/>
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
     <!-- ProDJ Link: any local-network access prompts the user with this string. -->
     <key>NSLocalNetworkUsageDescription</key>
     <string>OpenDeck DJ discovers and beat-syncs with Pro DJ Link players (CDJ/XDJ) on your local network.</string>

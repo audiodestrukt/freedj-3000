@@ -269,6 +269,7 @@ pub fn perf_tick() {
 impl DeckApp {
     fn new(
         path:         PathBuf,
+        browse_root:  Option<PathBuf>,
         waveform:     WaveformCache,
         audio:        AudioHandle,
         beat_grid:    Option<BeatGrid>,
@@ -283,7 +284,7 @@ impl DeckApp {
         event_rx:     mpsc::Receiver<Event>,
         settings:     settings::Settings,
     ) -> Self {
-        let browser = Browser::new(&path, std::sync::Arc::clone(&link));
+        let browser = Browser::new(browse_root.as_deref().unwrap_or(&path), std::sync::Arc::clone(&link));
         let tag_list = taglist::TagList::open();
         let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
             .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
@@ -2040,6 +2041,8 @@ pub struct Config {
     pub default_player: u8,
     pub deck_channel: u8,   // 0 = A/left (MIDI ch 0), 1 = B/right (ch 1)
     pub link_send:    bool,
+    /// Where BROWSE starts; `None` = the startup track's folder (or cwd).
+    pub browse_root:  Option<PathBuf>,
 }
 
 fn init_logging() {
@@ -2091,13 +2094,14 @@ pub fn desktop_main() -> Result<()> {
         }
     }
 
-    run(Config { track: path, player, default_player: 1, deck_channel, link_send })
+    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root: None })
 }
 
 /// Start a deck and run the UI event loop.  Platform-agnostic: every entry point
 /// (desktop `main`, iOS/Android) builds a `Config` and calls this.
 pub fn run(cfg: Config) -> Result<()> {
     let track        = cfg.track;
+    let browse_root  = cfg.browse_root;
     // Pro DJ Link player numbers: 1-4 is the universal space (CDJ-2000/NXS2,
     // XDJ, mixed rigs). The CDJ-3000 raised it to 6, but ONLY when every linked
     // device is a CDJ-3000; against an XDJ/mixed network 5-6 are invalid and the
@@ -2195,7 +2199,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(track.unwrap_or_default(), waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, settings);
+    let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, settings);
     // Park the startup track at its cue (AUTO CUE's first sound, or the
     // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
     if app.cue_point > 0 { let c = app.cue_point; app.seek_to(c); }
@@ -2378,26 +2382,39 @@ pub extern "C" fn freedj_ios_main() {
     std::env::set_var("OPENDECK_PORTRAIT", "1");
     let player: Option<u8> = std::env::var("OPENDECK_PLAYER").ok().and_then(|v| v.parse().ok());
 
-    let track = bundle.as_deref().and_then(bundled_track);
+    // Music lives in Documents (shared with the Files app, so the user drops
+    // tracks in there).  The bundled demo track is copied in once — if the user
+    // deletes it, it stays gone (the marker remembers the seeding).
+    let docs = taglist::documents_dir();
+    if let Some((t, name)) = bundle.as_deref().and_then(bundled_track).and_then(|t| t.file_name().map(|n| (t.clone(), n.to_os_string()))) {
+        let marker = docs.join(".seeded");
+        if !marker.exists() {
+            let dst = docs.join(name);
+            match std::fs::copy(&t, &dst) {
+                Ok(_)  => { log::info!("seeded {}", dst.display()); let _ = std::fs::write(&marker, b""); }
+                Err(e) => log::warn!("seeding {}: {e}", dst.display()),
+            }
+        }
+    }
+    let track = first_audio_in(&docs);
     match &track {
         Some(t) => log::info!("track: {}", t.display()),
-        None => log::info!(
-            "no audio file in the app bundle — booting to an empty deck; add one to \
-             the target's Copy Bundle Resources phase to preload (see ios/README.md)"
-        ),
+        None => log::info!("no audio in Documents — booting to an empty deck; add tracks via the Files app"),
     }
-    if let Err(e) = run(Config { track, player, default_player: 3, deck_channel: 0, link_send: true }) {
+    if let Err(e) = run(Config { track, player, default_player: 3, deck_channel: 0, link_send: true, browse_root: Some(docs) }) {
         log::error!("freedj_ios_main: {e:#}");
     }
 }
 
-/// First playable audio file sitting in the app bundle, so whichever track is
-/// dragged into Copy Bundle Resources is the one that loads — no rebuild of the
-/// Rust side to change it.  Sorted for a stable pick when there is more than one.
+/// The audio file shipped in the app bundle (bundle-track.sh copies one in).
 #[cfg(target_os = "ios")]
-fn bundled_track(bundle: &std::path::Path) -> Option<PathBuf> {
+fn bundled_track(bundle: &std::path::Path) -> Option<PathBuf> { first_audio_in(bundle) }
+
+/// First playable audio file in `dir`, sorted for a stable pick.
+#[cfg(target_os = "ios")]
+fn first_audio_in(dir: &std::path::Path) -> Option<PathBuf> {
     const EXTS: [&str; 6] = ["mp3", "m4a", "aac", "wav", "aiff", "flac"];
-    let mut found: Vec<PathBuf> = std::fs::read_dir(bundle)
+    let mut found: Vec<PathBuf> = std::fs::read_dir(dir)
         .ok()?
         .flatten()
         .map(|e| e.path())

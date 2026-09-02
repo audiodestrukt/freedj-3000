@@ -93,18 +93,37 @@ impl TagList {
     }
 }
 
-/// Where per-user app data lives.  iOS: the sandbox's Documents folder (also
-/// visible in the Files app, so the list is inspectable).  Desktop:
-/// $XDG_DATA_HOME or ~/.local/share, under opendeck/.
+/// Where per-user app data lives (taglist.json, settings.json, grids.json).
+/// iOS: Library/Application Support — NOT Documents, which is the music folder
+/// and is exposed in the Files app (UIFileSharingEnabled), where json files
+/// would be clutter.  Desktop: $XDG_DATA_HOME or ~/.local/share, under opendeck/.
 pub fn app_data_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     if cfg!(target_os = "ios") {
-        home.join("Documents")
+        let dir = home.join("Library").join("Application Support").join("opendeck");
+        let _ = std::fs::create_dir_all(&dir);
+        // Early TestFlight builds kept these in Documents; carry them across.
+        for f in ["taglist.json", "settings.json"] {
+            let (old, new) = (home.join("Documents").join(f), dir.join(f));
+            if old.is_file() && !new.exists() { let _ = std::fs::rename(&old, &new); }
+        }
+        dir
     } else {
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local").join("share"))
             .join("opendeck")
     }
+}
+
+/// iOS: the sandbox's Documents folder — the user's music, shared with the
+/// Files app / Finder (UIFileSharingEnabled + LSSupportsOpeningDocumentsInPlace)
+/// so tracks can be dropped in without a picker.
+#[cfg(target_os = "ios")]
+pub fn documents_dir() -> PathBuf {
+    let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    let dir = home.join("Documents");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 #[cfg(test)]
