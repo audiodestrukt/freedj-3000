@@ -97,7 +97,6 @@ struct DeckApp {
     slip:              bool,
     zoom_level:        usize,     // index into ZOOM_LEVELS
     zoom_grid_mode:    bool,
-    source_link:       bool,
     phase_ticks_view:  bool,
     /// Render the full physical faceplate (jog, fader, buttons) around the
     /// screen.  Off by default — the Pi/hardware target runs screen-only.
@@ -364,7 +363,6 @@ impl DeckApp {
             slip:              false,
             zoom_level:        ZOOM_DEFAULT,
             zoom_grid_mode:    std::env::var("OPENDECK_GRID_ADJUST").map(|v| v == "1").unwrap_or(false),   // dev: start in GRID ADJUST
-            source_link:       false,
             // Dev: OPENDECK_PHASE_VIEW=ticks starts in the alignment view (for captures).
             phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
             faceplate:         std::env::var("OPENDECK_FACEPLATE").map(|v| v == "1").unwrap_or(false),
@@ -847,7 +845,13 @@ impl DeckApp {
                 }
             }
             Event::Ui(UiEvent::PhaseMeterView) => { self.phase_ticks_view = !self.phase_ticks_view; log::info!("phase meter → {}", if self.phase_ticks_view { "alignment" } else { "beat display" }); }
-            Event::Ui(UiEvent::Source(src))  => { self.source_link = src == Source::Link; log::info!("source {src:?}"); }
+            // Source keys: open the browser on that source — LINK lists the
+            // linked players, FILE the local root.
+            Event::Ui(UiEvent::Source(src))  => {
+                match src { Source::Link => self.browser.go_link(), Source::Usb => self.browser.go_root() }
+                self.screen_mode = ScreenMode::Browse;
+                log::info!("source {src:?}");
+            }
             Event::Ui(UiEvent::Screen(sc)) => match sc {
                 TopScreen::Browse => {
                     self.screen_mode = if self.screen_mode == ScreenMode::Browse {
@@ -1431,7 +1435,7 @@ impl DeckApp {
         let flags = UiFlags {
             key_lock: self.key_lock, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
-            source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
+            source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             // Master indicator (phase-ticks view): the real XDJ shows a flat
             // line (no number) when THIS deck is master, and another deck's
@@ -1561,7 +1565,7 @@ impl DeckApp {
         let flags = UiFlags {
             key_lock: self.key_lock, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
-            source_link: self.source_link, phase_ticks_view: self.phase_ticks_view,
+            source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             // Master indicator (phase-ticks view): the real XDJ shows a flat
             // line (no number) when THIS deck is master, and another deck's

@@ -292,6 +292,30 @@ impl Browser {
         }
     }
 
+    /// The LINK source key: jump to the list of linked players (from wherever
+    /// the browser is).
+    pub fn go_link(&mut self) {
+        self.stack.truncate(1);
+        self.stack.push(Loc::Link);
+        self.selected = 0;
+        self.rebuild();
+    }
+
+    /// The FILE source key: back to the local root folder.
+    pub fn go_root(&mut self) {
+        self.stack.truncate(1);
+        self.selected = 0;
+        self.rebuild();
+    }
+
+    /// Whether the browser is on the LINK side (the player list, or a linked
+    /// player's library) — lights the LINK source key rather than FILE.
+    pub fn on_link(&self) -> bool {
+        self.stack.iter().any(|l| matches!(l, Loc::Link))
+            || (matches!(self.stack.last(), Some(Loc::RbTree(_) | Loc::RbPlaylist(_)))
+                && matches!(self.rb_source, Some(RbSource::Link(_))))
+    }
+
     pub fn back(&mut self) {
         if self.stack.len() > 1 {
             self.stack.pop();
