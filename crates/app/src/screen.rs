@@ -1026,13 +1026,23 @@ fn draw_wave_area(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut 
         let w = (r.width() - 2.0) / 2.0;
         Rect::from_min_size(Pos2::new(r.min.x + i as f32 * (w + 2.0), r.min.y), Vec2::new(w, r.height()))
     };
+    // Memory points: MEMORY stores the cue, DELETE removes the one at the cue,
+    // CALL ◀▶ steps to the previous / next point and cues there.
     bracket_caption(ui, lay.cueloop, "CUE / LOOP", h);
-    key(ui, half(lay.cueloop, 0), "cue-delete", "DELETE", "", h, None);
-    key(ui, half(lay.cueloop, 1), "cue-memory", "MEMORY", "", h, None);
+    if key(ui, half(lay.cueloop, 0), "cue-delete", "DELETE", "", h, None) {
+        out.push(Event::Deck(ControlEvent::MemoryCueDelete));
+    }
+    if key(ui, half(lay.cueloop, 1), "cue-memory", "MEMORY", "", h, None) {
+        out.push(Event::Deck(ControlEvent::MemoryCueSet));
+    }
 
     bracket_caption(ui, lay.call, "CALL", h);
-    key(ui, half(lay.call, 0), "call-prev", "◀", "", h, None);
-    key(ui, half(lay.call, 1), "call-next", "▶", "", h, None);
+    if key(ui, half(lay.call, 0), "call-prev", "◀", "", h, None) {
+        out.push(Event::Deck(ControlEvent::MemoryCueCall { next: false }));
+    }
+    if key(ui, half(lay.call, 1), "call-next", "▶", "", h, None) {
+        out.push(Event::Deck(ControlEvent::MemoryCueCall { next: true }));
+    }
 
     // ZOOM – GRID pill: tap ZOOM to step the zoom, tap GRID to switch mode.
     let z = lay.zoom;
@@ -1134,12 +1144,20 @@ fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec
     let n = lay.needle;
     p.rect_filled(n, 1.0, KEY_LO);
     text(ui, n.center(), Align2::CENTER_CENTER, if snap.linked { "NEEDLE COUNTDOWN" } else { "NEEDLE SEARCH" }, h * 0.018, TEXT);
-    // Cue marker triangle (none stored yet): a single start marker, as on the unit.
-    let x = ov.min.x + 3.0;
+    // Memory points: one triangle per point under the overview at its position
+    // on the playing-address bar, as on the unit.  The one the deck is cued at
+    // is drawn brighter so DELETE's target is obvious.
     let y = ov.max.y + h * 0.010;
-    p.add(egui::Shape::convex_polygon(
-        vec![Pos2::new(x - 4.0, y + 4.0), Pos2::new(x + 4.0, y + 4.0), Pos2::new(x, y - 3.0)],
-        ORANGE, Stroke::NONE));
+    let total = snap.total_samples.max(1) as f32;
+    let tol = snap.channels as u64 * 64;
+    for &m in snap.memory_cues {
+        let x = ov.min.x + 3.0 + (m as f32 / total) * (ov.width() - 6.0);
+        let at_cue = m.abs_diff(snap.cue_point) <= tol;
+        let col = if at_cue { ORANGE } else { tint(ORANGE, 150) };
+        p.add(egui::Shape::convex_polygon(
+            vec![Pos2::new(x - 4.0, y + 4.0), Pos2::new(x + 4.0, y + 4.0), Pos2::new(x, y - 3.0)],
+            col, Stroke::NONE));
+    }
 
     // ±range badge.
     let rg = lay.range;

@@ -145,6 +145,12 @@ pub enum ControlEvent {
     HotCueTrigger { slot: u8, held: bool },
     HotCueSet     { slot: u8 },
     HotCueDelete  { slot: u8 },
+    /// MEMORY key: store the current cue point as a memory point.
+    MemoryCueSet,
+    /// CALL ◀ / ▶: jump to the previous / next memory point (seek + cue there).
+    MemoryCueCall { next: bool },
+    /// DELETE key: remove the memory point the deck is cued at.
+    MemoryCueDelete,
     LoopIn,
     LoopOut,
     LoopToggle,

@@ -98,6 +98,10 @@ struct DeckApp {
     jog_offset:        f32,
     jog_until:         Option<Instant>,
     cue_point:         u64,   // start cue, source sample index (CDJ CUE)
+    /// Memory points (interleaved sample indices, sorted): rekordbox's from the
+    /// ANLZ on load, plus any set with MEMORY.  CALL ◀▶ steps through them;
+    /// DELETE removes the one the deck is cued at.  In-session for now.
+    memory_cues:       Vec<u64>,
     cue_preview:       bool,  // CUE held → previewing from the cue point
     cued:              bool,  // playhead is sitting on the cue (not searched away)
     exit_after_capture: bool,
@@ -146,7 +150,7 @@ struct UiFlags {
 
 #[allow(clippy::too_many_arguments)]
 fn make_snapshot<'a>(
-    path: &'a std::path::Path, beat_grid: Option<&'a BeatGrid>, audio: &AudioHandle, f: UiFlags,
+    path: &'a std::path::Path, beat_grid: Option<&'a BeatGrid>, memory_cues: &'a [u64], audio: &AudioHandle, f: UiFlags,
     pos: u64, playing: bool, speed: f32, fader_speed: f32, beat2_bpm: f32, beat2_phase_beats: f32, beat2_beat_in_bar: u8,
 ) -> DeckSnapshot<'a> {
     DeckSnapshot {
@@ -157,6 +161,7 @@ fn make_snapshot<'a>(
         channels:      audio.channels,
         total_samples: audio.len() as u64,
         cue_point:     f.cue_point,
+        memory_cues,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
         remain_mode:   f.remain_mode,
@@ -233,6 +238,16 @@ impl DeckApp {
         let cue_point = if cue_point == 0 {
             first_sound(audio.samples.load().as_slice(), audio.channels as usize)
         } else { cue_point };
+        // Dev: OPENDECK_MEMORY_CUES=1.5,4.0 seeds memory points (seconds) on the
+        // startup track — exercises MEMORY/CALL/DELETE and the overview markers
+        // headlessly, where no rekordbox ANLZ supplies them.
+        let sr_ch = audio.sample_rate as f64 * audio.channels as f64;
+        let mut memory_cues: Vec<u64> = std::env::var("OPENDECK_MEMORY_CUES").ok()
+            .map(|v| v.split(',').filter_map(|s| s.trim().parse::<f64>().ok())
+                     .map(|secs| ((secs * sr_ch) as u64 / audio.channels as u64) * audio.channels as u64)
+                     .collect())
+            .unwrap_or_default();
+        memory_cues.sort_unstable();
         Self {
             path,
             waveform,
@@ -272,6 +287,7 @@ impl DeckApp {
             jog_offset:        0.0,
             jog_until:         None,
             cue_point,
+            memory_cues,
             cue_preview:       false,
             cued:              true,
             exit_after_capture: false,
@@ -395,6 +411,59 @@ impl DeckApp {
                     self.seek_to(self.cue_point);
                     self.cued = true;
                     log::debug!("cue: release → back to cue");
+                }
+            }
+            // ── Memory points (MEMORY / CALL ◀▶ / DELETE) ──────────────────────
+            // Matching uses a small tolerance so a point set from a paused cue
+            // and one read from an ANLZ (ms-quantised) still count as the same.
+            Event::Deck(ControlEvent::MemoryCueSet) => {
+                let ch  = self.audio.channels as u64;
+                let tol = ch * 64;
+                let c   = self.cue_point;
+                if self.audio.len() == 0 {
+                    log::info!("memory: no track");
+                } else if memory_at(&self.memory_cues, c, tol).is_some() {
+                    log::info!("memory: point already set here");
+                } else if self.memory_cues.len() >= 10 {
+                    log::info!("memory: full (10 points)");
+                } else {
+                    self.memory_cues.push(c);
+                    self.memory_cues.sort_unstable();
+                    let sr_ch = self.audio.sample_rate as f64 * ch as f64;
+                    log::info!("memory: set at {:.2}s ({} points)", c as f64 / sr_ch, self.memory_cues.len());
+                }
+            }
+            Event::Deck(ControlEvent::MemoryCueCall { next }) => {
+                // Jump to the previous / next memory point from the playhead and
+                // cue there (paused), as CALL does on the unit.
+                let ch  = self.audio.channels as u64;
+                let tol = ch * 64;
+                let pos = self.smoothed_pos.max(0.0) as u64;
+                let target = if next { memory_next(&self.memory_cues, pos, tol) }
+                             else    { memory_prev(&self.memory_cues, pos, tol) };
+                match target {
+                    Some(m) => {
+                        self.audio.playing.store(false, Ordering::Relaxed);
+                        self.cue_point   = m;
+                        self.cue_preview = false;
+                        self.cued        = true;
+                        self.seek_to(m);
+                        let sr_ch = self.audio.sample_rate as f64 * ch as f64;
+                        log::info!("call {}: cued at {:.2}s", if next { "▶" } else { "◀" }, m as f64 / sr_ch);
+                    }
+                    None => log::info!("call {}: no memory point that way", if next { "▶" } else { "◀" }),
+                }
+            }
+            Event::Deck(ControlEvent::MemoryCueDelete) => {
+                let ch  = self.audio.channels as u64;
+                let tol = ch * 64;
+                let c   = self.cue_point;
+                match memory_at(&self.memory_cues, c, tol) {
+                    Some(i) => {
+                        self.memory_cues.remove(i);
+                        log::info!("memory: deleted point at cue ({} left)", self.memory_cues.len());
+                    }
+                    None => log::info!("memory: no point at the cue to delete"),
                 }
             }
             Event::Deck(ControlEvent::NeedleSearch { position }) => {
@@ -556,29 +625,32 @@ impl DeckApp {
     /// Convert a rekordbox ANLZ file into a constant BeatGrid (anchored on its
     /// first beat) and a start-cue sample index (first memory cue, interleaved).
     /// Returns None if the file has no beat grid.
-    fn grid_from_anlz(anlz: &std::path::Path, deck_sr: u32, ch: u8) -> Option<(BeatGrid, u64)> {
+    fn grid_from_anlz(anlz: &std::path::Path, deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
         let a = opendeck_rekordbox::read_anlz(anlz)
             .map_err(|e| log::warn!("ANLZ {}: {e:#}", anlz.display())).ok()?;
         Self::anlz_to_grid(a, deck_sr, ch)
     }
 
     /// Same as `grid_from_anlz` but from ANLZ bytes read over the network.
-    fn grid_from_anlz_bytes(bytes: &[u8], deck_sr: u32, ch: u8) -> Option<(BeatGrid, u64)> {
+    fn grid_from_anlz_bytes(bytes: &[u8], deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
         let a = opendeck_rekordbox::read_anlz_from(&mut std::io::Cursor::new(bytes.to_vec()))
             .map_err(|e| log::warn!("ANLZ (link): {e:#}")).ok()?;
         Self::anlz_to_grid(a, deck_sr, ch)
     }
 
-    fn anlz_to_grid(a: opendeck_rekordbox::RbAnalysis, deck_sr: u32, ch: u8) -> Option<(BeatGrid, u64)> {
+    fn anlz_to_grid(a: opendeck_rekordbox::RbAnalysis, deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
         let first = *a.beats.first()?;
         let anchor = (first.time_ms as u64 * deck_sr as u64) / 1000;      // frames
         let mut grid = BeatGrid::new_constant(anchor, first.bpm as f64);
         grid.downbeat_offset = first.beat_in_bar.saturating_sub(1) % 4;
         grid.confidence = 1.0;
-        let cue = a.memory_cues.first()
-            .map(|c| (c.time_ms as u64 * deck_sr as u64) / 1000 * ch as u64)  // interleaved
-            .unwrap_or(0);
-        Some((grid, cue))
+        // All memory points, as interleaved sample indices (already sorted by
+        // the reader); the first doubles as the load cue.
+        let memory_cues: Vec<u64> = a.memory_cues.iter()
+            .map(|c| (c.time_ms as u64 * deck_sr as u64) / 1000 * ch as u64)
+            .collect();
+        let cue = memory_cues.first().copied().unwrap_or(0);
+        Some(AnlzLoad { grid, cue, memory_cues })
     }
 
     /// Dispatch a browser selection: a local file, or a track on a linked player.
@@ -625,7 +697,7 @@ impl DeckApp {
     /// Shared load tail: resample to the deck rate, build the waveform, apply the
     /// grid (given, or detect a fallback), swap the samples in, reset transport.
     fn finish_load(&mut self, name: &str, samples: Vec<f32>, sr: u32, ch: usize,
-                   grid_cue: Option<(BeatGrid, u64)>, t0: Instant) -> Result<()> {
+                   grid_cue: Option<AnlzLoad>, t0: Instant) -> Result<()> {
         let deck_sr = self.audio.sample_rate;
         if ch as u8 != self.audio.channels {
             bail!("track has {} channels but the deck runs {} — channel conversion not yet implemented",
@@ -641,15 +713,16 @@ impl DeckApp {
         wb.push(&samples);
         let waveform = wb.finish();
 
-        // Prefer rekordbox's grid+cue; fall back to freedj's detector otherwise.
-        let (beat_grid, cue_pt, grid_src) = match grid_cue {
-            Some((grid, cue)) => (Some(grid), cue, "rekordbox"),
+        // Prefer rekordbox's grid+cues; fall back to freedj's detector otherwise.
+        let (beat_grid, cue_pt, memory_cues, grid_src) = match grid_cue {
+            Some(AnlzLoad { grid, cue, memory_cues }) => (Some(grid), cue, memory_cues, "rekordbox"),
             None => {
                 let mut ba = BeatAnalyzerImpl::new(deck_sr);
                 ba.push(&samples, deck_sr);
-                (ba.beat_grid().map(|g| (*g).clone()), 0, "freedj")
+                (ba.beat_grid().map(|g| (*g).clone()), 0, Vec::new(), "freedj")
             }
         };
+        self.memory_cues = memory_cues;
         // AUTO CUE: with no rekordbox memory cue, cue at the first audible sound
         // rather than 0:00 (the unit's behaviour; the A.CUE badge).  A memory
         // cue still wins — that is the DJ's own choice.
@@ -910,7 +983,7 @@ impl DeckApp {
             cue_point: self.cue_point,
         };
         let _t_snap = Instant::now();
-        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         perf_accum("make_snapshot", _t_snap.elapsed());
 
         // Screen layout in logical points; the shader gets its two rects in pixels.
@@ -1021,7 +1094,7 @@ impl DeckApp {
             player: self.link.player,
             cue_point: self.cue_point,
         };
-        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
 
         // Dev: OPENDECK_SCREENSHOT=path captures frame 90 and exits.
         self.frame_count += 1;
@@ -1067,6 +1140,28 @@ fn set_idle_timer_disabled(disabled: bool) {
     unsafe { freedj_set_idle_timer_disabled(disabled); }
     #[cfg(not(target_os = "ios"))]
     let _ = disabled;
+}
+
+/// What a rekordbox ANLZ contributes to a load: the beat grid, the load cue
+/// (its first memory point), and every memory point as interleaved samples.
+struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64> }
+
+// ── Memory-point lookup ────────────────────────────────────────────────────────
+// `cues` is sorted, interleaved sample indices.  `tol` is the match tolerance
+// (a paused cue and an ms-quantised ANLZ point must count as the same point,
+// and CALL must not re-select the point the deck is already sitting on).
+
+/// Index of the memory point at `at` (within `tol`), for DELETE / dedupe.
+fn memory_at(cues: &[u64], at: u64, tol: u64) -> Option<usize> {
+    cues.iter().position(|&m| m.abs_diff(at) <= tol)
+}
+/// The first memory point strictly after `pos` (beyond `tol`) — CALL ▶.
+fn memory_next(cues: &[u64], pos: u64, tol: u64) -> Option<u64> {
+    cues.iter().find(|&&m| m > pos.saturating_add(tol)).copied()
+}
+/// The last memory point strictly before `pos` (beyond `tol`) — CALL ◀.
+fn memory_prev(cues: &[u64], pos: u64, tol: u64) -> Option<u64> {
+    cues.iter().rev().find(|&&m| m.saturating_add(tol) < pos).copied()
 }
 
 /// AUTO CUE level: the amplitude a sample must exceed to count as "sound".  The
@@ -1224,6 +1319,11 @@ impl ApplicationHandler for DeckApp {
                     Minus | NumpadSubtract => Some(Event::Deck(ControlEvent::TempoFader { position: fader - step })),
                     Digit0 | Numpad0       => Some(Event::Deck(ControlEvent::TempoFader { position: 0.5 })),
                     KeyK => Some(Event::Deck(ControlEvent::KeyLockToggle)),
+                    // Memory points: N sets one at the cue, [ / ] CALL ◀ / ▶, Delete removes.
+                    KeyN         => Some(Event::Deck(ControlEvent::MemoryCueSet)),
+                    BracketLeft  => Some(Event::Deck(ControlEvent::MemoryCueCall { next: false })),
+                    BracketRight => Some(Event::Deck(ControlEvent::MemoryCueCall { next: true })),
+                    Delete       => Some(Event::Deck(ControlEvent::MemoryCueDelete)),
                     KeyS => Some(Event::Deck(ControlEvent::SlipToggle)),
                     KeyY => Some(Event::Deck(ControlEvent::SyncToggle)),
                     KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
@@ -1600,6 +1700,56 @@ pub fn run(cfg: Config) -> Result<()> {
 }
 
 #[cfg(test)]
+mod memory_cue_tests {
+    use super::{memory_at, memory_next, memory_prev, first_sound};
+
+    // Points at 1s, 2s, 3s (interleaved, 44.1k stereo); tolerance 64 frames.
+    const CUES: [u64; 3] = [88_200, 176_400, 264_600];
+    const TOL: u64 = 2 * 64;
+
+    #[test]
+    fn call_steps_past_the_point_the_deck_sits_on() {
+        // Sitting exactly on the 2s point: ▶ must go to 3s, ◀ to 1s — never
+        // re-select 2s (which would make CALL feel stuck).
+        assert_eq!(memory_next(&CUES, 176_400, TOL), Some(264_600));
+        assert_eq!(memory_prev(&CUES, 176_400, TOL), Some(88_200));
+    }
+
+    #[test]
+    fn call_from_between_points() {
+        assert_eq!(memory_next(&CUES, 100_000, TOL), Some(176_400));
+        assert_eq!(memory_prev(&CUES, 100_000, TOL), Some(88_200));
+    }
+
+    #[test]
+    fn call_at_the_ends_has_nowhere_to_go() {
+        assert_eq!(memory_next(&CUES, 264_600, TOL), None);
+        assert_eq!(memory_prev(&CUES, 88_200, TOL), None);
+        assert_eq!(memory_prev(&CUES, 0, TOL), None);
+    }
+
+    #[test]
+    fn at_matches_within_tolerance_only() {
+        // A paused cue a few frames off an ANLZ point is the same point …
+        assert_eq!(memory_at(&CUES, 176_400 + 100, TOL), Some(1));
+        // … but not one well away from it.
+        assert_eq!(memory_at(&CUES, 176_400 + 10_000, TOL), None);
+        assert_eq!(memory_at(&[], 5, TOL), None);
+    }
+
+    #[test]
+    fn first_sound_skips_the_leader_and_frame_aligns() {
+        // Stereo: 3 silent frames, then sound at frame 3 (index 6/7).
+        let s = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.1, 0.1];
+        assert_eq!(first_sound(&s, 2), 6);
+        // Sound first appears in the RIGHT channel (odd index) → still frame-aligned.
+        let r = [0.0, 0.0, 0.0, 0.5];
+        assert_eq!(first_sound(&r, 2), 2);
+        assert_eq!(first_sound(&[0.0; 8], 2), 0);
+    }
+}
+
+#[cfg(test)]
 mod anlz_grid_tests {
     use super::*;
     // Gated: OPENDECK_TEST_RB=/run/media/dan/CDJ1
@@ -1610,7 +1760,7 @@ mod anlz_grid_tests {
         let exp = opendeck_rekordbox::read_export(&root).unwrap();
         let t = exp.tracks.iter().find(|t| t.title.contains("OG Sins")).unwrap();
         let ap = t.analyze_on(&root).unwrap();
-        let (grid, _cue) = DeckApp::grid_from_anlz(&ap, 48_000, 2).expect("grid");
+        let AnlzLoad { grid, .. } = DeckApp::grid_from_anlz(&ap, 48_000, 2).expect("grid");
         assert!((grid.bpm - 125.0).abs() < 0.5, "bpm {}", grid.bpm);
         assert_eq!(grid.downbeat_offset, 0, "first beat is a downbeat");
         // first beat at 56 ms → 56*48000/1000 = 2688 frames

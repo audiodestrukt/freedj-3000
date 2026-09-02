@@ -29,6 +29,9 @@ pub struct DeckSnapshot<'a> {
     pub speed:        f32,
     /// Stable pitch-fader speed — what the TEMPO readout shows.
     pub fader_speed:  f32,
+    /// Memory points (interleaved sample indices, sorted) — drawn as markers on
+    /// the waveforms; CALL ◀▶ steps through them.
+    pub memory_cues:  &'a [u64],
     /// Master Tempo (key lock) engaged.
     pub key_lock:     bool,
     /// Time display shows remaining (REMAIN) rather than elapsed (TIME).
