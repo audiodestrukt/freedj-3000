@@ -1451,15 +1451,14 @@ fn draw_wave_area(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut 
         }
     }
 
-    // ZOOM – GRID pill: tap ZOOM to step the zoom, tap GRID to switch mode.
+    // ZOOM – GRID pill: one key, as on the unit — a tap anywhere on it flips
+    // what the browse knob does (zoom the waveform / slide the grid).
     let z = lay.zoom;
     let mid = z.center().x;
     let zl = Rect::from_min_max(z.min, Pos2::new(mid, z.max.y));
     let zr = Rect::from_min_max(Pos2::new(mid, z.min.y), z.max);
-    let (zoom_tap, _) = tap(ui, zl, "zoom-zoom");
-    let (grid_tap, _) = tap(ui, zr, "zoom-grid");
-    if zoom_tap { out.push(Event::Ui(UiEvent::ZoomStep(1))); }
-    if grid_tap { out.push(Event::Ui(UiEvent::ZoomGridMode)); }
+    let (flip, _) = tap(ui, z, "zoom-grid");
+    if flip { out.push(Event::Ui(UiEvent::ZoomGridMode)); }
     let p = ui.painter();
     let (zc, gc) = if snap.zoom_grid_mode { (KEY_LO, BLUE) } else { (BLUE, KEY_LO) };
     p.rect_filled(zl, 2.0, zc);
