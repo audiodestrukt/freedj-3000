@@ -362,7 +362,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
             disc(f.play.center(), f.play.width() * 0.5, Pos2::new(0.070, 0.887), 0.057);
             // Browse rotary (top-right), RELOOP, the small MASTER-TEMPO button,
             // and the yellow LOOP IN / OUT buttons — all from the photo.
-            disc(f.browse.center(), f.browse.width() * 0.5, Pos2::new(0.845, 0.205), 0.065);
+            disc(f.browse.center(), f.browse.width() * 0.5, Pos2::new(0.840, 0.174), 0.046);
             if let Some(r) = f.reloop { disc(r.center(), r.width() * 0.5, Pos2::new(0.255, 0.370), 0.025); }
             disc(f.mt.center(),     f.mt.width()     * 0.5, Pos2::new(0.925, 0.565), 0.018);
             if let Some(r) = f.loop_in  { crop(r, 0.040, 0.345, 0.110, 0.390); }
