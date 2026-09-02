@@ -331,6 +331,8 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         cap(f.play, "PLAY/PAUSE");
         cap(f.cue,  "CUE");
         cap(f.browse, "BROWSE");
+        cap(f.mt,     "MASTER TEMPO");   // key-lock button
+        cap(f.reloop, "RELOOP");
         if let Some(r) = f.loop_in  { cap(r, "IN"); }
         if let Some(r) = f.loop_out { cap(r, "OUT"); }
         // Portrait-only left column: TIME (elapsed/remain) + AUTO CUE.  Labelled
