@@ -94,6 +94,10 @@ pub struct Browser {
     rb:        Option<Arc<RbExport>>,
     rb_source: Option<RbSource>,
     link:      Arc<LinkState>,
+    /// BACK at the top level normally climbs to the parent folder; on iOS the
+    /// start folder is the app's sandbox, and climbing out of it only shows the
+    /// container's UUID directories — so the start is the floor there.
+    floor:     Option<PathBuf>,
 }
 
 impl Browser {
@@ -107,6 +111,7 @@ impl Browser {
             }
         };
         let mut b = Browser {
+            floor: if cfg!(target_os = "ios") { Some(start.clone()) } else { None },
             stack: vec![Loc::Fs(start)],
             entries: Vec::new(),
             selected: 0,
@@ -283,6 +288,7 @@ impl Browser {
             self.rebuild();
             self.selected = 0;
         } else if let Some(Loc::Fs(dir)) = self.stack.last().cloned() {
+            if self.floor.as_deref() == Some(dir.as_path()) { return; }
             if let Some(parent) = dir.parent().map(Path::to_path_buf) {
                 self.stack = vec![Loc::Fs(parent)];
                 self.rebuild();

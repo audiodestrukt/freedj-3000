@@ -42,6 +42,6 @@
     <true/>
     <!-- ProDJ Link: any local-network access prompts the user with this string. -->
     <key>NSLocalNetworkUsageDescription</key>
-    <string>freedj syncs to Pioneer CDJ/XDJ players on your local network over Pro DJ Link.</string>
+    <string>OpenDeck DJ discovers and beat-syncs with Pro DJ Link players (CDJ/XDJ) on your local network.</string>
 </dict>
 </plist>

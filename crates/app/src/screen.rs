@@ -219,6 +219,9 @@ pub struct FaceLayout {
     pub auto_cue:  Option<Rect>,
     /// TAG TRACK / REMOVE (portrait): beside the browse knob, as on the unit.
     pub tag_track: Option<Rect>,
+    /// BACK: up one level in BROWSE, or leave TAG LIST / MENU.  Beside TAG
+    /// TRACK on the unit (the two buttons above the browse knob).
+    pub back:      Option<Rect>,
 }
 
 /// Proportions of the deck photo the `faceplate_layout` fractions were measured
@@ -252,7 +255,10 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
         mt:       disk(0.925, 0.565, 0.018),
         time_mode: None,
         auto_cue:  None,
-        tag_track: None,
+        // The two rectangular buttons above the browse knob on the photo:
+        // BACK (left) and TAG TRACK / REMOVE (right).
+        back:      Some(face_rect(base, 0.797, 0.094, 0.841, 0.126)),
+        tag_track: Some(face_rect(base, 0.843, 0.094, 0.888, 0.126)),
     };
     (screen, face)
 }
@@ -306,8 +312,11 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         mt:       disk(0.845, 0.448, 0.020),
         time_mode: Some(face_rect(base, 0.012, 0.055, 0.104, 0.120)),
         auto_cue:  Some(face_rect(base, 0.012, 0.150, 0.104, 0.215)),
-        // Under the BROWSE knob's caption, right of the LCD (which ends ~0.887).
+        // Under the BROWSE knob's caption, right of the LCD (which ends ~0.887):
+        // TAG TRACK then BACK, stacked (the margin is too narrow for the unit's
+        // side-by-side pair).
         tag_track: Some(face_rect(base, 0.892, 0.192, 0.996, 0.238)),
+        back:      Some(face_rect(base, 0.892, 0.252, 0.996, 0.298)),
     };
     (screen, face)
 }
@@ -466,7 +475,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
         if let Some(r) = f.reloop   { cap(r, "RELOOP"); }
         // Portrait-only left column: TIME (elapsed/remain) + AUTO CUE.  Labelled
         // inside the slab since they sit in open space, not on a photo.
-        for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE"), (f.tag_track, "TAG TRACK")] {
+        for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE"), (f.tag_track, "TAG TRACK"), (f.back, "BACK")] {
             if let Some(r) = rect {
                 slab(r);
                 text(ui, r.center(), Align2::CENTER_CENTER, s, lbl * 0.85, DIM);
@@ -565,6 +574,13 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
         if sel_tagged { p.rect_filled(r, 3.0, tint(BLUE, 120)); }
         else if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
         if resp.clicked() { out.push(Event::Ui(UiEvent::TagTrack)); }
+    }
+    // BACK: up a level in BROWSE (LINK / a folder / a playlist), or out of the
+    // TAG LIST / MENU screens.  Momentary — nothing to light.
+    if let Some(r) = f.back {
+        let resp = ui.interact(r, Id::new("fp-back"), Sense::click());
+        if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
+        if resp.clicked() { out.push(Event::Deck(ControlEvent::Back)); }
     }
 }
 
