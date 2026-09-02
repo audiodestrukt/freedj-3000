@@ -42,6 +42,9 @@ pub enum UiEvent {
     PerformBank,
     /// PERFORM: DELETE –CALL — arm/disarm "the next pad tap deletes that hot cue".
     PerformDelete,
+    /// TAG TRACK / REMOVE: in BROWSE, tag/untag the highlighted track; on the
+    /// TAG LIST screen, remove the highlighted one.
+    TagTrack,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

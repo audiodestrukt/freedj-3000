@@ -12,6 +12,7 @@
 use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
 use crate::prodj::LinkState;
 use opendeck_nfs::Nfs;
 use opendeck_rekordbox::{read_export, read_export_from, RbExport};
@@ -25,7 +26,7 @@ fn is_audio(path: &Path) -> bool {
 }
 
 /// Where a track to load lives.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 pub enum Load {
     /// A local file (with an optional local ANLZ analysis file).
     Local { path: PathBuf, analyze: Option<PathBuf> },
@@ -44,6 +45,13 @@ pub struct Entry {
     #[allow(dead_code)]
     pub bpm:    Option<f32>,
     kind:       EntryKind,
+}
+
+impl Entry {
+    /// How to load this row, if it's a track (folders/links have none).
+    pub fn load(&self) -> Option<&Load> {
+        match &self.kind { EntryKind::Track(l) => Some(l), _ => None }
+    }
 }
 
 #[derive(Clone)]

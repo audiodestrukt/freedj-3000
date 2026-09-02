@@ -15,6 +15,7 @@ mod prodj;
 mod renderer;
 mod screen;
 mod snapshot;
+mod taglist;
 
 use anyhow::{bail, Context, Result};
 use audio::AudioHandle;
@@ -47,7 +48,7 @@ const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// Which middle-band mode the deck screen is showing.  PERFORM comes later.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum ScreenMode { Playback, Browse, Info, Perform }
+enum ScreenMode { Playback, Browse, Info, Perform, TagList }
 
 struct DeckApp {
     // Provided before event loop starts.
@@ -57,6 +58,8 @@ struct DeckApp {
     beat_grid:    Option<BeatGrid>,
     screen_mode:  ScreenMode,
     browser:      Browser,
+    /// TAG LIST — the on-the-fly playlist; persisted (see taglist.rs).
+    tag_list:     taglist::TagList,
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
@@ -261,6 +264,7 @@ impl DeckApp {
         event_rx:     mpsc::Receiver<Event>,
     ) -> Self {
         let browser = Browser::new(&path, std::sync::Arc::clone(&link));
+        let tag_list = taglist::TagList::open();
         let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
             .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
         // AUTO CUE (on by default, as the unit): with no explicit cue, the
@@ -299,9 +303,11 @@ impl DeckApp {
                 Ok("browse")  => ScreenMode::Browse,
                 Ok("info")    => ScreenMode::Info,
                 Ok("perform") => ScreenMode::Perform,
+                Ok("taglist") => ScreenMode::TagList,
                 _             => ScreenMode::Playback,
             },
             browser,
+            tag_list,
             fader_speed,
             beat2_bpm,
             beat2_anchor,
@@ -608,30 +614,64 @@ impl DeckApp {
                 }
             }
             Event::Deck(ControlEvent::BrowseEncoderDelta { delta }) => {
-                if self.screen_mode == ScreenMode::Browse {
-                    self.browser.move_selection(delta);
-                } else {
-                    // Outside the browser the selector nudges zoom, as on the unit.
-                    self.apply(Event::Ui(UiEvent::ZoomStep(delta.signum())));
+                match self.screen_mode {
+                    ScreenMode::Browse  => self.browser.move_selection(delta),
+                    ScreenMode::TagList => self.tag_list.move_selection(delta),
+                    // Outside a list the selector nudges zoom, as on the unit.
+                    _ => self.apply(Event::Ui(UiEvent::ZoomStep(delta.signum()))),
                 }
             }
             Event::Deck(ControlEvent::Load) => {
-                if self.screen_mode != ScreenMode::Browse {
-                    self.screen_mode = ScreenMode::Browse;
-                    self.browser.refresh();
-                } else {
-                    match self.browser.enter() {
+                match self.screen_mode {
+                    ScreenMode::Browse => match self.browser.enter() {
                         Enter::Folder  => {}                       // descended; stay in browser
                         Enter::Nothing => {}
                         Enter::Track(load) => match self.load_selected(load) {
                             Ok(())  => self.screen_mode = ScreenMode::Playback,
                             Err(e)  => log::warn!("load failed: {e:#}"),
                         },
+                    },
+                    ScreenMode::TagList => {
+                        if let Some(e) = self.tag_list.selected_entry().cloned() {
+                            match self.load_selected(e.load) {
+                                Ok(())  => self.screen_mode = ScreenMode::Playback,
+                                Err(e)  => log::warn!("load failed: {e:#}"),
+                            }
+                        }
+                    }
+                    _ => {
+                        self.screen_mode = ScreenMode::Browse;
+                        self.browser.refresh();
                     }
                 }
             }
             Event::Deck(ControlEvent::Back) => {
-                if self.screen_mode == ScreenMode::Browse { self.browser.back(); }
+                match self.screen_mode {
+                    ScreenMode::Browse  => self.browser.back(),
+                    ScreenMode::TagList => self.screen_mode = ScreenMode::Playback,
+                    _ => {}
+                }
+            }
+            Event::Ui(UiEvent::TagTrack) => {
+                // TAG TRACK / REMOVE: in BROWSE toggle the highlighted track's
+                // tag; on the TAG LIST screen drop the highlighted track.
+                match self.screen_mode {
+                    ScreenMode::Browse => {
+                        if let Some(e) = self.browser.selected_entry() {
+                            if let Some(load) = e.load() {
+                                let entry = taglist::TagEntry { name: e.name.clone(), artist: e.artist.clone(), load: load.clone() };
+                                let tagged = self.tag_list.toggle(entry);
+                                log::info!("tag list: {} {}", if tagged { "tagged" } else { "removed" }, e.name);
+                            }
+                        }
+                    }
+                    ScreenMode::TagList => {
+                        if let Some(e) = self.tag_list.remove_selected() {
+                            log::info!("tag list: removed {}", e.name);
+                        }
+                    }
+                    _ => {}
+                }
             }
             // ── Loops ───────────────────────────────────────────────────────────
             Event::Deck(ControlEvent::BeatLoop { beats, .. }) => {
@@ -737,6 +777,15 @@ impl DeckApp {
                         ScreenMode::Playback
                     } else {
                         ScreenMode::Info
+                    };
+                    log::info!("screen → {:?}", self.screen_mode);
+                }
+                TopScreen::TagList => {
+                    // TAG LIST: the on-the-fly playlist, browse-style.
+                    self.screen_mode = if self.screen_mode == ScreenMode::TagList {
+                        ScreenMode::Playback
+                    } else {
+                        ScreenMode::TagList
                     };
                     log::info!("screen → {:?}", self.screen_mode);
                 }
@@ -1296,8 +1345,13 @@ impl DeckApp {
         let raw = egui_state.take_egui_input(window.as_ref());
         let mut touch = Vec::new();
         let _t_run = Instant::now();
-        let browse = if self.screen_mode == ScreenMode::Browse { Some(&self.browser) } else { None };
-        let info   = self.screen_mode == ScreenMode::Info;
+        let view = match self.screen_mode {
+            ScreenMode::Playback => screen::ScreenView::Playback,
+            ScreenMode::Browse   => screen::ScreenView::Browse(&self.browser),
+            ScreenMode::Info     => screen::ScreenView::Info,
+            ScreenMode::Perform  => screen::ScreenView::Perform,
+            ScreenMode::TagList  => screen::ScreenView::TagList,
+        };
         let face_ref = face.as_ref();
         // Landscape paints the photo as the deck body; portrait doesn't (its body
         // is synthesised) but passes the texture as chrome_tex for jog/fader sprites.
@@ -1306,7 +1360,7 @@ impl DeckApp {
             _ => None,
         };
         let chrome_tex = if self.portrait { self.face_tex.as_ref() } else { None };
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, info, perform, face_ref, face_img, chrome_tex, &mut touch));
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, face_img, chrome_tex, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
         self.events.append(&mut touch);
@@ -1556,14 +1610,17 @@ impl ApplicationHandler for DeckApp {
                 }
                 // Everything else acts on key-down only.
                 if state != ElementState::Pressed { return; }
-                // In the browser the keys navigate the list, not the transport.
-                if self.screen_mode == ScreenMode::Browse {
+                // In a list screen (BROWSE / TAG LIST) the keys navigate the
+                // list, not the transport.  G = TAG TRACK / REMOVE.
+                if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList) {
+                    let here = if self.screen_mode == ScreenMode::Browse { TopScreen::Browse } else { TopScreen::TagList };
                     let ev = match code {
                         ArrowDown           => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: 1 })),
                         ArrowUp             => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: -1 })),
                         Enter | NumpadEnter => Some(Event::Deck(ControlEvent::Load)),
                         Backspace           => Some(Event::Deck(ControlEvent::Back)),
-                        KeyB | Escape       => Some(Event::Ui(UiEvent::Screen(TopScreen::Browse))), // toggle off
+                        KeyG                => Some(Event::Ui(UiEvent::TagTrack)),
+                        KeyB | Escape       => Some(Event::Ui(UiEvent::Screen(here))),   // toggle off
                         _ => None,
                     };
                     if let Some(ev) = ev {

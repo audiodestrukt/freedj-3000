@@ -16,6 +16,7 @@
 
 use crate::input::{ControlEvent, Event, Screen as TopScreen, Source, UiEvent};
 use crate::browser::Browser;
+use crate::taglist::TagList;
 use crate::snapshot::DeckSnapshot;
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -215,6 +216,8 @@ pub struct FaceLayout {
     /// where TIME/AUTO CUE live inside the LCD as on the real XDJ faceplate).
     pub time_mode: Option<Rect>,
     pub auto_cue:  Option<Rect>,
+    /// TAG TRACK / REMOVE (portrait): beside the browse knob, as on the unit.
+    pub tag_track: Option<Rect>,
 }
 
 /// Proportions of the deck photo the `faceplate_layout` fractions were measured
@@ -248,6 +251,7 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
         mt:       disk(0.925, 0.565, 0.018),
         time_mode: None,
         auto_cue:  None,
+        tag_track: None,
     };
     (screen, face)
 }
@@ -301,6 +305,8 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         mt:       disk(0.845, 0.448, 0.020),
         time_mode: Some(face_rect(base, 0.012, 0.055, 0.104, 0.120)),
         auto_cue:  Some(face_rect(base, 0.012, 0.150, 0.104, 0.215)),
+        // Under the BROWSE knob's caption, right of the LCD (which ends ~0.887).
+        tag_track: Some(face_rect(base, 0.892, 0.192, 0.996, 0.238)),
     };
     (screen, face)
 }
@@ -386,7 +392,7 @@ fn rect_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<Ev
 /// Draw the faceplate over the photo: redact the branding, paint the live
 /// overlays (jog marker, fader handle, lit states), and register the invisible
 /// touch targets that emit `ControlEvent`s.
-fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
+fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel_tagged: bool,
                   chrome_tex: Option<&egui::TextureHandle>, out: &mut Vec<Event>) {
     let p = ui.painter();
     // Branding is redacted in the asset itself (reference/photos), so nothing to
@@ -459,7 +465,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         if let Some(r) = f.reloop   { cap(r, "RELOOP"); }
         // Portrait-only left column: TIME (elapsed/remain) + AUTO CUE.  Labelled
         // inside the slab since they sit in open space, not on a photo.
-        for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE")] {
+        for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE"), (f.tag_track, "TAG TRACK")] {
             if let Some(r) = rect {
                 slab(r);
                 text(ui, r.center(), Align2::CENTER_CENTER, s, lbl * 0.85, DIM);
@@ -551,18 +557,29 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         else if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
         if resp.clicked() { out.push(Event::Ui(UiEvent::AutoCue)); }
     }
+    // TAG TRACK / REMOVE: tags/untags the highlighted browse track, or removes
+    // the highlighted TAG LIST track; lit while that track is tagged.
+    if let Some(r) = f.tag_track {
+        let resp = ui.interact(r, Id::new("fp-tag"), Sense::click());
+        if sel_tagged { p.rect_filled(r, 3.0, tint(BLUE, 120)); }
+        else if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
+        if resp.clicked() { out.push(Event::Ui(UiEvent::TagTrack)); }
+    }
 }
 
 // ── Drawing ───────────────────────────────────────────────────────────────────
 
 /// Draw the screen and collect the touch events it produced this frame.
+/// Which screen the LCD shows; the top / middle band follows it.
+#[derive(Clone, Copy)]
+pub enum ScreenView<'a> { Playback, Browse(&'a Browser), Info, Perform, TagList }
+
 pub fn draw(
     ctx:    &egui::Context,
     snap:   &DeckSnapshot,
     lay:    &Layout,
-    browse: Option<&Browser>,
-    info:   bool,                              // INFO screen replaces the middle band
-    perform: bool,                             // PERFORM screen replaces the top band
+    view:   ScreenView,
+    tag_list: &TagList,                        // tag marks in BROWSE + the TAG LIST screen
     face:   Option<&FaceLayout>,
     face_img: Option<(&egui::TextureHandle, Rect)>,
     chrome_tex: Option<&egui::TextureHandle>,   // photo for jog/fader sprites (portrait)
@@ -601,6 +618,7 @@ pub fn draw(
                 }
             }
 
+            let perform = matches!(view, ScreenView::Perform);
             // Ground everything except the two shader rects.  egui paints
             // after the waveform pass, so those must be left alone.  In PERFORM
             // the enlarged waveform lives in the compact strip instead.
@@ -610,34 +628,46 @@ pub fn draw(
             }
 
             draw_left(ui, snap, lay, h, perform, out);
-            if perform {
-                draw_perform(ui, snap, lay, h, out);
-            } else {
-                let active = if browse.is_some() { Some(TopScreen::Browse) }
-                             else if info { Some(TopScreen::Info) } else { None };
-                draw_keys(ui, lay, h, active, out);
+            match view {
+                ScreenView::Perform => draw_perform(ui, snap, lay, h, out),
+                _ => {
+                    let active = match view {
+                        ScreenView::Browse(_) => Some(TopScreen::Browse),
+                        ScreenView::Info      => Some(TopScreen::Info),
+                        ScreenView::TagList   => Some(TopScreen::TagList),
+                        _ => None,
+                    };
+                    draw_keys(ui, lay, h, active, out);
+                }
             }
-            if perform {
-                // drawn above
-            } else if let Some(browser) = browse {
+            match view {
+                ScreenView::Perform => {}   // drawn above
                 // BROWSE: the middle band (title + phase + enlarged waveform)
                 // becomes the file list.  The source column, info row and the
                 // overview keep running — the loaded track plays while you browse.
-                draw_browse(ui, browser, lay, h);
-            } else if info {
+                ScreenView::Browse(browser) => draw_browse(ui, browser, tag_list, lay, h),
+                // TAG LIST: the same list, of the tagged tracks.
+                ScreenView::TagList => draw_tag_list(ui, tag_list, lay, h),
                 // INFO: the middle band shows the loaded track's details.
-                draw_info_screen(ui, snap, lay, h);
-            } else {
-                draw_title(ui, snap, lay, h);
-                draw_phase(ui, snap, lay, h, out);
-                draw_wave_area(ui, snap, lay, h, out);
+                ScreenView::Info => draw_info_screen(ui, snap, lay, h),
+                ScreenView::Playback => {
+                    draw_title(ui, snap, lay, h);
+                    draw_phase(ui, snap, lay, h, out);
+                    draw_wave_area(ui, snap, lay, h, out);
+                }
             }
             draw_cue_call_keys(ui, lay, h, out);   // every mode, as on the unit
             draw_info(ui, snap, lay, h, out);
             draw_bottom(ui, snap, lay, h, out);
 
             if let Some(f) = face {
-                draw_faceplate(ui, snap, f, face_img.is_some(), chrome_tex, out);
+                // TAG TRACK lights when the highlighted browse track is tagged.
+                let sel_tagged = match view {
+                    ScreenView::Browse(b) => b.selected_entry().and_then(|e| e.load()).map_or(false, |l| tag_list.contains(l)),
+                    ScreenView::TagList   => true,
+                    _ => false,
+                };
+                draw_faceplate(ui, snap, f, face_img.is_some(), sel_tagged, chrome_tex, out);
             }
         });
 }
@@ -659,13 +689,17 @@ fn middle_band(lay: &Layout) -> Rect {
     )
 }
 
-fn draw_browse(ui: &Ui, browser: &Browser, lay: &Layout, h: f32) {
-    // Header replaces the title bar with the current folder name.
+/// One row of a list screen (BROWSE / TAG LIST).
+struct ListRow<'a> { name: &'a str, is_dir: bool, tagged: bool }
+
+/// The browse-style list screen: `header` in the title bar, the rows in the
+/// left pane with the highlighted one inverted and tagged tracks marked, and
+/// a detail pane on the right (`detail` = kind label, name, action hint).
+fn draw_list_screen(ui: &Ui, lay: &Layout, h: f32, header: &str, rows: &[ListRow],
+                    selected: usize, empty: &str, detail: Option<(&str, &str, &str)>) {
     let hdr = lay.title;
     ui.painter().rect_filled(hdr, 0.0, BAR);
-    let folder = browser.title();
-    text(ui, Pos2::new(hdr.min.x + h * 0.02, hdr.center().y), Align2::LEFT_CENTER,
-         folder.to_uppercase(), h * 0.030, TEXT);
+    text(ui, Pos2::new(hdr.min.x + h * 0.02, hdr.center().y), Align2::LEFT_CENTER, header, h * 0.030, TEXT);
 
     // Body spans the phase + enlarged-waveform region (covering the shader).
     let body = middle_band(lay);
@@ -674,52 +708,74 @@ fn draw_browse(ui: &Ui, browser: &Browser, lay: &Layout, h: f32) {
     // Split: left list pane, right detail pane.
     let split   = body.min.x + body.width() * 0.58;
     let list    = Rect::from_min_max(body.min, Pos2::new(split, body.max.y));
-    let detail  = Rect::from_min_max(Pos2::new(split + h * 0.01, body.min.y), body.max);
-    ui.painter().rect_filled(detail, 0.0, KEY_LO);
+    let detail_r = Rect::from_min_max(Pos2::new(split + h * 0.01, body.min.y), body.max);
+    ui.painter().rect_filled(detail_r, 0.0, KEY_LO);
 
-    let entries = browser.entries();
-    let row_h   = h * 0.052;
-    let n_vis   = (list.height() / row_h).floor().max(1.0) as usize;
-
-    if entries.is_empty() {
-        text(ui, list.center(), Align2::CENTER_CENTER, "— empty —", h * 0.026, DIM);
+    let row_h = h * 0.052;
+    let n_vis = (list.height() / row_h).floor().max(1.0) as usize;
+    if rows.is_empty() {
+        text(ui, list.center(), Align2::CENTER_CENTER, empty, h * 0.024, DIM);
         return;
     }
 
     // Scroll so the highlighted row stays roughly centred, clamped to the ends.
-    let sel   = browser.selected;
     let half  = n_vis / 2;
-    let max_first = entries.len().saturating_sub(n_vis);
-    let first = sel.saturating_sub(half).min(max_first);
-
+    let max_first = rows.len().saturating_sub(n_vis);
+    let first = selected.saturating_sub(half).min(max_first);
     for slot in 0..n_vis {
         let idx = first + slot;
-        if idx >= entries.len() { break; }
-        let e   = &entries[idx];
+        if idx >= rows.len() { break; }
+        let r   = &rows[idx];
         let y0  = list.min.y + slot as f32 * row_h;
         let row = Rect::from_min_max(Pos2::new(list.min.x, y0), Pos2::new(list.max.x, y0 + row_h));
-        let selected = idx == sel;
-        if selected {
-            ui.painter().rect_filled(row, 2.0, TEXT);   // inverted highlight
-        }
-        let ink = if selected { BG } else if e.is_dir { TEXT } else { DIM };
+        let sel = idx == selected;
+        if sel { ui.painter().rect_filled(row, 2.0, TEXT); }   // inverted highlight
+        let ink = if sel { BG } else if r.is_dir { TEXT } else { DIM };
         // egui's default font is Latin + a few symbols: ♪ renders, most arrows do
         // not.  Folders read as "name/", tracks get a ♪.
-        let label = if e.is_dir { format!("{}/", e.name) } else { format!("♪  {}", e.name) };
-        text(ui, Pos2::new(row.min.x + h * 0.02, row.center().y), Align2::LEFT_CENTER,
-             label, h * 0.026, ink);
+        let label = if r.is_dir { format!("{}/", r.name) } else { format!("♪  {}", r.name) };
+        text(ui, Pos2::new(row.min.x + h * 0.02, row.center().y), Align2::LEFT_CENTER, label, h * 0.026, ink);
+        // Tagged tracks carry a small mark at the row's right edge.
+        if r.tagged {
+            let m = Rect::from_center_size(Pos2::new(row.max.x - h * 0.03, row.center().y), Vec2::splat(h * 0.016));
+            ui.painter().rect_filled(m, 2.0, if sel { BG } else { BLUE });
+        }
     }
 
-    // Detail pane: the highlighted item.
-    if let Some(e) = browser.selected_entry() {
-        let x = detail.min.x + h * 0.02;
-        text(ui, Pos2::new(x, detail.min.y + h * 0.05), Align2::LEFT_CENTER,
-             if e.is_dir { "FOLDER" } else { "TRACK" }, h * 0.020, if e.is_dir { BLUE } else { ORANGE });
-        text(ui, Pos2::new(x, detail.min.y + h * 0.11), Align2::LEFT_CENTER,
-             &e.name, h * 0.026, TEXT);
-        let hint = if e.is_dir { "LOAD: open folder" } else { "LOAD: play track" };
-        text(ui, Pos2::new(x, detail.max.y - h * 0.04), Align2::LEFT_CENTER, hint, h * 0.018, DIM);
+    if let Some((kind, name, hint)) = detail {
+        let x = detail_r.min.x + h * 0.02;
+        text(ui, Pos2::new(x, detail_r.min.y + h * 0.05), Align2::LEFT_CENTER, kind, h * 0.020,
+             if kind == "FOLDER" { BLUE } else { ORANGE });
+        text(ui, Pos2::new(x, detail_r.min.y + h * 0.11), Align2::LEFT_CENTER, name, h * 0.026, TEXT);
+        text(ui, Pos2::new(x, detail_r.max.y - h * 0.04), Align2::LEFT_CENTER, hint, h * 0.018, DIM);
     }
+}
+
+fn draw_browse(ui: &Ui, browser: &Browser, tag_list: &TagList, lay: &Layout, h: f32) {
+    let rows: Vec<ListRow> = browser.entries().iter().map(|e| ListRow {
+        name: &e.name, is_dir: e.is_dir,
+        tagged: e.load().map_or(false, |l| tag_list.contains(l)),
+    }).collect();
+    let header = browser.title().to_uppercase();
+    let detail = browser.selected_entry().map(|e| {
+        let tagged = e.load().map_or(false, |l| tag_list.contains(l));
+        let hint = if e.is_dir { "LOAD: open folder" }
+                   else if tagged { "LOAD: play  ·  TAG TRACK: untag" }
+                   else { "LOAD: play  ·  TAG TRACK: tag" };
+        (if e.is_dir { "FOLDER" } else if tagged { "TRACK  (TAGGED)" } else { "TRACK" }, e.name.as_str(), hint)
+    });
+    draw_list_screen(ui, lay, h, &header, &rows, browser.selected, "— empty —", detail);
+}
+
+/// TAG LIST: the tagged tracks, browse-style.  LOAD plays the highlighted
+/// one; TAG TRACK / REMOVE drops it.
+fn draw_tag_list(ui: &Ui, tag_list: &TagList, lay: &Layout, h: f32) {
+    let rows: Vec<ListRow> = tag_list.entries().iter()
+        .map(|e| ListRow { name: &e.name, is_dir: false, tagged: true }).collect();
+    let header = format!("TAG LIST   {} / {}", tag_list.len(), TagList::MAX);
+    let detail = tag_list.selected_entry().map(|e| ("TAGGED TRACK", e.name.as_str(), "LOAD: play  ·  TAG TRACK: remove"));
+    draw_list_screen(ui, lay, h, &header, &rows, tag_list.selected,
+                     "— no tagged tracks —   (BROWSE, then TAG TRACK)", detail);
 }
 
 /// INFO screen: the loaded track's details in the middle band — its own tags
