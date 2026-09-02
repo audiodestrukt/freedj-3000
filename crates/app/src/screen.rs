@@ -282,6 +282,39 @@ fn play_pause_glyph(p: &egui::Painter, c: Pos2, s: f32, col: Color32) {
     p.rect_filled(Rect::from_min_size(Pos2::new(bx + bw + gap, c.y - s), Vec2::new(bw, 2.0 * s)), 0.0, col);
 }
 
+/// Synthetic tempo-fader slot: a recessed dark channel with a centred travel
+/// groove.  Portrait draws this instead of cropping the photo (whose crop
+/// dragged in the printed pitch scale and sat off-centre).
+fn fader_slot(p: &egui::Painter, ft: Rect) {
+    let round = ft.width() * 0.22;
+    p.rect_filled(ft, round, Color32::from_rgb(0x0a, 0x0b, 0x0d));
+    p.rect_stroke(ft, round, Stroke::new(1.5, Color32::from_rgb(0x2c, 0x2e, 0x33)));
+    // Centre travel groove.
+    let cx = ft.center().x;
+    let inset = ft.width() * 0.22;
+    p.line_segment(
+        [Pos2::new(cx, ft.min.y + inset), Pos2::new(cx, ft.max.y - inset)],
+        Stroke::new(ft.width() * 0.07, Color32::from_rgb(0x17, 0x19, 0x1d)),
+    );
+}
+
+/// Silver fader knob centred at `hy`, with a bright centre indicator line —
+/// the pitch handle, drawn synthetically so it carries no scale ticks.
+fn fader_knob(p: &egui::Painter, ft: Rect, hy: f32) {
+    let kw = ft.width() * 1.9;
+    let kh = kw * 0.60;
+    let kr = Rect::from_center_size(Pos2::new(ft.center().x, hy), Vec2::new(kw, kh));
+    let round = kh * 0.20;
+    p.rect_filled(kr, round, Color32::from_rgb(0x3a, 0x3c, 0x40));                 // dark bevel edge
+    p.rect_filled(kr.shrink2(Vec2::new(kw * 0.05, kh * 0.12)), round, SILVER);     // silver face
+    // Bright centre indicator line (the "position" mark on the real knob).
+    p.rect_filled(
+        Rect::from_center_size(kr.center(), Vec2::new(kw * 0.86, kh * 0.13)),
+        0.0, Color32::from_rgb(0xf2, 0xf4, 0xf6),
+    );
+    p.rect_stroke(kr, round, Stroke::new(1.0, Color32::from_rgb(0x1c, 0x1e, 0x22)));
+}
+
 /// A rectangular touch target, same overlay treatment as `round_btn`.
 fn rect_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<Event>, ev: ControlEvent) {
     let resp = ui.interact(r, Id::new(name), Sense::click());
@@ -320,11 +353,9 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
                 p.image(tex.id(), dst, Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)), Color32::WHITE);
 
             disc(f.jog.center(), f.jog.width() * 0.5, Pos2::new(0.500, 0.645), 0.340);
-            // Tempo track background: a knob-free slice of the ridged rail (the
-            // clean stretch just above the centre knob), stretched down the whole
-            // travel.  The knob itself is drawn separately at the live pitch so it
-            // moves — see the handle section below.
-            crop(f.fader, 0.862, 0.616, 0.950, 0.735);
+            // Tempo fader is drawn synthetically in the handle section below
+            // (a clean centred slot + knob); the photo crop dragged in the
+            // printed pitch scale and sat off-centre.
             // Silver transport buttons (CUE above PLAY/PAUSE, bottom-left); live
             // green/press tints draw over them.
             disc(f.cue.center(),  f.cue.width()  * 0.5, Pos2::new(0.077, 0.771), 0.057);
@@ -393,16 +424,13 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
     let ft  = f.fader;
     let pos = crate::input::speed_to_fader(snap.fader_speed).clamp(0.0, 1.0);
     let hy  = ft.max.y - pos * ft.height();
-    if let Some(tex) = chrome_tex {
-        // The photographed knob, drawn at the live pitch so the styled knob
-        // actually moves (the track behind it is a knob-free rail crop).
-        let kw = ft.width() * 1.7;
-        let kh = kw * 0.53;                       // knob is ~1.9:1 in the photo
-        let krect = Rect::from_center_size(Pos2::new(ft.center().x, hy), Vec2::new(kw, kh));
-        p.image(tex.id(), krect,
-                Rect::from_min_max(Pos2::new(0.881, 0.739), Pos2::new(0.955, 0.770)),
-                Color32::WHITE);
+    if chrome_tex.is_some() {
+        // Portrait: synthetic slot + knob (clean, centred, no scale ticks).
+        fader_slot(p, ft);
+        fader_knob(p, ft, hy);
     } else {
+        // Landscape / no-photo: the deck body already draws the slot; just add
+        // the silver handle at the live pitch.
         let hrect = Rect::from_center_size(Pos2::new(ft.center().x, hy), Vec2::new(ft.width() * 2.0, ft.height() * 0.045));
         p.rect_filled(hrect, 2.0, SILVER);
         p.rect_stroke(hrect, 2.0, Stroke::new(1.0, Color32::BLACK));
