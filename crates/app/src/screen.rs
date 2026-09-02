@@ -147,7 +147,9 @@ pub struct FaceLayout {
     /// but None in portrait/iOS until loop support lands — nothing to trigger yet.
     pub loop_in:  Option<Rect>,
     pub loop_out: Option<Rect>,
-    pub reloop:   Rect,
+    /// RELOOP/EXIT: on the landscape photo, but None in portrait/iOS — it needs
+    /// the loop engine (unbuilt in the app), same as loop_in/loop_out.
+    pub reloop:   Option<Rect>,
     pub browse:   Rect,
     pub mt:       Rect,   // MASTER TEMPO (key lock)
     /// Portrait-only physical buttons left of the screen (None in landscape,
@@ -182,7 +184,7 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
         cue:      disk(0.077, 0.771, 0.057),
         loop_in:  Some(face_rect(base, 0.040, 0.345, 0.110, 0.390)),
         loop_out: Some(face_rect(base, 0.125, 0.345, 0.185, 0.390)),
-        reloop:   disk(0.255, 0.370, 0.025),
+        reloop:   Some(disk(0.255, 0.370, 0.025)),
         browse:   disk(0.845, 0.205, 0.065),
         mt:       disk(0.925, 0.565, 0.018),
         time_mode: None,
@@ -232,7 +234,7 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         // LOOP IN/OUT omitted in portrait until loop support exists.
         loop_in:  None,
         loop_out: None,
-        reloop:   disk(0.775, 0.898, 0.026),
+        reloop:   None,   // loop engine unbuilt — omit in portrait, like loop_in/out
         // Browse knob in the right margin beside the screen; TIME/AUTO CUE stacked
         // in the left margin.  (Margins are (1-sw)/2 ≈ 0.117 wide at 6".)
         browse:   disk(0.945, 0.105, 0.048),
@@ -302,7 +304,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
             // Browse rotary (top-right), RELOOP, the small MASTER-TEMPO button,
             // and the yellow LOOP IN / OUT buttons — all from the photo.
             disc(f.browse.center(), f.browse.width() * 0.5, Pos2::new(0.845, 0.205), 0.065);
-            disc(f.reloop.center(), f.reloop.width() * 0.5, Pos2::new(0.255, 0.370), 0.025);
+            if let Some(r) = f.reloop { disc(r.center(), r.width() * 0.5, Pos2::new(0.255, 0.370), 0.025); }
             disc(f.mt.center(),     f.mt.width()     * 0.5, Pos2::new(0.925, 0.565), 0.018);
             if let Some(r) = f.loop_in  { crop(r, 0.040, 0.345, 0.110, 0.390); }
             if let Some(r) = f.loop_out { crop(r, 0.125, 0.345, 0.185, 0.390); }
@@ -322,7 +324,8 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         // With the photo, every control above is a real crop; only draw the
         // primitive outlines/slabs as the no-photo fallback.
         if chrome_tex.is_none() {
-            ring(f.reloop); ring(f.browse); ring(f.mt);
+            if let Some(r) = f.reloop { ring(r); }
+            ring(f.browse); ring(f.mt);
             ring(f.play); ring(f.cue);
             if let Some(r) = f.loop_in  { slab(r); }
             if let Some(r) = f.loop_out { slab(r); }
@@ -332,7 +335,6 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         cap(f.cue,  "CUE");
         cap(f.browse, "BROWSE");
         cap(f.mt,     "MASTER TEMPO");   // key-lock button
-        cap(f.reloop, "RELOOP");
         if let Some(r) = f.loop_in  { cap(r, "IN"); }
         if let Some(r) = f.loop_out { cap(r, "OUT"); }
         // Portrait-only left column: TIME (elapsed/remain) + AUTO CUE.  Labelled
@@ -394,7 +396,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
 
     if let Some(r) = f.loop_in  { rect_btn(ui, r, "fp-loopin",  None, out, ControlEvent::LoopIn); }
     if let Some(r) = f.loop_out { rect_btn(ui, r, "fp-loopout", None, out, ControlEvent::LoopOut); }
-    round_btn(ui, f.reloop,  "fp-reloop",  None, out, ControlEvent::Reloop);
+    if let Some(r) = f.reloop { round_btn(ui, r, "fp-reloop", None, out, ControlEvent::Reloop); }
     round_btn(ui, f.mt,      "fp-mt",      snap.key_lock.then_some(ORANGE), out, ControlEvent::KeyLockToggle);
 
     // ── Browse rotary ────────────────────────────────────────────────────────
