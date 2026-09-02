@@ -1,6 +1,12 @@
 /target
 Cargo.lock
 *.mp3
+# Exception: the bundled demo track shipped with the iOS app (an original
+# production of Dan's — "amplificate", from produkshun/finished tracks; the
+# source .flp lives in the archive). Tracked so CI bundles it; everything else
+# stays ignored. Alphabetically it precedes techno.mp3, so bundle-track.sh picks
+# THIS one, and a fresh CI checkout has only this one anyway.
+!/amplificate.mp3
 
 # Pioneer manual page extracts — copyrighted, local reference only.
 # Regenerate with: tools/fetch-reference.sh
