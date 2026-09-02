@@ -367,8 +367,8 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
         });
         if changed {
             log::info!(
-                "ProDJ status: player {} fw {} {:?} {}{}{}{}pitch {:+.2}% bpm {} beat {:?}/{:?} handoff {:?}",
-                st.player, String::from_utf8_lossy(&st.firmware).trim(), st.play,
+                "ProDJ status: player {} fw {} len {:#x} {:?} {}{}{}{}pitch {:+.2}% bpm {} beat {:?}/{:?} handoff {:?}",
+                st.player, String::from_utf8_lossy(&st.firmware).trim(), data.len(), st.play,
                 if st.playing { "PLAY " } else { "" }, if st.master { "MASTER " } else { "" },
                 if st.sync { "SYNC " } else { "" }, if st.on_air { "ONAIR " } else { "" },
                 (st.pitch - 1.0) * 100.0,
