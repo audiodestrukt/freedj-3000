@@ -52,6 +52,9 @@ pub struct DeckSnapshot<'a> {
     /// knob position) and QUANTIZE (readout).
     pub tempo_range:    f32,
     pub quantize:       bool,
+    /// SLIP: the shadow playhead while a loop / held hot cue is slipping
+    /// (interleaved samples) — drawn as a marker on both waveforms.
+    pub slip_shadow:    Option<u64>,
     /// Master Tempo (key lock) engaged.
     pub key_lock:     bool,
     /// Time display shows remaining (REMAIN) rather than elapsed (TIME).

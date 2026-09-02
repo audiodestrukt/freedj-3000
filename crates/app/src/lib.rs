@@ -123,6 +123,11 @@ struct DeckApp {
     /// Beat length of the active BEAT LOOP (0 = a manual IN/OUT loop), so the
     /// matching pad lights.  The loop itself lives on `audio.loop_*`.
     loop_beats:        f32,
+    /// SLIP: while a loop / held hot cue is in progress with SLIP on, the
+    /// playhead the track WOULD be at — (audible position when the action
+    /// began, audio.source_consumed then).  Shadow = pos + consumed-since.
+    /// Ending the action jumps there; a manual seek cancels it.
+    slip_anchor:       Option<(f64, u64)>,
     cue_preview:       bool,  // CUE held → previewing from the cue point
     cued:              bool,  // playhead is sitting on the cue (not searched away)
     exit_after_capture: bool,
@@ -171,6 +176,7 @@ struct UiFlags {
     perform_mode: PerformMode, perform_bank: u8, perform_delete: bool,
     loop_active: bool, loop_start: u64, loop_end: u64, loop_beats: f32,
     tempo_range: f32, quantize: bool,
+    slip_shadow: Option<u64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -203,6 +209,7 @@ fn make_snapshot<'a>(
         loop_beats:    f.loop_beats,
         tempo_range:   f.tempo_range,
         quantize:      f.quantize,
+        slip_shadow:   f.slip_shadow,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
         remain_mode:   f.remain_mode,
@@ -358,6 +365,7 @@ impl DeckApp {
             perform_bank:      0,
             perform_delete:    false,
             loop_beats:        0.0,
+            slip_anchor:       None,
             cue_preview:       false,
             cued:              true,
             exit_after_capture: false,
@@ -600,7 +608,16 @@ impl DeckApp {
                 self.audio.key_lock.store(self.key_lock, Ordering::Relaxed);
                 log::info!("master tempo {}", if self.key_lock { "ON (key lock)" } else { "OFF (varispeed)" });
             }
-            Event::Deck(ControlEvent::SlipToggle)    => { self.slip   = !self.slip;   log::info!("slip {} (no engine yet)", self.slip); }
+            Event::Deck(ControlEvent::SlipToggle) => {
+                self.slip = !self.slip;
+                if self.slip {
+                    // Engaged mid-loop: start shadowing from here.
+                    if self.audio.loop_active.load(Ordering::Relaxed) { self.slip_begin(); }
+                } else {
+                    self.slip_anchor = None;   // disengaged: no jump, just stop shadowing
+                }
+                log::info!("slip {}", if self.slip { "on" } else { "off" });
+            }
             Event::Deck(ControlEvent::SyncToggle) => {
                 let on = !self.link.sync.load(Ordering::Relaxed);
                 self.link.sync.store(on, Ordering::Relaxed);
@@ -703,7 +720,7 @@ impl DeckApp {
                 };
                 let active = self.audio.loop_active.load(Ordering::Relaxed);
                 if active && (self.loop_beats - beats).abs() < 1e-3 {
-                    self.exit_loop();                       // same pad again = exit
+                    self.exit_loop_slip();                  // same pad again = exit
                 } else {
                     // A new length re-uses the running loop's start; a fresh
                     // loop starts at the beat the playhead is in.
@@ -734,13 +751,17 @@ impl DeckApp {
                 // RELOOP/EXIT: leave a running loop, or jump back into the last
                 // one and run it again.
                 if self.audio.loop_active.load(Ordering::Relaxed) {
-                    self.exit_loop();
+                    self.exit_loop_slip();
                 } else {
                     let (s, e) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
                     if e > s {
                         let beats = self.loop_beats;
+                        // With SLIP the shadow starts where we ARE, not at the
+                        // loop start we're jumping back to.
+                        let anchor = self.slip.then(|| (self.smoothed_pos.max(0.0), self.audio.source_consumed.load(Ordering::Relaxed)));
                         self.seek_to(s);
                         self.set_loop(s, e, beats);
+                        if anchor.is_some() { self.slip_anchor = anchor; }
                         log::info!("reloop");
                     } else {
                         log::info!("reloop: no loop stored");
@@ -907,28 +928,67 @@ impl DeckApp {
         if end <= start { return; }
         self.audio.loop_start.store(start, Ordering::Relaxed);
         self.audio.loop_end.store(end, Ordering::Relaxed);
-        self.audio.loop_active.store(true, Ordering::Relaxed);
+        let was_active = self.audio.loop_active.swap(true, Ordering::Relaxed);
         self.loop_beats = beats;
+        if !was_active { self.slip_begin(); }
         let sr_ch = self.audio.sample_rate as f64 * self.audio.channels as f64;
         log::info!("loop: {:.2}s → {:.2}s ({})", start as f64 / sr_ch, end as f64 / sr_ch,
                    if beats > 0.0 { format!("{beats} beats") } else { "in/out".into() });
     }
 
-    /// Leave the loop; its bounds stay for RELOOP.
+    /// Leave the loop; its bounds stay for RELOOP.  (No SLIP jump — a manual
+    /// seek out of a loop goes where the DJ pointed.)
     fn exit_loop(&mut self) {
         if self.audio.loop_active.swap(false, Ordering::Relaxed) {
             log::info!("loop: exit");
         }
     }
 
+    /// Leave the loop by the pad / RELOOP: with SLIP engaged, jump to where the
+    /// track would have been had it never looped.
+    fn exit_loop_slip(&mut self) {
+        self.exit_loop();
+        self.slip_end();
+    }
+
+    // ── SLIP ─────────────────────────────────────────────────────────────────
+
+    /// Where the track would be now if the slip action had never happened.
+    fn slip_shadow(&self) -> Option<f64> {
+        let (pos, consumed_then) = self.slip_anchor?;
+        let consumed = self.audio.source_consumed.load(Ordering::Relaxed);
+        Some((pos + consumed.saturating_sub(consumed_then) as f64).min(self.audio.len() as f64))
+    }
+
+    /// Start shadowing (SLIP on, and not already shadowing).
+    fn slip_begin(&mut self) {
+        if self.slip && self.slip_anchor.is_none() {
+            self.slip_anchor = Some((self.smoothed_pos.max(0.0), self.audio.source_consumed.load(Ordering::Relaxed)));
+            log::info!("slip: shadowing from {:.2}s", self.smoothed_pos / (self.audio.sample_rate as f64 * self.audio.channels as f64));
+        }
+    }
+
+    /// The slip action ended: snap to the shadow and stop shadowing.
+    fn slip_end(&mut self) {
+        if let Some(shadow) = self.slip_shadow() {
+            let ch = self.audio.channels as u64;
+            let target = ((shadow as u64) / ch) * ch;
+            self.slip_anchor = None;
+            self.seek_to(target);
+            log::info!("slip: back to {:.2}s", target as f64 / (self.audio.sample_rate as f64 * ch as f64));
+        }
+    }
+
     fn seek_to(&mut self, pos: u64) {
         let pos = pos.min(self.audio.len() as u64);
         // Jumping out of an active loop leaves it (bounds kept for RELOOP), as
-        // a hot cue or needle search does on the unit.
+        // a hot cue or needle search does on the unit.  A seek also cancels
+        // any SLIP shadow: the DJ pointed somewhere, go there.
         if self.audio.loop_active.load(Ordering::Relaxed) {
             let (s, e) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
             if pos < s || pos >= e { self.exit_loop(); }
         }
+        self.slip_anchor = None;
         // The seek_request channel is what the processor actually acts on; it
         // can't be clobbered by the processor's own progress store (which lost
         // seeks and made CUE sometimes not return).  `position` is set too, as
@@ -1151,6 +1211,7 @@ impl DeckApp {
             self.prev_drops = drops;
         }
 
+        let slip_shadow = self.slip_shadow().map(|v| v as u64);
         let (egui_state, window) = match (self.egui_state.as_mut(), self.window.as_ref()) {
             (Some(s), Some(w)) => (s, w),
             _ => return,
@@ -1334,6 +1395,7 @@ impl DeckApp {
             loop_end: self.audio.loop_end.load(Ordering::Relaxed),
             loop_beats: self.loop_beats,
             tempo_range: self.settings.tempo_range, quantize: self.settings.quantize,
+            slip_shadow,
         };
         let _t_snap = Instant::now();
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
@@ -1429,6 +1491,7 @@ impl DeckApp {
         }
 
         let platform_output = std::mem::take(&mut output.platform_output);
+        let slip_shadow = self.slip_shadow().map(|v| v as u64);
         let (renderer, egui_state, window) = match (
             self.renderer.as_mut(),
             self.egui_state.as_mut(),
@@ -1462,6 +1525,7 @@ impl DeckApp {
             loop_end: self.audio.loop_end.load(Ordering::Relaxed),
             loop_beats: self.loop_beats,
             tempo_range: self.settings.tempo_range, quantize: self.settings.quantize,
+            slip_shadow,
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
 
@@ -2073,8 +2137,10 @@ pub fn run(cfg: Config) -> Result<()> {
     // Park the startup track at its cue (AUTO CUE's first sound, or the
     // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
     if app.cue_point > 0 { let c = app.cue_point; app.seek_to(c); }
-    // Dev: OPENDECK_LOOP=start_secs,beats arms a beat loop on the startup
-    // track (e.g. "30,4"), for exercising the loop engine + display headlessly.
+    // Dev: OPENDECK_SLIP=1 engages SLIP at startup; OPENDECK_LOOP=start_secs,
+    // beats arms a beat loop on the startup track (e.g. "30,4") — together they
+    // exercise the loop engine, SLIP's shadow and both displays headlessly.
+    if std::env::var("OPENDECK_SLIP").as_deref() == Ok("1") { app.slip = true; }
     if let Ok(v) = std::env::var("OPENDECK_LOOP") {
         let parts: Vec<f64> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
         if let ([secs, beats], Some(per_beat)) = (parts.as_slice(), app.samples_per_beat()) {
@@ -2082,8 +2148,8 @@ pub fn run(cfg: Config) -> Result<()> {
             let sr_ch = app.audio.sample_rate as f64 * ch as f64;
             let start = app.beat_floor(secs * sr_ch);
             let len = (((beats * per_beat) as u64) / ch) * ch;
-            app.set_loop(start, start + len, *beats as f32);
-            app.seek_to(start);
+            app.seek_to(start);                          // seek first: a seek cancels SLIP
+            app.set_loop(start, start + len, *beats as f32);   // …then arm, which anchors the shadow
         }
     }
     event_loop.run_app(&mut app).context("event loop error")?;

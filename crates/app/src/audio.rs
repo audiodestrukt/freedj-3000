@@ -106,6 +106,10 @@ pub struct AudioHandle {
     pub loop_start:  Arc<AtomicU64>,
     pub loop_end:    Arc<AtomicU64>,
     pub loop_active: Arc<AtomicBool>,
+    /// Total source samples the processor has read, ever — monotonic even
+    /// while a loop wraps `position` back.  SLIP measures its shadow playhead
+    /// against this: audio-clock accurate, no wall-clock drift.
+    pub source_consumed: Arc<AtomicU64>,
     /// Source samples that have been decoded but are not yet audible: the
     /// contents of the ring buffer plus the stretcher's internal latency.
     ///
@@ -228,6 +232,7 @@ impl AudioHandle {
         let loop_start  = Arc::new(AtomicU64::new(0));
         let loop_end    = Arc::new(AtomicU64::new(0));
         let loop_active = Arc::new(AtomicBool::new(false));
+        let source_consumed = Arc::new(AtomicU64::new(0));
         let drain_flag = Arc::new(AtomicBool::new(false));
         let in_flight  = Arc::new(AtomicU64::new(0));
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
@@ -246,6 +251,7 @@ impl AudioHandle {
             start:  Arc::clone(&loop_start),
             end:    Arc::clone(&loop_end),
             active: Arc::clone(&loop_active),
+            consumed: Arc::clone(&source_consumed),
         };
         let proc_drain_flag = Arc::clone(&drain_flag);
         let proc_in_flight  = Arc::clone(&in_flight);
@@ -334,6 +340,7 @@ impl AudioHandle {
             loop_start,
             loop_end,
             loop_active,
+            source_consumed,
             in_flight,
             seek_request,
             stats,
@@ -442,6 +449,7 @@ struct LoopShared {
     start:  Arc<AtomicU64>,
     end:    Arc<AtomicU64>,
     active: Arc<AtomicBool>,
+    consumed: Arc<AtomicU64>,
 }
 
 fn processor_loop(
@@ -570,6 +578,8 @@ fn processor_loop(
         let looping  = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
         let (src_block, src_end) = read_block(samples, proc_pos as usize, want,
                                               looping.then_some((ls, le)), &mut loop_buf);
+
+        lp.consumed.fetch_add(src_block.len() as u64, Ordering::Relaxed);
 
         let final_block = !looping && src_end >= samples.len();
 

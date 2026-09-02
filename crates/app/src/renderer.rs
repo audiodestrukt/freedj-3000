@@ -55,7 +55,9 @@ struct WaveformParams {
     /// gets a tinted background and amber in/out lines on both waveforms.
     loop_start_col:   f32,
     loop_end_col:     f32,
-    _pad:             [f32; 3],
+    /// SLIP shadow playhead column; < 0 = none.  Violet marker on both waveforms.
+    slip_col:         f32,
+    _pad:             [f32; 2],
 }
 
 /// Where the shader draws its two waveforms, in physical pixels.
@@ -256,7 +258,8 @@ impl Renderer {
             cue_col:          0.0,
             loop_start_col:   0.0,
             loop_end_col:     0.0,
-            _pad:             [0.0; 3],
+            slip_col:         -1.0,
+            _pad:             [0.0; 2],
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -476,7 +479,8 @@ impl Renderer {
             cue_col:           snap.cue_point as f32 / channels as f32 / hop_size,
             loop_start_col:    if snap.loop_active { snap.loop_start as f32 / channels as f32 / hop_size } else { 0.0 },
             loop_end_col:      if snap.loop_active { snap.loop_end   as f32 / channels as f32 / hop_size } else { 0.0 },
-            _pad:              [0.0; 3],
+            slip_col:          snap.slip_shadow.map_or(-1.0, |v| v as f32 / channels as f32 / hop_size),
+            _pad:              [0.0; 2],
         };
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -667,7 +671,8 @@ struct Params {
     cue_col:            f32,  // start-cue column (orange marker)
     loop_start_col:     f32,  // active loop span in columns; end <= start = none
     loop_end_col:       f32,
-    _p1: f32, _p2: f32, _p3: f32,
+    slip_col:           f32,  // SLIP shadow playhead column; < 0 = none
+    _p1: f32, _p2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
@@ -688,6 +693,7 @@ fn playhead() -> vec4<f32> { return srgb(232.0, 40.0, 40.0); }  // red on the un
 fn cue_color() -> vec4<f32> { return srgb(240.0, 138.0, 30.0); }  // orange start-cue marker
 fn loop_color() -> vec4<f32> { return srgb(250.0, 200.0, 40.0); } // amber loop in/out lines (the unit's yellow LOOP keys)
 fn loop_bg() -> vec4<f32> { return srgb(16.0, 40.0, 66.0); }      // tinted background across the looped span
+fn slip_color() -> vec4<f32> { return srgb(200.0, 110.0, 255.0); } // SLIP shadow playhead (violet)
 fn in_loop(col: f32) -> bool { return p.loop_end_col > p.loop_start_col && col >= p.loop_start_col && col < p.loop_end_col; }
 fn white() -> vec4<f32>    { return srgb(244.0, 246.0, 248.0); }
 fn band_low() -> vec4<f32> { return srgb(58.0, 123.0, 240.0); }  // 3-band blue
@@ -790,6 +796,10 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
        && (abs(col_f - p.loop_start_col) < cue_per_px || abs(col_f - p.loop_end_col) < cue_per_px) {
         return loop_color();
     }
+    // SLIP shadow playhead — where the track would be, while slipping.
+    if p.slip_col >= 0.0 && abs(col_f - p.slip_col) < cue_per_px {
+        return slip_color();
+    }
     let bg = select(wave_bg(), loop_bg(), looped);   // tint the looped span's field
     if col_f < 0.0 || col_f >= p.num_cols {
         return bg;
@@ -860,6 +870,10 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
         if abs(q.x - ls_x) < 1.5 || abs(q.x - le_x) < 1.5 {
             return loop_color();
         }
+    }
+    if p.slip_col >= 0.0 {
+        let sl_x = r.x + p.slip_col / p.num_cols * r.z;
+        if abs(q.x - sl_x) < 1.5 { return slip_color(); }
     }
     let over_field = select(over_bg(), loop_bg(), in_loop(col_here));
 

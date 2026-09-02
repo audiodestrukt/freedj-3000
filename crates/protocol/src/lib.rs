@@ -142,7 +142,10 @@ pub enum ControlEvent {
     Cue { pressed: bool },
     /// Relative tempo step, as a fraction (0.01 = +1%); the pitch ± buttons.
     TempoNudge { delta: f32 },
+    /// `held: true` = the pad is down (press); the deck plays from the cue.
+    /// In SLIP mode the matching `HotCueRelease` returns to the shadow.
     HotCueTrigger { slot: u8, held: bool },
+    HotCueRelease { slot: u8 },
     HotCueSet     { slot: u8 },
     HotCueDelete  { slot: u8 },
     /// MEMORY key: store the current cue point as a memory point.

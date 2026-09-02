@@ -1096,7 +1096,11 @@ fn draw_left(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, perform: bool, 
     text(ui, Pos2::new(pl.center().x, pl.min.y + h * 0.018), Align2::CENTER_CENTER, "PLAYER", h * 0.018, cap_c);
     text(ui, Pos2::new(pl.center().x, pl.center().y + h * 0.020), Align2::CENTER_CENTER, &snap.player.to_string(), h * 0.075, num_c);
 
-    if key(ui, lay.slip, "slip", "SLIP", "", h, snap.slip.then_some(BLUE)) {
+    // SLIP: blue when engaged; brighter while actually shadowing (a loop or
+    // held hot cue is in progress), as the unit's key blinks then.
+    let slip_lit = if snap.slip_shadow.is_some() { Some(Color32::from_rgb(0x6f, 0xb0, 0xff)) }
+                   else if snap.slip { Some(BLUE) } else { None };
+    if key(ui, lay.slip, "slip", "SLIP", "", h, slip_lit) {
         out.push(Event::Deck(ControlEvent::SlipToggle));
     }
 }
@@ -1183,7 +1187,11 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
     let pad_green = Color32::from_rgb(0x2c, 0x8f, 0x44);   // a set hot cue (the unit's default colour)
     for (i, r) in pl.pads.iter().enumerate() {
         let name = format!("pf-pad{i}");
-        let (clicked, down) = tap(ui, *r, &name);
+        // Pads are press/release (not click): a set hot cue plays on press and,
+        // under SLIP, its release returns to the shadow.
+        let resp = ui.interact(*r, Id::new(&name), Sense::click_and_drag());
+        let (pressed, released, down) = (resp.drag_started() || resp.clicked(), resp.drag_stopped(), resp.is_pointer_button_down_on());
+        let clicked = pressed;
         match snap.perform_mode {
             PM::HotCue => {
                 let slot   = snap.perform_bank * 4 + i as u8;
@@ -1206,10 +1214,13 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
                 if clicked {
                     let ev = match (set, snap.perform_delete) {
                         (Some(_), true)  => ControlEvent::HotCueDelete  { slot },
-                        (Some(_), false) => ControlEvent::HotCueTrigger { slot, held: false },
+                        (Some(_), false) => ControlEvent::HotCueTrigger { slot, held: true },
                         (None, _)        => ControlEvent::HotCueSet     { slot },
                     };
                     out.push(Event::Deck(ev));
+                }
+                if released && set.is_some() && !snap.perform_delete {
+                    out.push(Event::Deck(ControlEvent::HotCueRelease { slot }));
                 }
             }
             PM::BeatJump => {
