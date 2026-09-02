@@ -1282,10 +1282,26 @@ impl ApplicationHandler for DeckApp {
 fn load_face_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
     let configured = std::env::var("OPENDECK_FACEPLATE_IMG")
         .unwrap_or_else(|_| "reference/photos/XDJ1000Mk2-faceplate.jpg".to_string());
-    // Try the configured path, then its basename (the flat iOS bundle layout).
+    // Resolve against several roots and take the first that exists:
+    //   1. the configured path as-is (desktop, or an absolute override),
+    //   2. its basename next to the executable — the flat iOS/.app bundle layout,
+    //      resolved from current_exe() so it works even if the process cwd was
+    //      never chdir'd into the bundle (the iOS entry point ignores chdir
+    //      errors, so we must not depend on cwd), and
+    //   3. its basename relative to cwd (the desktop fresh-checkout fallback).
     let base = std::path::Path::new(&configured).file_name().map(|n| n.to_string_lossy().into_owned());
-    let path = if std::path::Path::new(&configured).exists() { configured }
-               else { base.filter(|b| std::path::Path::new(b).exists()).unwrap_or(configured) };
+    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
+    let candidates = [
+        Some(PathBuf::from(&configured)),
+        base.as_ref().and_then(|b| exe_dir.as_ref().map(|d| d.join(b))),
+        base.as_ref().map(PathBuf::from),
+    ];
+    let path = candidates
+        .into_iter()
+        .flatten()
+        .find(|p| p.exists())
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or(configured);
     // A missing photo is fine — the faceplate
     // still lays out and its controls still work, they are just drawn as
     // outlines over a plain body instead of tinting the photo.
