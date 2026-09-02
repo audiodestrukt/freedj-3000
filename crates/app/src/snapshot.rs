@@ -36,6 +36,12 @@ pub struct DeckSnapshot<'a> {
     pub tags:         &'a opendeck_decode::TrackTags,
     /// The file name (INFO shows it even when the title bar uses a tagged title).
     pub file:         &'a str,
+    /// Hot cues A–H (interleaved sample index), for the PERFORM pads + markers.
+    pub hot_cues:     [Option<u64>; 8],
+    /// PERFORM screen state.
+    pub perform_mode:   crate::input::PerformMode,
+    pub perform_bank:   u8,
+    pub perform_delete: bool,
     /// Master Tempo (key lock) engaged.
     pub key_lock:     bool,
     /// Time display shows remaining (REMAIN) rather than elapsed (TIME).

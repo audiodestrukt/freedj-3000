@@ -121,6 +121,56 @@ pub fn layout(screen: Rect) -> Layout {
     }
 }
 
+// ── PERFORM screen ────────────────────────────────────────────────────────────
+
+/// PERFORM's sub-layout over the top band (everything above the info row, left
+/// of the CUE/LOOP + CALL column), measured off the XDJ-1000MK2 PERFORM photo
+/// (reference/photos/xdj-1000mk2-perform.jpg).  The left column becomes the
+/// mode pair / DELETE –CALL / BANK, the phase meter moves to the top, the
+/// enlarged waveform shrinks to a strip, and four pads sit below it.  (The
+/// BEAT LOOP row arrives with the loop engine.)
+pub struct PerformLayout {
+    pub mode_hotcue:   Rect,
+    pub mode_beatjump: Rect,
+    pub delete_call:   Rect,
+    pub bank:          Rect,
+    pub phase:         Rect,
+    pub bars:          Rect,
+    /// Compact enlarged-waveform strip — the shader viewport in PERFORM.
+    pub wave:          Rect,
+    pub pads:          [Rect; 4],
+    /// The lit PERFORM key, in the tab row's last slot (tap to exit).
+    pub perform_key:   Rect,
+}
+
+pub fn perform_layout(screen: Rect) -> PerformLayout {
+    let (ox, oy) = (screen.min.x, screen.min.y);
+    let (w, h) = (screen.width(), screen.height());
+    let r = |x0: f32, y0: f32, x1: f32, y1: f32| {
+        Rect::from_min_max(Pos2::new(ox + x0 * w, oy + y0 * h), Pos2::new(ox + x1 * w, oy + y1 * h))
+    };
+    let lc = 0.092;
+    // Pads: four across, from just left of the waveform to its right edge.
+    let (px0, px1, gap) = (0.125, 0.785, 0.010);
+    let pw = (px1 - px0 - 3.0 * gap) / 4.0;
+    let pad = |i: usize| { let x = px0 + i as f32 * (pw + gap); r(x, 0.333, x + pw, 0.459) };
+    // PERFORM key = the tab row's 5th slot, exactly where draw_keys puts it.
+    let keys = r(lc + 0.006, 0.010, 0.996, 0.120);
+    let kw = (keys.width() - 2.0 * 4.0) / 5.0;
+    let kx = keys.min.x + 4.0 * (kw + 2.0);
+    PerformLayout {
+        mode_hotcue:   r(0.004, 0.030, lc - 0.004, 0.085),
+        mode_beatjump: r(0.004, 0.092, lc - 0.004, 0.147),
+        delete_call:   r(0.004, 0.176, lc - 0.004, 0.289),
+        bank:          r(0.004, 0.333, lc - 0.004, 0.440),
+        phase:         r(0.305, 0.030, 0.595, 0.115),
+        bars:          r(0.610, 0.030, 0.805, 0.115),
+        wave:          r(0.190, 0.175, 0.785, 0.300),
+        pads:          [pad(0), pad(1), pad(2), pad(3)],
+        perform_key:   Rect::from_min_max(Pos2::new(kx, keys.min.y), keys.max),
+    }
+}
+
 // ── Faceplate (chrome) ────────────────────────────────────────────────────────
 //
 // The full physical XDJ-1000MK2 deck rendered around the screen, enabled with
@@ -501,6 +551,7 @@ pub fn draw(
     lay:    &Layout,
     browse: Option<&Browser>,
     info:   bool,                              // INFO screen replaces the middle band
+    perform: bool,                             // PERFORM screen replaces the top band
     face:   Option<&FaceLayout>,
     face_img: Option<(&egui::TextureHandle, Rect)>,
     chrome_tex: Option<&egui::TextureHandle>,   // photo for jog/fader sprites (portrait)
@@ -540,16 +591,24 @@ pub fn draw(
             }
 
             // Ground everything except the two shader rects.  egui paints
-            // after the waveform pass, so those must be left alone.
-            for r in cover(lay.screen, lay.wave, lay.overview) {
+            // after the waveform pass, so those must be left alone.  In PERFORM
+            // the enlarged waveform lives in the compact strip instead.
+            let wave_hole = if perform { perform_layout(lay.screen).wave } else { lay.wave };
+            for r in cover(lay.screen, wave_hole, lay.overview) {
                 ui.painter().rect_filled(r, 0.0, BG);
             }
 
-            draw_left(ui, snap, lay, h, out);
-            let active = if browse.is_some() { Some(TopScreen::Browse) }
-                         else if info { Some(TopScreen::Info) } else { None };
-            draw_keys(ui, lay, h, active, out);
-            if let Some(browser) = browse {
+            draw_left(ui, snap, lay, h, perform, out);
+            if perform {
+                draw_perform(ui, snap, lay, h, out);
+            } else {
+                let active = if browse.is_some() { Some(TopScreen::Browse) }
+                             else if info { Some(TopScreen::Info) } else { None };
+                draw_keys(ui, lay, h, active, out);
+            }
+            if perform {
+                // drawn above
+            } else if let Some(browser) = browse {
                 // BROWSE: the middle band (title + phase + enlarged waveform)
                 // becomes the file list.  The source column, info row and the
                 // overview keep running — the loaded track plays while you browse.
@@ -901,25 +960,29 @@ fn fmt_time(secs: f64) -> String {
 
 // ── Left column ───────────────────────────────────────────────────────────────
 
-fn draw_left(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
+/// The left column.  In PERFORM the top (logo / LINK / FILE) gives way to the
+/// perform controls, but PLAYER and SLIP below stay, as on the unit.
+fn draw_left(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, perform: bool, out: &mut Vec<Event>) {
     let p = ui.painter();
-    // rekordbox-style logo cell.
-    let l = lay.logo;
-    p.rect_filled(l, 2.0, KEY_LO);
-    let c = Pos2::new(l.center().x, l.center().y - h * 0.02);
-    p.circle_stroke(c, h * 0.022, Stroke::new(2.0, TEXT));
-    p.circle_filled(c, h * 0.008, TEXT);
-    text(ui, Pos2::new(l.center().x, l.max.y - h * 0.022), Align2::CENTER_CENTER, "freedj", h * 0.018, TEXT);
+    if !perform {
+        // rekordbox-style logo cell.
+        let l = lay.logo;
+        p.rect_filled(l, 2.0, KEY_LO);
+        let c = Pos2::new(l.center().x, l.center().y - h * 0.02);
+        p.circle_stroke(c, h * 0.022, Stroke::new(2.0, TEXT));
+        p.circle_filled(c, h * 0.008, TEXT);
+        text(ui, Pos2::new(l.center().x, l.max.y - h * 0.022), Align2::CENTER_CENTER, "freedj", h * 0.018, TEXT);
 
-    if key(ui, lay.link, "src-link", "LINK", "", h, None) {
-        out.push(Event::Ui(UiEvent::Source(Source::Link)));
+        if key(ui, lay.link, "src-link", "LINK", "", h, None) {
+            out.push(Event::Ui(UiEvent::Source(Source::Link)));
+        }
+        if key(ui, lay.usb, "src-usb", "FILE", "", h, None) {
+            out.push(Event::Ui(UiEvent::Source(Source::Usb)));
+        }
+        // Green bar down the left edge of the selected source only.
+        let sel = if snap.source_link { lay.link } else { lay.usb };
+        ui.painter().rect_filled(Rect::from_min_size(sel.min, Vec2::new(h * 0.008, sel.height())), 0.0, GREEN);
     }
-    if key(ui, lay.usb, "src-usb", "FILE", "", h, None) {
-        out.push(Event::Ui(UiEvent::Source(Source::Usb)));
-    }
-    // Green bar down the left edge of the selected source only.
-    let sel = if snap.source_link { lay.link } else { lay.usb };
-    ui.painter().rect_filled(Rect::from_min_size(sel.min, Vec2::new(h * 0.008, sel.height())), 0.0, GREEN);
 
     // PLAYER n — dim text standalone; a solid blue box once a Link peer is heard.
     let pl = lay.player;
@@ -962,7 +1025,12 @@ fn draw_keys(ui: &Ui, lay: &Layout, h: f32, active: Option<TopScreen>, out: &mut
     }
     // PERFORM's expand glyph, top-right.
     let last = Rect::from_min_max(Pos2::new(r.max.x - kw, r.min.y), r.max);
-    let c = Pos2::new(last.max.x - h * 0.020, last.min.y + h * 0.020);
+    expand_glyph(ui, last, h);
+}
+
+/// The little ⤢ "expand" glyph in the top-right corner of the PERFORM key.
+fn expand_glyph(ui: &Ui, key_rect: Rect, h: f32) {
+    let c = Pos2::new(key_rect.max.x - h * 0.020, key_rect.min.y + h * 0.020);
     let d = h * 0.009;
     let st = Stroke::new(1.5, TEXT);
     let p = ui.painter();
@@ -971,6 +1039,93 @@ fn draw_keys(ui: &Ui, lay: &Layout, h: f32, active: Option<TopScreen>, out: &mut
     p.line_segment([Pos2::new(c.x + d, c.y - d), Pos2::new(c.x + d, c.y - d * 0.2)], st);
     p.line_segment([Pos2::new(c.x - d, c.y + d), Pos2::new(c.x - d * 0.2, c.y + d)], st);
     p.line_segment([Pos2::new(c.x - d, c.y + d), Pos2::new(c.x - d, c.y + d * 0.2)], st);
+}
+
+/// PERFORM screen: left-column controls (HOT CUE / BEAT JUMP mode pair,
+/// DELETE –CALL, BANK), the phase meter at the top, a compact waveform strip
+/// (the shader viewport moves there), and four pads — hot cues A–D or E–H
+/// (BANK), or ±1/±4-beat jumps in BEAT JUMP mode.  PERFORM stays lit in the
+/// tab row's last slot; tapping it exits.  CUE/LOOP + CALL, PLAYER/SLIP and
+/// the info row are drawn by the caller as in every mode.
+fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
+    use crate::input::PerformMode as PM;
+    let pl = perform_layout(lay.screen);
+    let p = ui.painter();
+    let hot = snap.perform_mode == PM::HotCue;
+
+    // ── Left column ──────────────────────────────────────────────────────────
+    // Pad-mode pair: the selected mode is a light key with dark text, as on the
+    // unit; small type so "BEAT JUMP" fits the narrow column.
+    let light = Color32::from_rgb(0xd8, 0xdc, 0xe2);
+    for (r, name, label, sel, mode) in [
+        (pl.mode_hotcue,   "pf-hotcue",   "HOT CUE",   hot,  PM::HotCue),
+        (pl.mode_beatjump, "pf-beatjump", "BEAT JUMP", !hot, PM::BeatJump),
+    ] {
+        let (clicked, down) = tap(ui, r, name);
+        p.rect_filled(r, 2.0, if sel { light } else if down { KEY_HI } else { KEY });
+        text(ui, r.center(), Align2::CENTER_CENTER, label, h * 0.019, if sel { Color32::BLACK } else { TEXT });
+        if clicked { out.push(Event::Ui(UiEvent::PerformMode(mode))); }
+    }
+    if key(ui, pl.delete_call, "pf-delete", "DELETE", "CALL", h, snap.perform_delete.then_some(RED)) {
+        out.push(Event::Ui(UiEvent::PerformDelete));
+    }
+    if key(ui, pl.bank, "pf-bank", "BANK", if snap.perform_bank == 0 { "A–D" } else { "E–H" }, h,
+           (snap.perform_bank == 1).then_some(BLUE)) {
+        out.push(Event::Ui(UiEvent::PerformBank));
+    }
+
+    // ── Phase meter + Bars, moved to the top ─────────────────────────────────
+    draw_phase_at(ui, snap, pl.phase, pl.bars, h, out);
+
+    // ── Pads ────────────────────────────────────────────────────────────────
+    let sr_ch = (snap.sample_rate as f32 * snap.channels as f32).max(1.0);
+    let pad_green = Color32::from_rgb(0x2c, 0x8f, 0x44);   // a set hot cue (the unit's default colour)
+    for (i, r) in pl.pads.iter().enumerate() {
+        let name = format!("pf-pad{i}");
+        let (clicked, down) = tap(ui, *r, &name);
+        match snap.perform_mode {
+            PM::HotCue => {
+                let slot   = snap.perform_bank * 4 + i as u8;
+                let letter = (b'A' + slot) as char;
+                let set    = snap.hot_cues[slot as usize];
+                let face = match set {
+                    Some(_) if snap.perform_delete => tint(RED, 210),
+                    Some(_)                        => pad_green,
+                    None if down                   => KEY_HI,
+                    None                           => KEY,
+                };
+                p.rect_filled(*r, 3.0, face);
+                let lift = if set.is_some() { h * 0.012 } else { 0.0 };
+                text(ui, Pos2::new(r.center().x, r.center().y - lift), Align2::CENTER_CENTER, letter, h * 0.046, TEXT);
+                if let Some(pos) = set {
+                    let s = pos as f32 / sr_ch;
+                    text(ui, Pos2::new(r.center().x, r.max.y - h * 0.018), Align2::CENTER_CENTER,
+                         format!("{}:{:04.1}", (s / 60.0) as u32, s % 60.0), h * 0.017, TEXT);
+                }
+                if clicked {
+                    let ev = match (set, snap.perform_delete) {
+                        (Some(_), true)  => ControlEvent::HotCueDelete  { slot },
+                        (Some(_), false) => ControlEvent::HotCueTrigger { slot, held: false },
+                        (None, _)        => ControlEvent::HotCueSet     { slot },
+                    };
+                    out.push(Event::Deck(ev));
+                }
+            }
+            PM::BeatJump => {
+                let (label, beats) = [("◀ 4", -4.0f32), ("◀ 1", -1.0), ("1 ▶", 1.0), ("4 ▶", 4.0)][i];
+                p.rect_filled(*r, 3.0, if down { KEY_HI } else { KEY });
+                text(ui, Pos2::new(r.center().x, r.center().y - h * 0.010), Align2::CENTER_CENTER, label, h * 0.040, TEXT);
+                text(ui, Pos2::new(r.center().x, r.max.y - h * 0.018), Align2::CENTER_CENTER, "BEATS", h * 0.016, DIM);
+                if clicked { out.push(Event::Deck(ControlEvent::BeatJump { beats })); }
+            }
+        }
+    }
+
+    // ── PERFORM key, lit, in its tab slot; tap to exit ───────────────────────
+    if key(ui, pl.perform_key, "PERFORM", "PERFORM", "", h, Some(BLUE)) {
+        out.push(Event::Ui(UiEvent::Screen(TopScreen::Perform)));
+    }
+    expand_glyph(ui, pl.perform_key, h);
 }
 
 // ── Title bar ─────────────────────────────────────────────────────────────────
@@ -992,7 +1147,25 @@ fn draw_title(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
 // ── Phase meter + beat countdown ──────────────────────────────────────────────
 
 fn draw_phase(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
-    let r = lay.phase;
+    draw_phase_at(ui, snap, lay.phase, lay.bars, h, out);
+}
+
+/// Bars.beats from the playhead to the next of `cues` (sorted or not), on the
+/// beat grid — the "Bars" countdown beside the phase meter.  None without a
+/// grid or with no cue ahead.
+fn bars_to_next(snap: &DeckSnapshot, cues: impl Iterator<Item = u64>) -> Option<(u32, u32)> {
+    let g = snap.beat_grid?;
+    if g.bpm <= 0.0 { return None; }
+    let pos = snap.position;
+    let next = cues.filter(|&c| c > pos).min()?;
+    let per_beat = snap.sample_rate as f64 * 60.0 / g.bpm * snap.channels as f64;
+    let beats = ((next - pos) as f64 / per_beat).round() as u32;
+    Some((beats / 4, beats % 4))
+}
+
+/// Phase meter + Bars readouts at explicit rects (PERFORM moves them to the
+/// top of the screen).
+fn draw_phase_at(ui: &Ui, snap: &DeckSnapshot, r: Rect, b: Rect, h: f32, out: &mut Vec<Event>) {
     // Touching the slot switches between the two views, as on the unit.
     let (toggle, _) = tap(ui, r, "phase-meter");
     if toggle { out.push(Event::Ui(UiEvent::PhaseMeterView)); }
@@ -1003,14 +1176,13 @@ fn draw_phase(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<
         draw_phase_boxes(ui, snap, r, h);
     }
 
-    // "Bars" readouts: orange counts bars.beats to the next memory cue, blue
-    // to the next hot cue.  No cues exist yet, so both are None → dashes.
-    let b = lay.bars;
+    // "Bars" readouts: orange counts bars.beats to the next memory point,
+    // blue to the next hot cue.
     let row = r.height() / 2.0;
     let fs = h * 0.026;
     let fmt = |v: Option<(u32, u32)>| v.map(|(bars, beats)| format!("{bars:02}.{beats}")).unwrap_or_else(|| "--.-".into());
-    let memory_cue: Option<(u32, u32)> = None;
-    let hot_cue:    Option<(u32, u32)> = None;
+    let memory_cue = bars_to_next(snap, snap.memory_cues.iter().copied());
+    let hot_cue    = bars_to_next(snap, snap.hot_cues.iter().flatten().copied());
     text(ui, Pos2::new(b.min.x, b.min.y + row * 0.5), Align2::LEFT_CENTER, fmt(memory_cue), fs, ORANGE);
     text(ui, Pos2::new(b.min.x + h * 0.078, b.min.y + row * 0.5), Align2::LEFT_CENTER, "Bars", h * 0.020, ORANGE);
     text(ui, Pos2::new(b.min.x, b.min.y + row * 1.5), Align2::LEFT_CENTER, fmt(hot_cue), fs, BLUE);
@@ -1254,6 +1426,19 @@ fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec
         p.add(egui::Shape::convex_polygon(
             vec![Pos2::new(x - 4.0, y + 4.0), Pos2::new(x + 4.0, y + 4.0), Pos2::new(x, y - 3.0)],
             col, Stroke::NONE));
+    }
+    // Hot cues: green, hanging from the overview's top edge (memory points sit
+    // below it), lettered so they map to the PERFORM pads.
+    let ty = ov.min.y - h * 0.004;
+    let pad_green = Color32::from_rgb(0x3c, 0xc8, 0x50);
+    for (i, c) in snap.hot_cues.iter().enumerate() {
+        if let Some(pos) = c {
+            let x = ov.min.x + 3.0 + (*pos as f32 / total) * (ov.width() - 6.0);
+            p.add(egui::Shape::convex_polygon(
+                vec![Pos2::new(x - 4.0, ty - 4.0), Pos2::new(x + 4.0, ty - 4.0), Pos2::new(x, ty + 3.0)],
+                pad_green, Stroke::NONE));
+            text(ui, Pos2::new(x, ty - h * 0.014), Align2::CENTER_CENTER, (b'A' + i as u8) as char, h * 0.014, pad_green);
+        }
     }
 
     // ±range badge.

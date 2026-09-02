@@ -36,6 +36,12 @@ pub enum UiEvent {
     Source(Source),
     /// A top-row touch key or a screen we do not have yet.
     Screen(Screen),
+    /// PERFORM: what the pads do — HOT CUE or BEAT JUMP.
+    PerformMode(PerformMode),
+    /// PERFORM: BANK — flip the pads between hot cues A–D and E–H.
+    PerformBank,
+    /// PERFORM: DELETE –CALL — arm/disarm "the next pad tap deletes that hot cue".
+    PerformDelete,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +49,10 @@ pub enum Source { Link, Usb }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen { Browse, TagList, Info, Menu, Perform }
+
+/// PERFORM pad mode: the pads are hot cues, or beat jumps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PerformMode { HotCue, BeatJump }
 
 /// Zoom levels for the enlarged waveform, in waveform columns across the
 /// field.  Index 2 is the default the display has always used.

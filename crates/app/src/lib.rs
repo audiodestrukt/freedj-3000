@@ -21,7 +21,7 @@ use audio::AudioHandle;
 use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_types::{BeatAnalyzer, BeatGrid};
 use renderer::Renderer;
-use input::{ControlEvent, Event, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
+use input::{ControlEvent, Event, PerformMode, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
 use browser::{Browser, Enter, Load};
 use snapshot::DeckSnapshot;
 use std::{
@@ -47,7 +47,7 @@ const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// Which middle-band mode the deck screen is showing.  PERFORM comes later.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum ScreenMode { Playback, Browse, Info }
+enum ScreenMode { Playback, Browse, Info, Perform }
 
 struct DeckApp {
     // Provided before event loop starts.
@@ -105,6 +105,14 @@ struct DeckApp {
     /// The loaded track's own tags (ID3 etc.) — title/artist for the title bar
     /// and the INFO screen.
     track_tags:        opendeck_decode::TrackTags,
+    /// Hot cues A–H (interleaved sample index, or empty): rekordbox's from the
+    /// ANLZ on load, plus any set from the PERFORM pads.  In-session for now.
+    hot_cues:          [Option<u64>; 8],
+    /// PERFORM screen state: pad mode, which bank the four pads show (0 = A–D,
+    /// 1 = E–H), and whether DELETE –CALL is armed (next pad tap deletes).
+    perform_mode:      PerformMode,
+    perform_bank:      u8,
+    perform_delete:    bool,
     cue_preview:       bool,  // CUE held → previewing from the cue point
     cued:              bool,  // playhead is sitting on the cue (not searched away)
     exit_after_capture: bool,
@@ -149,6 +157,8 @@ struct UiFlags {
     zoom_grid_mode: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
     player: u8,
     cue_point: u64,
+    hot_cues: [Option<u64>; 8],
+    perform_mode: PerformMode, perform_bank: u8, perform_delete: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -171,6 +181,10 @@ fn make_snapshot<'a>(
         total_samples: audio.len() as u64,
         cue_point:     f.cue_point,
         memory_cues,
+        hot_cues:      f.hot_cues,
+        perform_mode:  f.perform_mode,
+        perform_bank:  f.perform_bank,
+        perform_delete: f.perform_delete,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
         remain_mode:   f.remain_mode,
@@ -257,6 +271,16 @@ impl DeckApp {
                      .collect())
             .unwrap_or_default();
         memory_cues.sort_unstable();
+        // Dev: OPENDECK_HOT_CUES=1.5,,4.0 seeds hot cues A.. (seconds; blank =
+        // empty slot) on the startup track, for exercising the PERFORM pads.
+        let mut hot_cues: [Option<u64>; 8] = [None; 8];
+        if let Ok(v) = std::env::var("OPENDECK_HOT_CUES") {
+            for (i, s) in v.split(',').take(8).enumerate() {
+                if let Ok(secs) = s.trim().parse::<f64>() {
+                    hot_cues[i] = Some(((secs * sr_ch) as u64 / audio.channels as u64) * audio.channels as u64);
+                }
+            }
+        }
         let track_tags = audio.tags.clone();
         Self {
             path,
@@ -264,9 +288,10 @@ impl DeckApp {
             audio,
             beat_grid,
             screen_mode: match std::env::var("OPENDECK_SCREEN").as_deref() {
-                Ok("browse") => ScreenMode::Browse,
-                Ok("info")   => ScreenMode::Info,
-                _            => ScreenMode::Playback,
+                Ok("browse")  => ScreenMode::Browse,
+                Ok("info")    => ScreenMode::Info,
+                Ok("perform") => ScreenMode::Perform,
+                _             => ScreenMode::Playback,
             },
             browser,
             fader_speed,
@@ -303,6 +328,10 @@ impl DeckApp {
             cue_point,
             memory_cues,
             track_tags,
+            hot_cues,
+            perform_mode:      PerformMode::HotCue,
+            perform_bank:      0,
+            perform_delete:    false,
             cue_preview:       false,
             cued:              true,
             exit_after_capture: false,
@@ -481,6 +510,49 @@ impl DeckApp {
                     None => log::info!("memory: no point at the cue to delete"),
                 }
             }
+            // ── Hot cues A–H (PERFORM pads) ─────────────────────────────────────
+            Event::Deck(ControlEvent::HotCueSet { slot }) => {
+                let s = slot as usize;
+                if s < 8 && self.audio.len() > 0 {
+                    let ch  = self.audio.channels as u64;
+                    let pos = ((self.smoothed_pos.max(0.0) as u64) / ch) * ch;
+                    self.hot_cues[s] = Some(pos);
+                    let sr_ch = self.audio.sample_rate as f64 * ch as f64;
+                    log::info!("hot cue {}: set at {:.2}s", (b'A' + slot) as char, pos as f64 / sr_ch);
+                }
+            }
+            Event::Deck(ControlEvent::HotCueTrigger { slot, .. }) => {
+                // A hot cue is jump + play (latching), unlike momentary CUE.
+                if let Some(pos) = self.hot_cues.get(slot as usize).copied().flatten() {
+                    self.seek_to(pos);
+                    self.lock_in_play();
+                    log::info!("hot cue {}: play", (b'A' + slot) as char);
+                } else {
+                    log::info!("hot cue {}: empty", (b'A' + slot) as char);
+                }
+            }
+            Event::Deck(ControlEvent::HotCueDelete { slot }) => {
+                if let Some(c) = self.hot_cues.get_mut(slot as usize) {
+                    *c = None;
+                    log::info!("hot cue {}: deleted", (b'A' + slot) as char);
+                }
+                self.perform_delete = false;
+            }
+            // ── Beat jump (PERFORM pads in BEAT JUMP mode) ───────────────────────
+            Event::Deck(ControlEvent::BeatJump { beats }) => {
+                match &self.beat_grid {
+                    Some(g) if g.bpm > 0.0 => {
+                        let ch  = self.audio.channels as f64;
+                        let per_beat = self.audio.sample_rate as f64 * 60.0 / g.bpm * ch;
+                        let cur = self.smoothed_pos.max(0.0);
+                        let new = (cur + beats as f64 * per_beat).clamp(0.0, self.audio.len() as f64);
+                        let new = ((new as u64) / ch as u64) * ch as u64;
+                        self.seek_to(new);   // playing state is untouched: jump in place
+                        log::info!("beat jump {beats:+}: → {:.2}s", new as f64 / (self.audio.sample_rate as f64 * ch));
+                    }
+                    _ => log::info!("beat jump: no beat grid"),
+                }
+            }
             Event::Deck(ControlEvent::NeedleSearch { position }) => {
                 let total = self.audio.len() as f64;
                 // Land on a frame boundary so channels stay interleaved.
@@ -609,8 +681,31 @@ impl DeckApp {
                     };
                     log::info!("screen → {:?}", self.screen_mode);
                 }
+                TopScreen::Perform => {
+                    // PERFORM: hot-cue / beat-jump pads over a compact waveform.
+                    self.screen_mode = if self.screen_mode == ScreenMode::Perform {
+                        ScreenMode::Playback
+                    } else {
+                        ScreenMode::Perform
+                    };
+                    self.perform_delete = false;
+                    log::info!("screen → {:?}", self.screen_mode);
+                }
                 other => log::info!("{other:?} screen not implemented"),
             },
+            Event::Ui(UiEvent::PerformMode(m)) => {
+                self.perform_mode   = m;
+                self.perform_delete = false;
+                log::info!("perform pads → {m:?}");
+            }
+            Event::Ui(UiEvent::PerformBank) => {
+                self.perform_bank ^= 1;
+                log::info!("perform bank → {}", if self.perform_bank == 0 { "A–D" } else { "E–H" });
+            }
+            Event::Ui(UiEvent::PerformDelete) => {
+                self.perform_delete = !self.perform_delete;
+                log::info!("perform delete {}", if self.perform_delete { "armed" } else { "off" });
+            }
         }
     }
 
@@ -670,11 +765,16 @@ impl DeckApp {
         grid.confidence = 1.0;
         // All memory points, as interleaved sample indices (already sorted by
         // the reader); the first doubles as the load cue.
-        let memory_cues: Vec<u64> = a.memory_cues.iter()
-            .map(|c| (c.time_ms as u64 * deck_sr as u64) / 1000 * ch as u64)
-            .collect();
+        let to_samples = |ms: u32| (ms as u64 * deck_sr as u64) / 1000 * ch as u64;
+        let memory_cues: Vec<u64> = a.memory_cues.iter().map(|c| to_samples(c.time_ms)).collect();
         let cue = memory_cues.first().copied().unwrap_or(0);
-        Some(AnlzLoad { grid, cue, memory_cues })
+        let mut hot_cues = [None; 8];
+        for c in &a.hot_cues {
+            if let Some(n) = c.hot_cue {
+                if (n as usize) < 8 { hot_cues[n as usize] = Some(to_samples(c.time_ms)); }
+            }
+        }
+        Some(AnlzLoad { grid, cue, memory_cues, hot_cues })
     }
 
     /// Dispatch a browser selection: a local file, or a track on a linked player.
@@ -740,15 +840,17 @@ impl DeckApp {
         let waveform = wb.finish();
 
         // Prefer rekordbox's grid+cues; fall back to freedj's detector otherwise.
-        let (beat_grid, cue_pt, memory_cues, grid_src) = match grid_cue {
-            Some(AnlzLoad { grid, cue, memory_cues }) => (Some(grid), cue, memory_cues, "rekordbox"),
+        let (beat_grid, cue_pt, memory_cues, hot_cues, grid_src) = match grid_cue {
+            Some(AnlzLoad { grid, cue, memory_cues, hot_cues }) => (Some(grid), cue, memory_cues, hot_cues, "rekordbox"),
             None => {
                 let mut ba = BeatAnalyzerImpl::new(deck_sr);
                 ba.push(&samples, deck_sr);
-                (ba.beat_grid().map(|g| (*g).clone()), 0, Vec::new(), "freedj")
+                (ba.beat_grid().map(|g| (*g).clone()), 0, Vec::new(), [None; 8], "freedj")
             }
         };
-        self.memory_cues = memory_cues;
+        self.memory_cues    = memory_cues;
+        self.hot_cues       = hot_cues;
+        self.perform_delete = false;
         // AUTO CUE: with no rekordbox memory cue, cue at the first audible sound
         // rather than 0:00 (the unit's behaviour; the A.CUE badge).  A memory
         // cue still wins — that is the DJ's own choice.
@@ -1007,6 +1109,7 @@ impl DeckApp {
             },
             player: self.link.player,
             cue_point: self.cue_point,
+            hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
         };
         let _t_snap = Instant::now();
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
@@ -1056,7 +1159,10 @@ impl DeckApp {
         };
         let lay  = screen::layout(screen_rect);
         let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
-        let vp   = renderer::Viewports { wave: px(lay.wave), overview: px(lay.overview), dim_played: self.remain_mode };
+        let perform = self.screen_mode == ScreenMode::Perform;
+        // PERFORM shrinks the enlarged waveform to a strip above the pads.
+        let wave_rect = if perform { screen::perform_layout(screen_rect).wave } else { lay.wave };
+        let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(lay.overview), dim_played: self.remain_mode };
 
         // Build egui overlay.
         let raw = egui_state.take_egui_input(window.as_ref());
@@ -1072,7 +1178,7 @@ impl DeckApp {
             _ => None,
         };
         let chrome_tex = if self.portrait { self.face_tex.as_ref() } else { None };
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, info, face_ref, face_img, chrome_tex, &mut touch));
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, info, perform, face_ref, face_img, chrome_tex, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
         self.events.append(&mut touch);
@@ -1120,6 +1226,7 @@ impl DeckApp {
             },
             player: self.link.player,
             cue_point: self.cue_point,
+            hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
 
@@ -1170,8 +1277,9 @@ fn set_idle_timer_disabled(disabled: bool) {
 }
 
 /// What a rekordbox ANLZ contributes to a load: the beat grid, the load cue
-/// (its first memory point), and every memory point as interleaved samples.
-struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64> }
+/// (its first memory point), every memory point, and hot cues A–H — all as
+/// interleaved samples.
+struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8] }
 
 // ── Memory-point lookup ────────────────────────────────────────────────────────
 // `cues` is sorted, interleaved sample indices.  `tol` is the match tolerance
