@@ -500,6 +500,7 @@ pub fn draw(
     snap:   &DeckSnapshot,
     lay:    &Layout,
     browse: Option<&Browser>,
+    info:   bool,                              // INFO screen replaces the middle band
     face:   Option<&FaceLayout>,
     face_img: Option<(&egui::TextureHandle, Rect)>,
     chrome_tex: Option<&egui::TextureHandle>,   // photo for jog/fader sprites (portrait)
@@ -545,12 +546,17 @@ pub fn draw(
             }
 
             draw_left(ui, snap, lay, h, out);
-            draw_keys(ui, lay, h, out);
+            let active = if browse.is_some() { Some(TopScreen::Browse) }
+                         else if info { Some(TopScreen::Info) } else { None };
+            draw_keys(ui, lay, h, active, out);
             if let Some(browser) = browse {
                 // BROWSE: the middle band (title + phase + enlarged waveform)
                 // becomes the file list.  The source column, info row and the
                 // overview keep running — the loaded track plays while you browse.
                 draw_browse(ui, browser, lay, h);
+            } else if info {
+                // INFO: the middle band shows the loaded track's details.
+                draw_info_screen(ui, snap, lay, h);
             } else {
                 draw_title(ui, snap, lay, h);
                 draw_phase(ui, snap, lay, h, out);
@@ -571,6 +577,17 @@ pub fn draw(
 /// list with the highlighted row inverted, plus a right-hand detail pane.  Driven
 /// by the select encoder / Load / Back (and the keyboard on desktop); the list
 /// is presentation-only here — navigation state lives in `Browser`.
+/// The middle band that BROWSE / INFO replace: the phase meter + enlarged
+/// waveform.  Extends a hair below the waveform so the shader's bottom row of
+/// beat ticks can't peek out from under the cover (egui fills to the float
+/// edge; the GPU viewport rounds — a 1px sliver otherwise shows).
+fn middle_band(lay: &Layout) -> Rect {
+    Rect::from_min_max(
+        Pos2::new(lay.wave.min.x, lay.phase.min.y),
+        Pos2::new(lay.wave.max.x, lay.wave.max.y + 3.0),
+    )
+}
+
 fn draw_browse(ui: &Ui, browser: &Browser, lay: &Layout, h: f32) {
     // Header replaces the title bar with the current folder name.
     let hdr = lay.title;
@@ -580,10 +597,7 @@ fn draw_browse(ui: &Ui, browser: &Browser, lay: &Layout, h: f32) {
          folder.to_uppercase(), h * 0.030, TEXT);
 
     // Body spans the phase + enlarged-waveform region (covering the shader).
-    let body = Rect::from_min_max(
-        Pos2::new(lay.wave.min.x, lay.phase.min.y),
-        Pos2::new(lay.wave.max.x, lay.wave.max.y),
-    );
+    let body = middle_band(lay);
     ui.painter().rect_filled(body, 0.0, BG);
 
     // Split: left list pane, right detail pane.
@@ -634,6 +648,80 @@ fn draw_browse(ui: &Ui, browser: &Browser, lay: &Layout, h: f32) {
              &e.name, h * 0.026, TEXT);
         let hint = if e.is_dir { "LOAD: open folder" } else { "LOAD: play track" };
         text(ui, Pos2::new(x, detail.max.y - h * 0.04), Align2::LEFT_CENTER, hint, h * 0.018, DIM);
+    }
+}
+
+/// INFO screen: the loaded track's details in the middle band — its own tags
+/// (title/artist/album/genre/year/key) plus what the deck knows (analysed BPM,
+/// length, format, memory points, file).  Same body region as BROWSE.
+fn draw_info_screen(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
+    let p = ui.painter();
+    // Header replaces the title bar.
+    let hdr = lay.title;
+    p.rect_filled(hdr, 0.0, BAR);
+    text(ui, Pos2::new(hdr.min.x + h * 0.02, hdr.center().y), Align2::LEFT_CENTER,
+         "INFO", h * 0.030, TEXT);
+    text(ui, Pos2::new(hdr.max.x - h * 0.02, hdr.center().y), Align2::RIGHT_CENTER,
+         snap.title, h * 0.026, DIM);
+
+    let body = middle_band(lay);
+    p.rect_filled(body, 0.0, BG);
+
+    let t = snap.tags;
+    let dash = "—".to_string();
+    let or_dash = |v: &Option<String>| v.clone().unwrap_or_else(|| dash.clone());
+
+    // Derived values.
+    let sr_ch = (snap.sample_rate as f64 * snap.channels as f64).max(1.0);
+    let secs  = snap.total_samples as f64 / sr_ch;
+    let length = format!("{}:{:02}", (secs / 60.0) as u32, (secs % 60.0) as u32);
+    let bpm = match (snap.bpm(), t.bpm) {
+        (Some(a), Some(tg)) if (a - tg as f64).abs() > 0.05 => format!("{a:.1}  (tagged {tg:.1})"),
+        (Some(a), _) => format!("{a:.1}"),
+        (None, Some(tg)) => format!("{tg:.1}  (tagged)"),
+        (None, None) => dash.clone(),
+    };
+    let format = format!("{} Hz · {} ch", snap.sample_rate, snap.channels);
+    let memory = match snap.memory_cues.len() {
+        0 => "none".to_string(), 1 => "1 point".to_string(), n => format!("{n} points"),
+    };
+
+    let rows: [(&str, String); 11] = [
+        ("TITLE",   snap.title.to_string()),
+        ("ARTIST",  or_dash(&t.artist)),
+        ("ALBUM",   or_dash(&t.album)),
+        ("GENRE",   or_dash(&t.genre)),
+        ("YEAR",    or_dash(&t.year)),
+        ("KEY",     or_dash(&t.key)),
+        ("BPM",     bpm),
+        ("LENGTH",  length),
+        ("FORMAT",  format),
+        ("MEMORY",  memory),
+        ("FILE",    snap.file.to_string()),
+    ];
+
+    // Two columns of label/value rows.
+    let pad   = h * 0.025;
+    let row_h = (body.height() - pad * 2.0) / rows.len() as f32;
+    let lbl_x = body.min.x + pad;
+    let val_x = body.min.x + h * 0.16;
+    let max_w = body.max.x - pad - val_x;
+    let fs    = (row_h * 0.62).min(h * 0.030);
+    for (i, (label, value)) in rows.iter().enumerate() {
+        let y = body.min.y + pad + row_h * (i as f32 + 0.5);
+        text(ui, Pos2::new(lbl_x, y), Align2::LEFT_CENTER, *label, fs * 0.72, DIM);
+        // Elide long values so they never overrun the band.
+        let mut v = value.clone();
+        let est = |s: &str| s.chars().count() as f32 * fs * 0.55;
+        if est(&v) > max_w {
+            let keep = ((max_w / (fs * 0.55)) as usize).saturating_sub(1).max(1);
+            v = format!("{}…", v.chars().take(keep).collect::<String>());
+        }
+        text(ui, Pos2::new(val_x, y), Align2::LEFT_CENTER, v, fs, TEXT);
+        if i + 1 < rows.len() {
+            let ly = body.min.y + pad + row_h * (i as f32 + 1.0);
+            p.line_segment([Pos2::new(lbl_x, ly), Pos2::new(body.max.x - pad, ly)], Stroke::new(1.0, FAINT));
+        }
     }
 }
 
@@ -850,7 +938,9 @@ fn draw_left(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
 
 // ── Touch-key row ─────────────────────────────────────────────────────────────
 
-fn draw_keys(ui: &Ui, lay: &Layout, h: f32, out: &mut Vec<Event>) {
+/// The top row of screen keys.  `active` lights the key of the screen that is
+/// currently showing (BROWSE / INFO), so the tab reads as selected.
+fn draw_keys(ui: &Ui, lay: &Layout, h: f32, active: Option<TopScreen>, out: &mut Vec<Event>) {
     let r = lay.keys;
     let keys = [
         ("BROWSE", "SEARCH",    TopScreen::Browse),
@@ -864,7 +954,8 @@ fn draw_keys(ui: &Ui, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     for (i, (m, s, which)) in keys.iter().enumerate() {
         let x0 = r.min.x + i as f32 * (kw + gap);
         let kr = Rect::from_min_max(Pos2::new(x0, r.min.y), Pos2::new(x0 + kw, r.max.y));
-        if key(ui, kr, m, m, s, h, None) {
+        let lit = (active == Some(*which)).then_some(BLUE);
+        if key(ui, kr, m, m, s, h, lit) {
             out.push(Event::Ui(UiEvent::Screen(*which)));
         }
     }
@@ -887,10 +978,11 @@ fn draw_title(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
     let r = lay.title;
     ui.painter().rect_filled(r, 0.0, BAR);
     text(ui, Pos2::new(r.min.x + h * 0.02, r.center().y), Align2::LEFT_CENTER, format!("♪ {}", snap.title), h * 0.036, TEXT);
-    // Key badge + key name, right.  Detection is not implemented; the slot
-    // draws its glyph and a dash.
+    // Key badge + key name, right.  We don't detect key; show the file's own
+    // key tag when it has one (ID3 TKEY / INITIALKEY), else a dash.
     let kx = r.max.x - h * 0.02;
-    text(ui, Pos2::new(kx, r.center().y), Align2::RIGHT_CENTER, "--", h * 0.034, TEXT);
+    let key = snap.tags.key.as_deref().unwrap_or("--");
+    text(ui, Pos2::new(kx, r.center().y), Align2::RIGHT_CENTER, key, h * 0.034, TEXT);
     let badge = Rect::from_center_size(Pos2::new(kx - h * 0.075, r.center().y), Vec2::new(h * 0.030, h * 0.030));
     ui.painter().rect_filled(badge, 2.0, KEY);
     text(ui, badge.center(), Align2::CENTER_CENTER, "b#", h * 0.017, TEXT);

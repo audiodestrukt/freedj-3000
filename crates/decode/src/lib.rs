@@ -3,7 +3,7 @@ use rtrb::{Producer, RingBuffer};
 use std::path::Path;
 
 pub mod symphonia_decoder;
-pub use symphonia_decoder::SymphoniaDecoder;
+pub use symphonia_decoder::{SymphoniaDecoder, TrackTags};
 
 /// Ring buffer capacity: 4 seconds stereo at 44.1 kHz.
 pub const RING_CAPACITY: usize = 44_100 * 2 * 4;

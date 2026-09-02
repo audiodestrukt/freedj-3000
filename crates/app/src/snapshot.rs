@@ -32,6 +32,10 @@ pub struct DeckSnapshot<'a> {
     /// Memory points (interleaved sample indices, sorted) — drawn as markers on
     /// the waveforms; CALL ◀▶ steps through them.
     pub memory_cues:  &'a [u64],
+    /// The track's own tags (ID3 etc.) for the INFO screen.
+    pub tags:         &'a opendeck_decode::TrackTags,
+    /// The file name (INFO shows it even when the title bar uses a tagged title).
+    pub file:         &'a str,
     /// Master Tempo (key lock) engaged.
     pub key_lock:     bool,
     /// Time display shows remaining (REMAIN) rather than elapsed (TIME).

@@ -21,7 +21,7 @@
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use opendeck_decode::SymphoniaDecoder;
+use opendeck_decode::{SymphoniaDecoder, TrackTags};
 use opendeck_timestretch::TimestretechStage;
 use opendeck_types::{Decoder, PipelineStage};
 use std::{
@@ -113,6 +113,9 @@ pub struct AudioHandle {
     pub stats:       Arc<AudioStats>,
     pub sample_rate: u32,
     pub channels:    u8,
+    /// Tags of the track decoded at open (the startup track); the deck copies
+    /// these and replaces them on each browser LOAD.
+    pub tags:        TrackTags,
     _stream:     cpal::Stream,
     _processor:  thread::JoinHandle<()>,
 }
@@ -165,18 +168,18 @@ impl AudioHandle {
 impl AudioHandle {
     /// Open a deck with a decoded track.
     pub fn open(path: &Path) -> Result<Self> {
-        let (decoded, file_sr, file_ch) = decode_file(path)?;
-        Self::open_inner(Some((decoded, file_sr, file_ch as usize)))
+        let (decoded, file_sr, file_ch, tags) = decode_file(path)?;
+        Self::open_inner(Some((decoded, file_sr, file_ch as usize)), tags)
     }
 
     /// Open an empty deck: device up, no track, paused.  The deck rate/channels
     /// follow the output device; a later LOAD resamples the track to them in
     /// `finish_load`.  Lets freedj boot to a browse-and-load state like a CDJ.
     pub fn open_empty() -> Result<Self> {
-        Self::open_inner(None)
+        Self::open_inner(None, TrackTags::default())
     }
 
-    fn open_inner(initial: Option<(Vec<f32>, u32, usize)>) -> Result<Self> {
+    fn open_inner(initial: Option<(Vec<f32>, u32, usize)>, tags: TrackTags) -> Result<Self> {
         // ── 2. Open cpal device ────────────────────────────────────────────────
         let host   = cpal::default_host();
         let device = host
@@ -317,6 +320,7 @@ impl AudioHandle {
             stats,
             sample_rate: file_sr,
             channels: file_ch as u8,
+            tags,
             _stream: stream,
             _processor: processor,
         })
@@ -509,13 +513,15 @@ fn processor_loop(
 // ── Decoding ──────────────────────────────────────────────────────────────────
 
 /// Decode an entire audio file to interleaved f32 PCM in memory.  Returns the
-/// samples plus their sample rate and channel count.  Shared by `open()` (first
-/// track) and the runtime browser LOAD path.
-pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize)> {
+/// samples plus their sample rate, channel count, and the file's own tags
+/// (title/artist/…).  Shared by `open()` (first track) and the runtime
+/// browser LOAD path.
+pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize, TrackTags)> {
     log::info!("decoding {}", path.display());
     let mut decoder = SymphoniaDecoder::open(path)
         .with_context(|| format!("failed to open {}", path.display()))?;
 
+    let tags     = decoder.tags().clone();
     let file_sr  = decoder.sample_rate();
     let file_ch  = decoder.channels() as usize;
     let capacity = decoder
@@ -537,14 +543,15 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize)> {
         samples.len() as f64 / file_ch as f64 / file_sr as f64,
         file_sr, file_ch,
     );
-    Ok((samples, file_sr, file_ch))
+    Ok((samples, file_sr, file_ch, tags))
 }
 
 /// Decode an audio file from an in-memory buffer (e.g. read over NFS from a
 /// linked player). `ext` primes the format probe.  Same output as decode_file.
-pub fn decode_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<(Vec<f32>, u32, usize)> {
+pub fn decode_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<(Vec<f32>, u32, usize, TrackTags)> {
     let mut decoder = SymphoniaDecoder::open_bytes(bytes, ext)
         .context("failed to open in-memory audio")?;
+    let tags    = decoder.tags().clone();
     let file_sr = decoder.sample_rate();
     let file_ch = decoder.channels() as usize;
     let mut samples: Vec<f32> = Vec::new();
@@ -557,7 +564,7 @@ pub fn decode_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<(Vec<f32>, u32,
     }
     log::info!("decoded {} frames ({:.1}s) at {}Hz {}ch (from memory)",
         samples.len() / file_ch, samples.len() as f64 / file_ch as f64 / file_sr as f64, file_sr, file_ch);
-    Ok((samples, file_sr, file_ch))
+    Ok((samples, file_sr, file_ch, tags))
 }
 
 /// Offline sample-rate conversion of an interleaved buffer, used at LOAD time so

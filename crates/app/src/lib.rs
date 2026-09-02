@@ -47,7 +47,7 @@ const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// Which middle-band mode the deck screen is showing.  PERFORM comes later.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum ScreenMode { Playback, Browse }
+enum ScreenMode { Playback, Browse, Info }
 
 struct DeckApp {
     // Provided before event loop starts.
@@ -102,6 +102,9 @@ struct DeckApp {
     /// ANLZ on load, plus any set with MEMORY.  CALL ◀▶ steps through them;
     /// DELETE removes the one the deck is cued at.  In-session for now.
     memory_cues:       Vec<u64>,
+    /// The loaded track's own tags (ID3 etc.) — title/artist for the title bar
+    /// and the INFO screen.
+    track_tags:        opendeck_decode::TrackTags,
     cue_preview:       bool,  // CUE held → previewing from the cue point
     cued:              bool,  // playhead is sitting on the cue (not searched away)
     exit_after_capture: bool,
@@ -150,12 +153,18 @@ struct UiFlags {
 
 #[allow(clippy::too_many_arguments)]
 fn make_snapshot<'a>(
-    path: &'a std::path::Path, beat_grid: Option<&'a BeatGrid>, memory_cues: &'a [u64], audio: &AudioHandle, f: UiFlags,
+    path: &'a std::path::Path, beat_grid: Option<&'a BeatGrid>, memory_cues: &'a [u64],
+    tags: &'a opendeck_decode::TrackTags, audio: &AudioHandle, f: UiFlags,
     pos: u64, playing: bool, speed: f32, fader_speed: f32, beat2_bpm: f32, beat2_phase_beats: f32, beat2_beat_in_bar: u8,
 ) -> DeckSnapshot<'a> {
     DeckSnapshot {
+        // Title bar shows the tagged title when the file has one (as the unit
+        // does), else the filename.
         title:         if path.as_os_str().is_empty() { "NO TRACK" }
-                       else { path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown") },
+                       else { tags.title.as_deref()
+                                .unwrap_or_else(|| path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")) },
+        tags,
+        file:          path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
         position:      pos,
         sample_rate:   audio.sample_rate,
         channels:      audio.channels,
@@ -248,12 +257,17 @@ impl DeckApp {
                      .collect())
             .unwrap_or_default();
         memory_cues.sort_unstable();
+        let track_tags = audio.tags.clone();
         Self {
             path,
             waveform,
             audio,
             beat_grid,
-            screen_mode: if std::env::var("OPENDECK_SCREEN").as_deref() == Ok("browse") { ScreenMode::Browse } else { ScreenMode::Playback },
+            screen_mode: match std::env::var("OPENDECK_SCREEN").as_deref() {
+                Ok("browse") => ScreenMode::Browse,
+                Ok("info")   => ScreenMode::Info,
+                _            => ScreenMode::Playback,
+            },
             browser,
             fader_speed,
             beat2_bpm,
@@ -288,6 +302,7 @@ impl DeckApp {
             jog_until:         None,
             cue_point,
             memory_cues,
+            track_tags,
             cue_preview:       false,
             cued:              true,
             exit_after_capture: false,
@@ -585,6 +600,15 @@ impl DeckApp {
                     };
                     log::info!("screen → {:?}", self.screen_mode);
                 }
+                TopScreen::Info => {
+                    // INFO: the loaded track's details, in the middle band.
+                    self.screen_mode = if self.screen_mode == ScreenMode::Info {
+                        ScreenMode::Playback
+                    } else {
+                        ScreenMode::Info
+                    };
+                    log::info!("screen → {:?}", self.screen_mode);
+                }
                 other => log::info!("{other:?} screen not implemented"),
             },
         }
@@ -664,10 +688,11 @@ impl DeckApp {
     /// Load a local file: decode from disk, grid from its ANLZ if given.
     fn load_track(&mut self, path: &std::path::Path, analyze: Option<&std::path::Path>) -> Result<()> {
         let t0 = Instant::now();
-        let (samples, sr, ch) = audio::decode_file(path)?;
+        let (samples, sr, ch, tags) = audio::decode_file(path)?;
         let deck_sr = self.audio.sample_rate;
         let grid_cue = analyze.and_then(|p| Self::grid_from_anlz(p, deck_sr, ch as u8));
         self.path = path.to_path_buf();
+        self.track_tags = tags;
         self.finish_load(&path.display().to_string(), samples, sr, ch, grid_cue, t0)
     }
 
@@ -680,7 +705,8 @@ impl DeckApp {
         let root = nfs.mount_usb()?;
         let (fh, size) = nfs.lookup_path(&root, rel_path)?;
         let audio = nfs.read_file(&fh, size)?;
-        let (samples, sr, ch) = audio::decode_bytes(audio, rel_path.rsplit('.').next())?;
+        let (samples, sr, ch, tags) = audio::decode_bytes(audio, rel_path.rsplit('.').next())?;
+        self.track_tags = tags;
         let deck_sr = self.audio.sample_rate;
         let grid_cue = if analyze_rel.is_empty() {
             None
@@ -983,7 +1009,7 @@ impl DeckApp {
             cue_point: self.cue_point,
         };
         let _t_snap = Instant::now();
-        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         perf_accum("make_snapshot", _t_snap.elapsed());
 
         // Screen layout in logical points; the shader gets its two rects in pixels.
@@ -1037,6 +1063,7 @@ impl DeckApp {
         let mut touch = Vec::new();
         let _t_run = Instant::now();
         let browse = if self.screen_mode == ScreenMode::Browse { Some(&self.browser) } else { None };
+        let info   = self.screen_mode == ScreenMode::Info;
         let face_ref = face.as_ref();
         // Landscape paints the photo as the deck body; portrait doesn't (its body
         // is synthesised) but passes the texture as chrome_tex for jog/fader sprites.
@@ -1045,7 +1072,7 @@ impl DeckApp {
             _ => None,
         };
         let chrome_tex = if self.portrait { self.face_tex.as_ref() } else { None };
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, face_ref, face_img, chrome_tex, &mut touch));
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, browse, info, face_ref, face_img, chrome_tex, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
         self.events.append(&mut touch);
@@ -1094,7 +1121,7 @@ impl DeckApp {
             player: self.link.player,
             cue_point: self.cue_point,
         };
-        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
 
         // Dev: OPENDECK_SCREENSHOT=path captures frame 90 and exits.
         self.frame_count += 1;
@@ -1813,7 +1840,7 @@ mod nfs_load_tests {
         let audio = nfs.read_file(&afh, asize).unwrap();
         assert_eq!(audio.len() as u32, asize);
         let ext = t.rel_path.rsplit('.').next();
-        let (samples, sr, ch) = crate::audio::decode_bytes(audio, ext).expect("decode over-wire audio");
+        let (samples, sr, ch, _tags) = crate::audio::decode_bytes(audio, ext).expect("decode over-wire audio");
         assert!(samples.len() > sr as usize * ch, "> 1s of audio decoded");
         let secs = samples.len() as f64 / ch as f64 / sr as f64;
 

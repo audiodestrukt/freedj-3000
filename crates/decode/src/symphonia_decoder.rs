@@ -6,10 +6,55 @@ use symphonia::core::{
     codecs::DecoderOptions,
     formats::{FormatOptions, SeekMode, SeekTo},
     io::MediaSourceStream,
-    meta::MetadataOptions,
+    meta::{MetadataOptions, StandardTagKey, Tag},
     probe::Hint,
     units::Time,
 };
+
+/// The track's own metadata (ID3 / Vorbis comment / MP4 atoms), read at probe
+/// time.  Every field is optional; empty means the file didn't say.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct TrackTags {
+    pub title:   Option<String>,
+    pub artist:  Option<String>,
+    pub album:   Option<String>,
+    pub genre:   Option<String>,
+    pub year:    Option<String>,
+    pub comment: Option<String>,
+    /// Musical key as tagged (ID3 TKEY / "INITIALKEY"), e.g. "Am", "8A".
+    pub key:     Option<String>,
+    /// BPM as tagged by the producer/DJ software (not our analysis).
+    pub bpm:     Option<f32>,
+}
+
+impl TrackTags {
+    /// Fold a metadata revision's tags in; earlier values win, so call with the
+    /// most authoritative source first.
+    fn absorb(&mut self, tags: &[Tag]) {
+        let set = |slot: &mut Option<String>, v: &Tag| {
+            let s = v.value.to_string();
+            if slot.is_none() && !s.trim().is_empty() { *slot = Some(s.trim().to_string()); }
+        };
+        for t in tags {
+            match t.std_key {
+                Some(StandardTagKey::TrackTitle) => set(&mut self.title,   t),
+                Some(StandardTagKey::Artist)     => set(&mut self.artist,  t),
+                Some(StandardTagKey::Album)      => set(&mut self.album,   t),
+                Some(StandardTagKey::Genre)      => set(&mut self.genre,   t),
+                Some(StandardTagKey::Date)       => set(&mut self.year,    t),
+                Some(StandardTagKey::Comment)    => set(&mut self.comment, t),
+                Some(StandardTagKey::Bpm) => {
+                    if self.bpm.is_none() { self.bpm = t.value.to_string().trim().parse().ok(); }
+                }
+                _ => {
+                    // No standard key for musical key; catch the common raw ones.
+                    let k = t.key.to_ascii_uppercase();
+                    if k == "TKEY" || k == "INITIALKEY" || k == "KEY" { set(&mut self.key, t); }
+                }
+            }
+        }
+    }
+}
 
 pub struct SymphoniaDecoder {
     format:      Box<dyn symphonia::core::formats::FormatReader>,
@@ -19,6 +64,7 @@ pub struct SymphoniaDecoder {
     channels:    u8,
     total_frames: Option<u64>,
     sample_buf:  Option<SampleBuffer<f32>>,
+    tags:        TrackTags,
 }
 
 impl SymphoniaDecoder {
@@ -45,11 +91,21 @@ impl SymphoniaDecoder {
         let meta_opts = MetadataOptions::default();
         let fmt_opts = FormatOptions { enable_gapless: true, ..Default::default() };
 
-        let probed = symphonia::default::get_probe()
+        let mut probed = symphonia::default::get_probe()
             .format(&hint, mss, &fmt_opts, &meta_opts)
             .map_err(|e| DecodeError::UnsupportedFormat(e.to_string()))?;
 
-        let format = probed.format;
+        // Tags: container-level metadata found while probing (ID3v2 ahead of an
+        // MP3 stream lands here) first, then format-level (Vorbis comments,
+        // MP4 atoms).  Read now — it's just the header, and the reader may not
+        // re-surface it once decoding starts.
+        let mut tags = TrackTags::default();
+        if let Some(mut md) = probed.metadata.get() {
+            if let Some(rev) = md.skip_to_latest() { tags.absorb(rev.tags()); }
+        }
+        let mut format = probed.format;
+        if let Some(rev) = format.metadata().skip_to_latest() { tags.absorb(rev.tags()); }
+
         let track = format.default_track()
             .ok_or_else(|| DecodeError::UnsupportedFormat("no default track".into()))?;
 
@@ -73,8 +129,12 @@ impl SymphoniaDecoder {
             channels,
             total_frames,
             sample_buf: None,
+            tags,
         })
     }
+
+    /// The track's own metadata, as read at open.
+    pub fn tags(&self) -> &TrackTags { &self.tags }
 }
 
 impl Decoder for SymphoniaDecoder {
