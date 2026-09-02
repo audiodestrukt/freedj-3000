@@ -562,6 +562,7 @@ pub fn draw(
                 draw_phase(ui, snap, lay, h, out);
                 draw_wave_area(ui, snap, lay, h, out);
             }
+            draw_cue_call_keys(ui, lay, h, out);   // every mode, as on the unit
             draw_info(ui, snap, lay, h, out);
             draw_bottom(ui, snap, lay, h, out);
 
@@ -1114,6 +1115,26 @@ fn draw_wave_area(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut 
         }
     }
 
+    // ZOOM – GRID pill: tap ZOOM to step the zoom, tap GRID to switch mode.
+    let z = lay.zoom;
+    let mid = z.center().x;
+    let zl = Rect::from_min_max(z.min, Pos2::new(mid, z.max.y));
+    let zr = Rect::from_min_max(Pos2::new(mid, z.min.y), z.max);
+    let (zoom_tap, _) = tap(ui, zl, "zoom-zoom");
+    let (grid_tap, _) = tap(ui, zr, "zoom-grid");
+    if zoom_tap { out.push(Event::Ui(UiEvent::ZoomStep(1))); }
+    if grid_tap { out.push(Event::Ui(UiEvent::ZoomGridMode)); }
+    let p = ui.painter();
+    let (zc, gc) = if snap.zoom_grid_mode { (KEY_LO, BLUE) } else { (BLUE, KEY_LO) };
+    p.rect_filled(zl, 2.0, zc);
+    p.rect_filled(zr, 2.0, gc);
+    text(ui, Pos2::new(z.min.x + z.width() * 0.25, z.center().y), Align2::CENTER_CENTER, "ZOOM", h * 0.018, if snap.zoom_grid_mode { DIM } else { TEXT });
+    text(ui, Pos2::new(z.min.x + z.width() * 0.75, z.center().y), Align2::CENTER_CENTER, "– GRID", h * 0.018, if snap.zoom_grid_mode { TEXT } else { DIM });
+}
+
+/// The right-column CUE/LOOP (DELETE / MEMORY) and CALL (◀ / ▶) keys.  Drawn
+/// in every screen mode — the unit keeps them up in BROWSE, INFO and PERFORM.
+fn draw_cue_call_keys(ui: &Ui, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     let half = |r: Rect, i: usize| {
         let w = (r.width() - 2.0) / 2.0;
         Rect::from_min_size(Pos2::new(r.min.x + i as f32 * (w + 2.0), r.min.y), Vec2::new(w, r.height()))
@@ -1135,22 +1156,6 @@ fn draw_wave_area(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut 
     if key(ui, half(lay.call, 1), "call-next", "▶", "", h, None) {
         out.push(Event::Deck(ControlEvent::MemoryCueCall { next: true }));
     }
-
-    // ZOOM – GRID pill: tap ZOOM to step the zoom, tap GRID to switch mode.
-    let z = lay.zoom;
-    let mid = z.center().x;
-    let zl = Rect::from_min_max(z.min, Pos2::new(mid, z.max.y));
-    let zr = Rect::from_min_max(Pos2::new(mid, z.min.y), z.max);
-    let (zoom_tap, _) = tap(ui, zl, "zoom-zoom");
-    let (grid_tap, _) = tap(ui, zr, "zoom-grid");
-    if zoom_tap { out.push(Event::Ui(UiEvent::ZoomStep(1))); }
-    if grid_tap { out.push(Event::Ui(UiEvent::ZoomGridMode)); }
-    let p = ui.painter();
-    let (zc, gc) = if snap.zoom_grid_mode { (KEY_LO, BLUE) } else { (BLUE, KEY_LO) };
-    p.rect_filled(zl, 2.0, zc);
-    p.rect_filled(zr, 2.0, gc);
-    text(ui, Pos2::new(z.min.x + z.width() * 0.25, z.center().y), Align2::CENTER_CENTER, "ZOOM", h * 0.018, if snap.zoom_grid_mode { DIM } else { TEXT });
-    text(ui, Pos2::new(z.min.x + z.width() * 0.75, z.center().y), Align2::CENTER_CENTER, "– GRID", h * 0.018, if snap.zoom_grid_mode { TEXT } else { DIM });
 }
 
 // ── Info row ──────────────────────────────────────────────────────────────────
