@@ -290,6 +290,15 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
     let sy0 = 0.030;
     let screen = face_rect(base, sx0, sy0, sx0 + sw, sy0 + sh);
 
+    // LOOP IN / OUT are crops of the photo's buttons (`src_w` × 0.045 of it —
+    // see the crop UVs in draw_faceplate), so size each destination from a
+    // height and its own crop's pixel aspect — a fixed w×h fraction of the
+    // portrait body stretched them sideways.
+    let loop_btn = |cx: f32, cy: f32, src_w: f32| {
+        let hpx = 0.040 * base.height();
+        let wpx = hpx * (src_w * FACE_ASPECT.x) / (0.045 * FACE_ASPECT.y);
+        Rect::from_center_size(base.min + Vec2::new(cx * w, cy * base.height()), Vec2::new(wpx, hpx))
+    };
     let face = FaceLayout {
         base,
         // Jog dropped from 0.610 → 0.650 so its top clears the LCD's lower edge
@@ -303,8 +312,8 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         play:     disk(0.115, 0.905, 0.060),
         // LOOP IN / OUT and RELOOP/EXIT: back now the loop engine exists.  Sat
         // in the strip under the jog (its edge is ~0.875), left of the fader.
-        loop_in:  Some(face_rect(base, 0.520, 0.900, 0.605, 0.940)),
-        loop_out: Some(face_rect(base, 0.625, 0.900, 0.710, 0.940)),
+        loop_in:  Some(loop_btn(0.5625, 0.920, 0.070)),
+        loop_out: Some(loop_btn(0.6675, 0.920, 0.060)),
         reloop:   Some(disk(0.775, 0.920, 0.026)),
         // Browse knob in the right margin beside the screen; TIME/AUTO CUE stacked
         // in the left margin.  (Margins are (1-sw)/2 ≈ 0.117 wide at 6".)
