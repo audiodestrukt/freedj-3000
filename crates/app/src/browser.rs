@@ -19,6 +19,15 @@ use opendeck_rekordbox::{read_export, read_export_from, RbExport};
 
 const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg", "opus"];
 
+/// Folders no one browses for music: `_CodeSignature` and its kin inside the
+/// iOS app bundle (the browse root there), `__MACOSX` resource forks, and the
+/// bundle's localisation / framework folders.
+fn is_housekeeping_dir(name: &str) -> bool {
+    name.starts_with('_')
+        || name.ends_with(".lproj")
+        || (cfg!(target_os = "ios") && matches!(name, "Frameworks" | "PlugIns" | "SC_Info"))
+}
+
 fn is_audio(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str())
         .map(|e| AUDIO_EXTS.iter().any(|a| a.eq_ignore_ascii_case(e)))
@@ -189,6 +198,7 @@ impl Browser {
                 let name = ent.file_name().to_string_lossy().into_owned();
                 if name.starts_with('.') { continue; }
                 if path.is_dir() {
+                    if is_housekeeping_dir(&name) { continue; }
                     dirs.push(Entry { name, is_dir: true, artist: None, bpm: None,
                         kind: EntryKind::Descend(Loc::Fs(path)) });
                 } else if is_audio(&path) {
