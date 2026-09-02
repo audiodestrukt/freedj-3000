@@ -1025,6 +1025,21 @@ impl DeckApp {
     }
 }
 
+/// Keep the iPad screen awake while the deck is in the foreground — a locked
+/// screen means no touch control, so DJ apps disable auto-lock while active.
+/// iOS resets `idleTimerDisabled` to false on backgrounding, so we re-assert it
+/// on every foreground.  Implemented in ios/freedj/main.m; a no-op elsewhere.
+#[cfg(target_os = "ios")]
+extern "C" {
+    fn freedj_set_idle_timer_disabled(disabled: bool);
+}
+fn set_idle_timer_disabled(disabled: bool) {
+    #[cfg(target_os = "ios")]
+    unsafe { freedj_set_idle_timer_disabled(disabled); }
+    #[cfg(not(target_os = "ios"))]
+    let _ = disabled;
+}
+
 impl ApplicationHandler for DeckApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.window.is_some() {
@@ -1088,6 +1103,10 @@ impl ApplicationHandler for DeckApp {
 
         // Kick off the first redraw.
         window.request_redraw();
+
+        // Foreground and active: hold the screen awake (cold-launch case; the
+        // Occluded handler re-asserts it on every later foreground).
+        set_idle_timer_disabled(true);
     }
 
     // Deliberately no `suspended()` teardown.  On winit's iOS backend Suspended
@@ -1198,6 +1217,9 @@ impl ApplicationHandler for DeckApp {
             // redraw to resume.  Desktop never emits this, so it's iOS-only.
             WindowEvent::Occluded(occluded) => {
                 self.occluded = occluded;
+                // Release the auto-lock hold in the background, re-assert it on
+                // foreground (iOS resets idleTimerDisabled when backgrounding).
+                set_idle_timer_disabled(!occluded);
                 if occluded {
                     log::info!("occluded (background): pausing render");
                 } else {
