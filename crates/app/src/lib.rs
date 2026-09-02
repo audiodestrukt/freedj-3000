@@ -14,6 +14,7 @@ mod midi;
 mod prodj;
 mod renderer;
 mod screen;
+mod settings;
 mod snapshot;
 mod taglist;
 
@@ -48,7 +49,7 @@ const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// Which middle-band mode the deck screen is showing.  PERFORM comes later.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum ScreenMode { Playback, Browse, Info, Perform, TagList }
+enum ScreenMode { Playback, Browse, Info, Perform, TagList, Menu }
 
 struct DeckApp {
     // Provided before event loop starts.
@@ -60,6 +61,9 @@ struct DeckApp {
     browser:      Browser,
     /// TAG LIST — the on-the-fly playlist; persisted (see taglist.rs).
     tag_list:     taglist::TagList,
+    /// MENU / UTILITY settings; persisted (see settings.rs).
+    settings:     settings::Settings,
+    menu_cursor:  usize,
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
@@ -166,6 +170,7 @@ struct UiFlags {
     hot_cues: [Option<u64>; 8],
     perform_mode: PerformMode, perform_bank: u8, perform_delete: bool,
     loop_active: bool, loop_start: u64, loop_end: u64, loop_beats: f32,
+    tempo_range: f32, quantize: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -196,6 +201,8 @@ fn make_snapshot<'a>(
         loop_start:    f.loop_start,
         loop_end:      f.loop_end,
         loop_beats:    f.loop_beats,
+        tempo_range:   f.tempo_range,
+        quantize:      f.quantize,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
         remain_mode:   f.remain_mode,
@@ -262,6 +269,7 @@ impl DeckApp {
         link_grid:    Arc<arc_swap::ArcSwap<Option<BeatGrid>>>,
         link_send:    Arc<AtomicBool>,
         event_rx:     mpsc::Receiver<Event>,
+        settings:     settings::Settings,
     ) -> Self {
         let browser = Browser::new(&path, std::sync::Arc::clone(&link));
         let tag_list = taglist::TagList::open();
@@ -271,7 +279,7 @@ impl DeckApp {
         // startup track cues at its first audible sound rather than 0:00 — the
         // same rule finish_load applies to tracks loaded from the browser.
         let cue_point = if cue_point == 0 {
-            first_sound(audio.samples.load().as_slice(), audio.channels as usize)
+            first_sound(audio.samples.load().as_slice(), audio.channels as usize, settings.auto_cue_level_db)
         } else { cue_point };
         // Dev: OPENDECK_MEMORY_CUES=1.5,4.0 seeds memory points (seconds) on the
         // startup track — exercises MEMORY/CALL/DELETE and the overview markers
@@ -304,10 +312,13 @@ impl DeckApp {
                 Ok("info")    => ScreenMode::Info,
                 Ok("perform") => ScreenMode::Perform,
                 Ok("taglist") => ScreenMode::TagList,
+                Ok("menu")    => ScreenMode::Menu,
                 _             => ScreenMode::Playback,
             },
             browser,
             tag_list,
+            settings,
+            menu_cursor:       0,
             fader_speed,
             beat2_bpm,
             beat2_anchor,
@@ -395,8 +406,9 @@ impl DeckApp {
                 }
             }
             Event::Deck(ControlEvent::TempoNudge { delta }) => {
-                let step = delta / (2.0 * input::TEMPO_RANGE);
-                let f = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)));
+                let range = self.settings.tempo_range;
+                let step = delta / (2.0 * range);
+                let f = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)), range);
                 self.apply(Event::Deck(ControlEvent::TempoFader { position: f + step }));
             }
             Event::Deck(ControlEvent::JogDelta { delta, .. }) => {
@@ -457,8 +469,7 @@ impl DeckApp {
                         // the raw cursor stored the cue ~93 ms past the transient
                         // under the playhead, so playing from it skipped the kick.
                         // Frame-align so channels stay interleaved.
-                        let ch = self.audio.channels as u64;
-                        self.cue_point   = ((self.smoothed_pos.max(0.0) as u64) / ch) * ch;
+                        self.cue_point   = self.quantized(self.smoothed_pos);
                         self.cue_preview = true;
                         self.cued        = true;
                         self.audio.playing.store(true, Ordering::Relaxed);
@@ -530,7 +541,7 @@ impl DeckApp {
                 let s = slot as usize;
                 if s < 8 && self.audio.len() > 0 {
                     let ch  = self.audio.channels as u64;
-                    let pos = ((self.smoothed_pos.max(0.0) as u64) / ch) * ch;
+                    let pos = self.quantized(self.smoothed_pos);
                     self.hot_cues[s] = Some(pos);
                     let sr_ch = self.audio.sample_rate as f64 * ch as f64;
                     log::info!("hot cue {}: set at {:.2}s", (b'A' + slot) as char, pos as f64 / sr_ch);
@@ -577,7 +588,7 @@ impl DeckApp {
                 self.cued = false;   // searched away from the cue
             }
             Event::Deck(ControlEvent::TempoFader { position }) => {
-                let s = input::fader_to_speed(position);
+                let s = input::fader_to_speed(position, self.settings.tempo_range);
                 self.fader_speed.store(s.to_bits(), Ordering::Relaxed);
                 self.audio.speed_store(s);
                 log::info!("tempo {:+.2}%", (s - 1.0) * 100.0);
@@ -617,6 +628,10 @@ impl DeckApp {
                 match self.screen_mode {
                     ScreenMode::Browse  => self.browser.move_selection(delta),
                     ScreenMode::TagList => self.tag_list.move_selection(delta),
+                    ScreenMode::Menu    => {
+                        let last = settings::MENU.len() as i32 - 1;
+                        self.menu_cursor = (self.menu_cursor as i32 + delta).clamp(0, last) as usize;
+                    }
                     // Outside a list the selector nudges zoom, as on the unit.
                     _ => self.apply(Event::Ui(UiEvent::ZoomStep(delta.signum()))),
                 }
@@ -639,6 +654,8 @@ impl DeckApp {
                             }
                         }
                     }
+                    // In MENU the selector's press steps the highlighted setting.
+                    ScreenMode::Menu => self.settings.cycle(settings::MENU[self.menu_cursor].0, 1),
                     _ => {
                         self.screen_mode = ScreenMode::Browse;
                         self.browser.refresh();
@@ -648,8 +665,14 @@ impl DeckApp {
             Event::Deck(ControlEvent::Back) => {
                 match self.screen_mode {
                     ScreenMode::Browse  => self.browser.back(),
-                    ScreenMode::TagList => self.screen_mode = ScreenMode::Playback,
+                    ScreenMode::TagList | ScreenMode::Menu => self.screen_mode = ScreenMode::Playback,
                     _ => {}
+                }
+            }
+            Event::Ui(UiEvent::MenuTap(i)) => {
+                if i < settings::MENU.len() {
+                    self.menu_cursor = i;
+                    self.settings.cycle(settings::MENU[i].0, 1);
                 }
             }
             Event::Ui(UiEvent::TagTrack) => {
@@ -694,7 +717,7 @@ impl DeckApp {
             Event::Deck(ControlEvent::LoopIn) => {
                 // Start a manual loop here; OUT closes it.  Any running loop ends.
                 let ch = self.audio.channels as u64;
-                let pos = ((self.smoothed_pos.max(0.0) as u64) / ch) * ch;
+                let pos = self.quantized(self.smoothed_pos);
                 self.exit_loop();
                 self.audio.loop_start.store(pos, Ordering::Relaxed);
                 self.audio.loop_end.store(pos, Ordering::Relaxed);
@@ -702,8 +725,7 @@ impl DeckApp {
                 log::info!("loop in: {:.2}s", pos as f64 / (self.audio.sample_rate as f64 * ch as f64));
             }
             Event::Deck(ControlEvent::LoopOut) => {
-                let ch = self.audio.channels as u64;
-                let pos = ((self.smoothed_pos.max(0.0) as u64) / ch) * ch;
+                let pos = self.quantized(self.smoothed_pos);
                 let start = self.audio.loop_start.load(Ordering::Relaxed);
                 if pos > start { self.set_loop(start, pos, 0.0); }
                 else { log::info!("loop out: before the in point — ignored"); }
@@ -740,7 +762,8 @@ impl DeckApp {
                 // the unit does — AUTO CUE otherwise governs future loads).
                 if self.auto_cue && self.cue_point == 0 && !self.audio.playing.load(Ordering::Relaxed) {
                     let ch = self.audio.channels as usize;
-                    let fs = { let s = self.audio.samples.load(); first_sound(s.as_slice(), ch) };
+                    let lvl = self.settings.auto_cue_level_db;
+                    let fs = { let s = self.audio.samples.load(); first_sound(s.as_slice(), ch, lvl) };
                     if fs > 0 { self.cue_point = fs; self.seek_to(fs); self.cued = true; }
                 }
             }
@@ -789,6 +812,15 @@ impl DeckApp {
                     };
                     log::info!("screen → {:?}", self.screen_mode);
                 }
+                TopScreen::Menu => {
+                    // MENU / UTILITY: the settings list.
+                    self.screen_mode = if self.screen_mode == ScreenMode::Menu {
+                        ScreenMode::Playback
+                    } else {
+                        ScreenMode::Menu
+                    };
+                    log::info!("screen → {:?}", self.screen_mode);
+                }
                 TopScreen::Perform => {
                     // PERFORM: hot-cue / beat-jump pads over a compact waveform.
                     self.screen_mode = if self.screen_mode == ScreenMode::Perform {
@@ -799,7 +831,6 @@ impl DeckApp {
                     self.perform_delete = false;
                     log::info!("screen → {:?}", self.screen_mode);
                 }
-                other => log::info!("{other:?} screen not implemented"),
             },
             Event::Ui(UiEvent::PerformMode(m)) => {
                 self.perform_mode   = m;
@@ -853,6 +884,21 @@ impl DeckApp {
             _ => pos.max(0.0),
         };
         ((snapped as u64) / ch) * ch
+    }
+
+    /// A point the DJ just set (CUE, hot cue, LOOP IN/OUT): the nearest beat on
+    /// the grid when QUANTIZE is on, else the exact position; frame-aligned.
+    fn quantized(&self, pos: f64) -> u64 {
+        let ch = self.audio.channels as u64;
+        let p = match (self.settings.quantize, self.beat_grid.as_ref(), self.samples_per_beat()) {
+            (true, Some(g), Some(per_beat)) => {
+                let anchor = g.anchor_sample as f64 * ch as f64;
+                let n = ((pos - anchor) / per_beat).round();
+                (anchor + n * per_beat).max(0.0)
+            }
+            _ => pos.max(0.0),
+        };
+        ((p as u64) / ch) * ch
     }
 
     /// Arm the loop [start, end) — the processor wraps inside its blocks.
@@ -1012,7 +1058,7 @@ impl DeckApp {
         // AUTO CUE: with no rekordbox memory cue, cue at the first audible sound
         // rather than 0:00 (the unit's behaviour; the A.CUE badge).  A memory
         // cue still wins — that is the DJ's own choice.
-        let cue_pt = if self.auto_cue && cue_pt == 0 { first_sound(&samples, ch) } else { cue_pt };
+        let cue_pt = if self.auto_cue && cue_pt == 0 { first_sound(&samples, ch, self.settings.auto_cue_level_db) } else { cue_pt };
 
         self.audio.load_samples(Arc::clone(&samples), deck_sr, ch as u8)?;
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&waveform); }
@@ -1287,6 +1333,7 @@ impl DeckApp {
             loop_start: self.audio.loop_start.load(Ordering::Relaxed),
             loop_end: self.audio.loop_end.load(Ordering::Relaxed),
             loop_beats: self.loop_beats,
+            tempo_range: self.settings.tempo_range, quantize: self.settings.quantize,
         };
         let _t_snap = Instant::now();
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
@@ -1351,6 +1398,7 @@ impl DeckApp {
             ScreenMode::Info     => screen::ScreenView::Info,
             ScreenMode::Perform  => screen::ScreenView::Perform,
             ScreenMode::TagList  => screen::ScreenView::TagList,
+            ScreenMode::Menu     => screen::ScreenView::Menu(&self.settings, self.menu_cursor),
         };
         let face_ref = face.as_ref();
         // Landscape paints the photo as the deck body; portrait doesn't (its body
@@ -1413,6 +1461,7 @@ impl DeckApp {
             loop_start: self.audio.loop_start.load(Ordering::Relaxed),
             loop_end: self.audio.loop_end.load(Ordering::Relaxed),
             loop_beats: self.loop_beats,
+            tempo_range: self.settings.tempo_range, quantize: self.settings.quantize,
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
 
@@ -1485,15 +1534,11 @@ fn memory_prev(cues: &[u64], pos: u64, tol: u64) -> Option<u64> {
     cues.iter().rev().find(|&&m| m.saturating_add(tol) < pos).copied()
 }
 
-/// AUTO CUE level: the amplitude a sample must exceed to count as "sound".  The
-/// unit offers -36…-78 dB; -48 dB is a sensible default — skips leader silence
-/// and low noise without eating a soft intro.  Worth exposing in MENU later.
-const AUTO_CUE_LEVEL_DB: f32 = -48.0;
-
-/// Interleaved index of the first sample louder than `AUTO_CUE_LEVEL_DB`,
-/// frame-aligned — where AUTO CUE places the cue on load.  0 if silent.
-fn first_sound(samples: &[f32], ch: usize) -> u64 {
-    let thr = 10f32.powf(AUTO_CUE_LEVEL_DB / 20.0);
+/// Interleaved index of the first sample louder than `level_db` (the AUTO CUE
+/// LEVEL menu setting, -36…-78 dB), frame-aligned — where AUTO CUE places the
+/// cue on load.  0 if silent.
+fn first_sound(samples: &[f32], ch: usize, level_db: f32) -> u64 {
+    let thr = 10f32.powf(level_db / 20.0);
     match samples.iter().position(|&s| s.abs() > thr) {
         Some(i) => ((i / ch) * ch) as u64,
         None => 0,
@@ -1612,8 +1657,10 @@ impl ApplicationHandler for DeckApp {
                 if state != ElementState::Pressed { return; }
                 // In a list screen (BROWSE / TAG LIST) the keys navigate the
                 // list, not the transport.  G = TAG TRACK / REMOVE.
-                if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList) {
-                    let here = if self.screen_mode == ScreenMode::Browse { TopScreen::Browse } else { TopScreen::TagList };
+                if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu) {
+                    let here = match self.screen_mode {
+                        ScreenMode::Browse => TopScreen::Browse, ScreenMode::TagList => TopScreen::TagList, _ => TopScreen::Menu,
+                    };
                     let ev = match code {
                         ArrowDown           => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: 1 })),
                         ArrowUp             => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: -1 })),
@@ -1633,8 +1680,9 @@ impl ApplicationHandler for DeckApp {
                 let total   = self.audio.len().max(1) as f32;
                 let frac    = self.audio.position.load(Ordering::Relaxed) as f32 / total;
                 let ten_s   = (self.audio.sample_rate as f32 * self.audio.channels as f32 * 10.0) / total;
-                let fader   = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)));
-                let step    = 0.01 / (2.0 * input::TEMPO_RANGE);   // ±1% per press, as the DJ2Go buttons
+                let range   = self.settings.tempo_range;
+                let fader   = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)), range);
+                let step    = 0.01 / (2.0 * range);   // ±1% per press, as the DJ2Go buttons
                 let ev = match code {
                     Space      => Some(Event::Deck(if playing { ControlEvent::Pause } else { ControlEvent::Play })),
                     ArrowRight => Some(Event::Deck(ControlEvent::NeedleSearch { position: (frac + ten_s).min(1.0) })),
@@ -1859,7 +1907,11 @@ fn fit_contain(ts: egui::Vec2, win: egui::Rect) -> egui::Rect {
 pub struct Config {
     /// The track to load at startup; `None` boots to an empty deck (browse + LOAD).
     pub track:        Option<PathBuf>,
-    pub player:       u8,
+    /// Player number given explicitly (--player / OPENDECK_PLAYER); wins over
+    /// the persisted MENU setting.
+    pub player:       Option<u8>,
+    /// Platform default when neither is set: 1 on the desktop, 3 on the iPad.
+    pub default_player: u8,
     pub deck_channel: u8,   // 0 = A/left (MIDI ch 0), 1 = B/right (ch 1)
     pub link_send:    bool,
 }
@@ -1878,7 +1930,7 @@ pub fn desktop_main() -> Result<()> {
     // Args: <file> [--player N].  OPENDECK_PLAYER also works.
     let mut args = std::env::args().skip(1);
     let mut path: Option<PathBuf> = None;
-    let mut player: u8 = std::env::var("OPENDECK_PLAYER").ok().and_then(|v| v.parse().ok()).unwrap_or(1);
+    let mut player: Option<u8> = std::env::var("OPENDECK_PLAYER").ok().and_then(|v| v.parse().ok());
     // Controller side: A = left (MIDI channel 0), B = right (channel 1).
     let mut deck_channel: u8 = match std::env::var("OPENDECK_DECK").ok().as_deref() {
         Some("B") | Some("b") => 1,
@@ -1893,7 +1945,7 @@ pub fn desktop_main() -> Result<()> {
     let mut link_send = std::env::var("OPENDECK_LINK_SEND").map(|v| v == "1").unwrap_or(false);
     while let Some(a) = args.next() {
         match a.as_str() {
-            "--player" => player = args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6 (5-6 only on an all-CDJ-3000 network)")?,
+            "--player" => player = Some(args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6 (5-6 only on an all-CDJ-3000 network)")?),
             "--deck" => deck_channel = match args.next().as_deref() {
                 Some("A") | Some("a") => 0,
                 Some("B") | Some("b") => 1,
@@ -1913,7 +1965,7 @@ pub fn desktop_main() -> Result<()> {
         }
     }
 
-    run(Config { track: path, player, deck_channel, link_send })
+    run(Config { track: path, player, default_player: 1, deck_channel, link_send })
 }
 
 /// Start a deck and run the UI event loop.  Platform-agnostic: every entry point
@@ -1925,7 +1977,10 @@ pub fn run(cfg: Config) -> Result<()> {
     // device is a CDJ-3000; against an XDJ/mixed network 5-6 are invalid and the
     // player refuses master handoff to one. We allow 1-6; picking 5-6 only works
     // on an all-CDJ-3000 network. See docs/design/prodj-link-players.md.
-    let player       = cfg.player.clamp(1, 6);
+    // MENU / UTILITY settings persist across launches; an explicit --player /
+    // OPENDECK_PLAYER still wins over the persisted PLAYER No.
+    let settings     = settings::Settings::load(cfg.default_player);
+    let player       = cfg.player.unwrap_or(settings.player).clamp(1, 6);
     let deck_channel = cfg.deck_channel;
     let link_send    = cfg.link_send;
 
@@ -2014,7 +2069,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(track.unwrap_or_default(), waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx);
+    let mut app = DeckApp::new(track.unwrap_or_default(), waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, settings);
     // Park the startup track at its cue (AUTO CUE's first sound, or the
     // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
     if app.cue_point > 0 { let c = app.cue_point; app.seek_to(c); }
@@ -2078,11 +2133,11 @@ mod memory_cue_tests {
     fn first_sound_skips_the_leader_and_frame_aligns() {
         // Stereo: 3 silent frames, then sound at frame 3 (index 6/7).
         let s = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.5, 0.5, 0.1, 0.1];
-        assert_eq!(first_sound(&s, 2), 6);
+        assert_eq!(first_sound(&s, 2, -48.0), 6);
         // Sound first appears in the RIGHT channel (odd index) → still frame-aligned.
         let r = [0.0, 0.0, 0.0, 0.5];
-        assert_eq!(first_sound(&r, 2), 2);
-        assert_eq!(first_sound(&[0.0; 8], 2), 0);
+        assert_eq!(first_sound(&r, 2, -48.0), 2);
+        assert_eq!(first_sound(&[0.0; 8], 2, -48.0), 0);
     }
 }
 
@@ -2190,12 +2245,10 @@ pub extern "C" fn freedj_ios_main() {
 
     // Demo config: portrait iPad chrome, player 3 (the ADK-1000 is a drop-in
     // "deck 3" next to CDJs 1-2, so 3 avoids the default collision), Link send on.
-    // OPENDECK_PLAYER overrides, matching the desktop `--player` arg; a Utility
-    // -style config menu to set this on device is on the backlog.
+    // OPENDECK_PLAYER overrides, matching the desktop `--player` arg; otherwise
+    // the MENU's persisted PLAYER No. (seeded to 3 on first run).
     std::env::set_var("OPENDECK_PORTRAIT", "1");
-    let player: u8 = std::env::var("OPENDECK_PLAYER").ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(3);
+    let player: Option<u8> = std::env::var("OPENDECK_PLAYER").ok().and_then(|v| v.parse().ok());
 
     let track = bundle.as_deref().and_then(bundled_track);
     match &track {
@@ -2205,7 +2258,7 @@ pub extern "C" fn freedj_ios_main() {
              the target's Copy Bundle Resources phase to preload (see ios/README.md)"
         ),
     }
-    if let Err(e) = run(Config { track, player, deck_channel: 0, link_send: true }) {
+    if let Err(e) = run(Config { track, player, default_player: 3, deck_channel: 0, link_send: true }) {
         log::error!("freedj_ios_main: {e:#}");
     }
 }

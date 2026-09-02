@@ -45,6 +45,8 @@ pub enum UiEvent {
     /// TAG TRACK / REMOVE: in BROWSE, tag/untag the highlighted track; on the
     /// TAG LIST screen, remove the highlighted one.
     TagTrack,
+    /// MENU: a row was tapped — select it and step its value.
+    MenuTap(usize),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,15 +64,16 @@ pub enum PerformMode { HotCue, BeatJump }
 pub const ZOOM_LEVELS: [f32; 6] = [300.0, 450.0, 600.0, 900.0, 1200.0, 1800.0];
 pub const ZOOM_DEFAULT: usize = 2;
 
-/// Pitch-fader travel maps to ±16% — the range badge on the screen.
-pub const TEMPO_RANGE: f32 = 0.16;
+// The fader's range is the TEMPO RANGE menu setting (`Settings::tempo_range`,
+// default ±16 %).
 
 // DJ convention: pushing the tempo fader DOWN speeds up, UP slows down.
 // `position` is geometric (0 = bottom of travel, 1 = top), so bottom = fastest.
-pub fn fader_to_speed(position: f32) -> f32 {
-    1.0 + (0.5 - position.clamp(0.0, 1.0)) * 2.0 * TEMPO_RANGE
+// `range` is the fader's reach as a fraction (0.16 = ±16 %).
+pub fn fader_to_speed(position: f32, range: f32) -> f32 {
+    1.0 + (0.5 - position.clamp(0.0, 1.0)) * 2.0 * range
 }
 
-pub fn speed_to_fader(speed: f32) -> f32 {
-    (0.5 - (speed - 1.0) / (2.0 * TEMPO_RANGE)).clamp(0.0, 1.0)
+pub fn speed_to_fader(speed: f32, range: f32) -> f32 {
+    (0.5 - (speed - 1.0) / (2.0 * range)).clamp(0.0, 1.0)
 }

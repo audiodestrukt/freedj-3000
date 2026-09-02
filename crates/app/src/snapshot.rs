@@ -48,6 +48,10 @@ pub struct DeckSnapshot<'a> {
     pub loop_start:     u64,
     pub loop_end:       u64,
     pub loop_beats:     f32,
+    /// MENU settings the screen reflects: the tempo fader's range (badge +
+    /// knob position) and QUANTIZE (readout).
+    pub tempo_range:    f32,
+    pub quantize:       bool,
     /// Master Tempo (key lock) engaged.
     pub key_lock:     bool,
     /// Time display shows remaining (REMAIN) rather than elapsed (TIME).

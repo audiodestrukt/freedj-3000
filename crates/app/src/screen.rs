@@ -17,6 +17,7 @@
 use crate::input::{ControlEvent, Event, Screen as TopScreen, Source, UiEvent};
 use crate::browser::Browser;
 use crate::taglist::TagList;
+use crate::settings::{Settings, MENU};
 use crate::snapshot::DeckSnapshot;
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -489,7 +490,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
 
     // ── Tempo fader: silver handle at the live pitch ─────────────────────────
     let ft  = f.fader;
-    let pos = crate::input::speed_to_fader(snap.fader_speed).clamp(0.0, 1.0);
+    let pos = crate::input::speed_to_fader(snap.fader_speed, snap.tempo_range).clamp(0.0, 1.0);
     let hy  = ft.max.y - pos * ft.height();
     if chrome_tex.is_some() {
         // Portrait: synthetic slot + knob (clean, centred, no scale ticks).
@@ -572,7 +573,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
 /// Draw the screen and collect the touch events it produced this frame.
 /// Which screen the LCD shows; the top / middle band follows it.
 #[derive(Clone, Copy)]
-pub enum ScreenView<'a> { Playback, Browse(&'a Browser), Info, Perform, TagList }
+pub enum ScreenView<'a> { Playback, Browse(&'a Browser), Info, Perform, TagList, Menu(&'a Settings, usize) }
 
 pub fn draw(
     ctx:    &egui::Context,
@@ -632,9 +633,10 @@ pub fn draw(
                 ScreenView::Perform => draw_perform(ui, snap, lay, h, out),
                 _ => {
                     let active = match view {
-                        ScreenView::Browse(_) => Some(TopScreen::Browse),
-                        ScreenView::Info      => Some(TopScreen::Info),
-                        ScreenView::TagList   => Some(TopScreen::TagList),
+                        ScreenView::Browse(_)  => Some(TopScreen::Browse),
+                        ScreenView::Info       => Some(TopScreen::Info),
+                        ScreenView::TagList    => Some(TopScreen::TagList),
+                        ScreenView::Menu(_, _) => Some(TopScreen::Menu),
                         _ => None,
                     };
                     draw_keys(ui, lay, h, active, out);
@@ -650,6 +652,8 @@ pub fn draw(
                 ScreenView::TagList => draw_tag_list(ui, tag_list, lay, h),
                 // INFO: the middle band shows the loaded track's details.
                 ScreenView::Info => draw_info_screen(ui, snap, lay, h),
+                // MENU / UTILITY: the settings list.
+                ScreenView::Menu(settings, cursor) => draw_menu(ui, settings, cursor, lay, h, out),
                 ScreenView::Playback => {
                     draw_title(ui, snap, lay, h);
                     draw_phase(ui, snap, lay, h, out);
@@ -776,6 +780,36 @@ fn draw_tag_list(ui: &Ui, tag_list: &TagList, lay: &Layout, h: f32) {
     let detail = tag_list.selected_entry().map(|e| ("TAGGED TRACK", e.name.as_str(), "LOAD: play  ·  TAG TRACK: remove"));
     draw_list_screen(ui, lay, h, &header, &rows, tag_list.selected,
                      "— no tagged tracks —   (BROWSE, then TAG TRACK)", detail);
+}
+
+/// MENU / UTILITY: the settings, one per row — label left, value right.  The
+/// rotary moves the highlight and its press steps the value (as does tapping
+/// the row); BACK or the MENU tab leaves.
+fn draw_menu(ui: &Ui, settings: &Settings, cursor: usize, lay: &Layout, h: f32, out: &mut Vec<Event>) {
+    let p = ui.painter();
+    let hdr = lay.title;
+    p.rect_filled(hdr, 0.0, BAR);
+    text(ui, Pos2::new(hdr.min.x + h * 0.02, hdr.center().y), Align2::LEFT_CENTER, "UTILITY", h * 0.030, TEXT);
+    text(ui, Pos2::new(hdr.max.x - h * 0.02, hdr.center().y), Align2::RIGHT_CENTER,
+         "select: step value   ·   BACK: exit", h * 0.020, DIM);
+
+    let body = middle_band(lay);
+    p.rect_filled(body, 0.0, BG);
+
+    let pad   = h * 0.025;
+    let row_h = h * 0.062;
+    for (i, (setting, label)) in MENU.iter().enumerate() {
+        let y0  = body.min.y + pad + i as f32 * row_h;
+        let row = Rect::from_min_max(Pos2::new(body.min.x + pad, y0), Pos2::new(body.max.x - pad, y0 + row_h - h * 0.006));
+        let (clicked, down) = tap(ui, row, &format!("menu-{i}"));
+        let sel = i == cursor;
+        p.rect_filled(row, 3.0, if sel { TEXT } else if down { KEY_HI } else { KEY_LO });
+        let ink = if sel { BG } else { TEXT };
+        text(ui, Pos2::new(row.min.x + h * 0.02, row.center().y), Align2::LEFT_CENTER, *label, h * 0.028, ink);
+        text(ui, Pos2::new(row.max.x - h * 0.02, row.center().y), Align2::RIGHT_CENTER,
+             settings.value(*setting), h * 0.028, if sel { BG } else { BLUE });
+        if clicked { out.push(Event::Ui(UiEvent::MenuTap(i))); }
+    }
 }
 
 /// INFO screen: the loaded track's details in the middle band — its own tags
@@ -1440,7 +1474,8 @@ fn draw_info(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
     let (time_tap, _) = tap(ui, tm, "time");
     if time_tap { out.push(Event::Ui(UiEvent::TimeMode)); }
     let shown = if snap.remain_mode { snap.remaining_secs() } else { snap.elapsed_secs() };
-    text(ui, Pos2::new(tm.center().x, tm.min.y + h * 0.006), Align2::CENTER_TOP, "QUANTIZE : –", cap, ORANGE);
+    text(ui, Pos2::new(tm.center().x, tm.min.y + h * 0.006), Align2::CENTER_TOP,
+         if snap.quantize { "QUANTIZE : 1" } else { "QUANTIZE : –" }, cap, ORANGE);
     if snap.remain_mode {
         text(ui, Pos2::new(tm.min.x, tm.min.y + h * 0.006), Align2::LEFT_TOP, "REMAIN", cap, TEXT);
     }
@@ -1526,7 +1561,7 @@ fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec
     // ±range badge.
     let rg = lay.range;
     p.rect_filled(rg, 2.0, RED);
-    text(ui, rg.center(), Align2::CENTER_CENTER, "±16", h * 0.024, TEXT);
+    text(ui, rg.center(), Align2::CENTER_CENTER, crate::settings::Settings::range_label(snap.tempo_range), h * 0.024, TEXT);
 
     // BPM box: dark face, big integer part, smaller fraction, "BPM" caption.
     let b = lay.bpm;
