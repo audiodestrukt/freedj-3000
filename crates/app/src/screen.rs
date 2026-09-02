@@ -254,6 +254,34 @@ fn round_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<E
     if resp.clicked() { out.push(Event::Deck(ev)); }
 }
 
+/// Backlit-button glow: light around the rim and a faint wash across the face,
+/// instead of a flat colour fill.  Used for the lit PLAY / CUE state so the
+/// button reads as illuminated from within (rim + graphic) rather than painted
+/// over.  `col` is the lamp colour; the alphas bake the falloff.
+fn edge_glow(p: &egui::Painter, r: Rect, col: Color32) {
+    let c = r.center();
+    let rad = r.width() * 0.5;
+    // Mute the photographed silver face so the lamp reads, then rim light.
+    p.circle_filled(c, rad * 0.98, tint(Color32::BLACK, 90));
+    p.circle_filled(c, rad * 0.98, tint(col, 30));                            // face wash
+    p.circle_stroke(c, rad * 0.88, Stroke::new(rad * 0.18, tint(col, 48)));   // soft inner halo
+    p.circle_stroke(c, rad * 0.97, Stroke::new(rad * 0.07, tint(col, 200)));  // bright rim
+}
+
+/// Play/pause symbol (triangle + two bars) in `col`, so the button-face graphic
+/// lights up.  `s` is the glyph half-height.
+fn play_pause_glyph(p: &egui::Painter, c: Pos2, s: f32, col: Color32) {
+    let tx = c.x - s * 1.18;
+    p.add(egui::Shape::convex_polygon(
+        vec![Pos2::new(tx, c.y - s), Pos2::new(tx, c.y + s), Pos2::new(tx + s * 1.1, c.y)],
+        col, Stroke::NONE));
+    let bw = s * 0.42;
+    let gap = s * 0.34;
+    let bx = c.x + s * 0.28;
+    p.rect_filled(Rect::from_min_size(Pos2::new(bx, c.y - s), Vec2::new(bw, 2.0 * s)), 0.0, col);
+    p.rect_filled(Rect::from_min_size(Pos2::new(bx + bw + gap, c.y - s), Vec2::new(bw, 2.0 * s)), 0.0, col);
+}
+
 /// A rectangular touch target, same overlay treatment as `round_btn`.
 fn rect_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<Event>, ev: ControlEvent) {
     let resp = ui.interact(r, Id::new(name), Sense::click());
@@ -388,9 +416,22 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
     }
 
     // ── Transport + buttons (overlays + targets) ─────────────────────────────
-    round_btn(ui, f.play, "fp-play", snap.playing.then_some(GREEN), out, ControlEvent::PlayPause);
+    // PLAY / CUE are backlit: the light glows around the rim and through the
+    // face graphic (play/pause symbol, CUE lettering), not a flat colour wash.
+    {
+        let resp = ui.interact(f.play, Id::new("fp-play"), Sense::click());
+        let lit = if snap.playing { Some(GREEN) } else if resp.is_pointer_button_down_on() { Some(TEXT) } else { None };
+        if let Some(col) = lit {
+            edge_glow(p, f.play, col);
+            play_pause_glyph(p, f.play.center(), f.play.width() * 0.19, col);
+        }
+        if resp.clicked() { out.push(Event::Deck(ControlEvent::PlayPause)); }
+    }
     let cr = ui.interact(f.cue, Id::new("fp-cue"), Sense::click_and_drag());
-    if cr.is_pointer_button_down_on() { p.circle_filled(f.cue.center(), f.cue.width() * 0.5, tint(ORANGE, 120)); }
+    if cr.is_pointer_button_down_on() {
+        edge_glow(p, f.cue, ORANGE);
+        text(ui, f.cue.center(), Align2::CENTER_CENTER, "CUE", f.cue.width() * 0.34, ORANGE);
+    }
     if cr.drag_started() || cr.clicked() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
     if cr.drag_stopped()                 { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
 
