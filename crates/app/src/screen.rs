@@ -290,10 +290,11 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         // real XDJ (CUE upper, PLAY the bottom-left corner button).
         cue:      disk(0.115, 0.775, 0.060),
         play:     disk(0.115, 0.905, 0.060),
-        // LOOP IN/OUT omitted in portrait until loop support exists.
-        loop_in:  None,
-        loop_out: None,
-        reloop:   None,   // loop engine unbuilt — omit in portrait, like loop_in/out
+        // LOOP IN / OUT and RELOOP/EXIT: back now the loop engine exists.  Sat
+        // in the strip under the jog (its edge is ~0.875), left of the fader.
+        loop_in:  Some(face_rect(base, 0.520, 0.900, 0.605, 0.940)),
+        loop_out: Some(face_rect(base, 0.625, 0.900, 0.710, 0.940)),
+        reloop:   Some(disk(0.775, 0.920, 0.026)),
         // Browse knob in the right margin beside the screen; TIME/AUTO CUE stacked
         // in the left margin.  (Margins are (1-sw)/2 ≈ 0.117 wide at 6".)
         browse:   disk(0.945, 0.105, 0.048),
@@ -453,8 +454,9 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         cap(f.cue,  "CUE");
         cap(f.browse, "BROWSE");
         cap(f.mt,     "MASTER TEMPO");   // key-lock button
-        if let Some(r) = f.loop_in  { cap(r, "IN"); }
-        if let Some(r) = f.loop_out { cap(r, "OUT"); }
+        if let Some(r) = f.loop_in  { cap(r, "LOOP IN"); }
+        if let Some(r) = f.loop_out { cap(r, "LOOP OUT"); }
+        if let Some(r) = f.reloop   { cap(r, "RELOOP"); }
         // Portrait-only left column: TIME (elapsed/remain) + AUTO CUE.  Labelled
         // inside the slab since they sit in open space, not on a photo.
         for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE")] {
