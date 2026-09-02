@@ -1,9 +1,12 @@
 # iOS crash: `0x8BADF00D` scene-update watchdog after backgrounding
 
-**Status:** Fixed in `caa3ce5` (shipped in `ios-v0.1.1`).
+**Status:** First attempt `caa3ce5` (`ios-v0.1.1`/`0.1.2`) was wrong and
+reverted; **fixed properly** in the follow-up `Occluded` rework (see below).
 **Affected:** iOS/iPadOS TestFlight build `0.1.0` (build `1788281347`).
-**Reported from:** a real iPad (`iPad16,10`, iPadOS 26.5.2), crash report
-`freedj-2026-09-01-161036.ips`.
+**Reported from:** a real iPad (`iPad16,10`, iPadOS 26.5.2), two crash reports:
+`freedj-2026-09-01-161036.ips` (foreground, 10 s allowance) and
+`freedj-2026-09-01-214312.ips` (**background**, 30 s allowance, **86 s of app
+CPU** — the redraw loop spinning against the dead surface in the background).
 
 ---
 
@@ -90,34 +93,56 @@ work. Thermal stayed `nominal` because the burst was brief.
 
 ## The fix
 
-Add the missing lifecycle half. `crates/app/src/lib.rs`, in
-`impl ApplicationHandler for DeckApp`:
+### First attempt (reverted): tear down the window in `suspended()`
+
+The initial fix (commit `caa3ce5`) added a `suspended()` that dropped
+`egui_state`/`renderer`/`window`, letting `resumed()` rebuild them. It shipped in
+`0.1.1`/`0.1.2` but was **the wrong lever**: on winit's iOS backend `Suspended`
+is wired to `applicationWillResignActive` (see
+`winit-0.30/src/platform_impl/ios/event_loop.rs`), which fires on *every*
+interruption — a Control Center pull, a notification banner, an alert — not just
+a real background. Tearing the whole `UIWindow` down and rebuilding it on each of
+those is both wasteful and fragile, and recreating the window mid-run can leave
+the app frozen on a stale frame ("all I see is a red line" — the waveform-shader
+pass survives, the egui overlay is gone).
+
+### Final fix: pause on `Occluded`, reconfigure the surface
+
+winit wires `WindowEvent::Occluded` to
+`applicationDidEnterBackground`/`applicationWillEnterForeground` — the *true*,
+stable background/foreground signal. Hang the whole thing off that instead:
 
 ```rust
-fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
-    log::info!("suspended: releasing window + GPU surface until resume");
-    self.egui_state = None;
-    self.renderer   = None;   // drops the wgpu Surface
-    self.window     = None;
+// window_event:
+WindowEvent::Occluded(occluded) => {
+    self.occluded = occluded;
+    if !occluded {
+        // returning to foreground: the CAMetalLayer's drawables were
+        // invalidated in the background — reconfigure before drawing again
+        if let (Some(r), Some(w)) = (&mut self.renderer, &self.window) {
+            let sz = w.inner_size();
+            r.resize(sz.width, sz.height);   // reconfigures the surface
+            w.request_redraw();
+        }
+    }
 }
 ```
 
-That's the whole change. It works because:
+- `Occluded(true)` (background): set `self.occluded`; `render_frame()`
+  early-returns, `RedrawRequested` stops re-arming, and `about_to_wait()` idles on
+  `ControlFlow::Wait`. The main thread quiesces, so there's **no redraw spin** and
+  iOS can suspend the app cleanly — this is what removes the background
+  scene-update watchdog (the 0.1.0 crash that burned 86 s of CPU in the
+  background).
+- `Occluded(false)` (foreground): reconfigure the surface (re-establishing the
+  drawables the background invalidated), then kick a redraw to resume.
+- **Safety net**: the surface-acquire path now reconfigures on
+  `SurfaceError::Lost`/`Outdated` instead of just logging and returning, so a
+  stale surface self-heals even if `Occluded` didn't fire first.
 
-- `resumed()` already rebuilds the window, renderer, and egui state whenever
-  `self.window` is `None` — which is now exactly the state `suspended()` leaves
-  behind — so the recreate path is the one we already trust for first launch and
-  Android resume.
-- All **playback and sync state survives**: the audio ring, decoder position,
-  Pro DJ Link `LinkState`, and the CPU-side waveform live on `self` (and on
-  background threads), not in the window/renderer/egui objects we drop. On
-  resume, `Renderer::new` re-uploads the waveform from the retained CPU copy, so
-  the loaded track and its display come back intact.
-- While suspended, nothing spins: `render_frame()` early-returns on
-  `window == None`, and both the `RedrawRequested` re-arm and the hybrid pacer in
-  `about_to_wait()` are guarded by `self.window.is_some()`.
-- It is **cross-platform-safe**: desktop compositors (Wayland/X11) don't emit
-  `Suspended`, so on the desktop build this method is simply never called.
+The window is never torn down, so there's no `UIWindow` churn and no stale-frame
+freeze. Playback/Link/waveform state is untouched throughout. Desktop compositors
+emit neither `Occluded` nor `Suspended`, so this is all iOS-only.
 
 ## How to verify
 
@@ -127,13 +152,14 @@ fix on the TestFlight build:
 
 1. Launch the app, load/see the deck rendering.
 2. Background it — press Home / swipe up, or lock the screen — and leave it a
-   little while.
+   little while. Also try quick interruptions (pull down Control Center, then
+   dismiss) — these must NOT tear anything down now.
 3. Foreground it again. It should repaint and keep running instead of being
-   killed after ~10 s. Repeat a few times, including a longer background.
+   killed. Repeat a few times, including a longer background.
 
-The device log line `suspended: releasing window + GPU surface until resume`
-(followed by the `window …x… px` line from `resumed()`) confirms the lifecycle
-is now firing on each cycle.
+The device log lines `occluded (background): pausing render` and `un-occluded
+(foreground): reconfiguring surface, resuming` confirm the lifecycle is firing on
+each real background cycle (and staying quiet on mere interruptions).
 
 ## Lessons for the next iOS crash
 
