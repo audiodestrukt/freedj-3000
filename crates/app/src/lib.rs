@@ -79,7 +79,7 @@ struct DeckApp {
     refresh_interval:  Duration,  // display period; each frame lands in one of these
     frame_count:       u64,
     remain_mode:       bool,      // time display: REMAIN vs TIME
-    key_lock:          bool,      // MT indicator (Rubber Band path is always on today)
+    key_lock:          bool,      // Master Tempo: mirrors audio.key_lock (DSP truth)
     slip:              bool,
     zoom_level:        usize,     // index into ZOOM_LEVELS
     zoom_grid_mode:    bool,
@@ -403,10 +403,11 @@ impl DeckApp {
                 log::info!("tempo {:+.2}%", (s - 1.0) * 100.0);
             }
             Event::Deck(ControlEvent::KeyLockToggle) => {
-                // The Rubber Band path is always engaged today; this is the
-                // indicator only, until the resample path exists (A1).
+                // Master Tempo: on = key lock (time-stretch, pitch held); off =
+                // varispeed (pitch tracks speed). The processor reads this flag.
                 self.key_lock = !self.key_lock;
-                log::info!("master tempo {} (display only for now)", if self.key_lock { "on" } else { "off" });
+                self.audio.key_lock.store(self.key_lock, Ordering::Relaxed);
+                log::info!("master tempo {}", if self.key_lock { "ON (key lock)" } else { "OFF (varispeed)" });
             }
             Event::Deck(ControlEvent::SlipToggle)    => { self.slip   = !self.slip;   log::info!("slip {} (no engine yet)", self.slip); }
             Event::Deck(ControlEvent::SyncToggle) => {

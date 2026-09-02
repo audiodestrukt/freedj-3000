@@ -95,6 +95,10 @@ pub struct AudioHandle {
     /// Playback speed as f32 bits (1.0 = normal, 0.5 = half, 2.0 = double).
     /// Set via `speed_store` / `speed_load` helpers.
     pub speed:       Arc<AtomicU32>,
+    /// Master Tempo / key lock.  true = tempo changes but pitch (key) is held
+    /// (time-stretch); false = varispeed, pitch tracks speed like vinyl.  Read
+    /// by the processor each block.
+    pub key_lock:    Arc<AtomicBool>,
     /// Source samples that have been decoded but are not yet audible: the
     /// contents of the ring buffer plus the stretcher's internal latency.
     ///
@@ -210,6 +214,7 @@ impl AudioHandle {
         let position   = Arc::new(AtomicU64::new(0));
         let playing    = Arc::new(AtomicBool::new(playing_init));
         let speed      = Arc::new(AtomicU32::new(1.0f32.to_bits()));
+        let key_lock   = Arc::new(AtomicBool::new(true));  // Master Tempo on by default
         let drain_flag = Arc::new(AtomicBool::new(false));
         let in_flight  = Arc::new(AtomicU64::new(0));
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
@@ -223,6 +228,7 @@ impl AudioHandle {
         let proc_position   = Arc::clone(&position);
         let proc_playing    = Arc::clone(&playing);
         let proc_speed      = Arc::clone(&speed);
+        let proc_key_lock   = Arc::clone(&key_lock);
         let proc_drain_flag = Arc::clone(&drain_flag);
         let proc_in_flight  = Arc::clone(&in_flight);
         let proc_seek       = Arc::clone(&seek_request);
@@ -236,6 +242,7 @@ impl AudioHandle {
                     proc_position,
                     proc_playing,
                     proc_speed,
+                    proc_key_lock,
                     proc_drain_flag,
                     proc_in_flight,
                     proc_seek,
@@ -304,6 +311,7 @@ impl AudioHandle {
             position,
             playing,
             speed,
+            key_lock,
             in_flight,
             seek_request,
             stats,
@@ -322,6 +330,7 @@ fn processor_loop(
     position:   Arc<AtomicU64>,
     playing:    Arc<AtomicBool>,
     speed:      Arc<AtomicU32>,
+    key_lock:   Arc<AtomicBool>,
     drain_flag: Arc<AtomicBool>,
     in_flight:  Arc<AtomicU64>,
     seek_request: Arc<AtomicU64>,
@@ -444,9 +453,16 @@ fn processor_loop(
         proc_pos = src_end as u64;
         position.store(proc_pos, Ordering::Relaxed);
 
-        // ── Update speed ───────────────────────────────────────────────────────
-        let spd = f32::from_bits(speed.load(Ordering::Relaxed));
-        stretcher.set_speed(spd.clamp(0.25, 4.0));
+        // ── Update speed + key-lock mode ─────────────────────────────────────────
+        // Master Tempo on (key_lock): tempo moves, pitch held (pure time-stretch).
+        // Master Tempo off (varispeed): pitch tracks speed like vinyl — achieved
+        // by pitch-shifting the stretcher UP by the same factor as the tempo
+        // change, so time_ratio (1/spd) and pitch_scale (spd) combine to a plain
+        // speed change of the source.
+        let spd = f32::from_bits(speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
+        stretcher.set_speed(spd);
+        let semitones = if key_lock.load(Ordering::Relaxed) { 0.0 } else { 12.0 * spd.log2() };
+        stretcher.set_pitch_semitones(semitones);
 
         // ── Timestretch ───────────────────────────────────────────────────────
         ts_out.clear();
