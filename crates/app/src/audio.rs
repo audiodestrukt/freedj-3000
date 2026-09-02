@@ -99,6 +99,13 @@ pub struct AudioHandle {
     /// (time-stretch); false = varispeed, pitch tracks speed like vinyl.  Read
     /// by the processor each block.
     pub key_lock:    Arc<AtomicBool>,
+    /// Loop: [loop_start, loop_end) in interleaved samples, honoured by the
+    /// processor while `loop_active`.  The wrap happens INSIDE a source block
+    /// (tail of the loop then its head, one continuous read) so the stretcher
+    /// never sees a discontinuity — no reset, no click.
+    pub loop_start:  Arc<AtomicU64>,
+    pub loop_end:    Arc<AtomicU64>,
+    pub loop_active: Arc<AtomicBool>,
     /// Source samples that have been decoded but are not yet audible: the
     /// contents of the ring buffer plus the stretcher's internal latency.
     ///
@@ -218,6 +225,9 @@ impl AudioHandle {
         let playing    = Arc::new(AtomicBool::new(playing_init));
         let speed      = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let key_lock   = Arc::new(AtomicBool::new(true));  // Master Tempo on by default
+        let loop_start  = Arc::new(AtomicU64::new(0));
+        let loop_end    = Arc::new(AtomicU64::new(0));
+        let loop_active = Arc::new(AtomicBool::new(false));
         let drain_flag = Arc::new(AtomicBool::new(false));
         let in_flight  = Arc::new(AtomicU64::new(0));
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
@@ -232,6 +242,11 @@ impl AudioHandle {
         let proc_playing    = Arc::clone(&playing);
         let proc_speed      = Arc::clone(&speed);
         let proc_key_lock   = Arc::clone(&key_lock);
+        let proc_loop = LoopShared {
+            start:  Arc::clone(&loop_start),
+            end:    Arc::clone(&loop_end),
+            active: Arc::clone(&loop_active),
+        };
         let proc_drain_flag = Arc::clone(&drain_flag);
         let proc_in_flight  = Arc::clone(&in_flight);
         let proc_seek       = Arc::clone(&seek_request);
@@ -246,6 +261,7 @@ impl AudioHandle {
                     proc_playing,
                     proc_speed,
                     proc_key_lock,
+                    proc_loop,
                     proc_drain_flag,
                     proc_in_flight,
                     proc_seek,
@@ -315,6 +331,9 @@ impl AudioHandle {
             playing,
             speed,
             key_lock,
+            loop_start,
+            loop_end,
+            loop_active,
             in_flight,
             seek_request,
             stats,
@@ -329,12 +348,109 @@ impl AudioHandle {
 
 // ── Processor loop ────────────────────────────────────────────────────────────
 
+/// The next source block from `pos`, `want` samples long, and the cursor after
+/// it.  With a loop `[ls, le)` active, a block that would run past `le` is
+/// assembled in `scratch` as the loop's tail then its head — one continuous
+/// stream across the wrap, so the stretcher never sees a discontinuity
+/// (seamless, no reset, no click).  A cursor at/after `le` (a loop set behind
+/// the playhead) wraps straight to `ls`.  Without a loop, or past the loop's
+/// reach, it's a plain slice clamped to the end of the track.
+fn read_block<'a>(
+    samples: &'a [f32], pos: usize, want: usize,
+    lp: Option<(usize, usize)>, scratch: &'a mut Vec<f32>,
+) -> (&'a [f32], usize) {
+    if let Some((ls, le)) = lp {
+        let pos = if pos >= le { ls } else { pos };
+        if pos + want > le {
+            let tail = le - pos;
+            let head = (want - tail).min(le - ls);
+            scratch.clear();
+            scratch.extend_from_slice(&samples[pos..le]);
+            scratch.extend_from_slice(&samples[ls..ls + head]);
+            return (scratch.as_slice(), ls + head);
+        }
+        return (&samples[pos..pos + want], pos + want);
+    }
+    let end = (pos + want).min(samples.len());
+    (&samples[pos..end], end)
+}
+
+#[cfg(test)]
+mod loop_read_tests {
+    use super::read_block;
+
+    fn ramp(n: usize) -> Vec<f32> { (0..n).map(|i| i as f32).collect() }
+
+    #[test]
+    fn plain_read_without_a_loop_clamps_to_track_end() {
+        let s = ramp(1000);
+        let mut sc = Vec::new();
+        let (b, end) = read_block(&s, 900, 200, None, &mut sc);
+        assert_eq!(b.len(), 100);
+        assert_eq!(end, 1000);
+        assert_eq!(b[0], 900.0);
+    }
+
+    #[test]
+    fn block_inside_the_loop_is_a_plain_slice() {
+        let s = ramp(1000);
+        let mut sc = Vec::new();
+        let (b, end) = read_block(&s, 120, 50, Some((100, 300)), &mut sc);
+        assert_eq!(end, 170);
+        assert_eq!((b[0], b[49]), (120.0, 169.0));
+    }
+
+    #[test]
+    fn block_crossing_the_end_wraps_tail_then_head_continuously() {
+        // Loop [100, 300), cursor at 280, want 50 → 20 of tail (280..300) then
+        // 30 of head (100..130); cursor ends at 130.  No gap, no repeat.
+        let s = ramp(1000);
+        let mut sc = Vec::new();
+        let (b, end) = read_block(&s, 280, 50, Some((100, 300)), &mut sc);
+        assert_eq!(b.len(), 50);
+        assert_eq!(end, 130);
+        assert_eq!(&b[..20], &ramp(1000)[280..300]);
+        assert_eq!(&b[20..], &ramp(1000)[100..130]);
+    }
+
+    #[test]
+    fn cursor_at_or_past_the_end_wraps_to_start_first() {
+        let s = ramp(1000);
+        let mut sc = Vec::new();
+        let (b, end) = read_block(&s, 300, 50, Some((100, 300)), &mut sc);
+        assert_eq!((b[0], end), (100.0, 150));
+        let (b, end) = read_block(&s, 750, 50, Some((100, 300)), &mut sc);
+        assert_eq!((b[0], end), (100.0, 150));
+    }
+
+    #[test]
+    fn a_loop_shorter_than_a_block_never_overreads_the_head() {
+        // Loop [100, 120) (20 samples), want 50 from 110: tail 10, head capped
+        // at the loop length (20) — never more than one loop of head.
+        let s = ramp(1000);
+        let mut sc = Vec::new();
+        let (b, end) = read_block(&s, 110, 50, Some((100, 120)), &mut sc);
+        assert_eq!(b.len(), 30);
+        assert_eq!(end, 120);
+        assert_eq!(&b[..10], &ramp(1000)[110..120]);
+        assert_eq!(&b[10..], &ramp(1000)[100..120]);
+    }
+}
+
+/// The processor's view of the loop state (see `AudioHandle::loop_*`).
+struct LoopShared {
+    start:  Arc<AtomicU64>,
+    end:    Arc<AtomicU64>,
+    active: Arc<AtomicBool>,
+}
+
 fn processor_loop(
     samples:    Arc<ArcSwap<Vec<f32>>>,
     position:   Arc<AtomicU64>,
     playing:    Arc<AtomicBool>,
     speed:      Arc<AtomicU32>,
     key_lock:   Arc<AtomicBool>,
+    lp:         LoopShared,
     drain_flag: Arc<AtomicBool>,
     in_flight:  Arc<AtomicU64>,
     seek_request: Arc<AtomicU64>,
@@ -364,6 +480,8 @@ fn processor_loop(
 
     // Output buffer for timestretched (file_ch interleaved) audio.
     let mut ts_out: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch * 8);
+    // Scratch for a source block that wraps the loop boundary (tail + head).
+    let mut loop_buf: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch);
 
     loop {
         // ── Pause handling ────────────────────────────────────────────────────
@@ -446,12 +564,14 @@ fn processor_loop(
             continue;
         }
 
-        // ── Read a block from the source ──────────────────────────────────────
-        let src_start = proc_pos as usize;
-        let src_end   = (src_start + BLOCK_FRAMES * file_ch).min(samples.len());
-        let src_block = &samples[src_start..src_end];
+        // ── Read a block from the source (loop-aware) ─────────────────────────
+        let want = BLOCK_FRAMES * file_ch;
+        let (ls, le) = (lp.start.load(Ordering::Relaxed) as usize, lp.end.load(Ordering::Relaxed) as usize);
+        let looping  = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
+        let (src_block, src_end) = read_block(samples, proc_pos as usize, want,
+                                              looping.then_some((ls, le)), &mut loop_buf);
 
-        let final_block = src_end >= samples.len();
+        let final_block = !looping && src_end >= samples.len();
 
         // Advance the shared position so the UI/renderer sees it.
         proc_pos = src_end as u64;

@@ -51,7 +51,11 @@ struct WaveformParams {
     dim_played:       f32,
     /// Start-cue column (source position), orange marker.
     cue_col:          f32,
-    _pad:             [f32; 1],
+    /// Active loop as columns; end <= start means no loop.  The looped span
+    /// gets a tinted background and amber in/out lines on both waveforms.
+    loop_start_col:   f32,
+    loop_end_col:     f32,
+    _pad:             [f32; 3],
 }
 
 /// Where the shader draws its two waveforms, in physical pixels.
@@ -250,7 +254,9 @@ impl Renderer {
             amp_gain:         1.0,
             dim_played:       0.0,
             cue_col:          0.0,
-            _pad:             [0.0; 1],
+            loop_start_col:   0.0,
+            loop_end_col:     0.0,
+            _pad:             [0.0; 3],
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -468,7 +474,9 @@ impl Renderer {
             amp_gain:          self.amp_gain,
             dim_played:        if vp.dim_played { 1.0 } else { 0.0 },
             cue_col:           snap.cue_point as f32 / channels as f32 / hop_size,
-            _pad:              [0.0; 1],
+            loop_start_col:    if snap.loop_active { snap.loop_start as f32 / channels as f32 / hop_size } else { 0.0 },
+            loop_end_col:      if snap.loop_active { snap.loop_end   as f32 / channels as f32 / hop_size } else { 0.0 },
+            _pad:              [0.0; 3],
         };
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -657,7 +665,9 @@ struct Params {
     amp_gain:           f32,  // brings the track peak to its display height
     dim_played:         f32,  // 1 = REMAIN mode: played part of the overview turns off
     cue_col:            f32,  // start-cue column (orange marker)
-    _p1: f32,
+    loop_start_col:     f32,  // active loop span in columns; end <= start = none
+    loop_end_col:       f32,
+    _p1: f32, _p2: f32, _p3: f32,
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
@@ -676,6 +686,9 @@ fn wave_bg() -> vec4<f32>  { return ground(); }                 // the unit draw
 fn over_bg() -> vec4<f32>  { return ground(); }
 fn playhead() -> vec4<f32> { return srgb(232.0, 40.0, 40.0); }  // red on the unit
 fn cue_color() -> vec4<f32> { return srgb(240.0, 138.0, 30.0); }  // orange start-cue marker
+fn loop_color() -> vec4<f32> { return srgb(250.0, 200.0, 40.0); } // amber loop in/out lines (the unit's yellow LOOP keys)
+fn loop_bg() -> vec4<f32> { return srgb(16.0, 40.0, 66.0); }      // tinted background across the looped span
+fn in_loop(col: f32) -> bool { return p.loop_end_col > p.loop_start_col && col >= p.loop_start_col && col < p.loop_end_col; }
 fn white() -> vec4<f32>    { return srgb(244.0, 246.0, 248.0); }
 fn band_low() -> vec4<f32> { return srgb(58.0, 123.0, 240.0); }  // 3-band blue
 fn band_mid() -> vec4<f32> { return srgb(240.0, 160.0, 48.0); }  // 3-band amber
@@ -771,8 +784,15 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
     if abs(col_f - p.cue_col) < cue_per_px {
         return cue_color();
     }
+    // Loop in / out lines (amber), when a loop is active.
+    let looped = in_loop(col_f);
+    if p.loop_end_col > p.loop_start_col
+       && (abs(col_f - p.loop_start_col) < cue_per_px || abs(col_f - p.loop_end_col) < cue_per_px) {
+        return loop_color();
+    }
+    let bg = select(wave_bg(), loop_bg(), looped);   // tint the looped span's field
     if col_f < 0.0 || col_f >= p.num_cols {
-        return wave_bg();
+        return bg;
     }
 
     // Bilinear between adjacent columns so the scroll is sub-pixel smooth.
@@ -814,7 +834,7 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
             }
         }
     }
-    return wave_bg();
+    return bg;
 }
 
 // ── Overview waveform ─────────────────────────────────────────────────────────
@@ -832,6 +852,16 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
     if abs(q.x - cue_x) < 1.5 {
         return cue_color();
     }
+    // Loop in / out lines and the tinted looped span.
+    let col_here = sx * p.num_cols;
+    if p.loop_end_col > p.loop_start_col {
+        let ls_x = r.x + p.loop_start_col / p.num_cols * r.z;
+        let le_x = r.x + p.loop_end_col   / p.num_cols * r.z;
+        if abs(q.x - ls_x) < 1.5 || abs(q.x - le_x) < 1.5 {
+            return loop_color();
+        }
+    }
+    let over_field = select(over_bg(), loop_bg(), in_loop(col_here));
 
     // Each pixel column covers many waveform columns; take the peak of each
     // band so transients survive the downsample instead of aliasing away.
@@ -851,7 +881,7 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
         // leaves the whole graph lit.
         return select(bar, bar * vec4<f32>(0.18, 0.18, 0.18, 1.0), q.x < ph_x && p.dim_played > 0.5);
     }
-    return over_bg();
+    return over_field;
 }
 
 // ── Fragment ──────────────────────────────────────────────────────────────────

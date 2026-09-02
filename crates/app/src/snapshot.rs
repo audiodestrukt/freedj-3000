@@ -42,6 +42,12 @@ pub struct DeckSnapshot<'a> {
     pub perform_mode:   crate::input::PerformMode,
     pub perform_bank:   u8,
     pub perform_delete: bool,
+    /// Loop: active flag, bounds (interleaved samples), and the beat length a
+    /// BEAT LOOP pad set (0 = manual IN/OUT loop) so the pad can light.
+    pub loop_active:    bool,
+    pub loop_start:     u64,
+    pub loop_end:       u64,
+    pub loop_beats:     f32,
     /// Master Tempo (key lock) engaged.
     pub key_lock:     bool,
     /// Time display shows remaining (REMAIN) rather than elapsed (TIME).

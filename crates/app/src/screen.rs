@@ -127,8 +127,8 @@ pub fn layout(screen: Rect) -> Layout {
 /// of the CUE/LOOP + CALL column), measured off the XDJ-1000MK2 PERFORM photo
 /// (reference/photos/xdj-1000mk2-perform.jpg).  The left column becomes the
 /// mode pair / DELETE –CALL / BANK, the phase meter moves to the top, the
-/// enlarged waveform shrinks to a strip, and four pads sit below it.  (The
-/// BEAT LOOP row arrives with the loop engine.)
+/// enlarged waveform shrinks to a strip, four pads sit below it, and the
+/// BEAT LOOP row below those.
 pub struct PerformLayout {
     pub mode_hotcue:   Rect,
     pub mode_beatjump: Rect,
@@ -139,6 +139,9 @@ pub struct PerformLayout {
     /// Compact enlarged-waveform strip — the shader viewport in PERFORM.
     pub wave:          Rect,
     pub pads:          [Rect; 4],
+    /// BEAT LOOP row: 1/2 · 1 · 2 · 4 · 8 · 16 beats, plus its label at left.
+    pub beatloop:      [Rect; 6],
+    pub beatloop_lbl:  Rect,
     /// The lit PERFORM key, in the tab row's last slot (tap to exit).
     pub perform_key:   Rect,
 }
@@ -154,6 +157,10 @@ pub fn perform_layout(screen: Rect) -> PerformLayout {
     let (px0, px1, gap) = (0.125, 0.785, 0.010);
     let pw = (px1 - px0 - 3.0 * gap) / 4.0;
     let pad = |i: usize| { let x = px0 + i as f32 * (pw + gap); r(x, 0.333, x + pw, 0.459) };
+    // BEAT LOOP row: six across the same span, below the pads.
+    let bgap = 0.007;
+    let bw = (px1 - px0 - 5.0 * bgap) / 6.0;
+    let bl = |i: usize| { let x = px0 + i as f32 * (bw + bgap); r(x, 0.497, x + bw, 0.629) };
     // PERFORM key = the tab row's 5th slot, exactly where draw_keys puts it.
     let keys = r(lc + 0.006, 0.010, 0.996, 0.120);
     let kw = (keys.width() - 2.0 * 4.0) / 5.0;
@@ -167,6 +174,8 @@ pub fn perform_layout(screen: Rect) -> PerformLayout {
         bars:          r(0.610, 0.030, 0.805, 0.115),
         wave:          r(0.190, 0.175, 0.785, 0.300),
         pads:          [pad(0), pad(1), pad(2), pad(3)],
+        beatloop:      [bl(0), bl(1), bl(2), bl(3), bl(4), bl(5)],
+        beatloop_lbl:  r(0.004, 0.540, lc - 0.004, 0.590),
         perform_key:   Rect::from_min_max(Pos2::new(kx, keys.min.y), keys.max),
     }
 }
@@ -1044,8 +1053,8 @@ fn expand_glyph(ui: &Ui, key_rect: Rect, h: f32) {
 /// PERFORM screen: left-column controls (HOT CUE / BEAT JUMP mode pair,
 /// DELETE –CALL, BANK), the phase meter at the top, a compact waveform strip
 /// (the shader viewport moves there), and four pads — hot cues A–D or E–H
-/// (BANK), or ±1/±4-beat jumps in BEAT JUMP mode.  PERFORM stays lit in the
-/// tab row's last slot; tapping it exits.  CUE/LOOP + CALL, PLAYER/SLIP and
+/// (BANK), or ±1/±4-beat jumps in BEAT JUMP mode — then the BEAT LOOP row.
+/// PERFORM stays lit in the tab row's last slot; tapping it exits.  CUE/LOOP + CALL, PLAYER/SLIP and
 /// the info row are drawn by the caller as in every mode.
 fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     use crate::input::PerformMode as PM;
@@ -1119,6 +1128,21 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
                 if clicked { out.push(Event::Deck(ControlEvent::BeatJump { beats })); }
             }
         }
+    }
+
+    // ── BEAT LOOP row ───────────────────────────────────────────────────────
+    // Tap a length to loop that many beats from the current beat; the running
+    // loop's pad lights amber (the unit's loop colour); tap it again to exit.
+    text(ui, pl.beatloop_lbl.center(), Align2::CENTER_CENTER, "BEAT LOOP", h * 0.016, DIM);
+    let amber = Color32::from_rgb(0xfa, 0xc8, 0x28);
+    for (i, r) in pl.beatloop.iter().enumerate() {
+        let (label, beats) = [("1/2", 0.5f32), ("1", 1.0), ("2", 2.0), ("4", 4.0), ("8", 8.0), ("16", 16.0)][i];
+        let running = snap.loop_active && (snap.loop_beats - beats).abs() < 1e-3;
+        let (clicked, down) = tap(ui, *r, &format!("pf-bl{i}"));
+        p.rect_filled(*r, 3.0, if running { amber } else if down { KEY_HI } else { KEY });
+        p.rect_stroke(*r, 3.0, Stroke::new(1.0, if running { amber } else { tint(amber, 110) }));
+        text(ui, r.center(), Align2::CENTER_CENTER, label, h * 0.036, if running { Color32::BLACK } else { TEXT });
+        if clicked { out.push(Event::Deck(ControlEvent::BeatLoop { beats, held: false })); }
     }
 
     // ── PERFORM key, lit, in its tab slot; tap to exit ───────────────────────

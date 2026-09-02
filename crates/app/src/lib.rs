@@ -113,6 +113,9 @@ struct DeckApp {
     perform_mode:      PerformMode,
     perform_bank:      u8,
     perform_delete:    bool,
+    /// Beat length of the active BEAT LOOP (0 = a manual IN/OUT loop), so the
+    /// matching pad lights.  The loop itself lives on `audio.loop_*`.
+    loop_beats:        f32,
     cue_preview:       bool,  // CUE held → previewing from the cue point
     cued:              bool,  // playhead is sitting on the cue (not searched away)
     exit_after_capture: bool,
@@ -159,6 +162,7 @@ struct UiFlags {
     cue_point: u64,
     hot_cues: [Option<u64>; 8],
     perform_mode: PerformMode, perform_bank: u8, perform_delete: bool,
+    loop_active: bool, loop_start: u64, loop_end: u64, loop_beats: f32,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -185,6 +189,10 @@ fn make_snapshot<'a>(
         perform_mode:  f.perform_mode,
         perform_bank:  f.perform_bank,
         perform_delete: f.perform_delete,
+        loop_active:   f.loop_active,
+        loop_start:    f.loop_start,
+        loop_end:      f.loop_end,
+        loop_beats:    f.loop_beats,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
         remain_mode:   f.remain_mode,
@@ -332,6 +340,7 @@ impl DeckApp {
             perform_mode:      PerformMode::HotCue,
             perform_bank:      0,
             perform_delete:    false,
+            loop_beats:        0.0,
             cue_preview:       false,
             cued:              true,
             exit_after_capture: false,
@@ -624,8 +633,58 @@ impl DeckApp {
             Event::Deck(ControlEvent::Back) => {
                 if self.screen_mode == ScreenMode::Browse { self.browser.back(); }
             }
-            Event::Deck(ControlEvent::LoopIn)  => log::info!("loop in (no loop engine yet)"),
-            Event::Deck(ControlEvent::LoopOut) => log::info!("loop out (no loop engine yet)"),
+            // ── Loops ───────────────────────────────────────────────────────────
+            Event::Deck(ControlEvent::BeatLoop { beats, .. }) => {
+                let Some(per_beat) = self.samples_per_beat() else {
+                    log::info!("beat loop: no beat grid"); return;
+                };
+                let active = self.audio.loop_active.load(Ordering::Relaxed);
+                if active && (self.loop_beats - beats).abs() < 1e-3 {
+                    self.exit_loop();                       // same pad again = exit
+                } else {
+                    // A new length re-uses the running loop's start; a fresh
+                    // loop starts at the beat the playhead is in.
+                    let start = if active { self.audio.loop_start.load(Ordering::Relaxed) }
+                                else { self.beat_floor(self.smoothed_pos) };
+                    let ch  = self.audio.channels as u64;
+                    let len = (((beats as f64 * per_beat) as u64) / ch) * ch;
+                    self.set_loop(start, start + len, beats);
+                }
+            }
+            Event::Deck(ControlEvent::LoopIn) => {
+                // Start a manual loop here; OUT closes it.  Any running loop ends.
+                let ch = self.audio.channels as u64;
+                let pos = ((self.smoothed_pos.max(0.0) as u64) / ch) * ch;
+                self.exit_loop();
+                self.audio.loop_start.store(pos, Ordering::Relaxed);
+                self.audio.loop_end.store(pos, Ordering::Relaxed);
+                self.loop_beats = 0.0;
+                log::info!("loop in: {:.2}s", pos as f64 / (self.audio.sample_rate as f64 * ch as f64));
+            }
+            Event::Deck(ControlEvent::LoopOut) => {
+                let ch = self.audio.channels as u64;
+                let pos = ((self.smoothed_pos.max(0.0) as u64) / ch) * ch;
+                let start = self.audio.loop_start.load(Ordering::Relaxed);
+                if pos > start { self.set_loop(start, pos, 0.0); }
+                else { log::info!("loop out: before the in point — ignored"); }
+            }
+            Event::Deck(ControlEvent::LoopToggle) | Event::Deck(ControlEvent::Reloop) => {
+                // RELOOP/EXIT: leave a running loop, or jump back into the last
+                // one and run it again.
+                if self.audio.loop_active.load(Ordering::Relaxed) {
+                    self.exit_loop();
+                } else {
+                    let (s, e) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
+                    if e > s {
+                        let beats = self.loop_beats;
+                        self.seek_to(s);
+                        self.set_loop(s, e, beats);
+                        log::info!("reloop");
+                    } else {
+                        log::info!("reloop: no loop stored");
+                    }
+                }
+            }
             Event::Deck(other) => log::info!("unhandled deck event {other:?}"),
 
             Event::Ui(UiEvent::TimeMode) => {
@@ -723,8 +782,58 @@ impl DeckApp {
         self.audio.playing.store(true, Ordering::Relaxed);
     }
 
+    // ── Loop helpers ─────────────────────────────────────────────────────────
+
+    /// Interleaved samples per beat from the beat grid; None without a grid.
+    fn samples_per_beat(&self) -> Option<f64> {
+        let g = self.beat_grid.as_ref()?;
+        if g.bpm <= 0.0 { return None; }
+        Some(self.audio.sample_rate as f64 * 60.0 / g.bpm * self.audio.channels as f64)
+    }
+
+    /// The start of the beat the position is in (floor to the grid), frame-
+    /// aligned — where a BEAT LOOP begins, so it includes what's playing now.
+    fn beat_floor(&self, pos: f64) -> u64 {
+        let ch = self.audio.channels as u64;
+        let snapped = match (self.beat_grid.as_ref(), self.samples_per_beat()) {
+            (Some(g), Some(per_beat)) => {
+                let anchor = g.anchor_sample as f64 * ch as f64;   // frames → interleaved
+                let n = ((pos - anchor) / per_beat).floor();
+                (anchor + n * per_beat).max(0.0)
+            }
+            _ => pos.max(0.0),
+        };
+        ((snapped as u64) / ch) * ch
+    }
+
+    /// Arm the loop [start, end) — the processor wraps inside its blocks.
+    fn set_loop(&mut self, start: u64, end: u64, beats: f32) {
+        let end = end.min(self.audio.len() as u64);
+        if end <= start { return; }
+        self.audio.loop_start.store(start, Ordering::Relaxed);
+        self.audio.loop_end.store(end, Ordering::Relaxed);
+        self.audio.loop_active.store(true, Ordering::Relaxed);
+        self.loop_beats = beats;
+        let sr_ch = self.audio.sample_rate as f64 * self.audio.channels as f64;
+        log::info!("loop: {:.2}s → {:.2}s ({})", start as f64 / sr_ch, end as f64 / sr_ch,
+                   if beats > 0.0 { format!("{beats} beats") } else { "in/out".into() });
+    }
+
+    /// Leave the loop; its bounds stay for RELOOP.
+    fn exit_loop(&mut self) {
+        if self.audio.loop_active.swap(false, Ordering::Relaxed) {
+            log::info!("loop: exit");
+        }
+    }
+
     fn seek_to(&mut self, pos: u64) {
         let pos = pos.min(self.audio.len() as u64);
+        // Jumping out of an active loop leaves it (bounds kept for RELOOP), as
+        // a hot cue or needle search does on the unit.
+        if self.audio.loop_active.load(Ordering::Relaxed) {
+            let (s, e) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
+            if pos < s || pos >= e { self.exit_loop(); }
+        }
         // The seek_request channel is what the processor actually acts on; it
         // can't be clobbered by the processor's own progress store (which lost
         // seeks and made CUE sometimes not return).  `position` is set too, as
@@ -975,7 +1084,22 @@ impl DeckApp {
         // buffer and stretcher, so subtracting it puts the playhead on what the
         // listener actually hears rather than ~93 ms ahead of it.
         let sr_ch  = self.audio.sample_rate as f64 * self.audio.channels as f64;
-        let heard  = raw_pos.saturating_sub(in_flight) as f64;
+        // Audible position.  Inside an active loop the processor's cursor has
+        // already wrapped while the loop's tail is still in flight, so walk the
+        // in-flight distance back MODULO the loop — otherwise the estimate lands
+        // before loop_start and the playhead lurches.
+        let loop_active = self.audio.loop_active.load(Ordering::Relaxed);
+        let (ls, le) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
+        let heard = {
+            let h = raw_pos as i64 - in_flight as i64;
+            if loop_active && le > ls && h < ls as i64 {
+                let len = (le - ls) as i64;
+                (ls as i64 + ((h - ls as i64) % len + len) % len) as f64
+            } else { h.max(0) as f64 }
+        };
+        // The audible wrap (end → start) is an EXPECTED backward jump: snap the
+        // playhead to it instead of riding it out as a transient.
+        let wrapped = loop_active && le > ls && (self.smoothed_pos - heard) > (le - ls) as f64 * 0.5;
 
         // A far-off reference is almost always a transient: `in_flight` is
         // sampled at decode-block boundaries and spikes for a frame whenever the
@@ -988,7 +1112,7 @@ impl DeckApp {
         // one-frame spike is ignored and the free-run carries through it.
         let far_off = (heard - self.smoothed_pos).abs() > sr_ch * 0.5;
         if far_off { self.resync_frames += 1; } else { self.resync_frames = 0; }
-        if self.smoothed_pos <= 0.0 || self.resync_frames >= 4 {
+        if self.smoothed_pos <= 0.0 || self.resync_frames >= 4 || wrapped {
             // First frame, or a sustained desync — snap and reset the filter.
             self.smoothed_pos  = heard;
             self.resync_frames = 0;
@@ -1110,6 +1234,10 @@ impl DeckApp {
             player: self.link.player,
             cue_point: self.cue_point,
             hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
+            loop_active: self.audio.loop_active.load(Ordering::Relaxed),
+            loop_start: self.audio.loop_start.load(Ordering::Relaxed),
+            loop_end: self.audio.loop_end.load(Ordering::Relaxed),
+            loop_beats: self.loop_beats,
         };
         let _t_snap = Instant::now();
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
@@ -1227,6 +1355,10 @@ impl DeckApp {
             player: self.link.player,
             cue_point: self.cue_point,
             hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
+            loop_active: self.audio.loop_active.load(Ordering::Relaxed),
+            loop_start: self.audio.loop_start.load(Ordering::Relaxed),
+            loop_end: self.audio.loop_end.load(Ordering::Relaxed),
+            loop_beats: self.loop_beats,
         };
         let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
 
@@ -1829,6 +1961,19 @@ pub fn run(cfg: Config) -> Result<()> {
     // Park the startup track at its cue (AUTO CUE's first sound, or the
     // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
     if app.cue_point > 0 { let c = app.cue_point; app.seek_to(c); }
+    // Dev: OPENDECK_LOOP=start_secs,beats arms a beat loop on the startup
+    // track (e.g. "30,4"), for exercising the loop engine + display headlessly.
+    if let Ok(v) = std::env::var("OPENDECK_LOOP") {
+        let parts: Vec<f64> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
+        if let ([secs, beats], Some(per_beat)) = (parts.as_slice(), app.samples_per_beat()) {
+            let ch = app.audio.channels as u64;
+            let sr_ch = app.audio.sample_rate as f64 * ch as f64;
+            let start = app.beat_floor(secs * sr_ch);
+            let len = (((beats * per_beat) as u64) / ch) * ch;
+            app.set_loop(start, start + len, *beats as f32);
+            app.seek_to(start);
+        }
+    }
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())
