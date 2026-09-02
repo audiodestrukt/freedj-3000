@@ -1079,6 +1079,25 @@ impl ApplicationHandler for DeckApp {
         window.request_redraw();
     }
 
+    // Backgrounding on iOS/Android invalidates the window's native surface
+    // (the CAMetalLayer on iOS): the wgpu Surface built from it is dead the
+    // moment we come back, and every get_current_texture() then fails.  winit's
+    // documented lifecycle is to DROP the graphics context here and rebuild it
+    // in resumed() — which we already do, since resumed() rebuilds whenever
+    // `window` is None.  Without this, a background→foreground cycle left us
+    // rendering against the stale surface: the deck never repainted and the
+    // main thread could not finish the foreground scene-update transaction, so
+    // iOS killed us with the 10s scene-update watchdog (0x8BADF00D).  Drop the
+    // surface-holders first, then the window; all playback/Link/waveform state
+    // lives elsewhere on `self`, so it survives across the cycle untouched.
+    // (Desktop compositors don't emit Suspended, so this is a no-op there.)
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        log::info!("suspended: releasing window + GPU surface until resume");
+        self.egui_state = None;
+        self.renderer   = None;
+        self.window     = None;
+    }
+
     fn window_event(
         &mut self,
         event_loop: &ActiveEventLoop,
