@@ -143,8 +143,10 @@ pub struct FaceLayout {
     pub fader:    Rect,
     pub play:     Rect,
     pub cue:      Rect,
-    pub loop_in:  Rect,
-    pub loop_out: Rect,
+    /// Loop IN/OUT: present on the landscape faceplate (cropped from the photo),
+    /// but None in portrait/iOS until loop support lands — nothing to trigger yet.
+    pub loop_in:  Option<Rect>,
+    pub loop_out: Option<Rect>,
     pub reloop:   Rect,
     pub browse:   Rect,
     pub mt:       Rect,   // MASTER TEMPO (key lock)
@@ -178,8 +180,8 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
         fader:    face_rect(base, 0.895, 0.615, 0.930, 0.940),
         play:     disk(0.070, 0.887, 0.057),
         cue:      disk(0.077, 0.771, 0.057),
-        loop_in:  face_rect(base, 0.040, 0.345, 0.110, 0.390),
-        loop_out: face_rect(base, 0.125, 0.345, 0.185, 0.390),
+        loop_in:  Some(face_rect(base, 0.040, 0.345, 0.110, 0.390)),
+        loop_out: Some(face_rect(base, 0.125, 0.345, 0.185, 0.390)),
         reloop:   disk(0.255, 0.370, 0.025),
         browse:   disk(0.845, 0.205, 0.065),
         mt:       disk(0.925, 0.565, 0.018),
@@ -218,14 +220,18 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
 
     let face = FaceLayout {
         base,
-        jog:      disk(0.500, 0.610, 0.300),
+        // Jog dropped from 0.610 → 0.650 so its top clears the LCD's lower edge
+        // (they were kissing at the old centre); removing LOOP IN/OUT below frees
+        // the room for it.
+        jog:      disk(0.500, 0.650, 0.300),
         fader:    face_rect(base, 0.886, 0.462, 0.950, 0.818),
         // CUE above PLAY/PAUSE, stacked vertically at the bottom-left, as on the
         // real XDJ (CUE upper, PLAY the bottom-left corner button).
         cue:      disk(0.115, 0.775, 0.060),
         play:     disk(0.115, 0.905, 0.060),
-        loop_in:  face_rect(base, 0.520, 0.878, 0.605, 0.918),
-        loop_out: face_rect(base, 0.625, 0.878, 0.710, 0.918),
+        // LOOP IN/OUT omitted in portrait until loop support exists.
+        loop_in:  None,
+        loop_out: None,
         reloop:   disk(0.775, 0.898, 0.026),
         // Browse knob in the right margin beside the screen; TIME/AUTO CUE stacked
         // in the left margin.  (Margins are (1-sw)/2 ≈ 0.117 wide at 6".)
@@ -298,8 +304,8 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
             disc(f.browse.center(), f.browse.width() * 0.5, Pos2::new(0.845, 0.205), 0.065);
             disc(f.reloop.center(), f.reloop.width() * 0.5, Pos2::new(0.255, 0.370), 0.025);
             disc(f.mt.center(),     f.mt.width()     * 0.5, Pos2::new(0.925, 0.565), 0.018);
-            crop(f.loop_in,  0.040, 0.345, 0.110, 0.390);
-            crop(f.loop_out, 0.125, 0.345, 0.185, 0.390);
+            if let Some(r) = f.loop_in  { crop(r, 0.040, 0.345, 0.110, 0.390); }
+            if let Some(r) = f.loop_out { crop(r, 0.125, 0.345, 0.185, 0.390); }
         } else {
             // Jog: platter face plus a rim, so the drag target reads as a wheel.
             p.circle_filled(f.jog.center(), f.jog.width() * 0.5, KEY_LO);
@@ -318,14 +324,15 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
         if chrome_tex.is_none() {
             ring(f.reloop); ring(f.browse); ring(f.mt);
             ring(f.play); ring(f.cue);
-            slab(f.loop_in); slab(f.loop_out);
+            if let Some(r) = f.loop_in  { slab(r); }
+            if let Some(r) = f.loop_out { slab(r); }
         }
         let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
         cap(f.play, "PLAY/PAUSE");
         cap(f.cue,  "CUE");
         cap(f.browse, "BROWSE");
-        cap(f.loop_in,  "IN");
-        cap(f.loop_out, "OUT");
+        if let Some(r) = f.loop_in  { cap(r, "IN"); }
+        if let Some(r) = f.loop_out { cap(r, "OUT"); }
         // Portrait-only left column: TIME (elapsed/remain) + AUTO CUE.  Labelled
         // inside the slab since they sit in open space, not on a photo.
         for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE")] {
@@ -383,8 +390,8 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool,
     if cr.drag_started() || cr.clicked() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
     if cr.drag_stopped()                 { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
 
-    rect_btn(ui, f.loop_in,  "fp-loopin",  None, out, ControlEvent::LoopIn);
-    rect_btn(ui, f.loop_out, "fp-loopout", None, out, ControlEvent::LoopOut);
+    if let Some(r) = f.loop_in  { rect_btn(ui, r, "fp-loopin",  None, out, ControlEvent::LoopIn); }
+    if let Some(r) = f.loop_out { rect_btn(ui, r, "fp-loopout", None, out, ControlEvent::LoopOut); }
     round_btn(ui, f.reloop,  "fp-reloop",  None, out, ControlEvent::Reloop);
     round_btn(ui, f.mt,      "fp-mt",      snap.key_lock.then_some(ORANGE), out, ControlEvent::KeyLockToggle);
 
