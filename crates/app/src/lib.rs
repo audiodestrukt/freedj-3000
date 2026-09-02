@@ -1296,26 +1296,37 @@ fn load_face_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
         base.as_ref().and_then(|b| exe_dir.as_ref().map(|d| d.join(b))),
         base.as_ref().map(PathBuf::from),
     ];
-    let path = candidates
-        .into_iter()
-        .flatten()
-        .find(|p| p.exists())
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or(configured);
-    // A missing photo is fine — the faceplate
-    // still lays out and its controls still work, they are just drawn as
-    // outlines over a plain body instead of tinting the photo.
-    let bytes = std::fs::read(&path)
-        .map_err(|e| log::warn!("faceplate image: cannot read {path}: {e} — plain deck body"))
-        .ok()?;
-    let (rgba, w, h) = decode_rgba(&bytes, &path).or_else(|| {
-        log::warn!("faceplate image: could not decode {path} (need jpg/png) — plain deck body");
-        None
-    })?;
-    log::info!("faceplate image: {path} ({w}x{h})");
+    let file = candidates.into_iter().flatten().find(|p| p.exists());
+
+    // Prefer a real file (so OPENDECK_FACEPLATE_IMG can override), but fall back
+    // to the copy COMPILED INTO THE BINARY.  On iOS the bundled file + cwd proved
+    // unreliable (the jog/fader rendered as a flat circle because the photo never
+    // loaded); a baked-in image removes the whole "is it bundled / can we find
+    // it" failure class, so the skin is always available on every platform.
+    let (rgba, w, h) = file
+        .and_then(|p| {
+            let path = p.to_string_lossy().into_owned();
+            let bytes = std::fs::read(&p)
+                .map_err(|e| log::warn!("faceplate image: cannot read {path}: {e}"))
+                .ok()?;
+            match decode_rgba(&bytes, &path) {
+                Some(d) => { log::info!("faceplate image: {path} ({}x{})", d.1, d.2); Some(d) }
+                None    => { log::warn!("faceplate image: could not decode {path}"); None }
+            }
+        })
+        .or_else(|| {
+            log::info!("faceplate image: using embedded copy ({} bytes)", FACEPLATE_EMBEDDED.len());
+            decode_rgba(FACEPLATE_EMBEDDED, "XDJ1000Mk2-faceplate.jpg")
+        })?;
     let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
     Some(ctx.load_texture("faceplate", img, egui::TextureOptions::LINEAR))
 }
+
+/// The faceplate photo baked into the binary — the guaranteed fallback when no
+/// file is found (notably on iOS).  It is the same tracked, branding-redacted
+/// photo of our own unit that `bundle-track.sh` copies into the .app.
+const FACEPLATE_EMBEDDED: &[u8] =
+    include_bytes!("../../../reference/photos/XDJ1000Mk2-faceplate.jpg");
 
 /// Decode a JPEG or PNG to RGBA8 (jpeg-decoder + the png crate already vendored).
 fn decode_rgba(bytes: &[u8], path: &str) -> Option<(Vec<u8>, usize, usize)> {
