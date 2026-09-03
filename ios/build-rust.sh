@@ -34,7 +34,10 @@ else
     PROFILE_FLAG=""; PROFILE_DIR="debug"
 fi
 
-echo "cargo build --lib --target $RUST_TARGET ($CONFIGURATION)"
+# Shown on the UTILITY screen (screen.rs APP_VERSION); build.rs makes cargo
+# notice when it changes.
+export OPENDECK_VERSION="${MARKETING_VERSION:-dev} (${CURRENT_PROJECT_VERSION:-0})"
+echo "cargo build --lib --target $RUST_TARGET ($CONFIGURATION) — version $OPENDECK_VERSION"
 # shellcheck disable=SC2086
 cargo build -p opendeck-app --lib $PROFILE_FLAG --target "$RUST_TARGET"
 

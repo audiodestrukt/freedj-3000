@@ -812,6 +812,15 @@ fn draw_tag_list(ui: &Ui, tag_list: &TagList, lay: &Layout, h: f32) {
 /// MENU / UTILITY: the settings, one per row — label left, value right.  The
 /// rotary moves the highlight and its press steps the value (as does tapping
 /// the row); BACK or the MENU tab leaves.
+/// "0.1.12 (1788413453)" on iOS — ios/build-rust.sh exports OPENDECK_VERSION
+/// from Xcode's MARKETING_VERSION / CURRENT_PROJECT_VERSION; the crate version
+/// elsewhere.
+pub const APP_VERSION: &str = match option_env!("OPENDECK_VERSION") {
+    Some(v) => v,
+    None => env!("CARGO_PKG_VERSION"),
+};
+const SUPPORT_LINE: &str = "support@audiodestrukt.com   ·   audiodestrukt.com/opendeck";
+
 fn draw_menu(ui: &Ui, settings: &Settings, cursor: usize, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     let p = ui.painter();
     let hdr = lay.title;
@@ -837,6 +846,14 @@ fn draw_menu(ui: &Ui, settings: &Settings, cursor: usize, lay: &Layout, h: f32, 
              settings.value(*setting), h * 0.028, if sel { BG } else { BLUE });
         if clicked { out.push(Event::Ui(UiEvent::MenuTap(i))); }
     }
+
+    // About / support footer: the one place a user with a problem can find
+    // the version to quote and where to write.  The unit's UTILITY shows its
+    // firmware version here too.
+    let x = body.min.x + pad + h * 0.02;
+    text(ui, Pos2::new(x, body.max.y - pad - h * 0.030), Align2::LEFT_BOTTOM,
+         &format!("OpenDeck DJ  {APP_VERSION}"), h * 0.022, DIM);
+    text(ui, Pos2::new(x, body.max.y - pad), Align2::LEFT_BOTTOM, SUPPORT_LINE, h * 0.022, DIM);
 }
 
 /// INFO screen: the loaded track's details in the middle band — its own tags

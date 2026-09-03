@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — 2026-09-03
+- **UTILITY screen shows the app version and support address** (as the unit
+  shows its firmware version): `OpenDeck DJ 0.1.x (build)` from Xcode's
+  MARKETING_VERSION / CURRENT_PROJECT_VERSION via `OPENDECK_VERSION`, plus
+  support@audiodestrukt.com and the support URL.
+
 ### Fixed — 2026-09-02
 - **Decoder dropped the tail of every packet larger than its output buffer.**
   FLAC (4608-frame blocks) lost ~11 % of its samples, silently shortening
