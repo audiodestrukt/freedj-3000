@@ -1,0 +1,5 @@
+OpenDeck DJ is a standalone single-deck DJ player; no external hardware or account is needed to review it. A demo track is pre-loaded — tap PLAY/PAUSE, use the jog wheel, tempo fader, CUE, LOOP IN/OUT and the on-screen BROWSE / PERFORM keys.
+
+To load your own music: copy audio files into Files → On My iPad → OpenDeck DJ, then tap BROWSE (or the FILE key), turn the BROWSE knob and press it to LOAD.
+
+On first launch iPadOS asks for Local Network permission. This is used only for Pro DJ Link (UDP on the local network) to beat-sync with Pioneer CDJ/XDJ players if any are present. Denying it leaves every other feature working. Nothing is sent off the device.

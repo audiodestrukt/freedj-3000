@@ -1,0 +1,1 @@
+A single-deck DJ player for iPad that plays your own tracks and syncs with CDJ/XDJ players over Pro DJ Link. No account, no sign-in, nothing collected.

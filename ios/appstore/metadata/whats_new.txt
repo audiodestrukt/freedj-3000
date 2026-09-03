@@ -1,0 +1,1 @@
+First release: a single-deck DJ player for iPad with Pro DJ Link sync, your own music via the Files app, hot cues, beat loops, GRID ADJUST and MASTER TEMPO.

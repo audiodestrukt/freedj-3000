@@ -1,0 +1,20 @@
+OpenDeck DJ turns your iPad into a single-deck DJ player modeled on a professional club media player: a large jog wheel with a spinning platter display, a tempo fader, transport controls, a zoomable waveform, hot cues, beat loops, and automatic BPM and beat-grid analysis.
+
+BRING YOUR OWN MUSIC
+Drop MP3, AAC/M4A, WAV, AIFF, FLAC or OGG files into the OpenDeck DJ folder in the Files app (On My iPad → OpenDeck DJ), or from a Mac via Finder, and browse them from the deck's BROWSE screen. A demo track is included so you can try everything straight away.
+
+PLAY ALONGSIDE THE CLUB STANDARD
+OpenDeck DJ speaks Pro DJ Link. On a local network it appears as another player next to CDJ/XDJ decks: it can follow the shared tempo and beat grid with SYNC, or take MASTER and lead. Link hardware is optional — the app is a complete standalone player on its own.
+
+FEATURES
+• Jog wheel with vinyl (scratch) and nudge modes and a live centre display
+• Tempo fader with ±6 / ±10 / ±16 / WIDE ranges and MASTER TEMPO key lock
+• CUE with AUTO CUE, hot cues A–D, memory points, beat loops from 1/2 to 16 and SLIP
+• Zoomable waveform with beat and bar markers, full-track overview and needle search
+• Automatic BPM and beat-grid analysis, with GRID ADJUST (snap, shift, reset)
+• QUANTIZE so cues and loops land on the beat
+• Pro DJ Link: SYNC, MASTER, beat and phase meter, and LINK browsing of other players' media
+• TAG LIST, track INFO and a UTILITY menu (player number, tempo range, quantize, auto-cue level)
+• Runs entirely on-device: no account, no sign-in, no analytics
+
+OpenDeck DJ is an independent open-source project. Pioneer DJ, CDJ, XDJ, rekordbox and Pro DJ Link are trademarks of AlphaTheta Corporation, which is not affiliated with and does not endorse this app.
