@@ -54,10 +54,9 @@ jobs:
           echo "build=$BUILD" >> "$GITHUB_OUTPUT"
           echo "Building $VERSION (+$BUILD)"
 
-      # The App Store Connect API key drives EVERYTHING below: cloud signing
-      # (xcodebuild fetches/creates the distribution cert + profile itself) and
-      # the TestFlight upload. No .p12, no keychain. The key's role must be App
-      # Manager or Admin. Same secret names as the other repos' iOS workflows.
+      # The App Store Connect API key drives the provisioning profile fetch and
+      # the TestFlight upload. The key's role must be App Manager or Admin.
+      # Same secret names as the other repos' iOS workflows.
       - name: Install App Store Connect API key
         env:
           P8: ${{ secrets.APP_STORE_CONNECT_P8 }}
@@ -66,11 +65,43 @@ jobs:
           mkdir -p ~/private_keys
           printf '%s' "$P8" > ~/private_keys/AuthKey_${KEY_ID}.p8
 
+      # Persistent Apple Distribution certificate. Without one in a keychain,
+      # -allowProvisioningUpdates mints a NEW cloud-managed cert on every
+      # (ephemeral) runner and the team hits Apple's distribution-cert cap
+      # after a handful of builds. With the .p12 imported, automatic signing
+      # finds this identity and reuses it; the API key still fetches the
+      # profile. IOS_P12_BASE64 = base64 of a .p12 holding the cert, its
+      # private key and the WWDR G3 intermediate; IOS_P12_PASSWORD unlocks it.
+      # If the secret is unset the step is a no-op and cloud signing applies.
+      - name: Import distribution certificate
+        env:
+          P12_B64: ${{ secrets.IOS_P12_BASE64 }}
+          P12_PASS: ${{ secrets.IOS_P12_PASSWORD }}
+        run: |
+          if [ -z "$P12_B64" ]; then
+            echo "IOS_P12_BASE64 not set — falling back to cloud-managed signing"
+            exit 0
+          fi
+          KC="$RUNNER_TEMP/ci-signing.keychain-db"
+          KC_PASS=$(uuidgen)
+          printf '%s' "$P12_B64" | base64 --decode > "$RUNNER_TEMP/dist.p12"
+          security create-keychain -p "$KC_PASS" "$KC"
+          security set-keychain-settings -lut 21600 "$KC"
+          security unlock-keychain -p "$KC_PASS" "$KC"
+          security import "$RUNNER_TEMP/dist.p12" -k "$KC" -P "$P12_PASS" \
+            -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcodebuild
+          # let codesign use the key without a UI prompt
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$KC_PASS" "$KC" > /dev/null
+          security list-keychains -d user -s "$KC" $(security list-keychains -d user | tr -d '"')
+          rm -f "$RUNNER_TEMP/dist.p12"
+          echo "KEYCHAIN=$KC" >> "$GITHUB_ENV"
+          security find-identity -v -p codesigning "$KC"
+
       # Archive. The Build Rust phase runs inside this (cargo on the runner's
       # ~/.cargo/bin, which build-rust.sh puts on PATH). No track is bundled —
       # *.mp3 is gitignored, so a fresh checkout has none; the faceplate photo
       # is tracked and still bundles.
-      - name: Archive with cloud signing
+      - name: Archive
         env:
           KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
           ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
@@ -102,6 +133,8 @@ jobs:
             -authenticationKeyID "$KEY_ID" \
             -authenticationKeyIssuerID "$ISSUER_ID"
 
-      - name: Clean up key
+      - name: Clean up key + keychain
         if: always()
-        run: rm -rf ~/private_keys
+        run: |
+          rm -rf ~/private_keys
+          if [ -n "$KEYCHAIN" ]; then security delete-keychain "$KEYCHAIN" || true; fi
