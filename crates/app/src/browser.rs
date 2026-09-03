@@ -17,7 +17,8 @@ use crate::prodj::LinkState;
 use opendeck_nfs::Nfs;
 use opendeck_rekordbox::{read_export, read_export_from, RbExport};
 
-const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg", "opus"];
+// What the decoder actually plays (symphonia: no Opus decoder exists).
+const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg"];
 
 /// Folders no one browses for music: `_CodeSignature` and its kin inside the
 /// iOS app bundle (the browse root there), `__MACOSX` resource forks, and the

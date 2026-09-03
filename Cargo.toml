@@ -52,7 +52,7 @@ rtrb        = "0.3"
 
 # Audio decoding — pure Rust, no system lib dependency
 symphonia   = { version = "0.5", features = [
-    "mp3", "aac", "flac", "wav", "aiff", "ogg", "vorbis"
+    "mp3", "aac", "isomp4", "flac", "wav", "aiff", "ogg", "vorbis"
 ] }
 
 # Resampling (no-keylock speed change) — pure Rust

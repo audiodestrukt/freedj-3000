@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed — 2026-09-02
+- **Decoder dropped the tail of every packet larger than its output buffer.**
+  FLAC (4608-frame blocks) lost ~11 % of its samples, silently shortening
+  tracks; the decoder now carries the remainder across calls. **Ogg Vorbis
+  crashed** on its zero-frame first packet (skipped now). **M4A/AAC in MP4**
+  never opened — the MP4 demuxer was not enabled. Opus is hidden in the browser
+  (no decoder exists). All six advertised formats verified end-to-end.
+
 ### Added — 2026-08-26
 - **Jog wheel: vinyl / nudge modes.** The DJ2Go jog is not touch-sensitive, so
   play state selects the mode: **playing → nudge** (a temporary pitch bend that

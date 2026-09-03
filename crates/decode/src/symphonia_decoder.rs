@@ -64,6 +64,9 @@ pub struct SymphoniaDecoder {
     channels:    u8,
     total_frames: Option<u64>,
     sample_buf:  Option<SampleBuffer<f32>>,
+    /// Samples of `sample_buf` already handed out; a packet larger than the
+    /// caller's buffer is delivered across calls rather than truncated.
+    buf_pos:     usize,
     tags:        TrackTags,
 }
 
@@ -129,6 +132,7 @@ impl SymphoniaDecoder {
             channels,
             total_frames,
             sample_buf: None,
+            buf_pos: 0,
             tags,
         })
     }
@@ -139,7 +143,22 @@ impl SymphoniaDecoder {
 
 impl Decoder for SymphoniaDecoder {
     fn decode(&mut self, out: &mut [f32]) -> Result<usize, DecodeError> {
+        let ch = self.channels as usize;
         loop {
+            // Drain what is left of the last packet first.  Dropping the
+            // remainder (as this once did) silently lost ~11 % of every FLAC
+            // file, whose 4608-frame blocks overflow a 4096-sample buffer.
+            if let Some(buf) = &self.sample_buf {
+                let samples = buf.samples();
+                if self.buf_pos < samples.len() {
+                    let mut n = (samples.len() - self.buf_pos).min(out.len());
+                    n -= n % ch;   // whole frames only
+                    out[..n].copy_from_slice(&samples[self.buf_pos..self.buf_pos + n]);
+                    self.buf_pos += n;
+                    return Ok(n / ch);
+                }
+            }
+
             let packet = match self.format.next_packet() {
                 Ok(p) => p,
                 Err(symphonia::core::errors::Error::IoError(e))
@@ -164,6 +183,9 @@ impl Decoder for SymphoniaDecoder {
 
             let spec   = *decoded.spec();
             let frames = decoded.frames();
+            // Vorbis's first packet decodes to zero frames; symphonia's
+            // SampleBuffer panics on a zero-length copy, so skip such packets.
+            if frames == 0 { continue; }
             let needed = frames * spec.channels.count();
 
             // Reallocate if the buffer is absent or too small for this packet.
@@ -172,25 +194,70 @@ impl Decoder for SymphoniaDecoder {
             }
             let buf = self.sample_buf.as_mut().unwrap();
             buf.copy_interleaved_ref(decoded);
-
-            let samples = buf.samples();
-            let copy_len = samples.len().min(out.len());
-            out[..copy_len].copy_from_slice(&samples[..copy_len]);
-            return Ok(copy_len / spec.channels.count());
+            self.buf_pos = 0;
         }
     }
 
     fn seek(&mut self, sample: u64) -> Result<u64, DecodeError> {
+        // Anything still buffered from before the seek is stale.
+        self.sample_buf = None;
+        self.buf_pos = 0;
         let ts = sample as f64 / self.sample_rate as f64;
-        self.format.seek(
+        let pos = self.format.seek(
             SeekMode::Accurate,
             SeekTo::Time { time: Time::from(ts), track_id: Some(self.track_id) },
         )
-        .map(|pos| pos.actual_ts)
-        .map_err(|e| DecodeError::Codec(e.to_string()))
+        .map_err(|e| DecodeError::Codec(e.to_string()))?;
+        self.decoder.reset();
+        Ok(pos.actual_ts)
     }
 
     fn sample_rate(&self) -> u32 { self.sample_rate }
     fn channels(&self)    -> u8  { self.channels }
     fn total_frames(&self) -> Option<u64> { self.total_frames }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 16-bit stereo WAV of `frames` frames of a ramp, built by hand.
+    fn wav(frames: usize) -> Vec<u8> {
+        let data_len = (frames * 4) as u32;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF"); b.extend_from_slice(&(36 + data_len).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt "); b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());          // PCM
+        b.extend_from_slice(&2u16.to_le_bytes());          // stereo
+        b.extend_from_slice(&44100u32.to_le_bytes());
+        b.extend_from_slice(&(44100u32 * 4).to_le_bytes());
+        b.extend_from_slice(&4u16.to_le_bytes()); b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data"); b.extend_from_slice(&data_len.to_le_bytes());
+        for i in 0..frames {
+            let v = (i % 1000) as i16;
+            b.extend_from_slice(&v.to_le_bytes()); b.extend_from_slice(&(-v).to_le_bytes());
+        }
+        b
+    }
+
+    /// Packets larger than the caller's buffer must be delivered in full
+    /// across calls, never truncated (this once lost ~11 % of every FLAC).
+    #[test]
+    fn small_output_buffer_loses_nothing() {
+        let frames = 20_000;
+        let mut d = SymphoniaDecoder::open_bytes(wav(frames), Some("wav")).unwrap();
+        let mut out = vec![0f32; 300];   // far smaller than a WAV packet, not a multiple of 4
+        let mut got = Vec::new();
+        loop {
+            let n = d.decode(&mut out).unwrap();
+            if n == 0 { break; }
+            got.extend_from_slice(&out[..n * 2]);
+        }
+        assert_eq!(got.len(), frames * 2);
+        // Sample order survived the split: the ramp is intact.
+        for (i, f) in got.chunks(2).enumerate() {
+            let v = (i % 1000) as f32 / 32768.0;
+            assert!((f[0] - v).abs() < 1e-4 && (f[1] + v).abs() < 1e-4, "frame {i}");
+        }
+    }
 }
