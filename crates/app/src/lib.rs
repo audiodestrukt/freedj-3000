@@ -106,6 +106,8 @@ struct DeckApp {
     events:            Vec<Event>,
     /// Off-thread sources (MIDI, later HID/serial) send here; drained per frame.
     event_rx:          mpsc::Receiver<Event>,
+    /// VINYL-mode drag began while playing: resume on release.
+    jog_hold_resume:   bool,
     /// Jog nudge: a temporary speed offset that snaps back when the wheel stops.
     jog_offset:        f32,
     jog_until:         Option<Instant>,
@@ -173,7 +175,7 @@ struct DeckApp {
 /// mutably in the same frame.
 #[derive(Clone, Copy)]
 struct UiFlags {
-    key_lock: bool, remain_mode: bool, auto_cue: bool, slip: bool, sync: bool, master: bool,
+    key_lock: bool, jog_vinyl: bool, remain_mode: bool, auto_cue: bool, slip: bool, sync: bool, master: bool,
     zoom_grid_mode: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
     player: u8,
     cue_point: u64,
@@ -217,6 +219,7 @@ fn make_snapshot<'a>(
         slip_shadow:   f.slip_shadow,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
+        jog_vinyl:     f.jog_vinyl,
         remain_mode:   f.remain_mode,
         auto_cue:      f.auto_cue,
         slip:          f.slip,
@@ -360,6 +363,7 @@ impl DeckApp {
             frame_count:       0,
             remain_mode:       false,   // the reference unit was in TIME mode
             key_lock:          true,
+            jog_hold_resume:   false,
             auto_cue:          true,
             slip:              false,
             zoom_level:        ZOOM_DEFAULT,
@@ -434,13 +438,36 @@ impl DeckApp {
                 let f = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)), range);
                 self.apply(Event::Deck(ControlEvent::TempoFader { position: f + step }));
             }
+            Event::Deck(ControlEvent::JogModeToggle) => {
+                self.settings.jog_vinyl = !self.settings.jog_vinyl;
+                self.settings.save();
+                log::info!("jog mode {}", if self.settings.jog_vinyl { "VINYL" } else { "CDJ" });
+            }
+            Event::Deck(ControlEvent::JogTouch { touched }) => {
+                // VINYL mode while playing: the platter counts as pressed for the
+                // whole drag (no push sensor on glass), so hold the transport
+                // while the finger is down and let go when it lifts — the
+                // playhead follows the drag in between (JogDelta below).  There
+                // is no scrub audio yet, so this is a silent scratch.
+                let vinyl = self.settings.jog_vinyl;
+                if touched && vinyl && self.audio.playing.load(Ordering::Relaxed) {
+                    self.audio.playing.store(false, Ordering::Relaxed);
+                    self.jog_hold_resume = true;
+                    log::debug!("jog touch: holding transport (VINYL)");
+                } else if !touched && self.jog_hold_resume {
+                    self.jog_hold_resume = false;
+                    self.lock_in_play();
+                    log::debug!("jog release: transport resumes");
+                }
+            }
             Event::Deck(ControlEvent::JogDelta { delta, .. }) => {
-                if self.audio.playing.load(Ordering::Relaxed) {
-                    // PLAYING → nudge: a temporary speed offset that snaps back
-                    // when the wheel goes idle.  Overrides SYNC's phase nudge
+                // JOG MODE decides what a drag does while PLAYING: CDJ → nudge,
+                // VINYL → direct manipulation (the playhead follows the wheel).
+                // Paused, the wheel scrubs in either mode.
+                if self.audio.playing.load(Ordering::Relaxed) && !self.settings.jog_vinyl {
+                    // PLAYING (CDJ) → nudge: a temporary speed offset that snaps
+                    // back when the wheel goes idle.  Overrides SYNC's phase nudge
                     // while active, as a CDJ does when you touch the jog synced.
-                    // (The DJ2Go jog is not touch-sensitive, so play state, not a
-                    // touch sensor, selects the mode — see docs/INPUT_PLAN.md.)
                     const NUDGE_PER_TICK: f32 = 0.002;
                     self.jog_offset = (self.jog_offset + delta as f32 * NUDGE_PER_TICK).clamp(-0.5, 0.5);
                     self.jog_until  = Some(Instant::now() + Duration::from_millis(150));
@@ -449,8 +476,10 @@ impl DeckApp {
                     self.audio.speed.store(spd.to_bits(), Ordering::Relaxed);
                     log::debug!("jog nudge {delta:+} → {spd:.3}×");
                 } else {
-                    // PAUSED → vinyl: the wheel scrubs the playhead through the
-                    // track (no scrub-audio yet — position + waveform only).
+                    // PAUSED, or VINYL while playing → the wheel scrubs the
+                    // playhead through the track (no scrub-audio yet — position
+                    // + waveform only; a playing deck keeps playing from wherever
+                    // the wheel leaves it).
                     const VINYL_SECS_PER_TICK: f64 = 0.020;
                     let sr_ch = self.audio.sample_rate as f64 * self.audio.channels as f64;
                     let step  = (sr_ch * VINYL_SECS_PER_TICK) as i64;
@@ -1434,7 +1463,7 @@ impl DeckApp {
             0.0
         };
         let flags = UiFlags {
-            key_lock: self.key_lock, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
+            key_lock: self.key_lock, jog_vinyl: self.settings.jog_vinyl, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
@@ -1564,7 +1593,7 @@ impl DeckApp {
         };
         egui_state.handle_platform_output(window.as_ref(), platform_output);
         let flags = UiFlags {
-            key_lock: self.key_lock, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
+            key_lock: self.key_lock, jog_vinyl: self.settings.jog_vinyl, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
@@ -1822,6 +1851,7 @@ impl ApplicationHandler for DeckApp {
                     Minus | NumpadSubtract => Some(Event::Deck(ControlEvent::TempoFader { position: fader - step })),
                     Digit0 | Numpad0       => Some(Event::Deck(ControlEvent::TempoFader { position: 0.5 })),
                     KeyK => Some(Event::Deck(ControlEvent::KeyLockToggle)),
+                    KeyV => Some(Event::Deck(ControlEvent::JogModeToggle)),
                     // Memory points: N sets one at the cue, [ / ] CALL ◀ / ▶, Delete removes.
                     KeyN         => Some(Event::Deck(ControlEvent::MemoryCueSet)),
                     BracketLeft  => Some(Event::Deck(ControlEvent::MemoryCueCall { next: false })),

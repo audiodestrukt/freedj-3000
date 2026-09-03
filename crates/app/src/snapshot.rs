@@ -57,6 +57,8 @@ pub struct DeckSnapshot<'a> {
     pub slip_shadow:    Option<u64>,
     /// Master Tempo (key lock) engaged.
     pub key_lock:     bool,
+    /// JOG MODE = VINYL (hub badge + drag behaviour).
+    pub jog_vinyl:    bool,
     /// Time display shows remaining (REMAIN) rather than elapsed (TIME).
     pub remain_mode:  bool,
     /// AUTO CUE engaged: loads cue at the first audible sound (A.CUE badge).

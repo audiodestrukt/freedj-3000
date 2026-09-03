@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added — 2026-09-03
+- **JOG MODE (VINYL / CDJ).** The faceplate's JOG MODE button is live and lit
+  in vinyl mode; the hub badge only reads "Vinyl" then. While PLAYING, a drag
+  in VINYL mode holds the transport and moves the playhead directly (the glass
+  platter counts as always pressed, since there is no push sensor), resuming on
+  release; in CDJ mode a drag nudges. Paused, the platter scrubs in either
+  mode. Remembered across launches; keyboard `V`. No scrub audio or brake ramp
+  yet (needs the real-time resampler). Closes the dead-control half of #40.
 - **UTILITY screen shows the app version and support address** (as the unit
   shows its firmware version): `OpenDeck DJ 0.1.x (build)` from Xcode's
   MARKETING_VERSION / CURRENT_PROJECT_VERSION via `OPENDECK_VERSION`, plus

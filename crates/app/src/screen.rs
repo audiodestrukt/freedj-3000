@@ -222,6 +222,8 @@ pub struct FaceLayout {
     /// BACK: up one level in BROWSE, or leave TAG LIST / MENU.  Beside TAG
     /// TRACK on the unit (the two buttons above the browse knob).
     pub back:      Option<Rect>,
+    /// JOG MODE (VINYL) button — lit while in vinyl mode.
+    pub jog_mode:  Option<Rect>,
 }
 
 /// Proportions of the deck photo the `faceplate_layout` fractions were measured
@@ -259,6 +261,8 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
         // BACK (left) and TAG TRACK / REMOVE (right).
         back:      Some(face_rect(base, 0.797, 0.094, 0.841, 0.126)),
         tag_track: Some(face_rect(base, 0.843, 0.094, 0.888, 0.126)),
+        // The rectangular VINYL button right of the jog, under VINYL SPEED ADJUST.
+        jog_mode:  Some(face_rect(base, 0.903, 0.427, 0.948, 0.450)),
     };
     (screen, face)
 }
@@ -328,6 +332,8 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         // side-by-side pair).
         tag_track: Some(face_rect(base, 0.892, 0.192, 0.996, 0.238)),
         back:      Some(face_rect(base, 0.892, 0.252, 0.996, 0.298)),
+        // JOG MODE under the tempo fader (which ends ~0.818), bottom-right.
+        jog_mode:  Some(face_rect(base, 0.884, 0.880, 0.952, 0.920)),
     };
     (screen, face)
 }
@@ -454,6 +460,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
             disc(f.mt.center(),     f.mt.width()     * 0.5, Pos2::new(0.925, 0.565), 0.018);
             if let Some(r) = f.loop_in  { crop(r, 0.040, 0.345, 0.110, 0.390); }
             if let Some(r) = f.loop_out { crop(r, 0.125, 0.345, 0.185, 0.390); }
+            if let Some(r) = f.jog_mode { crop(r, 0.903, 0.427, 0.948, 0.450); }
         } else {
             // Jog: platter face plus a rim, so the drag target reads as a wheel.
             p.circle_filled(f.jog.center(), f.jog.width() * 0.5, KEY_LO);
@@ -475,6 +482,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
             ring(f.play); ring(f.cue);
             if let Some(r) = f.loop_in  { slab(r); }
             if let Some(r) = f.loop_out { slab(r); }
+            if let Some(r) = f.jog_mode { slab(r); }
         }
         let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
         cap(f.play, "PLAY/PAUSE");
@@ -484,6 +492,16 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
         if let Some(r) = f.loop_in  { cap(r, "LOOP IN"); }
         if let Some(r) = f.loop_out { cap(r, "LOOP OUT"); }
         if let Some(r) = f.reloop   { cap(r, "RELOOP"); }
+        if let Some(r) = f.jog_mode {
+            cap(r, "JOG MODE");
+            // The button's legend, lit in vinyl mode (the unit lights the VINYL
+            // text).  The photo crop carries the printed legend already; the
+            // lit overlay from rect_btn shows the state there.
+            if chrome_tex.is_none() {
+                text(ui, r.center(), Align2::CENTER_CENTER, "VINYL", lbl * 0.85,
+                     if snap.jog_vinyl { ORANGE } else { DIM });
+            }
+        }
         // Portrait-only left column: TIME (elapsed/remain) + AUTO CUE.  Labelled
         // inside the slab since they sit in open space, not on a photo.
         for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE"), (f.tag_track, "TAG TRACK"), (f.back, "BACK")] {
@@ -555,6 +573,7 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
     if let Some(r) = f.loop_out { rect_btn(ui, r, "fp-loopout", None, out, ControlEvent::LoopOut); }
     if let Some(r) = f.reloop { round_btn(ui, r, "fp-reloop", None, out, ControlEvent::Reloop); }
     round_btn(ui, f.mt,      "fp-mt",      snap.key_lock.then_some(ORANGE), out, ControlEvent::KeyLockToggle);
+    if let Some(r) = f.jog_mode { rect_btn(ui, r, "fp-jogmode", snap.jog_vinyl.then_some(ORANGE), out, ControlEvent::JogModeToggle); }
 
     // ── Browse rotary ────────────────────────────────────────────────────────
     let brr = ui.interact(f.browse, Id::new("fp-browse"), Sense::click_and_drag());
@@ -1052,13 +1071,17 @@ fn draw_jog_center(p: &egui::Painter, center: Pos2, radius: f32, snap: &DeckSnap
     }
     p.circle_stroke(center, ring_r * 0.86, Stroke::new(1.5, Color32::from_gray(0xd2)));
 
-    // VINYL badge at the hub.
-    // TODO: gate on the real JOG MODE = VINYL state once the input layer exposes
-    // it; the reference (and the default) is vinyl mode.
-    p.circle_filled(center, badge_r, Color32::from_rgb(0x60, 0x96, 0xc4));
-    p.circle_stroke(center, badge_r, Stroke::new(1.5, Color32::from_gray(0xe6)));
-    p.text(center, Align2::CENTER_CENTER, "Vinyl",
-           FontId::proportional(badge_r * 0.62), Color32::from_rgb(0x14, 0x1e, 0x2d));
+    // Hub badge: blue "Vinyl" in JOG MODE = VINYL, a plain dark hub in CDJ mode
+    // (the unit only shows the badge in vinyl mode).
+    if snap.jog_vinyl {
+        p.circle_filled(center, badge_r, Color32::from_rgb(0x60, 0x96, 0xc4));
+        p.circle_stroke(center, badge_r, Stroke::new(1.5, Color32::from_gray(0xe6)));
+        p.text(center, Align2::CENTER_CENTER, "Vinyl",
+               FontId::proportional(badge_r * 0.62), Color32::from_rgb(0x14, 0x1e, 0x2d));
+    } else {
+        p.circle_filled(center, badge_r, Color32::from_gray(0x22));
+        p.circle_stroke(center, badge_r, Stroke::new(1.5, Color32::from_gray(0x80)));
+    }
 }
 
 /// A touch target.  Returns true on tap (press + release inside).

@@ -35,11 +35,16 @@ pub struct Settings {
     /// Pro DJ Link player number 1–4.  Read at launch (the sender bakes it
     /// into its packets), so a change applies on the next start.
     pub player: u8,
+    /// JOG MODE: true = VINYL (a drag while playing moves the playhead
+    /// directly — the platter counts as always pressed, since a touch screen
+    /// has no push sensor), false = CDJ (a drag while playing nudges).  Paused,
+    /// the platter scrubs in either mode.  Remembered, as on the unit.
+    pub jog_vinyl: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1 }
+        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true }
     }
 }
 

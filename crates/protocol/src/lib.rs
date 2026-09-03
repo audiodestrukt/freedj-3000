@@ -162,6 +162,8 @@ pub enum ControlEvent {
     BeatJump     { beats: f32 },
     SlipToggle,
     KeyLockToggle,
+    /// JOG MODE button: VINYL (drag = direct playhead manipulation) ↔ CDJ (drag = nudge).
+    JogModeToggle,
     /// SYNC key: follow the tempo master.
     SyncToggle,
     /// MASTER key: ask to become tempo master.
