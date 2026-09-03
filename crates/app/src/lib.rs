@@ -1681,6 +1681,11 @@ impl ApplicationHandler for DeckApp {
         // photo's aspect (the image is aspect-fit inside it).
         let (win_w, win_h) = if self.portrait { (966u32, 1288u32) }   // iPad 13" portrait (0.75)
                              else if self.faceplate { (860u32, 1090u32) } else { (1024u32, 600u32) };
+        // Dev: OPENDECK_WINDOW=WxH overrides the window size (App Store
+        // screenshots want the iPad 13" panel's exact 2064x2752).
+        let (win_w, win_h) = std::env::var("OPENDECK_WINDOW").ok()
+            .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
+            .unwrap_or((win_w, win_h));
         let mut attrs = WindowAttributes::default().with_title("freedj-3000");
         // Only ask for a size where a window manager can grant one.  On iOS the
         // requested size is applied to the UIWindow, so asking for 860x1090 got
@@ -2207,6 +2212,8 @@ pub fn run(cfg: Config) -> Result<()> {
     // beats arms a beat loop on the startup track (e.g. "30,4") — together they
     // exercise the loop engine, SLIP's shadow and both displays headlessly.
     if std::env::var("OPENDECK_SLIP").as_deref() == Ok("1") { app.slip = true; }
+    // Dev: OPENDECK_PLAY=1 starts playback at once (a playing deck for captures).
+    if std::env::var("OPENDECK_PLAY").as_deref() == Ok("1") { app.lock_in_play(); }
     if let Ok(v) = std::env::var("OPENDECK_LOOP") {
         let parts: Vec<f64> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
         if let ([secs, beats], Some(per_beat)) = (parts.as_slice(), app.samples_per_beat()) {

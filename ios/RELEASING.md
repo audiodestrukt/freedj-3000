@@ -46,6 +46,11 @@ Apple's ~5–15 min processing, which no setting can skip.
    Updates** (and allow TestFlight notifications). New builds download and install
    themselves; just open the app.
 
+## App Store submission
+
+Listing text, review notes, privacy answers and the iPad 13" screenshots are in
+`ios/appstore/` (`METADATA.md`; `make shots-appstore` regenerates the PNGs).
+
 ## Signing / secrets
 
 Cloud signing via an App Store Connect API key — no `.p12`, no keychain. Three

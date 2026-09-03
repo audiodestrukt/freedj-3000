@@ -53,7 +53,7 @@ ios_app        = $(shell cd ios && xcodebuild -project freedj.xcodeproj -scheme 
                    | awk '/ BUILT_PRODUCTS_DIR =/{print $$3}')/freedj.app
 
 .DEFAULT_GOAL := help
-.PHONY: help build debug relink ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot check fmt clippy test perf cad clean reference distclean
+.PHONY: help build debug relink ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot shots-appstore check fmt clippy test perf cad clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -151,6 +151,10 @@ shot: build ## Capture the playback screen to SHOT (default docs/screenshots/pla
 shot-portrait: build ## Capture the iPad portrait chrome to SHOT (TRACK optional)
 	@mkdir -p $(dir $(SHOT))
 	OPENDECK_PORTRAIT=1 OPENDECK_SCREENSHOT=$(SHOT) RUST_LOG=opendeck=info,wgpu=off,naga=off,egui=off ./$(BIN) $(if $(wildcard $(TRACK)),"$(TRACK)",) 2>&1 | grep -E "captured|error" || true
+
+MUSIC ?= $(dir $(TRACK))
+shots-appstore: build ## App Store screenshots (iPad 13", 2064x2752) from MUSIC folder + TRACK
+	TRACK="$(TRACK)" ios/appstore/capture.sh "$(MUSIC)" ios/appstore/screenshots/ipad-13
 
 ## ── Quality ────────────────────────────────────────────────────────────────
 
