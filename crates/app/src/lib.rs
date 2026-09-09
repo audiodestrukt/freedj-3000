@@ -9,6 +9,7 @@
 
 mod audio;
 mod browser;
+pub mod chrome;
 mod grids;
 mod input;
 mod midi;
@@ -144,9 +145,8 @@ struct DeckApp {
     renderer:    Option<Renderer>,
     egui_ctx:    egui::Context,
     egui_state:  Option<egui_winit::State>,
-    /// Faceplate background photo (loaded once from a path; see load_face_texture).
-    face_tex:       Option<egui::TextureHandle>,
-    face_tex_tried: bool,
+    /// Procedurally shaded faceplate sprites (jog, buttons), baked per size.
+    chrome:         chrome::ChromeCache,
 
     /// Time of the last rendered frame, used to cap to FRAME_INTERVAL.
     last_render: Instant,
@@ -392,8 +392,7 @@ impl DeckApp {
             renderer:    None,
             egui_ctx:    egui::Context::default(),
             egui_state:  None,
-            face_tex:       None,
-            face_tex_tried: false,
+            chrome:         chrome::ChromeCache::default(),
             last_render: Instant::now(),
             last_frame_total: Duration::ZERO,
             frame_spikes: 0,
@@ -1497,13 +1496,6 @@ impl DeckApp {
         let size = window.inner_size();
         let win  = egui::Rect::from_min_size(egui::Pos2::ZERO,
                        egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
-        // Load the deck photo for any chrome mode.  Landscape paints it as the
-        // whole body; portrait keeps a synthesised body but lifts the jog platter
-        // and fader slot out of the photo (see chrome_tex below).
-        if (self.faceplate || self.portrait) && !self.face_tex_tried {
-            self.face_tex_tried = true;
-            self.face_tex = load_face_texture(&self.egui_ctx);
-        }
         // Faceplate renders the screen into a sub-rect of the deck body; with
         // --faceplate off we fill the whole window, screen-only.
         // The faceplate's control fractions are measured off the deck photo, so
@@ -1523,8 +1515,7 @@ impl DeckApp {
                 // aspect so the preview stays true to the device.
                 if cfg!(target_os = "ios") { win } else { fit_contain(screen::PORTRAIT_ASPECT, win) }
             } else {
-                let aspect = self.face_tex.as_ref().map_or(screen::FACE_ASPECT, |t| t.size_vec2());
-                fit_contain(aspect, win)
+                fit_contain(screen::FACE_ASPECT, win)
             }
         });
         let (screen_rect, face) = match base {
@@ -1554,14 +1545,8 @@ impl DeckApp {
             ScreenMode::Menu     => screen::ScreenView::Menu(&self.settings, self.menu_cursor),
         };
         let face_ref = face.as_ref();
-        // Landscape paints the photo as the deck body; portrait doesn't (its body
-        // is synthesised) but passes the texture as chrome_tex for jog/fader sprites.
-        let face_img = match (self.face_tex.as_ref(), base) {
-            (Some(t), Some(b)) if !self.portrait => Some((t, b)),
-            _ => None,
-        };
-        let chrome_tex = if self.portrait { self.face_tex.as_ref() } else { None };
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, face_img, chrome_tex, &mut touch));
+        let chrome = &mut self.chrome;
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, chrome, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
         self.events.append(&mut touch);
@@ -1975,87 +1960,6 @@ impl ApplicationHandler for DeckApp {
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
-
-/// Load the faceplate background image (default `reference/photos/XDJ1000Mk2-
-/// faceplate.jpg`, a tracked photo of our own unit; override with
-/// OPENDECK_FACEPLATE_IMG).  On iOS the file is bundled flat in the .app, so we
-/// also try the basename.  Absent → the deck falls back to drawn primitives.
-fn load_face_texture(ctx: &egui::Context) -> Option<egui::TextureHandle> {
-    let configured = std::env::var("OPENDECK_FACEPLATE_IMG")
-        .unwrap_or_else(|_| "reference/photos/XDJ1000Mk2-faceplate.jpg".to_string());
-    // Resolve against several roots and take the first that exists:
-    //   1. the configured path as-is (desktop, or an absolute override),
-    //   2. its basename next to the executable — the flat iOS/.app bundle layout,
-    //      resolved from current_exe() so it works even if the process cwd was
-    //      never chdir'd into the bundle (the iOS entry point ignores chdir
-    //      errors, so we must not depend on cwd), and
-    //   3. its basename relative to cwd (the desktop fresh-checkout fallback).
-    let base = std::path::Path::new(&configured).file_name().map(|n| n.to_string_lossy().into_owned());
-    let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(PathBuf::from));
-    let candidates = [
-        Some(PathBuf::from(&configured)),
-        base.as_ref().and_then(|b| exe_dir.as_ref().map(|d| d.join(b))),
-        base.as_ref().map(PathBuf::from),
-    ];
-    let file = candidates.into_iter().flatten().find(|p| p.exists());
-
-    // Prefer a real file (so OPENDECK_FACEPLATE_IMG can override), but fall back
-    // to the copy COMPILED INTO THE BINARY.  On iOS the bundled file + cwd proved
-    // unreliable (the jog/fader rendered as a flat circle because the photo never
-    // loaded); a baked-in image removes the whole "is it bundled / can we find
-    // it" failure class, so the skin is always available on every platform.
-    let (rgba, w, h) = file
-        .and_then(|p| {
-            let path = p.to_string_lossy().into_owned();
-            let bytes = std::fs::read(&p)
-                .map_err(|e| log::warn!("faceplate image: cannot read {path}: {e}"))
-                .ok()?;
-            match decode_rgba(&bytes, &path) {
-                Some(d) => { log::info!("faceplate image: {path} ({}x{})", d.1, d.2); Some(d) }
-                None    => { log::warn!("faceplate image: could not decode {path}"); None }
-            }
-        })
-        .or_else(|| {
-            log::info!("faceplate image: using embedded copy ({} bytes)", FACEPLATE_EMBEDDED.len());
-            decode_rgba(FACEPLATE_EMBEDDED, "XDJ1000Mk2-faceplate.jpg")
-        })?;
-    let img = egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba);
-    Some(ctx.load_texture("faceplate", img, egui::TextureOptions::LINEAR))
-}
-
-/// The faceplate photo baked into the binary — the guaranteed fallback when no
-/// file is found (notably on iOS).  It is the same tracked, branding-redacted
-/// photo of our own unit that `bundle-track.sh` copies into the .app.
-const FACEPLATE_EMBEDDED: &[u8] =
-    include_bytes!("../../../reference/photos/XDJ1000Mk2-faceplate.jpg");
-
-/// Decode a JPEG or PNG to RGBA8 (jpeg-decoder + the png crate already vendored).
-fn decode_rgba(bytes: &[u8], path: &str) -> Option<(Vec<u8>, usize, usize)> {
-    if path.to_ascii_lowercase().ends_with(".png") {
-        let mut reader = png::Decoder::new(bytes).read_info().ok()?;
-        let mut buf = vec![0u8; reader.output_buffer_size()];
-        let info = reader.next_frame(&mut buf).ok()?;
-        let (w, h) = (info.width as usize, info.height as usize);
-        let rgba = match info.color_type {
-            png::ColorType::Rgba      => buf[..w * h * 4].to_vec(),
-            png::ColorType::Rgb       => buf[..w * h * 3].chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
-            png::ColorType::Grayscale => buf[..w * h].iter().flat_map(|&v| [v, v, v, 255]).collect(),
-            _ => return None,
-        };
-        Some((rgba, w, h))
-    } else {
-        let mut dec = jpeg_decoder::Decoder::new(bytes);
-        let pixels = dec.decode().ok()?;
-        let info = dec.info()?;
-        let (w, h) = (info.width as usize, info.height as usize);
-        let rgba = match info.pixel_format {
-            jpeg_decoder::PixelFormat::RGB24 => pixels.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
-            jpeg_decoder::PixelFormat::L8    => pixels.iter().flat_map(|&v| [v, v, v, 255]).collect(),
-            _ => return None,
-        };
-        Some((rgba, w, h))
-    }
-}
 
 /// Aspect-fit (contain) a texture of size `ts` into `win`, centered.
 fn fit_contain(ts: egui::Vec2, win: egui::Rect) -> egui::Rect {

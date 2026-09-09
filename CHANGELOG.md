@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed — 2026-09-09
+- **Faceplate chrome is rendered, not photographed.** The jog wheel (dimpled
+  grip rim, silver bezel, glossy platter, centre recess), CUE / PLAY, LOOP IN /
+  OUT, RELOOP, MASTER TEMPO, the BROWSE knob and the tempo-fader knob are now
+  shaded from height fields under one shared light rig (`chrome.rs`) and baked
+  to textures per pixel size at first draw. One light for every control is
+  what makes the panel read as a single object; lit states (PLAY green, CUE
+  orange, loops, MASTER TEMPO) are baked variants rather than tints painted
+  over a photo. The deck photo, its bundling step and the JPEG decoder are
+  gone — the app ships no Pioneer imagery. `cargo run --example chrome_dump`
+  writes the sprites as PNGs for tuning.
+
 ### Added — 2026-09-03
 - **JOG MODE (VINYL / CDJ).** The faceplate's JOG MODE button is live and lit
   in vinyl mode; the hub badge only reads "Vinyl" then. While PLAYING, a drag

@@ -19,6 +19,7 @@ use crate::browser::Browser;
 use crate::taglist::TagList;
 use crate::settings::{Settings, MENU};
 use crate::snapshot::DeckSnapshot;
+use crate::chrome::{ChromeCache, Lamp, RoundKind, Sprite};
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
 // ── Palette ───────────────────────────────────────────────────────────────────
@@ -41,7 +42,7 @@ const GOLD:    Color32 = Color32::from_rgb(0xf0, 0xb0, 0x20);   // MASTER state
 // Faceplate (chrome) — the physical deck body around the screen.
 const BODY:    Color32 = Color32::from_rgb(0x18, 0x1a, 0x1d);   // letterbox + redaction fill
 const FACE_BODY: Color32 = Color32::from_rgb(0x2b, 0x2e, 0x33); // stand-in deck body (no photo)
-const SILVER:  Color32 = Color32::from_rgb(0xc6, 0xca, 0xce);   // fader handle overlay
+const PRINT:   Color32 = Color32::from_rgb(0x26, 0x28, 0x2c);   // legend printed on a silver cap
 
 /// Same RGB, custom alpha — a translucent lit overlay to lay over the photo.
 fn tint(c: Color32, a: u8) -> Color32 { Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), a) }
@@ -196,9 +197,8 @@ pub fn perform_layout(screen: Rect) -> PerformLayout {
 /// XDJ-1000MK2 photo — tune here.  SYNC/MASTER are on the SCREEN (touch), not
 /// physical, so they are not chrome.
 pub struct FaceLayout {
-    /// The deck body's drawn rect — the photo's letterboxed rect, or the same
-    /// proportions synthesised when there is no photo.  Kept so the no-photo
-    /// path can paint a stand-in body without re-deriving it.
+    /// The deck body's drawn rect (letterboxed to `FACE_ASPECT` in landscape,
+    /// the whole window in portrait).
     pub base:     Rect,
     pub jog:      Rect,
     pub fader:    Rect,
@@ -224,6 +224,8 @@ pub struct FaceLayout {
     pub back:      Option<Rect>,
     /// JOG MODE (VINYL) button — lit while in vinyl mode.
     pub jog_mode:  Option<Rect>,
+    /// Printed-caption text size (points): the layouts pack differently.
+    pub caption:   f32,
 }
 
 /// Proportions of the deck photo the `faceplate_layout` fractions were measured
@@ -263,6 +265,7 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
         tag_track: Some(face_rect(base, 0.843, 0.094, 0.888, 0.126)),
         // The rectangular VINYL button right of the jog, under VINYL SPEED ADJUST.
         jog_mode:  Some(face_rect(base, 0.903, 0.427, 0.948, 0.450)),
+        caption:   w * 0.011,
     };
     (screen, face)
 }
@@ -294,14 +297,12 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
     let sy0 = 0.030;
     let screen = face_rect(base, sx0, sy0, sx0 + sw, sy0 + sh);
 
-    // LOOP IN / OUT are crops of the photo's buttons (`src_w` × 0.045 of it —
-    // see the crop UVs in draw_faceplate), so size each destination from a
-    // height and its own crop's pixel aspect — a fixed w×h fraction of the
-    // portrait body stretched them sideways.
-    let loop_btn = |cx: f32, cy: f32, src_w: f32| {
+    // LOOP IN / OUT: rectangular domed buttons, sized from a height at the
+    // sprite's own aspect.
+    let loop_btn = |cx: f32, cy: f32| {
         let hpx = 0.040 * base.height();
-        let wpx = hpx * (src_w * FACE_ASPECT.x) / (0.045 * FACE_ASPECT.y);
-        Rect::from_center_size(base.min + Vec2::new(cx * w, cy * base.height()), Vec2::new(wpx, hpx))
+        Rect::from_center_size(base.min + Vec2::new(cx * w, cy * base.height()),
+                               Vec2::new(hpx * crate::chrome::LOOP_ASPECT, hpx))
     };
     let face = FaceLayout {
         base,
@@ -316,8 +317,8 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         play:     disk(0.115, 0.905, 0.060),
         // LOOP IN / OUT and RELOOP/EXIT: back now the loop engine exists.  Sat
         // in the strip under the jog (its edge is ~0.875), left of the fader.
-        loop_in:  Some(loop_btn(0.5625, 0.920, 0.070)),
-        loop_out: Some(loop_btn(0.6675, 0.920, 0.060)),
+        loop_in:  Some(loop_btn(0.5625, 0.920)),
+        loop_out: Some(loop_btn(0.6675, 0.920)),
         reloop:   Some(disk(0.775, 0.920, 0.026)),
         // Browse knob in the right margin beside the screen; TIME/AUTO CUE stacked
         // in the left margin.  (Margins are (1-sw)/2 ≈ 0.117 wide at 6".)
@@ -334,6 +335,7 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         back:      Some(face_rect(base, 0.892, 0.252, 0.996, 0.298)),
         // JOG MODE under the tempo fader (which ends ~0.818), bottom-right.
         jog_mode:  Some(face_rect(base, 0.884, 0.880, 0.952, 0.920)),
+        caption:   w * 0.018,
     };
     (screen, face)
 }
@@ -347,18 +349,9 @@ fn round_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<E
     if resp.clicked() { out.push(Event::Deck(ev)); }
 }
 
-/// Backlit-button glow: light around the rim and a faint wash across the face,
-/// instead of a flat colour fill.  Used for the lit PLAY / CUE state so the
-/// button reads as illuminated from within (rim + graphic) rather than painted
-/// over.  `col` is the lamp colour; the alphas bake the falloff.
-fn edge_glow(p: &egui::Painter, r: Rect, col: Color32) {
-    let c = r.center();
-    let rad = r.width() * 0.5;
-    // Mute the photographed silver face so the lamp reads, then rim light.
-    p.circle_filled(c, rad * 0.98, tint(Color32::BLACK, 90));
-    p.circle_filled(c, rad * 0.98, tint(col, 30));                            // face wash
-    p.circle_stroke(c, rad * 0.88, Stroke::new(rad * 0.18, tint(col, 48)));   // soft inner halo
-    p.circle_stroke(c, rad * 0.97, Stroke::new(rad * 0.07, tint(col, 200)));  // bright rim
+/// Screen colour of a button lamp.
+fn lamp_col(l: Lamp) -> Color32 {
+    match l { Lamp::Green => GREEN, Lamp::Orange => ORANGE, Lamp::White => TEXT }
 }
 
 /// Play/pause symbol (triangle + two bars) in `col`, so the button-face graphic
@@ -391,21 +384,17 @@ fn fader_slot(p: &egui::Painter, ft: Rect) {
     );
 }
 
-/// Silver fader knob centred at `hy`, with a bright centre indicator line —
-/// the pitch handle, drawn synthetically so it carries no scale ticks.
-fn fader_knob(p: &egui::Painter, ft: Rect, hy: f32) {
+/// Silver fader knob centred at `hy` (shaded sprite), with the printed white
+/// centre indicator line in its groove.
+fn fader_knob(p: &egui::Painter, ctx: &egui::Context, chrome: &mut ChromeCache, ft: Rect, hy: f32) {
     let kw = ft.width() * 1.9;
-    let kh = kw * 0.60;
+    let kh = kw / crate::chrome::KNOB_ASPECT;
     let kr = Rect::from_center_size(Pos2::new(ft.center().x, hy), Vec2::new(kw, kh));
-    let round = kh * 0.20;
-    p.rect_filled(kr, round, Color32::from_rgb(0x3a, 0x3c, 0x40));                 // dark bevel edge
-    p.rect_filled(kr.shrink2(Vec2::new(kw * 0.05, kh * 0.12)), round, SILVER);     // silver face
-    // Bright centre indicator line (the "position" mark on the real knob).
+    crate::chrome::paint(p, ctx, chrome, Sprite::FaderKnob, kr);
     p.rect_filled(
-        Rect::from_center_size(kr.center(), Vec2::new(kw * 0.86, kh * 0.13)),
+        Rect::from_center_size(kr.center(), Vec2::new(kw * 0.80, kh * 0.08)),
         0.0, Color32::from_rgb(0xf2, 0xf4, 0xf6),
     );
-    p.rect_stroke(kr, round, Stroke::new(1.0, Color32::from_rgb(0x1c, 0x1e, 0x22)));
 }
 
 /// A rectangular touch target, same overlay treatment as `round_btn`.
@@ -416,108 +405,69 @@ fn rect_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<Ev
     if resp.clicked() { out.push(Event::Deck(ev)); }
 }
 
-/// Draw the faceplate over the photo: redact the branding, paint the live
-/// overlays (jog marker, fader handle, lit states), and register the invisible
-/// touch targets that emit `ControlEvent`s.
-fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel_tagged: bool,
-                  chrome_tex: Option<&egui::TextureHandle>, out: &mut Vec<Event>) {
+/// Draw the faceplate: the shaded chrome (jog, buttons, knob — see
+/// `chrome.rs`), the live overlays (jog display, fader handle, lit states,
+/// printed legends), and the invisible touch targets that emit `ControlEvent`s.
+fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLayout, sel_tagged: bool,
+                  chrome: &mut ChromeCache, out: &mut Vec<Event>) {
     let p = ui.painter();
-    // Branding is redacted in the asset itself (reference/photos), so nothing to
-    // paint over here — just the live overlays and touch targets.
+    let lbl = f.caption;
 
-    // With no photo the controls below are invisible (they only tint what the
-    // photo already draws), so outline and label them first.  Drawn under the
-    // live overlays, which then read as lit state exactly as they do on the photo.
-    if !photo {
-        let lbl = f.base.width() * 0.018;
-        let ring = |r: Rect| p.circle_stroke(r.center(), r.width() * 0.5, Stroke::new(1.5, FAINT));
-        let slab = |r: Rect| {
-            p.rect_filled(r, 3.0, KEY_LO);
-            p.rect_stroke(r, 3.0, Stroke::new(1.0, FAINT));
-        };
-        // Jog + fader: lift them straight out of the deck photo when we have it
-        // (real platter + fader slot); fall back to drawn primitives otherwise.
-        // UV regions match faceplate_layout's landscape jog/fader placements.
-        if let Some(tex) = chrome_tex {
-            let a = tex.size_vec2();
-            let vr = |rw: f32| rw * a.x / a.y;   // circle's UV v-radius (aspect-corrected)
-            let disc = |c: Pos2, r: f32, uc: Pos2, rw: f32| textured_disc(p, tex, c, r, uc, rw, vr(rw));
-            let crop = |dst: Rect, u0: f32, v0: f32, u1: f32, v1: f32|
-                p.image(tex.id(), dst, Rect::from_min_max(Pos2::new(u0, v0), Pos2::new(u1, v1)), Color32::WHITE);
+    // Touch state first: the sprites pick their lit / pressed variant from it.
+    let play_resp = ui.interact(f.play, Id::new("fp-play"), Sense::click());
+    let cue_resp  = ui.interact(f.cue,  Id::new("fp-cue"),  Sense::click_and_drag());
+    let play_lamp = if snap.playing { Some(Lamp::Green) }
+                    else if play_resp.is_pointer_button_down_on() { Some(Lamp::White) }
+                    else { None };
+    let cue_lit = cue_resp.is_pointer_button_down_on();
 
-            disc(f.jog.center(), f.jog.width() * 0.5, Pos2::new(0.500, 0.645), 0.340);
-            // Tempo fader is drawn synthetically in the handle section below
-            // (a clean centred slot + knob); the photo crop dragged in the
-            // printed pitch scale and sat off-centre.
-            // Silver transport buttons (CUE above PLAY/PAUSE, bottom-left); live
-            // green/press tints draw over them.
-            disc(f.cue.center(),  f.cue.width()  * 0.5, Pos2::new(0.077, 0.771), 0.057);
-            disc(f.play.center(), f.play.width() * 0.5, Pos2::new(0.070, 0.887), 0.057);
-            // Browse rotary (top-right), RELOOP, the small MASTER-TEMPO button,
-            // and the yellow LOOP IN / OUT buttons — all from the photo.
-            disc(f.browse.center(), f.browse.width() * 0.5, Pos2::new(0.840, 0.174), 0.046);
-            if let Some(r) = f.reloop { disc(r.center(), r.width() * 0.5, Pos2::new(0.255, 0.370), 0.025); }
-            disc(f.mt.center(),     f.mt.width()     * 0.5, Pos2::new(0.925, 0.565), 0.018);
-            if let Some(r) = f.loop_in  { crop(r, 0.040, 0.345, 0.110, 0.390); }
-            if let Some(r) = f.loop_out { crop(r, 0.125, 0.345, 0.185, 0.390); }
-            if let Some(r) = f.jog_mode { crop(r, 0.903, 0.427, 0.948, 0.450); }
-        } else {
-            // Jog: platter face plus a rim, so the drag target reads as a wheel.
-            p.circle_filled(f.jog.center(), f.jog.width() * 0.5, KEY_LO);
-            p.circle_stroke(f.jog.center(), f.jog.width() * 0.5, Stroke::new(2.0, FAINT));
-            p.circle_stroke(f.jog.center(), f.jog.width() * 0.17, Stroke::new(1.0, FAINT));
-            // Tempo fader: slot with a centre detent mark.
-            p.rect_filled(f.fader, 2.0, Color32::BLACK);
-            p.rect_stroke(f.fader, 2.0, Stroke::new(1.0, FAINT));
-            p.line_segment(
-                [Pos2::new(f.fader.min.x, f.fader.center().y), Pos2::new(f.fader.max.x, f.fader.center().y)],
-                Stroke::new(1.0, DIM),
-            );
-        }
-        // With the photo, every control above is a real crop; only draw the
-        // primitive outlines/slabs as the no-photo fallback.
-        if chrome_tex.is_none() {
-            if let Some(r) = f.reloop { ring(r); }
-            ring(f.browse); ring(f.mt);
-            ring(f.play); ring(f.cue);
-            if let Some(r) = f.loop_in  { slab(r); }
-            if let Some(r) = f.loop_out { slab(r); }
-            if let Some(r) = f.jog_mode { slab(r); }
-        }
-        let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
-        cap(f.play, "PLAY/PAUSE");
-        cap(f.cue,  "CUE");
-        cap(f.browse, "BROWSE");
-        cap(f.mt,     "MASTER TEMPO");   // key-lock button
-        if let Some(r) = f.loop_in  { cap(r, "LOOP IN"); }
-        if let Some(r) = f.loop_out { cap(r, "LOOP OUT"); }
-        if let Some(r) = f.reloop   { cap(r, "RELOOP"); }
-        if let Some(r) = f.jog_mode {
-            cap(r, "JOG MODE");
-            // The button's legend, lit in vinyl mode (the unit lights the VINYL
-            // text).  The photo crop carries the printed legend already; the
-            // lit overlay from rect_btn shows the state there.
-            if chrome_tex.is_none() {
-                text(ui, r.center(), Align2::CENTER_CENTER, "VINYL", lbl * 0.85,
-                     if snap.jog_vinyl { ORANGE } else { DIM });
-            }
-        }
-        // Portrait-only left column: TIME (elapsed/remain) + AUTO CUE.  Labelled
-        // inside the slab since they sit in open space, not on a photo.
-        for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE"), (f.tag_track, "TAG TRACK"), (f.back, "BACK")] {
-            if let Some(r) = rect {
-                slab(r);
-                text(ui, r.center(), Align2::CENTER_CENTER, s, lbl * 0.85, DIM);
-            }
+    // ── Chrome sprites ───────────────────────────────────────────────────────
+    {
+        let mut sprite = |what: Sprite, r: Rect| crate::chrome::paint(p, ctx, chrome, what, r);
+        sprite(Sprite::Jog, f.jog);
+        sprite(Sprite::Round(RoundKind::Silver, play_lamp), f.play);
+        sprite(Sprite::Round(RoundKind::Silver, cue_lit.then_some(Lamp::Orange)), f.cue);
+        sprite(Sprite::Round(RoundKind::Knob, None), f.browse);
+        sprite(Sprite::Round(RoundKind::Lamp, snap.key_lock.then_some(Lamp::Orange)), f.mt);
+        if let Some(r) = f.reloop   { sprite(Sprite::Round(RoundKind::Black, None), r); }
+        if let Some(r) = f.loop_in  { sprite(Sprite::Square(snap.loop_active), r); }
+        if let Some(r) = f.loop_out { sprite(Sprite::Square(snap.loop_active), r); }
+    }
+    // Button-face legends: printed dark when off, lit in the lamp colour.
+    play_pause_glyph(p, f.play.center(), f.play.width() * 0.19, play_lamp.map_or(PRINT, lamp_col));
+    text(ui, f.cue.center(), Align2::CENTER_CENTER, "CUE", f.cue.width() * 0.30, if cue_lit { ORANGE } else { PRINT });
+
+    // Flat rectangular keys (no sprite): JOG MODE / VINYL, and the portrait
+    // column — TIME, AUTO CUE, TAG TRACK, BACK — labelled inside the slab.
+    let slab = |r: Rect| {
+        p.rect_filled(r, 3.0, KEY_LO);
+        p.rect_stroke(r, 3.0, Stroke::new(1.0, FAINT));
+    };
+    if let Some(r) = f.jog_mode {
+        slab(r);
+        if snap.jog_vinyl { p.rect_stroke(r.expand(1.5), 4.0, Stroke::new(2.0, tint(ORANGE, 110))); }
+        text(ui, r.center(), Align2::CENTER_CENTER, "VINYL", lbl * 0.85, if snap.jog_vinyl { ORANGE } else { DIM });
+    }
+    for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE"), (f.tag_track, "TAG TRACK"), (f.back, "BACK")] {
+        if let Some(r) = rect {
+            slab(r);
+            text(ui, r.center(), Align2::CENTER_CENTER, s, lbl * 0.85, DIM);
         }
     }
+    // Printed captions under each control.
+    let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
+    cap(f.play,   "PLAY/PAUSE");
+    cap(f.cue,    "CUE");
+    cap(f.browse, "BROWSE");
+    cap(f.mt,     "MASTER TEMPO");   // key-lock button
+    if let Some(r) = f.loop_in  { cap(r, "LOOP IN"); }
+    if let Some(r) = f.loop_out { cap(r, "LOOP OUT"); }
+    if let Some(r) = f.reloop   { cap(r, "RELOOP"); }
+    if let Some(r) = f.jog_mode { cap(r, "JOG MODE"); }
 
     // ── Jog: spinning centre display (CDJ/XDJ platter position indicator) ────
     let r = f.jog.width() * 0.5;
-    // The platter hub sits slightly up-and-left of the jog rect centre in the
-    // faceplate photo; nudge the synthetic display onto it (tune via capture).
-    let pc = f.jog.center() + Vec2::new(JOG_HUB_DX * r, JOG_HUB_DY * r);
-    draw_jog_center(p, pc, r * JOG_HUB_R, snap);
+    draw_jog_center(p, f.jog.center(), r * JOG_HUB_R, snap);
     let jr = ui.interact(f.jog, Id::new("fp-jog"), Sense::click_and_drag());
     if jr.drag_started() { out.push(Event::Deck(ControlEvent::JogTouch { touched: true })); }
     if jr.drag_stopped() { out.push(Event::Deck(ControlEvent::JogTouch { touched: false })); }
@@ -526,21 +476,12 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
         if dx.abs() > 0.01 { out.push(Event::Deck(ControlEvent::JogDelta { delta: dx as i32, velocity_rpm: dx * 2.0 })); }
     }
 
-    // ── Tempo fader: silver handle at the live pitch ─────────────────────────
+    // ── Tempo fader: slot + silver handle at the live pitch ──────────────────
     let ft  = f.fader;
     let pos = crate::input::speed_to_fader(snap.fader_speed, snap.tempo_range).clamp(0.0, 1.0);
     let hy  = ft.max.y - pos * ft.height();
-    if chrome_tex.is_some() {
-        // Portrait: synthetic slot + knob (clean, centred, no scale ticks).
-        fader_slot(p, ft);
-        fader_knob(p, ft, hy);
-    } else {
-        // Landscape / no-photo: the deck body already draws the slot; just add
-        // the silver handle at the live pitch.
-        let hrect = Rect::from_center_size(Pos2::new(ft.center().x, hy), Vec2::new(ft.width() * 2.0, ft.height() * 0.045));
-        p.rect_filled(hrect, 2.0, SILVER);
-        p.rect_stroke(hrect, 2.0, Stroke::new(1.0, Color32::BLACK));
-    }
+    fader_slot(p, ft);
+    fader_knob(p, ctx, chrome, ft, hy);
     let fr = ui.interact(ft, Id::new("fp-fader"), Sense::click_and_drag());
     if fr.dragged() || fr.clicked() {
         if let Some(pp) = fr.interact_pointer_pos() {
@@ -549,31 +490,16 @@ fn draw_faceplate(ui: &Ui, snap: &DeckSnapshot, f: &FaceLayout, photo: bool, sel
         }
     }
 
-    // ── Transport + buttons (overlays + targets) ─────────────────────────────
-    // PLAY / CUE are backlit: the light glows around the rim and through the
-    // face graphic (play/pause symbol, CUE lettering), not a flat colour wash.
-    {
-        let resp = ui.interact(f.play, Id::new("fp-play"), Sense::click());
-        let lit = if snap.playing { Some(GREEN) } else if resp.is_pointer_button_down_on() { Some(TEXT) } else { None };
-        if let Some(col) = lit {
-            edge_glow(p, f.play, col);
-            play_pause_glyph(p, f.play.center(), f.play.width() * 0.19, col);
-        }
-        if resp.clicked() { out.push(Event::Deck(ControlEvent::PlayPause)); }
-    }
-    let cr = ui.interact(f.cue, Id::new("fp-cue"), Sense::click_and_drag());
-    if cr.is_pointer_button_down_on() {
-        edge_glow(p, f.cue, ORANGE);
-        text(ui, f.cue.center(), Align2::CENTER_CENTER, "CUE", f.cue.width() * 0.34, ORANGE);
-    }
-    if cr.drag_started() || cr.clicked() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
-    if cr.drag_stopped()                 { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
+    // ── Transport + buttons (targets; lit states are in the sprites) ─────────
+    if play_resp.clicked() { out.push(Event::Deck(ControlEvent::PlayPause)); }
+    if cue_resp.drag_started() || cue_resp.clicked() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
+    if cue_resp.drag_stopped()                       { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
 
     if let Some(r) = f.loop_in  { rect_btn(ui, r, "fp-loopin",  None, out, ControlEvent::LoopIn); }
     if let Some(r) = f.loop_out { rect_btn(ui, r, "fp-loopout", None, out, ControlEvent::LoopOut); }
     if let Some(r) = f.reloop { round_btn(ui, r, "fp-reloop", None, out, ControlEvent::Reloop); }
-    round_btn(ui, f.mt,      "fp-mt",      snap.key_lock.then_some(ORANGE), out, ControlEvent::KeyLockToggle);
-    if let Some(r) = f.jog_mode { rect_btn(ui, r, "fp-jogmode", snap.jog_vinyl.then_some(ORANGE), out, ControlEvent::JogModeToggle); }
+    round_btn(ui, f.mt, "fp-mt", None, out, ControlEvent::KeyLockToggle);
+    if let Some(r) = f.jog_mode { rect_btn(ui, r, "fp-jogmode", None, out, ControlEvent::JogModeToggle); }
 
     // ── Browse rotary ────────────────────────────────────────────────────────
     let brr = ui.interact(f.browse, Id::new("fp-browse"), Sense::click_and_drag());
@@ -628,8 +554,7 @@ pub fn draw(
     view:   ScreenView,
     tag_list: &TagList,                        // tag marks in BROWSE + the TAG LIST screen
     face:   Option<&FaceLayout>,
-    face_img: Option<(&egui::TextureHandle, Rect)>,
-    chrome_tex: Option<&egui::TextureHandle>,   // photo for jog/fader sprites (portrait)
+    chrome: &mut ChromeCache,                  // baked jog / button sprites
     out:    &mut Vec<Event>,
 ) {
     egui::CentralPanel::default()
@@ -637,26 +562,10 @@ pub fn draw(
         .show(ctx, |ui| {
             let h = lay.screen.height();
 
-            // Faceplate: paint the deck photo behind everything (letterboxing the
-            // window). The screen renders into its sub-rect over the photo.
-            if let Some((tex, irect)) = face_img {
-                // Fill only the letterbox margins (outside the image) — filling
-                // the whole window would paint over the waveform shader rects,
-                // which render underneath.
-                for m in cover(ui.max_rect(), irect, irect) {
-                    ui.painter().rect_filled(m, 0.0, BODY);
-                }
-                // Paint the photo for the deck body only, leaving the whole LCD
-                // area (lay.screen) to our GUI.
-                for part in cover(irect, lay.screen, lay.screen) {
-                    image_part(ui.painter(), tex, irect, part);
-                }
-            } else if let Some(f) = face {
-                // Faceplate without the photo (it is not redistributable, so this
-                // is the normal case on a fresh checkout and on mobile).  Paint a
-                // plain deck body in its place: same rect, same control
-                // positions, so the transport is still reachable — the controls
-                // are overlays and would otherwise be invisible.
+            // Faceplate: paint the deck body behind everything (letterboxing
+            // the window); the screen renders into its sub-rect over it and the
+            // chrome sprites go on top at the end.
+            if let Some(f) = face {
                 for m in cover(ui.max_rect(), f.base, f.base) {
                     ui.painter().rect_filled(m, 0.0, BODY);
                 }
@@ -717,7 +626,7 @@ pub fn draw(
                     ScreenView::TagList   => true,
                     _ => false,
                 };
-                draw_faceplate(ui, snap, f, face_img.is_some(), sel_tagged, chrome_tex, out);
+                draw_faceplate(ui, ctx, snap, f, sel_tagged, chrome, out);
             }
         });
 }
@@ -950,40 +859,6 @@ fn draw_info_screen(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
 }
 
 /// Rects that tile `outer` minus two holes `a` and `b` (a above b, non-overlapping).
-/// Paint a sub-rect of a texture, mapping `part` (a sub-rect of `irect`) to the
-/// matching UV region — used to paint the deck photo around the shader rects.
-/// Draw a circular crop of `tex` (a triangle-fan disc) — used to lift the round
-/// jog platter out of the deck photo with no square edge.  `uvc` is the crop's
-/// centre in texture UV (0..1); `uvrx`/`uvry` its UV radii (different because UV
-/// normalises each axis, so a circle in the image is an ellipse in UV).
-fn textured_disc(p: &egui::Painter, tex: &egui::TextureHandle, center: Pos2, r: f32,
-                 uvc: Pos2, uvrx: f32, uvry: f32) {
-    use egui::epaint::{Mesh, Vertex};
-    let mut mesh = Mesh::with_texture(tex.id());
-    let n = 72u32;
-    mesh.vertices.push(Vertex { pos: center, uv: uvc, color: Color32::WHITE });
-    for i in 0..=n {
-        let a = i as f32 / n as f32 * std::f32::consts::TAU;
-        let (c, s) = (a.cos(), a.sin());
-        mesh.vertices.push(Vertex {
-            pos: Pos2::new(center.x + c * r, center.y + s * r),
-            uv:  Pos2::new(uvc.x + c * uvrx, uvc.y + s * uvry),
-            color: Color32::WHITE,
-        });
-    }
-    for i in 1..=n { mesh.indices.extend_from_slice(&[0, i, i + 1]); }
-    p.add(egui::Shape::mesh(mesh));
-}
-
-fn image_part(p: &egui::Painter, tex: &egui::TextureHandle, irect: Rect, part: Rect) {
-    if part.width() <= 0.5 || part.height() <= 0.5 { return; }
-    let uv = Rect::from_min_max(
-        Pos2::new((part.min.x - irect.min.x) / irect.width(), (part.min.y - irect.min.y) / irect.height()),
-        Pos2::new((part.max.x - irect.min.x) / irect.width(), (part.max.y - irect.min.y) / irect.height()),
-    );
-    p.image(tex.id(), part, uv, Color32::WHITE);
-}
-
 fn cover(outer: Rect, a: Rect, b: Rect) -> Vec<Rect> {
     let band = |y0: f32, y1: f32| Rect::from_min_max(Pos2::new(outer.min.x, y0), Pos2::new(outer.max.x, y1));
     vec![
@@ -1008,11 +883,9 @@ fn text(ui: &Ui, pos: Pos2, a: Align2, s: impl ToString, size: f32, c: Color32) 
 // the platter, a white segmented ring, and (in VINYL mode) a blue Vinyl badge at
 // the hub.  Tune these against a `--faceplate` capture.
 
-/// Hub offset from the jog rect centre onto the platter's photographed hub,
-/// and the spoke-ring outer radius — both as fractions of the jog radius.
-const JOG_HUB_DX: f32 = -0.013;
-const JOG_HUB_DY: f32 = -0.006;
-const JOG_HUB_R:  f32 =  0.280;
+/// Spoke-ring outer radius as a fraction of the jog radius — inside the
+/// platter's centre recess (`chrome::JOG_RECESS_R`), leaving its wall visible.
+const JOG_HUB_R:  f32 =  0.300;
 
 /// Draw the jog centre display. `center` is the platter hub in screen pixels,
 /// `radius` the outer edge of the spoke ring.
