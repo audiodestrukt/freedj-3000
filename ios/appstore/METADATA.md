@@ -11,7 +11,7 @@ iPadOS 15+), so no iPhone screenshots are required.
 | Field | Value |
 |---|---|
 | Name (30) | `OpenDeck DJ` |
-| Subtitle (30) | `Pro DJ Link deck for iPad` |
+| Subtitle (30) | `Beat-synced single-deck player` (no Apple or third-party trademarks: Apple rejected "for iPad" here, 2026-09-14) |
 | Primary category | Music |
 | Secondary category | Entertainment (optional) |
 | Content rights | Does not contain third-party content (the seeded demo track is our own) |
