@@ -1,4 +1,4 @@
-OpenDeck DJ turns your iPad into a single-deck DJ player modeled on a professional club media player: a large jog wheel with a spinning platter display, a tempo fader, transport controls, a zoomable waveform, hot cues, beat loops, and automatic BPM and beat-grid analysis.
+OpenDeck DJ is a single-deck DJ player modeled on a professional club media player: a large jog wheel with a spinning platter display, a tempo fader, transport controls, a zoomable waveform, hot cues, beat loops, and automatic BPM and beat-grid analysis.
 
 BRING YOUR OWN MUSIC
 Drop MP3, AAC/M4A, WAV, AIFF, FLAC or OGG files into the OpenDeck DJ folder in the Files app (On My iPad → OpenDeck DJ), or from a Mac via Finder, and browse them from the deck's BROWSE screen. A demo track is included so you can try everything straight away.

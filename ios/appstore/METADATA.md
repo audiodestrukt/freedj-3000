@@ -28,13 +28,13 @@ Free · all territories · no pre-order.
 **Promotional text (170)** — editable without a new build:
 
 ```
-A single-deck DJ player for iPad that plays your own tracks and syncs with CDJ/XDJ players over Pro DJ Link. No account, no sign-in, nothing collected.
+A single-deck DJ player that plays your own tracks and beat-syncs with CDJ/XDJ players over Pro DJ Link. No account, no sign-in, nothing collected.
 ```
 
 **Description (4000):**
 
 ```
-OpenDeck DJ turns your iPad into a single-deck DJ player modeled on a professional club media player: a large jog wheel with a spinning platter display, a tempo fader, transport controls, a zoomable waveform, hot cues, beat loops, and automatic BPM and beat-grid analysis.
+OpenDeck DJ is a single-deck DJ player modeled on a professional club media player: a large jog wheel with a spinning platter display, a tempo fader, transport controls, a zoomable waveform, hot cues, beat loops, and automatic BPM and beat-grid analysis.
 
 BRING YOUR OWN MUSIC
 Drop MP3, AAC/M4A, WAV, AIFF, FLAC or OGG files into the OpenDeck DJ folder in the Files app (On My iPad → OpenDeck DJ), or from a Mac via Finder, and browse them from the deck's BROWSE screen. A demo track is included so you can try everything straight away.
@@ -76,7 +76,7 @@ description covers compatibility factually, with the disclaimer line.)
 **What's New (first release):**
 
 ```
-First release: a single-deck DJ player for iPad with Pro DJ Link sync, your own music via the Files app, hot cues, beat loops, GRID ADJUST and MASTER TEMPO.
+First release: a single-deck DJ player with Pro DJ Link sync, your own music via the Files app, hot cues, beat loops, GRID ADJUST and MASTER TEMPO.
 ```
 
 ### Screenshots — iPad 13" Display (2064 × 2752, portrait)
