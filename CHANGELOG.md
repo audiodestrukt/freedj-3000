@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.1.13] — 2026-09-16
+
+First public release of **OpenDeck DJ** on the App Store (iPad, build
+1788938809): https://apps.apple.com/app/id6807472453. Approved 2026-09-16
+after one metadata rejection (the subtitle used the word "iPad"; now
+"Beat-synced single-deck player").
+
 ### Changed — 2026-09-09
 - **Faceplate chrome is rendered, not photographed.** The jog wheel (dimpled
   grip rim, silver bezel, glossy platter, centre recess), CUE / PLAY, LOOP IN /
