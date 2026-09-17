@@ -1132,6 +1132,7 @@ impl DeckApp {
         match load {
             Load::Local { path, analyze } => self.load_track(&path, analyze.as_deref()),
             Load::Link { ip, rel_path, analyze_rel } => self.load_track_link(ip, &rel_path, &analyze_rel),
+            Load::Rekordbox { ip, id, title } => self.load_track_rekordbox(ip, id, &title),
         }
     }
 
@@ -1168,6 +1169,44 @@ impl DeckApp {
         };
         self.path = std::path::PathBuf::from(rel_path);
         self.finish_load(rel_path, samples, sr, ch, grid_cue, t0)
+    }
+
+    /// Load a track from a rekordbox laptop in LINK mode: ask its dbserver for
+    /// the file path and beat grid, then read the audio over its NFS export
+    /// (portmapper on 50111, export "/").
+    fn load_track_rekordbox(&mut self, ip: std::net::Ipv4Addr, id: u32, title: &str) -> Result<()> {
+        use opendeck_dbserver::{parse_beat_grid, Client, Slot};
+        let t0 = Instant::now();
+        let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
+        let mut db = Client::discover(ip, device)?;
+        let path = db.file_path(Slot::Collection, id)?
+            .ok_or_else(|| anyhow::anyhow!("rekordbox {ip}: no file path for track {id}"))?;
+        let beats = match db.beat_grid(Slot::Collection, id) {
+            Ok(blob) => parse_beat_grid(&blob),
+            Err(e) => { log::warn!("rekordbox beat grid {id}: {e:#}"); Vec::new() }
+        };
+        log::info!("rekordbox {ip}: track {id} at {path:?}, {} grid beats ({:.0} ms)", beats.len(), t0.elapsed().as_secs_f64() * 1e3);
+
+        let mut nfs = opendeck_nfs::Nfs::connect_at(ip, opendeck_nfs::PORTMAP_REKORDBOX)?;
+        let export = nfs.exports()?.into_iter().next()
+            .unwrap_or_else(|| "/".encode_utf16().flat_map(|u| u.to_le_bytes()).collect());
+        let root = nfs.mount(&export)?;
+        let (fh, size) = nfs.lookup_path(&root, &path)?;
+        let audio = nfs.read_file(&fh, size)?;
+        log::info!("rekordbox {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
+        let (samples, sr, ch, tags) = audio::decode_bytes(audio, path.rsplit('.').next())?;
+        self.track_tags = tags;
+        let deck_sr = self.audio.sample_rate;
+        let grid_cue = (!beats.is_empty()).then(|| {
+            let a = opendeck_rekordbox::RbAnalysis {
+                beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
+                memory_cues: Vec::new(), hot_cues: Vec::new(),
+            };
+            Self::anlz_to_grid(a, deck_sr, ch as u8)
+        }).flatten();
+        self.path = std::path::PathBuf::from(&path);
+        let name = if title.is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { title.to_string() };
+        self.finish_load(&name, samples, sr, ch, grid_cue, t0)
     }
 
     /// Shared load tail: resample to the deck rate, build the waveform, apply the

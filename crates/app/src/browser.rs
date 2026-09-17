@@ -14,6 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use crate::prodj::LinkState;
+use opendeck_dbserver::{Client as DbClient, Slot};
 use opendeck_nfs::Nfs;
 use opendeck_rekordbox::{read_export, read_export_from, RbExport};
 
@@ -42,6 +43,9 @@ pub enum Load {
     Local { path: PathBuf, analyze: Option<PathBuf> },
     /// A track on a linked player, read over NFS.  Paths are rekordbox-relative.
     Link  { ip: Ipv4Addr, rel_path: String, analyze_rel: String },
+    /// A track in a rekordbox laptop's collection (LINK mode): metadata, path
+    /// and beat grid come from its dbserver, the audio over its NFS export.
+    Rekordbox { ip: Ipv4Addr, id: u32, title: String },
 }
 
 /// One visible row.
@@ -69,6 +73,8 @@ enum EntryKind {
     Descend(Loc),
     /// Connect to a linked player, then browse its rekordbox library.
     ConnectLink(Ipv4Addr),
+    /// Connect to a rekordbox laptop's dbserver, then browse its collection.
+    ConnectDb(Ipv4Addr),
     Track(Load),
 }
 
@@ -81,6 +87,11 @@ enum Loc {
     RbTree(u32),
     /// The tracks of a rekordbox playlist.
     RbPlaylist(u32),
+    /// rekordbox-over-dbserver: a playlist folder (0 = root, which also lists
+    /// ALL TRACKS), a playlist's tracks, or the whole collection.
+    DbFolder(u32),
+    DbPlaylist(u32),
+    DbAllTracks,
 }
 
 /// Which media the currently-loaded rekordbox export came from — decides how a
@@ -103,6 +114,10 @@ pub struct Browser {
     pub selected: usize,
     rb:        Option<Arc<RbExport>>,
     rb_source: Option<RbSource>,
+    /// Open dbserver session to a rekordbox laptop (LINK) and its address.
+    db:        Option<(Ipv4Addr, DbClient)>,
+    /// Name of the dbserver folder/playlist being shown (set on descend).
+    db_title:  String,
     link:      Arc<LinkState>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
@@ -127,6 +142,8 @@ impl Browser {
             selected: 0,
             rb: None,
             rb_source: None,
+            db: None,
+            db_title: String::new(),
             link,
         };
         b.rebuild();
@@ -147,6 +164,12 @@ impl Browser {
             Some(Loc::RbTree(id)) | Some(Loc::RbPlaylist(id)) => self.rb.as_ref()
                 .and_then(|e| e.playlists.iter().find(|n| n.id == *id))
                 .map(|n| n.name.clone()).unwrap_or_else(|| "rekordbox".to_string()),
+            Some(Loc::DbFolder(0)) => match &self.db {
+                Some((ip, _)) => format!("rekordbox  {ip}"),
+                None => "rekordbox".to_string(),
+            },
+            Some(Loc::DbAllTracks) => "ALL TRACKS".to_string(),
+            Some(Loc::DbFolder(_)) | Some(Loc::DbPlaylist(_)) => self.db_title.clone(),
             None => "/".to_string(),
         }
     }
@@ -159,6 +182,9 @@ impl Browser {
             Some(Loc::Link)           => self.link_entries(),
             Some(Loc::RbTree(node))   => self.rb_tree_entries(node),
             Some(Loc::RbPlaylist(id)) => self.rb_playlist_entries(id),
+            Some(Loc::DbFolder(id))   => self.db_folder_entries(id),
+            Some(Loc::DbPlaylist(id)) => self.db_track_entries(Some(id)),
+            Some(Loc::DbAllTracks)    => self.db_track_entries(None),
             None                      => Vec::new(),
         };
         self.entries = entries;
@@ -216,15 +242,71 @@ impl Browser {
     }
 
     /// The LINK source: discovered players from the ProDJ Link peer table.
+    /// A rekordbox laptop (device number 17+, or announcing as "rekordbox")
+    /// is browsed over its dbserver rather than NFS + export.pdb.
     fn link_entries(&self) -> Vec<Entry> {
         let peers = self.link.peers.lock().map(|p| p.clone()).unwrap_or_default();
+        let names = self.link.peer_names.lock().map(|p| p.clone()).unwrap_or_default();
         let mut v: Vec<(u8, Ipv4Addr)> = peers.into_iter().collect();
         v.sort_by_key(|(p, _)| *p);
-        v.into_iter().map(|(player, ip)| Entry {
-            name: format!("Player {player}   {ip}"),
-            is_dir: true, artist: None, bpm: None,
-            kind: EntryKind::ConnectLink(ip),
+        v.into_iter().map(|(player, ip)| {
+            let name = names.get(&player).cloned().unwrap_or_default();
+            if player >= 17 || name.to_ascii_lowercase().contains("rekordbox") {
+                Entry { name: format!("rekordbox   {ip}"), is_dir: true, artist: None, bpm: None,
+                        kind: EntryKind::ConnectDb(ip) }
+            } else {
+                Entry { name: format!("Player {player}   {ip}"), is_dir: true, artist: None, bpm: None,
+                        kind: EntryKind::ConnectLink(ip) }
+            }
         }).collect()
+    }
+
+    /// Root of a rekordbox collection: ALL TRACKS, then the playlist tree.
+    fn db_folder_entries(&mut self, folder: u32) -> Vec<Entry> {
+        let Some((_, c)) = self.db.as_mut() else { return Vec::new() };
+        let mut out = Vec::new();
+        if folder == 0 {
+            out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None,
+                             kind: EntryKind::Descend(Loc::DbAllTracks) });
+        }
+        match c.playlist(Slot::Collection, folder, true) {
+            Ok(items) => for i in items {
+                let is_folder = i.type_name() == "folder";
+                out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None,
+                    kind: EntryKind::Descend(if is_folder { Loc::DbFolder(i.id) } else { Loc::DbPlaylist(i.id) }) });
+            },
+            Err(e) => log::warn!("rekordbox folder {folder}: {e:#}"),
+        }
+        out
+    }
+
+    /// Tracks of a playlist, or the whole collection.
+    fn db_track_entries(&mut self, playlist: Option<u32>) -> Vec<Entry> {
+        let Some((ip, c)) = self.db.as_mut() else { return Vec::new() };
+        let ip = *ip;
+        let items = match playlist {
+            Some(id) => c.playlist(Slot::Collection, id, false),
+            None     => c.all_tracks(Slot::Collection, 0),
+        };
+        match items {
+            Ok(items) => items.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
+                name: i.label.clone(), is_dir: false,
+                artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None,
+                kind: EntryKind::Track(Load::Rekordbox { ip, id: i.id, title: i.label }),
+            }).collect(),
+            Err(e) => { log::warn!("rekordbox tracks: {e:#}"); Vec::new() }
+        }
+    }
+
+    /// Open a dbserver session to a rekordbox laptop.
+    fn connect_db(&mut self, ip: Ipv4Addr) -> anyhow::Result<()> {
+        if matches!(&self.db, Some((cur, _)) if *cur == ip) { return Ok(()); }
+        // rekordbox answers requests from a real player number (1–4).
+        let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
+        let c = DbClient::discover(ip, device)?;
+        log::info!("LINK rekordbox {ip}: dbserver session open");
+        self.db = Some((ip, c));
+        Ok(())
     }
 
     fn rb_tree_entries(&self, node: u32) -> Vec<Entry> {
@@ -275,11 +357,21 @@ impl Browser {
         let Some(sel) = self.entries.get(self.selected) else { return Enter::Nothing };
         match sel.kind.clone() {
             EntryKind::Descend(loc) => {
+                if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_)) { self.db_title = sel.name.clone(); }
                 self.stack.push(loc);
                 self.selected = 0;
                 self.rebuild();
                 Enter::Folder
             }
+            EntryKind::ConnectDb(ip) => match self.connect_db(ip) {
+                Ok(()) => {
+                    self.stack.push(Loc::DbFolder(0));
+                    self.selected = 0;
+                    self.rebuild();
+                    Enter::Folder
+                }
+                Err(e) => { log::warn!("LINK rekordbox {ip} failed: {e:#}"); Enter::Nothing }
+            },
             EntryKind::ConnectLink(ip) => match self.connect_link(ip) {
                 Ok(()) => {
                     self.stack.push(Loc::RbTree(0));
@@ -312,7 +404,7 @@ impl Browser {
     /// Whether the browser is on the LINK side (the player list, or a linked
     /// player's library) — lights the LINK source key rather than FILE.
     pub fn on_link(&self) -> bool {
-        self.stack.iter().any(|l| matches!(l, Loc::Link))
+        self.stack.iter().any(|l| matches!(l, Loc::Link | Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbAllTracks))
             || (matches!(self.stack.last(), Some(Loc::RbTree(_) | Loc::RbPlaylist(_)))
                 && matches!(self.rb_source, Some(RbSource::Link(_))))
     }

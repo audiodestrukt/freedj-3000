@@ -65,6 +65,8 @@ pub struct LinkState {
     pub yielded_from:  AtomicU32,
     /// player → ip, from announces.
     pub peers:         Mutex<HashMap<u8, Ipv4Addr>>,
+    /// player → device name from its announce ("XDJ-1000MK2", "rekordbox", …).
+    pub peer_names:    Mutex<HashMap<u8, String>>,
 }
 
 impl LinkState {
@@ -84,6 +86,7 @@ impl LinkState {
             our_sync: AtomicU32::new(0),
             yielded_from: AtomicU32::new(0),
             peers: Mutex::new(HashMap::new()),
+            peer_names: Mutex::new(HashMap::new()),
         })
     }
 
@@ -265,6 +268,7 @@ fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
                 if peers.insert(player, ip) != Some(ip) {
                     let name = String::from_utf8_lossy(&data[0x0c..0x20]).trim_end_matches('\0').to_string();
                     log::info!("ProDJ Link: player {player} \"{name}\" at {ip}");
+                    if let Ok(mut names) = link.peer_names.lock() { names.insert(player, name); }
                 }
             }
         }

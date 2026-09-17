@@ -364,9 +364,40 @@ impl Client {
     }
 }
 
+/// One beat from a dbserver beat-grid blob (`0x4602`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GridBeat { pub beat_in_bar: u8, pub bpm: f32, pub time_ms: u32 }
+
+/// Parse a `0x4602` beat-grid blob: a 20-byte header (bytes 4..8 = beat count,
+/// little-endian) then 16-byte entries — byte 0 beat-in-bar (1–4), bytes 2..4
+/// tempo ×100 LE, bytes 4..8 time in ms LE, 8 bytes of 0xff.  Verified against
+/// rekordbox 7: a 128.00 BPM track gives beats at 25 ms, 494 ms, …
+pub fn parse_beat_grid(blob: &[u8]) -> Vec<GridBeat> {
+    let mut out = Vec::new();
+    if blob.len() < 20 { return out; }
+    for e in blob[20..].chunks_exact(16) {
+        let bpm = u16::from_le_bytes([e[2], e[3]]) as f32 / 100.0;
+        let time_ms = u32::from_le_bytes([e[4], e[5], e[6], e[7]]);
+        if e[0] == 0 || bpm <= 0.0 { continue; }
+        out.push(GridBeat { beat_in_bar: e[0], bpm, time_ms });
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn beat_grid_blob_from_rekordbox_7() {
+        let mut b = vec![0x00, 0x00, 0x08, 0x00, 0x02, 0x00, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00,
+                         0x01, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00];
+        b.extend_from_slice(&[0x01, 0x00, 0x00, 0x32, 0x19, 0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        b.extend_from_slice(&[0x02, 0x00, 0x00, 0x32, 0xee, 0x01, 0x00, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+        let g = parse_beat_grid(&b);
+        assert_eq!(g, vec![GridBeat { beat_in_bar: 1, bpm: 128.0, time_ms: 25 },
+                           GridBeat { beat_in_bar: 2, bpm: 128.0, time_ms: 494 }]);
+    }
 
     #[test]
     fn field_roundtrip() {
