@@ -109,8 +109,9 @@ struct DeckApp {
     event_rx:          mpsc::Receiver<Event>,
     /// A network load in progress: the fetch thread's result channel and the
     /// name being loaded.  The deck keeps running until the bytes arrive.
-    fetch_rx:          Option<mpsc::Receiver<Result<Fetched>>>,
+    fetch_rx:          Option<mpsc::Receiver<Result<Prepared>>>,
     pub loading:       Option<String>,
+    play_on_load:      bool,      // dev autoload: start playback once the load lands
     /// VINYL-mode drag began while playing: resume on release.
     jog_hold_resume:   bool,
     /// Jog nudge: a temporary speed offset that snaps back when the wheel stops.
@@ -380,6 +381,7 @@ impl DeckApp {
             event_rx,
             fetch_rx: None,
             loading: None,
+            play_on_load: false,
             jog_offset:        0.0,
             jog_until:         None,
             cue_point,
@@ -1092,11 +1094,6 @@ impl DeckApp {
         self.prev_pos     = pos;
     }
 
-    /// Decode, analyse, and swap in a new track selected in the browser.
-    /// Blocks the render thread for the decode + waveform/beat analysis
-    /// (~1-2 s on a Pi) — acceptable for a LOAD, as a CDJ spins up briefly;
-    /// can move to a worker thread later.  Leaves the deck paused at the start,
-    /// as a CDJ does after loading.
     /// Convert a rekordbox ANLZ file into a constant BeatGrid (anchored on its
     /// first beat) and a start-cue sample index (first memory cue, interleaved).
     /// Returns None if the file has no beat grid.
@@ -1142,23 +1139,27 @@ impl DeckApp {
         }
     }
 
-    /// Load a local file: decode from disk, grid from its ANLZ if given.
+    /// Load a local file.  Decode + analysis run on a loader thread; the frame
+    /// loop swaps the track in when it is ready ([`poll_fetch`](Self::poll_fetch)).
     fn load_track(&mut self, path: &std::path::Path, analyze: Option<&std::path::Path>) -> Result<()> {
+        let (path, analyze) = (path.to_path_buf(), analyze.map(|p| p.to_path_buf()));
+        let prep = self.prep();
+        self.start_fetch(path.display().to_string(), move || Self::prepare_local(prep, path, analyze))
+    }
+
+    fn prepare_local(prep: Prep, path: std::path::PathBuf, analyze: Option<std::path::PathBuf>) -> Result<Prepared> {
         let t0 = Instant::now();
-        let (samples, sr, ch, tags) = audio::decode_file(path)?;
-        let deck_sr = self.audio.sample_rate;
-        let grid_cue = analyze.and_then(|p| Self::grid_from_anlz(p, deck_sr, ch as u8));
-        self.path = path.to_path_buf();
-        self.track_tags = tags;
-        self.finish_load(&path.display().to_string(), samples, sr, ch, grid_cue, t0)
+        let (samples, sr, ch, tags) = audio::decode_file(&path)?;
+        let grid_cue = analyze.and_then(|p| Self::grid_from_anlz(&p, prep.deck_sr, ch as u8));
+        prep.finish(path.display().to_string(), path, samples, sr, ch, tags, grid_cue, t0)
     }
 
     /// Load a track from a linked player over NFS: pull the audio + ANLZ off the
-    /// wire, decode from memory.  Blocks the UI for the fetch (a few seconds for
-    /// a multi-MB read at 8 KB/NFS-read — non-blocking load is #19).
+    /// wire, decode from memory.  All on the fetch thread.
     fn load_track_link(&mut self, ip: std::net::Ipv4Addr, rel_path: &str, analyze_rel: &str) -> Result<()> {
         let (rel_path, analyze_rel) = (rel_path.to_string(), analyze_rel.to_string());
         let name = rel_path.rsplit('/').next().unwrap_or(&rel_path).to_string();
+        let prep = self.prep();
         self.start_fetch(name.clone(), move || {
             let t0 = Instant::now();
             let mut nfs = opendeck_nfs::Nfs::connect(ip)?;
@@ -1172,7 +1173,7 @@ impl DeckApp {
                 }
             };
             log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
-            Ok(Fetched { name, path: rel_path, audio, grid, t0 })
+            prep.complete(Fetched { name, path: rel_path, audio, grid, t0 })
         })
     }
 
@@ -1185,6 +1186,7 @@ impl DeckApp {
         let slot = if rekordbox { Slot::Collection } else { Slot::Usb };
         let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
         let title = title.to_string();
+        let prep = self.prep();
         self.start_fetch(title.clone(), move || {
             let t0 = Instant::now();
             let mut db = Client::discover(ip, device)?;
@@ -1205,98 +1207,66 @@ impl DeckApp {
             let audio = nfs.read_file(&fh, size)?;
             log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
             let name = if title.is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { title };
-            Ok(Fetched { name, path, audio, grid: FetchedGrid::Beats(beats), t0 })
+            prep.complete(Fetched { name, path, audio, grid: FetchedGrid::Beats(beats), t0 })
         })
     }
 
-    /// Run `fetch` on a thread and remember its result channel.  The deck
-    /// keeps playing; the frame loop completes the load when the bytes land.
-    fn start_fetch(&mut self, name: String, fetch: impl FnOnce() -> Result<Fetched> + Send + 'static) -> Result<()> {
+    /// What the loader thread needs to know about the deck to prepare a track.
+    fn prep(&self) -> Prep {
+        Prep {
+            deck_sr: self.audio.sample_rate, deck_ch: self.audio.channels,
+            auto_cue: self.auto_cue, auto_cue_level_db: self.settings.auto_cue_level_db,
+        }
+    }
+
+    /// Run `load` on a thread and remember its result channel.  The deck keeps
+    /// playing; the frame loop swaps the track in when it is ready.  A newer
+    /// load supersedes an older one still in flight (its result is dropped).
+    fn start_fetch(&mut self, name: String, load: impl FnOnce() -> Result<Prepared> + Send + 'static) -> Result<()> {
         let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new().name("track-fetch".into()).spawn(move || { let _ = tx.send(fetch()); })?;
+        std::thread::Builder::new().name("track-load".into()).spawn(move || { let _ = tx.send(load()); })?;
         log::info!("loading {name:?} in the background");
         self.loading = Some(name);
         self.fetch_rx = Some(rx);
         Ok(())
     }
 
-    /// Complete a background load whose bytes have arrived (decode + finish).
+    /// Swap in a background load that has finished.
     fn poll_fetch(&mut self) {
         let Some(rx) = &self.fetch_rx else { return };
         let got = match rx.try_recv() {
             Ok(r) => r,
             Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("fetch thread died")),
+            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("load thread died")),
         };
         self.fetch_rx = None;
         self.loading = None;
-        let f = match got { Ok(f) => f, Err(e) => { log::warn!("load failed: {e:#}"); return } };
-        if let Err(e) = self.complete_fetch(f) { log::warn!("load failed: {e:#}"); }
-    }
-
-    fn complete_fetch(&mut self, f: Fetched) -> Result<()> {
-        let (samples, sr, ch, tags) = audio::decode_bytes(f.audio, f.path.rsplit('.').next())?;
-        self.track_tags = tags;
-        let deck_sr = self.audio.sample_rate;
-        let grid_cue = match f.grid {
-            FetchedGrid::None => None,
-            FetchedGrid::Anlz(bytes) => Self::grid_from_anlz_bytes(&bytes, deck_sr, ch as u8),
-            FetchedGrid::Beats(beats) if !beats.is_empty() => {
-                let a = opendeck_rekordbox::RbAnalysis {
-                    beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
-                    memory_cues: Vec::new(), hot_cues: Vec::new(),
-                };
-                Self::anlz_to_grid(a, deck_sr, ch as u8)
-            }
-            FetchedGrid::Beats(_) => None,
-        };
-        self.path = std::path::PathBuf::from(&f.path);
-        self.finish_load(&f.name, samples, sr, ch, grid_cue, f.t0)
-    }
-
-    /// Shared load tail: resample to the deck rate, build the waveform, apply the
-    /// grid (given, or detect a fallback), swap the samples in, reset transport.
-    fn finish_load(&mut self, name: &str, samples: Vec<f32>, sr: u32, ch: usize,
-                   grid_cue: Option<AnlzLoad>, t0: Instant) -> Result<()> {
-        let deck_sr = self.audio.sample_rate;
-        if ch as u8 != self.audio.channels {
-            bail!("track has {} channels but the deck runs {} — channel conversion not yet implemented",
-                  ch, self.audio.channels);
+        match got.and_then(|p| self.apply_prepared(p)) {
+            Ok(()) => if std::mem::take(&mut self.play_on_load) {
+                self.audio.playing.store(true, Ordering::Relaxed);
+                log::info!("autoload ok");
+            },
+            Err(e) => { self.play_on_load = false; log::warn!("load failed: {e:#}"); }
         }
-        // Offline SRC so a differently-sampled track plays at the right pitch.
-        let samples = if sr != deck_sr {
-            audio::resample_interleaved(&samples, ch, sr, deck_sr)?
-        } else { samples };
-        let samples = Arc::new(samples);
+    }
 
-        let mut wb = WaveformBuilder::new(deck_sr);
-        wb.push(&samples);
-        let waveform = wb.finish();
-
-        // Prefer rekordbox's grid+cues; fall back to freedj's detector otherwise.
-        let (beat_grid, cue_pt, memory_cues, hot_cues, grid_src) = match grid_cue {
-            Some(AnlzLoad { grid, cue, memory_cues, hot_cues }) => (Some(grid), cue, memory_cues, hot_cues, "rekordbox"),
-            None => {
-                let mut ba = BeatAnalyzerImpl::new(deck_sr);
-                ba.push(&samples, deck_sr);
-                (ba.beat_grid().map(|g| (*g).clone()), 0, Vec::new(), [None; 8], "freedj")
-            }
-        };
-        self.memory_cues    = memory_cues;
-        self.hot_cues       = hot_cues;
+    /// The UI-thread tail of a load: hand the prepared samples to the audio
+    /// thread, upload the waveform, reset transport to the cue.  Cheap; every
+    /// heavy step happened in [`Prep::finish`].
+    fn apply_prepared(&mut self, p: Prepared) -> Result<()> {
+        let deck_sr = self.audio.sample_rate;
+        self.track_tags     = p.tags;
+        self.path           = p.path;
+        self.memory_cues    = p.memory_cues;
+        self.hot_cues       = p.hot_cues;
         self.perform_delete = false;
-        // AUTO CUE: with no rekordbox memory cue, cue at the first audible sound
-        // rather than 0:00 (the unit's behaviour; the A.CUE badge).  A memory
-        // cue still wins — that is the DJ's own choice.
-        let cue_pt = if self.auto_cue && cue_pt == 0 { first_sound(&samples, ch, self.settings.auto_cue_level_db) } else { cue_pt };
-
-        self.audio.load_samples(Arc::clone(&samples), deck_sr, ch as u8)?;
-        if let Some(r) = self.renderer.as_mut() { r.set_waveform(&waveform); }
-        self.waveform     = waveform;
-        self.grid_orig    = beat_grid.clone();
+        self.audio.load_samples(Arc::clone(&p.samples), deck_sr, p.ch as u8)?;
+        if let Some(r) = self.renderer.as_mut() { r.set_waveform(&p.waveform); }
+        self.waveform     = p.waveform;
+        self.grid_orig    = p.beat_grid.clone();
         self.beat_grid    = match self.grids.get(&self.path.to_string_lossy()) {
             Some(g) => { log::info!("grid: hand-adjusted (grids.json)"); Some(g.clone()) }
-            None => beat_grid,
+            None => p.beat_grid,
         };
         // Keep the ProDJ Link sender's grid in step with the loaded track, so
         // SYNC divides the master BPM by the CURRENT track's BPM (not the one
@@ -1304,17 +1274,17 @@ impl DeckApp {
         self.link_grid.store(Arc::new(self.beat_grid.clone()));
         self.smoothed_pos = 0.0;
         self.prev_pos     = 0;
-        self.cue_point    = cue_pt;
+        self.cue_point    = p.cue_pt;
         self.cue_preview  = false;
         self.cued         = true;
         // Park the deck at the cue (a CDJ sits at the cue after load) so PLAY
         // starts there — with AUTO CUE that's the first sound, not the leader.
-        if cue_pt > 0 { self.seek_to(cue_pt); }
+        if p.cue_pt > 0 { self.seek_to(p.cue_pt); }
         log::info!(
             "loaded {} in {:.1}s ({} BPM, {} grid, cue {:.2}s)",
-            name, t0.elapsed().as_secs_f32(),
+            p.name, p.t0.elapsed().as_secs_f32(),
             self.beat_grid.as_ref().map(|g| format!("{:.1}", g.bpm)).unwrap_or_else(|| "?".into()),
-            grid_src, cue_pt as f64 / (deck_sr as f64 * ch as f64),
+            p.grid_src, p.cue_pt as f64 / (deck_sr as f64 * p.ch as f64),
         );
         Ok(())
     }
@@ -1330,7 +1300,7 @@ impl DeckApp {
         if self.frame_count == 150 {
             if let Ok(path) = std::env::var("OPENDECK_AUTOLOAD") {
                 match self.load_track(std::path::Path::new(&path), None) {
-                    Ok(())  => { self.audio.playing.store(true, Ordering::Relaxed); log::info!("autoload ok"); }
+                    Ok(())  => self.play_on_load = true,
                     Err(e)  => log::error!("autoload failed: {e:#}"),
                 }
             }
@@ -1744,6 +1714,76 @@ struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64>, hot_cues: [Op
 /// A track fetched over the network by a background thread, ready to decode.
 struct Fetched { name: String, path: String, audio: Vec<u8>, grid: FetchedGrid, t0: Instant }
 enum FetchedGrid { None, Anlz(Vec<u8>), Beats(Vec<opendeck_dbserver::GridBeat>) }
+
+/// The deck facts a loader thread needs; captured before the thread starts.
+#[derive(Clone, Copy)]
+struct Prep { deck_sr: u32, deck_ch: u8, auto_cue: bool, auto_cue_level_db: f32 }
+
+/// A track ready to swap in: decoded at the deck rate, waveform built, grid
+/// and cues resolved.  Everything here was produced off the UI thread.
+struct Prepared {
+    name: String, path: std::path::PathBuf, tags: opendeck_decode::TrackTags,
+    samples: Arc<Vec<f32>>, ch: usize, waveform: WaveformCache,
+    beat_grid: Option<BeatGrid>, cue_pt: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8],
+    grid_src: &'static str, t0: Instant,
+}
+
+impl Prep {
+    /// Decode fetched bytes and prepare them (loader thread).
+    fn complete(self, f: Fetched) -> Result<Prepared> {
+        let (samples, sr, ch, tags) = audio::decode_bytes(f.audio, f.path.rsplit('.').next())?;
+        let grid_cue = match f.grid {
+            FetchedGrid::None => None,
+            FetchedGrid::Anlz(bytes) => DeckApp::grid_from_anlz_bytes(&bytes, self.deck_sr, ch as u8),
+            FetchedGrid::Beats(beats) if !beats.is_empty() => {
+                let a = opendeck_rekordbox::RbAnalysis {
+                    beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
+                    memory_cues: Vec::new(), hot_cues: Vec::new(),
+                };
+                DeckApp::anlz_to_grid(a, self.deck_sr, ch as u8)
+            }
+            FetchedGrid::Beats(_) => None,
+        };
+        self.finish(f.name, std::path::PathBuf::from(&f.path), samples, sr, ch, tags, grid_cue, f.t0)
+    }
+
+    /// The heavy tail of every load, off the UI thread: resample to the deck
+    /// rate, build the waveform, take the given grid or detect one, place the
+    /// auto cue.
+    #[allow(clippy::too_many_arguments)]
+    fn finish(self, name: String, path: std::path::PathBuf, samples: Vec<f32>, sr: u32, ch: usize,
+              tags: opendeck_decode::TrackTags, grid_cue: Option<AnlzLoad>, t0: Instant) -> Result<Prepared> {
+        if ch as u8 != self.deck_ch {
+            bail!("track has {} channels but the deck runs {} — channel conversion not yet implemented",
+                  ch, self.deck_ch);
+        }
+        // Offline SRC so a differently-sampled track plays at the right pitch.
+        let samples = if sr != self.deck_sr {
+            audio::resample_interleaved(&samples, ch, sr, self.deck_sr)?
+        } else { samples };
+        let samples = Arc::new(samples);
+
+        let mut wb = WaveformBuilder::new(self.deck_sr);
+        wb.push(&samples);
+        let waveform = wb.finish();
+
+        // Prefer rekordbox's grid+cues; fall back to freedj's detector otherwise.
+        let (beat_grid, cue_pt, memory_cues, hot_cues, grid_src) = match grid_cue {
+            Some(AnlzLoad { grid, cue, memory_cues, hot_cues }) => (Some(grid), cue, memory_cues, hot_cues, "rekordbox"),
+            None => {
+                let mut ba = BeatAnalyzerImpl::new(self.deck_sr);
+                ba.push(&samples, self.deck_sr);
+                (ba.beat_grid().map(|g| (*g).clone()), 0, Vec::new(), [None; 8], "freedj")
+            }
+        };
+        // AUTO CUE: with no rekordbox memory cue, cue at the first audible sound
+        // rather than 0:00 (the unit's behaviour; the A.CUE badge).  A memory
+        // cue still wins — that is the DJ's own choice.
+        let cue_pt = if self.auto_cue && cue_pt == 0 { first_sound(&samples, ch, self.auto_cue_level_db) } else { cue_pt };
+        log::info!("prepared {name:?} in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+        Ok(Prepared { name, path, tags, samples, ch, waveform, beat_grid, cue_pt, memory_cues, hot_cues, grid_src, t0 })
+    }
+}
 
 // ── Memory-point lookup ────────────────────────────────────────────────────────
 // `cues` is sorted, interleaved sample indices.  `tol` is the match tolerance

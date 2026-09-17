@@ -98,10 +98,10 @@ rekordcrate. Entering rekordbox uses the collection slot. The root of a
 dbserver source is ALL TRACKS plus the playlist tree (`0x1105`); tracks list
 title / artist / BPM from the menu rows.
 
-Loading: `0x2102` for the path, then `read_file` over NFS. The file is fetched
-on a **background thread** (`start_fetch` in `lib.rs`), so the deck keeps
-running while the bytes come in; decode is still on the UI thread (#19, audio
-half). The beat grid comes from `0x2204` when the source has one (rekordbox,
+Loading: `0x2102` for the path, then `read_file` over NFS. The whole load
+(fetch, decode, resample, waveform, grid, auto cue) runs on a **loader
+thread** (`start_fetch` / `Prep::finish` in `lib.rs`); the UI thread only
+swaps the prepared track in, a few milliseconds. The beat grid comes from `0x2204` when the source has one (rekordbox,
 players); otherwise from the ANLZ file over NFS, otherwise our own analysis.
 
 `read_file` keeps **32 READs in flight** (`crates/nfs/src/lib.rs`, `WINDOW`),
@@ -213,5 +213,4 @@ over the same NFS. The presentation differs, and #32 tracks closing the gap:
   `0x2c04`) currently answer unavailable.
 - The XDJ acceptance test: LINK → OpenDeck → load, watching the server log for
   any `0x4003` we send.
-- Decode off the UI thread (#19, audio half).
 - Confirm port binding on the iPad (TestFlight 0.1.14).

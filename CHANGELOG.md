@@ -23,8 +23,12 @@ All notable changes to this project will be documented in this file.
 - **Fast network loads.** NFS reads keep 32 requests in flight instead of one
   (NFSv2 caps a read at 8 KB, so a serial client paid one round trip per
   8 KB: about two minutes for a 12 MB track over a phone hotspot, now a few
-  seconds). The fetch runs on a background thread, so the deck keeps playing
-  and responding while a LINK track streams in. (#31, #19 network half)
+  seconds). (#31)
+- **Loads no longer stall the deck.** Every load, local or LINK, runs on a
+  loader thread: fetch, decode, resample, waveform, beat grid and auto cue.
+  The UI thread only swaps the prepared track in (about 5 ms including the
+  waveform upload), so the deck keeps playing and responding through a load
+  instead of freezing for a second (several on a Pi). (#19)
 - `docs/reference/prodj-link-media.md`: how media browsing and loading works
   between decks (dbserver + NFS), rekordbox 7 findings, test recipes.
 
