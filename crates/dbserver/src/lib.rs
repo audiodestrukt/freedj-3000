@@ -22,6 +22,8 @@
 //! This is the client half.  Serving (being a media source for other decks,
 //! issue #44) reuses the same framing in the other direction.
 
+pub mod server;
+
 use anyhow::{bail, Context, Result};
 use std::io::{BufReader, Read, Write};
 use std::net::{Ipv4Addr, SocketAddrV4, TcpStream};
@@ -77,7 +79,7 @@ pub enum TrackType { Rekordbox = 1, Unanalyzed = 2, AudioCd = 5 }
 pub enum Field { U8(u8), U16(u16), U32(u32), Blob(Vec<u8>), Str(String) }
 
 impl Field {
-    fn encode(&self, out: &mut Vec<u8>) {
+    pub fn encode(&self, out: &mut Vec<u8>) {
         match self {
             Field::U8(v)   => { out.push(0x0f); out.push(*v); }
             Field::U16(v)  => { out.push(0x10); out.extend_from_slice(&v.to_be_bytes()); }
@@ -98,7 +100,7 @@ impl Field {
         match self { Field::Str(_) => 0x02, Field::Blob(_) => 0x03, _ => 0x06 }
     }
 
-    fn read<R: Read>(r: &mut R) -> Result<Field> {
+    pub fn read<R: Read>(r: &mut R) -> Result<Field> {
         let mut tag = [0u8; 1];
         r.read_exact(&mut tag).context("dbserver: read field tag")?;
         Ok(match tag[0] {

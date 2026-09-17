@@ -18,6 +18,8 @@
 //! after Deep Symmetry's crate-digger; targets nexus/nexus2-era gear (the
 //! XDJ-1000MK2). The CDJ-3000 encrypts this and is not supported.
 
+pub mod server;
+
 use anyhow::{anyhow, bail, Context, Result};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::time::Duration;

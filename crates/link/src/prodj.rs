@@ -24,6 +24,10 @@ pub const PORT_STATUS:    u16 = 50002;
 
 /// Packet type byte, at offset 0x0a in every packet.
 pub const PKT_ANNOUNCE:   u8 = 0x06;
+/// Media query / response on port 50002 (same type bytes as the 50000 family,
+/// distinguished by port).
+pub const PKT_MEDIA_QUERY: u8 = 0x05;
+pub const PKT_MEDIA_RESP:  u8 = 0x06;
 pub const PKT_BEAT:       u8 = 0x28;
 pub const PKT_STATUS:     u8 = 0x0A;
 /// Tempo-master handoff: request (to the current master, port 50001) and
@@ -200,6 +204,44 @@ impl ProDjLink {
         // Trailer per the analysis: 01 00 00 00 01 00
         pkt[0x30] = 0x01;
         pkt[0x34] = 0x01;
+        pkt
+    }
+
+    /// Parse a media query (0x05, port 50002): `(requesting device, its IP,
+    /// target player, slot)`.  Layout per Beat Link's `VirtualCdj`: header to
+    /// 0x24, then 01 00 D 00 0c ip(4) 00 00 00 target 00 00 00 slot.
+    pub fn parse_media_query(data: &[u8]) -> Option<(u8, Ipv4Addr, u8, u8)> {
+        (Self::packet_type(data)? == PKT_MEDIA_QUERY && data.len() >= 0x35).then(|| {
+            (data[0x26], Ipv4Addr::new(data[0x29], data[0x2a], data[0x2b], data[0x2c]), data[0x30], data[0x34])
+        })
+    }
+
+    /// Build a media response (0x06 on port 50002, 0xc0 bytes) describing
+    /// media in one of our slots — the reply to a media query.  Layout per
+    /// Beat Link's `MediaDetails`: 0x27 host player, 0x2b slot, 0x2c name
+    /// (UTF-16BE, 64 bytes), 0x6c creation date (UTF-16BE, 24 bytes), 0xa6
+    /// track count, 0xa8 colour, 0xaa media type (1 = rekordbox), 0xab
+    /// "has My Settings", 0xae playlist count, 0xb0 total bytes, 0xb8 free.
+    pub fn build_media_response(&self, requester_ip: Ipv4Addr, slot: u8, name: &str, tracks: u16, playlists: u16, total: u64, free: u64) -> Vec<u8> {
+        let mut pkt = vec![0u8; 0xc0];
+        pkt[..10].copy_from_slice(MAGIC);
+        pkt[0x0a] = PKT_MEDIA_RESP;
+        pkt[0x0b..0x0b + 20].copy_from_slice(&self.device_name);
+        pkt[0x1f] = 0x01;
+        pkt[0x21] = self.player_num;
+        pkt[0x22..0x24].copy_from_slice(&((0xc0u16) - 0x24).to_be_bytes());
+        pkt[0x24..0x28].copy_from_slice(&requester_ip.octets());
+        pkt[0x27] = self.player_num;
+        pkt[0x2b] = slot;
+        for (i, u) in name.encode_utf16().take(31).enumerate() { pkt[0x2c + i * 2..0x2e + i * 2].copy_from_slice(&u.to_be_bytes()); }
+        for (i, u) in "2026/09/17".encode_utf16().take(11).enumerate() { pkt[0x6c + i * 2..0x6e + i * 2].copy_from_slice(&u.to_be_bytes()); }
+        pkt[0xa6..0xa8].copy_from_slice(&tracks.to_be_bytes());
+        pkt[0xa8] = 0;
+        pkt[0xaa] = 0x01;
+        pkt[0xab] = 0;
+        pkt[0xae..0xb0].copy_from_slice(&playlists.to_be_bytes());
+        pkt[0xb0..0xb8].copy_from_slice(&total.to_be_bytes());
+        pkt[0xb8..0xc0].copy_from_slice(&free.to_be_bytes());
         pkt
     }
 

@@ -1,0 +1,18 @@
+[package]
+name        = "opendeck-mediaserver"
+description = "OpenDeck as a Pro DJ Link media source: announce, answer media queries, serve the library over dbserver and the audio over NFSv2"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opendeck-serve"
+path = "src/main.rs"
+
+[dependencies]
+opendeck-link     = { workspace = true }
+opendeck-nfs      = { path = "../nfs" }
+opendeck-dbserver = { path = "../dbserver" }
+anyhow     = { workspace = true }
+log        = { workspace = true }
+env_logger = { workspace = true }
