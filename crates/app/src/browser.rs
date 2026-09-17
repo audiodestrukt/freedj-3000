@@ -43,9 +43,10 @@ pub enum Load {
     Local { path: PathBuf, analyze: Option<PathBuf> },
     /// A track on a linked player, read over NFS.  Paths are rekordbox-relative.
     Link  { ip: Ipv4Addr, rel_path: String, analyze_rel: String },
-    /// A track in a rekordbox laptop's collection (LINK mode): metadata, path
-    /// and beat grid come from its dbserver, the audio over its NFS export.
-    Rekordbox { ip: Ipv4Addr, id: u32, title: String },
+    /// A track served by a peer's dbserver (a player's USB, or a rekordbox
+    /// laptop's collection when `rekordbox`): path and beat grid come from
+    /// dbserver, the audio over the peer's NFS export.
+    Db { ip: Ipv4Addr, id: u32, title: String, rekordbox: bool },
 }
 
 /// One visible row.
@@ -114,8 +115,9 @@ pub struct Browser {
     pub selected: usize,
     rb:        Option<Arc<RbExport>>,
     rb_source: Option<RbSource>,
-    /// Open dbserver session to a rekordbox laptop (LINK) and its address.
-    db:        Option<(Ipv4Addr, DbClient)>,
+    /// Open dbserver session to a peer: its address, the client, and the slot
+    /// we browse (USB on a player, Collection on rekordbox).
+    db:        Option<(Ipv4Addr, DbClient, Slot)>,
     /// Name of the dbserver folder/playlist being shown (set on descend).
     db_title:  String,
     link:      Arc<LinkState>,
@@ -165,8 +167,9 @@ impl Browser {
                 .and_then(|e| e.playlists.iter().find(|n| n.id == *id))
                 .map(|n| n.name.clone()).unwrap_or_else(|| "rekordbox".to_string()),
             Some(Loc::DbFolder(0)) => match &self.db {
-                Some((ip, _)) => format!("rekordbox  {ip}"),
-                None => "rekordbox".to_string(),
+                Some((ip, _, Slot::Collection)) => format!("rekordbox  {ip}"),
+                Some((ip, _, _)) => format!("LINK  {ip}"),
+                None => "LINK".to_string(),
             },
             Some(Loc::DbAllTracks) => "ALL TRACKS".to_string(),
             Some(Loc::DbFolder(_)) | Some(Loc::DbPlaylist(_)) => self.db_title.clone(),
@@ -261,15 +264,16 @@ impl Browser {
         }).collect()
     }
 
-    /// Root of a rekordbox collection: ALL TRACKS, then the playlist tree.
+    /// Root of a dbserver library: ALL TRACKS, then the playlist tree.
     fn db_folder_entries(&mut self, folder: u32) -> Vec<Entry> {
-        let Some((_, c)) = self.db.as_mut() else { return Vec::new() };
+        let Some((_, c, slot)) = self.db.as_mut() else { return Vec::new() };
+        let slot = *slot;
         let mut out = Vec::new();
         if folder == 0 {
             out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None,
                              kind: EntryKind::Descend(Loc::DbAllTracks) });
         }
-        match c.playlist(Slot::Collection, folder, true) {
+        match c.playlist(slot, folder, true) {
             Ok(items) => for i in items {
                 let is_folder = i.type_name() == "folder";
                 out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None,
@@ -282,30 +286,31 @@ impl Browser {
 
     /// Tracks of a playlist, or the whole collection.
     fn db_track_entries(&mut self, playlist: Option<u32>) -> Vec<Entry> {
-        let Some((ip, c)) = self.db.as_mut() else { return Vec::new() };
-        let ip = *ip;
+        let Some((ip, c, slot)) = self.db.as_mut() else { return Vec::new() };
+        let (ip, slot) = (*ip, *slot);
         let items = match playlist {
-            Some(id) => c.playlist(Slot::Collection, id, false),
-            None     => c.all_tracks(Slot::Collection, 0),
+            Some(id) => c.playlist(slot, id, false),
+            None     => c.all_tracks(slot, 0),
         };
         match items {
             Ok(items) => items.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
                 name: i.label.clone(), is_dir: false,
                 artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None,
-                kind: EntryKind::Track(Load::Rekordbox { ip, id: i.id, title: i.label }),
+                kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection }),
             }).collect(),
             Err(e) => { log::warn!("rekordbox tracks: {e:#}"); Vec::new() }
         }
     }
 
-    /// Open a dbserver session to a rekordbox laptop.
-    fn connect_db(&mut self, ip: Ipv4Addr) -> anyhow::Result<()> {
-        if matches!(&self.db, Some((cur, _)) if *cur == ip) { return Ok(()); }
-        // rekordbox answers requests from a real player number (1–4).
+    /// Open a dbserver session to a peer (a player's USB slot, or rekordbox's
+    /// collection).
+    fn connect_db(&mut self, ip: Ipv4Addr, slot: Slot) -> anyhow::Result<()> {
+        if matches!(&self.db, Some((cur, _, s)) if *cur == ip && *s == slot) { return Ok(()); }
+        // Servers answer requests from a real player number (1–4).
         let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
         let c = DbClient::discover(ip, device)?;
-        log::info!("LINK rekordbox {ip}: dbserver session open");
-        self.db = Some((ip, c));
+        log::info!("LINK {ip}: dbserver session open ({slot:?})");
+        self.db = Some((ip, c, slot));
         Ok(())
     }
 
@@ -363,7 +368,7 @@ impl Browser {
                 self.rebuild();
                 Enter::Folder
             }
-            EntryKind::ConnectDb(ip) => match self.connect_db(ip) {
+            EntryKind::ConnectDb(ip) => match self.connect_db(ip, Slot::Collection) {
                 Ok(()) => {
                     self.stack.push(Loc::DbFolder(0));
                     self.selected = 0;
@@ -372,14 +377,27 @@ impl Browser {
                 }
                 Err(e) => { log::warn!("LINK rekordbox {ip} failed: {e:#}"); Enter::Nothing }
             },
-            EntryKind::ConnectLink(ip) => match self.connect_link(ip) {
+            // A player: browse its USB over dbserver like a CDJ does; if it has
+            // no database service, fall back to reading export.pdb over NFS.
+            EntryKind::ConnectLink(ip) => match self.connect_db(ip, Slot::Usb) {
                 Ok(()) => {
-                    self.stack.push(Loc::RbTree(0));
+                    self.stack.push(Loc::DbFolder(0));
                     self.selected = 0;
                     self.rebuild();
                     Enter::Folder
                 }
-                Err(e) => { log::warn!("LINK connect {ip} failed: {e:#}"); Enter::Nothing }
+                Err(e) => {
+                    log::info!("LINK {ip}: no dbserver ({e:#}); trying export.pdb over NFS");
+                    match self.connect_link(ip) {
+                        Ok(()) => {
+                            self.stack.push(Loc::RbTree(0));
+                            self.selected = 0;
+                            self.rebuild();
+                            Enter::Folder
+                        }
+                        Err(e) => { log::warn!("LINK connect {ip} failed: {e:#}"); Enter::Nothing }
+                    }
+                }
             },
             EntryKind::Track(load) => Enter::Track(load),
         }
@@ -430,34 +448,45 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Gated on a linked player: OPENDECK_TEST_NFS=192.168.68.58
+    // Gated on a serving peer: OPENDECK_TEST_LINK=127.0.0.1 (e.g. `opendeck-serve`
+    // running locally) or an XDJ / rekordbox address.  Browses LINK → the peer →
+    // ALL TRACKS → first track, then reads that track's audio the way the deck
+    // would: dbserver file path + NFS.
     #[test]
-    fn link_source_browses_to_a_loadable_track() {
-        let Ok(ip) = std::env::var("OPENDECK_TEST_NFS") else { return };
+    fn link_source_browses_and_reads_a_track_over_dbserver_and_nfs() {
+        let Ok(ip) = std::env::var("OPENDECK_TEST_LINK") else { return };
         let ip: Ipv4Addr = ip.parse().unwrap();
         let link = crate::prodj::LinkState::new(1);
-        link.peers.lock().unwrap().insert(2, ip);   // pretend player 2 is the XDJ
+        link.peers.lock().unwrap().insert(3, ip);
         let mut b = Browser::new(&std::env::temp_dir(), link);
 
-        // LINK row at top → the player → its rekordbox tree → a playlist → tracks
         let li = b.entries().iter().position(|e| e.name == "LINK").expect("LINK row");
         b.selected = li;
-        assert!(matches!(b.enter(), Enter::Folder));            // LINK list
-        assert!(!b.entries().is_empty(), "a player is listed");
+        assert!(matches!(b.enter(), Enter::Folder));                    // LINK list
+        assert_eq!(b.entries().len(), 1, "one peer listed");
         b.selected = 0;
-        assert!(matches!(b.enter(), Enter::Folder));            // connect + tree root
-        assert!(!b.entries().is_empty(), "playlist tree");
+        assert!(matches!(b.enter(), Enter::Folder));                    // dbserver root
+        let all = b.entries().iter().position(|e| e.name == "ALL TRACKS").expect("ALL TRACKS row");
+        b.selected = all;
+        assert!(matches!(b.enter(), Enter::Folder));
+        assert!(b.entries().iter().all(|e| !e.is_dir) && !b.entries().is_empty(), "tracks");
         b.selected = 0;
-        assert!(matches!(b.enter(), Enter::Folder));            // into a playlist
-        assert!(b.entries().iter().all(|e| !e.is_dir), "tracks");
-        b.selected = 0;
-        match b.enter() {
-            Enter::Track(Load::Link { ip: tip, rel_path, .. }) => {
-                assert_eq!(tip, ip);
-                assert!(rel_path.contains("/Contents/"), "nfs rel path: {rel_path}");
-                println!("OK: LINK browse → loadable track {rel_path}");
-            }
-            _ => panic!("expected a Link track"),
-        }
+        let (tip, id, rekordbox) = match b.enter() {
+            Enter::Track(Load::Db { ip, id, rekordbox, .. }) => (ip, id, rekordbox),
+            _ => panic!("expected a Db track"),
+        };
+        assert_eq!(tip, ip);
+
+        let mut db = DbClient::discover(ip, 1).unwrap();
+        let slot = if rekordbox { Slot::Collection } else { Slot::Usb };
+        let path = db.file_path(slot, id).unwrap().expect("file path");
+        let pm = if rekordbox { opendeck_nfs::PORTMAP_REKORDBOX } else { opendeck_nfs::PORTMAP_PLAYER };
+        let mut nfs = Nfs::connect_at(ip, pm).unwrap();
+        let export = nfs.exports().unwrap().into_iter().next().unwrap();
+        let root = nfs.mount(&export).unwrap();
+        let (fh, size) = nfs.lookup_path(&root, &path).unwrap();
+        let bytes = nfs.read_file(&fh, size).unwrap();
+        assert!(bytes.len() == size as usize && size > 0, "read {} of {size}", bytes.len());
+        println!("OK: LINK → dbserver track {id} at {path} → {size} bytes over NFS");
     }
 }

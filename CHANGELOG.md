@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added — 2026-09-17
+- **OpenDeck is a Pro DJ Link media source.** The app now serves its music
+  folder to the other decks the way a CDJ serves its USB stick: a dbserver
+  (remote-database) service for browsing, metadata, file paths and beat grids,
+  and an NFSv2 server for the audio, plus the media-query answer and the
+  "USB loaded" status flags that make a player list us under LINK. Player
+  browsing of *any* peer now goes through dbserver (with the old export.pdb
+  fallback), so two OpenDecks can load from each other, and an XDJ should be
+  able to load from an iPad. `OPENDECK_SERVE=0` turns it off;
+  `opendeck-serve <dir>` is the stand-alone server for testing. (#44)
+- **rekordbox as a LINK source.** A rekordbox laptop in LINK mode appears
+  under LINK; its collection and playlists browse over dbserver and tracks load
+  over its NFS export (portmapper on 50111), with the beat grid. (#30)
+- `OPENDECK_LINK_UNICAST=ip,…` sends announces straight to peers across a
+  routed link (Tailscale), and peers are addressed where their announce came
+  from, not the address inside the packet.
+
 ## [0.1.13] — 2026-09-16
 
 First public release of **OpenDeck DJ** on the App Store (iPad, build

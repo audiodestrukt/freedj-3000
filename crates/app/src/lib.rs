@@ -1132,7 +1132,7 @@ impl DeckApp {
         match load {
             Load::Local { path, analyze } => self.load_track(&path, analyze.as_deref()),
             Load::Link { ip, rel_path, analyze_rel } => self.load_track_link(ip, &rel_path, &analyze_rel),
-            Load::Rekordbox { ip, id, title } => self.load_track_rekordbox(ip, id, &title),
+            Load::Db { ip, id, title, rekordbox } => self.load_track_db(ip, id, &title, rekordbox),
         }
     }
 
@@ -1171,29 +1171,32 @@ impl DeckApp {
         self.finish_load(rel_path, samples, sr, ch, grid_cue, t0)
     }
 
-    /// Load a track from a rekordbox laptop in LINK mode: ask its dbserver for
-    /// the file path and beat grid, then read the audio over its NFS export
-    /// (portmapper on 50111, export "/").
-    fn load_track_rekordbox(&mut self, ip: std::net::Ipv4Addr, id: u32, title: &str) -> Result<()> {
+    /// Load a track a peer serves over dbserver: ask for the file path and
+    /// beat grid, then read the audio over the peer's NFS export.  A player's
+    /// portmapper is on 111 and exports "/C/"; rekordbox uses 50111 and "/".
+    fn load_track_db(&mut self, ip: std::net::Ipv4Addr, id: u32, title: &str, rekordbox: bool) -> Result<()> {
         use opendeck_dbserver::{parse_beat_grid, Client, Slot};
         let t0 = Instant::now();
+        let slot = if rekordbox { Slot::Collection } else { Slot::Usb };
         let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
         let mut db = Client::discover(ip, device)?;
-        let path = db.file_path(Slot::Collection, id)?
-            .ok_or_else(|| anyhow::anyhow!("rekordbox {ip}: no file path for track {id}"))?;
-        let beats = match db.beat_grid(Slot::Collection, id) {
+        let path = db.file_path(slot, id)?
+            .ok_or_else(|| anyhow::anyhow!("LINK {ip}: no file path for track {id}"))?;
+        let beats = match db.beat_grid(slot, id) {
             Ok(blob) => parse_beat_grid(&blob),
-            Err(e) => { log::warn!("rekordbox beat grid {id}: {e:#}"); Vec::new() }
+            Err(e) => { log::info!("LINK {ip} beat grid {id}: {e:#}"); Vec::new() }
         };
-        log::info!("rekordbox {ip}: track {id} at {path:?}, {} grid beats ({:.0} ms)", beats.len(), t0.elapsed().as_secs_f64() * 1e3);
+        log::info!("LINK {ip}: track {id} at {path:?}, {} grid beats ({:.0} ms)", beats.len(), t0.elapsed().as_secs_f64() * 1e3);
 
-        let mut nfs = opendeck_nfs::Nfs::connect_at(ip, opendeck_nfs::PORTMAP_REKORDBOX)?;
+        let pm = if rekordbox { opendeck_nfs::PORTMAP_REKORDBOX } else { opendeck_nfs::PORTMAP_PLAYER };
+        let mut nfs = opendeck_nfs::Nfs::connect_at(ip, pm)?;
+        let fallback = if rekordbox { "/" } else { "/C/" };
         let export = nfs.exports()?.into_iter().next()
-            .unwrap_or_else(|| "/".encode_utf16().flat_map(|u| u.to_le_bytes()).collect());
+            .unwrap_or_else(|| fallback.encode_utf16().flat_map(|u| u.to_le_bytes()).collect());
         let root = nfs.mount(&export)?;
         let (fh, size) = nfs.lookup_path(&root, &path)?;
         let audio = nfs.read_file(&fh, size)?;
-        log::info!("rekordbox {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
+        log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
         let (samples, sr, ch, tags) = audio::decode_bytes(audio, path.rsplit('.').next())?;
         self.track_tags = tags;
         let deck_sr = self.audio.sample_rate;
@@ -2139,6 +2142,18 @@ pub fn run(cfg: Config) -> Result<()> {
 
     // ── 4. Start ProDJ Link listener (optional — app runs fine without it) ────────
     let link = prodj::LinkState::new(player);
+    // Serve our music folder to the other decks as a Link media source (dbserver
+    // + NFS, like a CDJ with a stick in it).  OPENDECK_SERVE=0 disables; a port
+    // we cannot bind (111 needs privilege on Linux) just logs and skips.
+    if std::env::var("OPENDECK_SERVE").map(|v| v != "0").unwrap_or(true) {
+        let serve_root = browse_root.clone().or_else(|| track.as_ref().and_then(|t| t.parent().map(|p| p.to_path_buf())));
+        if let Some(root) = serve_root {
+            match start_media_server(&root, player) {
+                Ok(n) => link.serve_tracks.store(n, Ordering::Relaxed),
+                Err(e) => log::warn!("media server not started: {e:#}"),
+            }
+        }
+    }
     // Dev hooks for headless tests: OPENDECK_SYNC=1 / OPENDECK_MASTER=1.
     if std::env::var("OPENDECK_SYNC").map(|v| v == "1").unwrap_or(false)   { link.sync.store(true, Ordering::Relaxed); }
     if std::env::var("OPENDECK_MASTER").map(|v| v == "1").unwrap_or(false) { link.want_master.store(true, Ordering::Relaxed); }
@@ -2406,4 +2421,27 @@ fn first_audio_in(dir: &std::path::Path) -> Option<PathBuf> {
         .collect();
     found.sort();
     found.into_iter().next()
+}
+
+/// Start the Link media-source services over `root`: NFSv2 (portmap 111,
+/// nfsd 2049, export "/C/") for the audio and dbserver (12523 + ephemeral) for
+/// browsing.  Returns the number of tracks served.
+fn start_media_server(root: &std::path::Path, player: u8) -> Result<u32> {
+    use opendeck_dbserver::server::{Library, Server as DbServer, Track};
+    use opendeck_nfs::server::{NfsServer, Tree};
+    const EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg"];
+    let tree = Tree::scan(root)?;
+    let mut tracks = Vec::new();
+    for (i, (nfs_path, local)) in tree.files().into_iter().enumerate() {
+        let ext = local.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
+        if !EXTS.contains(&ext.as_str()) { continue; }
+        let title = local.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
+        tracks.push(Track { id: i as u32 + 1, title, artist: String::new(), album: String::new(), path: nfs_path,
+                            duration_s: 0, bpm: 0.0, comment: String::new(), bitrate: 0, date_added: String::new(), beats: Vec::new() });
+    }
+    let n = tracks.len() as u32;
+    let nfs = NfsServer::start(tree, "/C/", 111, 2049)?;
+    let db = DbServer::start(Library { tracks, name: "OpenDeck".into() }, player, 0)?;
+    log::info!("media server: {n} tracks under {} — nfs portmap {} nfsd {}, dbserver {}", root.display(), nfs.portmap, nfs.nfsd, db.db_port);
+    Ok(n)
 }

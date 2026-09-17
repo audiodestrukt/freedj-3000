@@ -16,8 +16,7 @@
 
 use opendeck_link::prodj::{
     ProDjLink, Status, StatusFields, BECOME_MASTER, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS,
-    SYNC_OFF, SYNC_ON,
-};
+    SYNC_OFF, SYNC_ON, PKT_MEDIA_QUERY};
 use arc_swap::ArcSwap;
 use opendeck_types::{BeatGrid, EngineSnapshot};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -67,6 +66,9 @@ pub struct LinkState {
     pub peers:         Mutex<HashMap<u8, Ipv4Addr>>,
     /// player → device name from its announce ("XDJ-1000MK2", "rekordbox", …).
     pub peer_names:    Mutex<HashMap<u8, String>>,
+    /// Tracks we serve as a Link media source (0 = not serving).  Non-zero
+    /// answers media queries and flags our USB slot loaded in status.
+    pub serve_tracks:  AtomicU32,
 }
 
 impl LinkState {
@@ -87,6 +89,7 @@ impl LinkState {
             yielded_from: AtomicU32::new(0),
             peers: Mutex::new(HashMap::new()),
             peer_names: Mutex::new(HashMap::new()),
+            serve_tracks: AtomicU32::new(0),
         })
     }
 
@@ -262,8 +265,12 @@ fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
     log::info!("ProDJ Link: listening for announces on port {PORT_ANNOUNCE}");
     spawn("prodj-rx-50000", sock, move |data, addr| {
         log::trace!("ProDJ rx :50000 {} bytes from {addr} — {:02X?}", data.len(), data);
-        if let Some((player, ip)) = ProDjLink::parse_announce(data) {
+        if let Some((player, pkt_ip)) = ProDjLink::parse_announce(data) {
             if player == link.player { return; }
+            // Reach the peer where its packet came FROM: identical to the IP in
+            // the packet on a LAN, and the only address that works when the
+            // announce was unicast across a routed link (Tailscale).
+            let ip = match addr { SocketAddr::V4(v) => *v.ip(), _ => pkt_ip };
             if let Ok(mut peers) = link.peers.lock() {
                 if peers.insert(player, ip) != Some(ip) {
                     let name = String::from_utf8_lossy(&data[0x0c..0x20]).trim_end_matches('\0').to_string();
@@ -359,8 +366,23 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
     let sock = bind_shared(PORT_STATUS)?;
     log::info!("ProDJ Link: listening for status on port {PORT_STATUS}");
     let mut last: HashMap<u8, Status> = HashMap::new();
+    let reply_sock = UdpSocket::bind("0.0.0.0:0").ok();
+    let me = ProDjLink::new(link.player);
     spawn("prodj-rx-50002", sock, move |data, addr| {
         log::trace!("ProDJ rx :50002 {} bytes from {addr} — {:02X?}", data.len(), data);
+        // Media query: a peer asks what is in one of our slots.  Answer when we
+        // are serving (the media response names the library and its size).
+        if ProDjLink::packet_type(data) == Some(PKT_MEDIA_QUERY) {
+            if let Some((dev, rip, target, slot)) = ProDjLink::parse_media_query(data) {
+                let n = link.serve_tracks.load(Ordering::Relaxed);
+                log::info!("ProDJ Link: media query from device {dev} ({rip}) for player {target} slot {slot}; serving {n} tracks");
+                if target == link.player && n > 0 && matches!(slot, 0 | 3) {
+                    let resp = me.build_media_response(rip, 3, "OPENDECK", n.min(u16::MAX as u32) as u16, 0, 32 << 30, 16 << 30);
+                    if let Some(s) = &reply_sock { let _ = s.send_to(&resp, (rip, PORT_STATUS)); }
+                }
+            }
+            return;
+        }
         let Some(st) = ProDjLink::parse_status(data) else { return };
         if st.player == link.player { return; }
 
@@ -459,6 +481,11 @@ impl ProDjSender {
         }
         let (ip, bcast, mac, iface) = link_interface(&[]);
         let player = link.player;
+        // OPENDECK_LINK_UNICAST=ip,ip — also send announces straight to these
+        // devices (broadcast does not cross a VPN such as Tailscale).
+        let unicast_peers: Vec<Ipv4Addr> = std::env::var("OPENDECK_LINK_UNICAST").ok()
+            .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect()).unwrap_or_default();
+        if !unicast_peers.is_empty() { log::info!("ProDJ Link: announcing by unicast to {unicast_peers:?}"); }
         log::info!("ProDJ Link: sending as player {player} from {ip} ({iface}) to {bcast}");
 
         let me = ProDjLink::new(player);
@@ -589,6 +616,7 @@ impl ProDjSender {
                                 bcast_warned = false;   // re-warn if the new one also fails
                             }
                         }
+                        for p in &unicast_peers { let _ = sock.send_to(&announce, (*p, PORT_ANNOUNCE)); }
                         if let Err(e) = sock.send_to(&announce, (bcast, PORT_ANNOUNCE)) {
                             if !bcast_warned {
                                 bcast_warned = true;
@@ -710,7 +738,11 @@ impl ProDjSender {
                             sync_counter: link.our_sync.load(Ordering::Relaxed),
                         };
                         counter = counter.wrapping_add(1);
-                        let pkt = me.build_status(&fields);
+                        let mut pkt = me.build_status(&fields);
+                        if link.serve_tracks.load(Ordering::Relaxed) > 0 {
+                            pkt[0x6f] = 0x00;   // USB local state: loaded
+                            pkt[0x75] = 0x01;   // link media available
+                        }
                         let peers: Vec<Ipv4Addr> = link.peers.lock().map(|p| p.values().copied().collect()).unwrap_or_default();
                         if flags_changed {
                             log::info!("ProDJ tx: status master={} sync={} → {} peer(s)", fields.master, fields.sync, peers.len());
