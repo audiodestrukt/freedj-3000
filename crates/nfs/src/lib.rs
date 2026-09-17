@@ -229,20 +229,97 @@ impl Nfs {
         Ok(r[start..start + dlen].to_vec())
     }
 
-    /// Read an entire file (chunked).
+    /// Read an entire file with up to [`WINDOW`](Self::WINDOW) 8 KB reads in
+    /// flight.  NFSv2 caps a read at 8 KB, so a serial loop pays one round
+    /// trip per 8 KB — fine on a switch, minutes over Wi-Fi or a VPN (a 12 MB
+    /// track across a hotspot + Tailscale took ~2 min at 60 ms RTT).  Keeping
+    /// a window of requests outstanding and matching replies by xid makes the
+    /// transfer bandwidth-bound instead.  Lost datagrams are re-sent after a
+    /// short timeout; the server sees plain independent READs, which every
+    /// NFS server (the CDJ's included) must handle.
     pub fn read_file(&mut self, fh: &Fh, size: u32) -> Result<Vec<u8>> {
         const CHUNK: u32 = 8192;
-        let mut out = Vec::with_capacity(size as usize);
-        let mut off = 0u32;
-        while off < size {
+        let mut out = vec![0u8; size as usize];
+        if size == 0 { return Ok(out); }
+        let nblocks = ((size + CHUNK - 1) / CHUNK) as usize;
+        let dst = SocketAddrV4::new(*self.server.ip(), self.nfs_port);
+        // Outstanding requests: xid → (block index, time sent, retries)
+        let mut inflight: std::collections::HashMap<u32, (usize, std::time::Instant, u32)> = std::collections::HashMap::new();
+        let mut next = 0usize;          // next block to request
+        let mut done = 0usize;
+        let mut got = vec![false; nblocks];
+        let old_timeout = self.sock.read_timeout()?;
+        self.sock.set_read_timeout(Some(Duration::from_millis(50)))?;
+        let mut buf = vec![0u8; 65536];
+        let send = |me: &mut Self, block: usize, inflight: &mut std::collections::HashMap<u32, (usize, std::time::Instant, u32)>, retries: u32| -> Result<()> {
+            me.xid = me.xid.wrapping_add(1);
+            let xid = me.xid;
+            let off = block as u32 * CHUNK;
             let want = CHUNK.min(size - off);
-            let block = self.read(fh, off, want)?;
-            if block.is_empty() { break; }
-            off += block.len() as u32;
-            out.extend_from_slice(&block);
-        }
+            let mut msg = Vec::with_capacity(84);
+            msg.extend_from_slice(&xid.to_be_bytes());
+            msg.extend_from_slice(&0u32.to_be_bytes());
+            msg.extend_from_slice(&2u32.to_be_bytes());
+            msg.extend_from_slice(&PROG_NFS.to_be_bytes());
+            msg.extend_from_slice(&2u32.to_be_bytes());
+            msg.extend_from_slice(&6u32.to_be_bytes());
+            msg.extend_from_slice(&[0; 16]);
+            msg.extend_from_slice(fh);
+            msg.extend_from_slice(&off.to_be_bytes());
+            msg.extend_from_slice(&want.to_be_bytes());
+            msg.extend_from_slice(&want.to_be_bytes());
+            me.sock.send_to(&msg, dst).context("nfs send")?;
+            inflight.insert(xid, (block, std::time::Instant::now(), retries));
+            Ok(())
+        };
+        let result = (|| -> Result<()> {
+            while done < nblocks {
+                while next < nblocks && inflight.len() < Self::WINDOW {
+                    send(self, next, &mut inflight, 0)?;
+                    next += 1;
+                }
+                match self.sock.recv_from(&mut buf) {
+                    Ok((n, _)) => {
+                        let r = &buf[..n];
+                        if n < 24 { continue; }
+                        let Some((block, _, _)) = inflight.remove(&be32(r, 0)) else { continue };
+                        if be32(r, 4) != 1 || be32(r, 8) != 0 { bail!("READ: RPC reply not accepted"); }
+                        let vlen = be32(r, 16) as usize;
+                        let mut off = 20 + ((vlen + 3) & !3);
+                        if be32(r, off) != 0 { bail!("READ: RPC accept_stat {}", be32(r, off)); }
+                        off += 4;
+                        let status = be32(r, off);
+                        if status != 0 { bail!("READ failed (status {status})"); }
+                        let dlen = be32(r, off + 4 + 68) as usize;
+                        let start = off + 4 + 68 + 4;
+                        let at = block * CHUNK as usize;
+                        let take = dlen.min(out.len() - at);
+                        out[at..at + take].copy_from_slice(&r[start..start + take]);
+                        if !got[block] { got[block] = true; done += 1; }
+                    }
+                    Err(_) => {
+                        // Re-send anything older than the retransmit timeout.
+                        let now = std::time::Instant::now();
+                        let stale: Vec<(u32, usize, u32)> = inflight.iter()
+                            .filter(|(_, (_, t, _))| now.duration_since(*t) > Duration::from_millis(400))
+                            .map(|(x, (b, _, k))| (*x, *b, *k)).collect();
+                        for (xid, block, k) in stale {
+                            inflight.remove(&xid);
+                            if k >= 8 { bail!("no READ reply for block {block} after {k} retries"); }
+                            send(self, block, &mut inflight, k + 1)?;
+                        }
+                    }
+                }
+            }
+            Ok(())
+        })();
+        self.sock.set_read_timeout(old_timeout)?;
+        result?;
         Ok(out)
     }
+
+    /// Reads in flight at once for [`read_file`](Self::read_file).
+    pub const WINDOW: usize = 32;
 
     /// List a directory (one READDIR; large dirs may need cookie paging — TODO).
     pub fn readdir(&mut self, fh: &Fh) -> Result<Vec<DirEntry>> {
