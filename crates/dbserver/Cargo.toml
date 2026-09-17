@@ -1,0 +1,13 @@
+[package]
+name        = "opendeck-dbserver"
+description = "Client for the Pioneer Pro DJ Link 'remote database' (dbserver) protocol: browse and query a CDJ/XDJ or rekordbox over TCP"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+log    = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }

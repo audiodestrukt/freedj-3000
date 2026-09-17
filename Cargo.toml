@@ -12,6 +12,7 @@ members = [
     "crates/db",
     "crates/rekordbox",
     "crates/nfs",
+    "crates/dbserver",
     "crates/ui",
     "crates/app",
 ]

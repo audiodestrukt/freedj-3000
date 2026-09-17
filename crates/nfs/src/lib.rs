@@ -6,6 +6,9 @@
 //! player exports its stick and others mount + read `export.pdb`, the `ANLZ`
 //! files, and the audio itself.
 //!
+//! rekordbox (the laptop app, LINK mode) serves the same NFSv2 export but its
+//! portmapper is on UDP **50111**, not 111 — see [`Nfs::connect_at`].
+//!
 //! Two Pioneer quirks (verified against a real XDJ-1000MK2):
 //!   * the export path and all NFS filenames are **UTF-16LE** (`P\0I\0O\0…`),
 //!   * requests should come from a **privileged source port** (< 1024).
@@ -23,6 +26,11 @@ const PROG_PORTMAP: u32 = 100_000;
 const PROG_MOUNT:   u32 = 100_005;
 const PROG_NFS:     u32 = 100_003;
 const IPPROTO_UDP:  u32 = 17;
+
+/// Portmapper port on CDJ/XDJ hardware (standard rpcbind).
+pub const PORTMAP_PLAYER:    u16 = 111;
+/// Portmapper port used by rekordbox on a laptop (unprivileged).
+pub const PORTMAP_REKORDBOX: u16 = 50_111;
 
 /// An opaque NFSv2 file handle (fixed 32 bytes).
 pub type Fh = [u8; 32];
@@ -61,15 +69,24 @@ fn wide(name: &str) -> Vec<u8> {
 }
 
 impl Nfs {
-    /// Connect to a player and resolve its mountd + nfsd UDP ports via portmap.
+    /// Connect to a player and resolve its mountd + nfsd UDP ports via the
+    /// standard portmapper on UDP 111 (CDJ/XDJ hardware).
     pub fn connect(ip: Ipv4Addr) -> Result<Self> {
+        Self::connect_at(ip, PORTMAP_PLAYER)
+    }
+
+    /// Like [`connect`](Self::connect) but with an explicit portmapper port.
+    /// rekordbox on a laptop can't bind 111 unprivileged, so it runs its
+    /// portmapper on [`PORTMAP_REKORDBOX`] (UDP 50111); a CDJ loading from
+    /// rekordbox asks there.
+    pub fn connect_at(ip: Ipv4Addr, portmap_port: u16) -> Result<Self> {
         // Bind a privileged source port; the CDJ NFS server expects < 1024.
         // Fall back to an ephemeral port if we can't (works on some setups).
         let sock = bind_privileged().context("bind UDP socket")?;
         sock.set_read_timeout(Some(Duration::from_secs(3)))?;
         let mut me = Nfs {
             sock,
-            server: SocketAddrV4::new(ip, 111),
+            server: SocketAddrV4::new(ip, portmap_port),
             mount_port: 0,
             nfs_port: 0,
             xid: 0x0102_0304,
@@ -127,8 +144,30 @@ impl Nfs {
         a.extend_from_slice(&vers.to_be_bytes());
         a.extend_from_slice(&IPPROTO_UDP.to_be_bytes());
         a.extend_from_slice(&0u32.to_be_bytes());
-        let r = self.call(PROG_PORTMAP, 2, 3, 111, &a)?;
+        let r = self.call(PROG_PORTMAP, 2, 3, self.server.port(), &a)?;
         Ok(be32(&r, 0) as u16)
+    }
+
+    /// MOUNTPROC_EXPORT: list the server's export names (raw bytes; Pioneer
+    /// gear returns UTF-16LE such as `/\0C\0/\0`).  Handy for discovering what a
+    /// rekordbox laptop exports (drive letters / volumes) before mounting.
+    pub fn exports(&mut self) -> Result<Vec<Vec<u8>>> {
+        let r = self.call(PROG_MOUNT, 1, 5, self.mount_port, &[])?;
+        let mut out = Vec::new();
+        let mut off = 0usize;
+        // exportlist: bool more; then { dirpath (opaque), groups (bool-chained names), next }
+        while off + 4 <= r.len() && be32(&r, off) == 1 {
+            off += 4;
+            let n = be32(&r, off) as usize; off += 4;
+            out.push(r[off..off + n].to_vec());
+            off += (n + 3) & !3;
+            while off + 4 <= r.len() && be32(&r, off) == 1 {      // groups
+                off += 4;
+                let g = be32(&r, off) as usize; off += 4 + ((g + 3) & !3);
+            }
+            off += 4;                                            // groups terminator
+        }
+        Ok(out)
     }
 
     /// MNT an export (raw bytes as advertised by the server, e.g. `/\0C\0/\0`).
