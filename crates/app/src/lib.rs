@@ -107,6 +107,10 @@ struct DeckApp {
     events:            Vec<Event>,
     /// Off-thread sources (MIDI, later HID/serial) send here; drained per frame.
     event_rx:          mpsc::Receiver<Event>,
+    /// A network load in progress: the fetch thread's result channel and the
+    /// name being loaded.  The deck keeps running until the bytes arrive.
+    fetch_rx:          Option<mpsc::Receiver<Result<Fetched>>>,
+    pub loading:       Option<String>,
     /// VINYL-mode drag began while playing: resume on release.
     jog_hold_resume:   bool,
     /// Jog nudge: a temporary speed offset that snaps back when the wheel stops.
@@ -374,6 +378,8 @@ impl DeckApp {
             portrait:          std::env::var("OPENDECK_PORTRAIT").map(|v| v == "1").unwrap_or(false),
             events:            Vec::new(),
             event_rx,
+            fetch_rx: None,
+            loading: None,
             jog_offset:        0.0,
             jog_until:         None,
             cue_point,
@@ -1151,65 +1157,101 @@ impl DeckApp {
     /// wire, decode from memory.  Blocks the UI for the fetch (a few seconds for
     /// a multi-MB read at 8 KB/NFS-read — non-blocking load is #19).
     fn load_track_link(&mut self, ip: std::net::Ipv4Addr, rel_path: &str, analyze_rel: &str) -> Result<()> {
-        let t0 = Instant::now();
-        let mut nfs = opendeck_nfs::Nfs::connect(ip)?;
-        let root = nfs.mount_usb()?;
-        let (fh, size) = nfs.lookup_path(&root, rel_path)?;
-        let audio = nfs.read_file(&fh, size)?;
-        let (samples, sr, ch, tags) = audio::decode_bytes(audio, rel_path.rsplit('.').next())?;
-        self.track_tags = tags;
-        let deck_sr = self.audio.sample_rate;
-        let grid_cue = if analyze_rel.is_empty() {
-            None
-        } else {
-            match nfs.lookup_path(&root, analyze_rel).and_then(|(afh, asz)| nfs.read_file(&afh, asz)) {
-                Ok(bytes) => Self::grid_from_anlz_bytes(&bytes, deck_sr, ch as u8),
-                Err(e) => { log::warn!("link ANLZ {analyze_rel}: {e:#}"); None }
-            }
-        };
-        self.path = std::path::PathBuf::from(rel_path);
-        self.finish_load(rel_path, samples, sr, ch, grid_cue, t0)
+        let (rel_path, analyze_rel) = (rel_path.to_string(), analyze_rel.to_string());
+        let name = rel_path.rsplit('/').next().unwrap_or(&rel_path).to_string();
+        self.start_fetch(name.clone(), move || {
+            let t0 = Instant::now();
+            let mut nfs = opendeck_nfs::Nfs::connect(ip)?;
+            let root = nfs.mount_usb()?;
+            let (fh, size) = nfs.lookup_path(&root, &rel_path)?;
+            let audio = nfs.read_file(&fh, size)?;
+            let grid = if analyze_rel.is_empty() { FetchedGrid::None } else {
+                match nfs.lookup_path(&root, &analyze_rel).and_then(|(afh, asz)| nfs.read_file(&afh, asz)) {
+                    Ok(bytes) => FetchedGrid::Anlz(bytes),
+                    Err(e) => { log::warn!("link ANLZ {analyze_rel}: {e:#}"); FetchedGrid::None }
+                }
+            };
+            log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
+            Ok(Fetched { name, path: rel_path, audio, grid, t0 })
+        })
     }
 
     /// Load a track a peer serves over dbserver: ask for the file path and
     /// beat grid, then read the audio over the peer's NFS export.  A player's
     /// portmapper is on 111 and exports "/C/"; rekordbox uses 50111 and "/".
+    /// All of that runs on a fetch thread; see [`poll_fetch`](Self::poll_fetch).
     fn load_track_db(&mut self, ip: std::net::Ipv4Addr, id: u32, title: &str, rekordbox: bool) -> Result<()> {
         use opendeck_dbserver::{parse_beat_grid, Client, Slot};
-        let t0 = Instant::now();
         let slot = if rekordbox { Slot::Collection } else { Slot::Usb };
         let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
-        let mut db = Client::discover(ip, device)?;
-        let path = db.file_path(slot, id)?
-            .ok_or_else(|| anyhow::anyhow!("LINK {ip}: no file path for track {id}"))?;
-        let beats = match db.beat_grid(slot, id) {
-            Ok(blob) => parse_beat_grid(&blob),
-            Err(e) => { log::info!("LINK {ip} beat grid {id}: {e:#}"); Vec::new() }
-        };
-        log::info!("LINK {ip}: track {id} at {path:?}, {} grid beats ({:.0} ms)", beats.len(), t0.elapsed().as_secs_f64() * 1e3);
+        let title = title.to_string();
+        self.start_fetch(title.clone(), move || {
+            let t0 = Instant::now();
+            let mut db = Client::discover(ip, device)?;
+            let path = db.file_path(slot, id)?
+                .ok_or_else(|| anyhow::anyhow!("LINK {ip}: no file path for track {id}"))?;
+            let beats = match db.beat_grid(slot, id) {
+                Ok(blob) => parse_beat_grid(&blob),
+                Err(e) => { log::info!("LINK {ip} beat grid {id}: {e:#}"); Vec::new() }
+            };
+            log::info!("LINK {ip}: track {id} at {path:?}, {} grid beats ({:.0} ms)", beats.len(), t0.elapsed().as_secs_f64() * 1e3);
+            let pm = if rekordbox { opendeck_nfs::PORTMAP_REKORDBOX } else { opendeck_nfs::PORTMAP_PLAYER };
+            let mut nfs = opendeck_nfs::Nfs::connect_at(ip, pm)?;
+            let fallback = if rekordbox { "/" } else { "/C/" };
+            let export = nfs.exports()?.into_iter().next()
+                .unwrap_or_else(|| fallback.encode_utf16().flat_map(|u| u.to_le_bytes()).collect());
+            let root = nfs.mount(&export)?;
+            let (fh, size) = nfs.lookup_path(&root, &path)?;
+            let audio = nfs.read_file(&fh, size)?;
+            log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
+            let name = if title.is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { title };
+            Ok(Fetched { name, path, audio, grid: FetchedGrid::Beats(beats), t0 })
+        })
+    }
 
-        let pm = if rekordbox { opendeck_nfs::PORTMAP_REKORDBOX } else { opendeck_nfs::PORTMAP_PLAYER };
-        let mut nfs = opendeck_nfs::Nfs::connect_at(ip, pm)?;
-        let fallback = if rekordbox { "/" } else { "/C/" };
-        let export = nfs.exports()?.into_iter().next()
-            .unwrap_or_else(|| fallback.encode_utf16().flat_map(|u| u.to_le_bytes()).collect());
-        let root = nfs.mount(&export)?;
-        let (fh, size) = nfs.lookup_path(&root, &path)?;
-        let audio = nfs.read_file(&fh, size)?;
-        log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
-        let (samples, sr, ch, tags) = audio::decode_bytes(audio, path.rsplit('.').next())?;
+    /// Run `fetch` on a thread and remember its result channel.  The deck
+    /// keeps playing; the frame loop completes the load when the bytes land.
+    fn start_fetch(&mut self, name: String, fetch: impl FnOnce() -> Result<Fetched> + Send + 'static) -> Result<()> {
+        let (tx, rx) = mpsc::channel();
+        std::thread::Builder::new().name("track-fetch".into()).spawn(move || { let _ = tx.send(fetch()); })?;
+        log::info!("loading {name:?} in the background");
+        self.loading = Some(name);
+        self.fetch_rx = Some(rx);
+        Ok(())
+    }
+
+    /// Complete a background load whose bytes have arrived (decode + finish).
+    fn poll_fetch(&mut self) {
+        let Some(rx) = &self.fetch_rx else { return };
+        let got = match rx.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("fetch thread died")),
+        };
+        self.fetch_rx = None;
+        self.loading = None;
+        let f = match got { Ok(f) => f, Err(e) => { log::warn!("load failed: {e:#}"); return } };
+        if let Err(e) = self.complete_fetch(f) { log::warn!("load failed: {e:#}"); }
+    }
+
+    fn complete_fetch(&mut self, f: Fetched) -> Result<()> {
+        let (samples, sr, ch, tags) = audio::decode_bytes(f.audio, f.path.rsplit('.').next())?;
         self.track_tags = tags;
         let deck_sr = self.audio.sample_rate;
-        let grid_cue = (!beats.is_empty()).then(|| {
-            let a = opendeck_rekordbox::RbAnalysis {
-                beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
-                memory_cues: Vec::new(), hot_cues: Vec::new(),
-            };
-            Self::anlz_to_grid(a, deck_sr, ch as u8)
-        }).flatten();
-        self.path = std::path::PathBuf::from(&path);
-        let name = if title.is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { title.to_string() };
-        self.finish_load(&name, samples, sr, ch, grid_cue, t0)
+        let grid_cue = match f.grid {
+            FetchedGrid::None => None,
+            FetchedGrid::Anlz(bytes) => Self::grid_from_anlz_bytes(&bytes, deck_sr, ch as u8),
+            FetchedGrid::Beats(beats) if !beats.is_empty() => {
+                let a = opendeck_rekordbox::RbAnalysis {
+                    beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
+                    memory_cues: Vec::new(), hot_cues: Vec::new(),
+                };
+                Self::anlz_to_grid(a, deck_sr, ch as u8)
+            }
+            FetchedGrid::Beats(_) => None,
+        };
+        self.path = std::path::PathBuf::from(&f.path);
+        self.finish_load(&f.name, samples, sr, ch, grid_cue, f.t0)
     }
 
     /// Shared load tail: resample to the deck rate, build the waveform, apply the
@@ -1597,6 +1639,7 @@ impl DeckApp {
         for ev in pending {
             self.apply(ev);
         }
+        self.poll_fetch();
         // Jog nudge snap-back: once the wheel has been still past the window,
         // return to the pitch-fader speed.
         if let Some(until) = self.jog_until {
@@ -1697,6 +1740,10 @@ fn set_idle_timer_disabled(disabled: bool) {
 /// (its first memory point), every memory point, and hot cues A–H — all as
 /// interleaved samples.
 struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8] }
+
+/// A track fetched over the network by a background thread, ready to decode.
+struct Fetched { name: String, path: String, audio: Vec<u8>, grid: FetchedGrid, t0: Instant }
+enum FetchedGrid { None, Anlz(Vec<u8>), Beats(Vec<opendeck_dbserver::GridBeat>) }
 
 // ── Memory-point lookup ────────────────────────────────────────────────────────
 // `cues` is sorted, interleaved sample indices.  `tol` is the match tolerance
