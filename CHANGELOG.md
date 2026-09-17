@@ -20,6 +20,13 @@ All notable changes to this project will be documented in this file.
 - `OPENDECK_LINK_UNICAST=ip,…` sends announces straight to peers across a
   routed link (Tailscale), and peers are addressed where their announce came
   from, not the address inside the packet.
+- **Fast network loads.** NFS reads keep 32 requests in flight instead of one
+  (NFSv2 caps a read at 8 KB, so a serial client paid one round trip per
+  8 KB: about two minutes for a 12 MB track over a phone hotspot, now a few
+  seconds). The fetch runs on a background thread, so the deck keeps playing
+  and responding while a LINK track streams in. (#31, #19 network half)
+- `docs/reference/prodj-link-media.md`: how media browsing and loading works
+  between decks (dbserver + NFS), rekordbox 7 findings, test recipes.
 
 ## [0.1.13] — 2026-09-16
 

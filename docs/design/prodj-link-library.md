@@ -1,8 +1,15 @@
 # Design: track browse / load over ProDJ Link (rekordbox-on-the-network)
 
-Status: **feasibility + plan** (2026-08-26). Not built. Answers "can freedj do
-the file transfer of songs over the CDJ link like the XDJ does?" — short answer:
-**yes for nexus/nexus2-era gear (incl. XDJ-1000MK2), with real caveats.**
+Status: **built, both directions** (2026-09-17). The consumer direction below
+(load from an XDJ's USB) shipped first over NFS + `export.pdb`; the provider
+direction turned out far smaller than feared because players and rekordbox
+browse each other through **dbserver**, not by reading a `pdb`, so no
+`export.pdb` / ANLZ writer was needed. The as-built reference, wire details
+and test recipes are in **`docs/reference/prodj-link-media.md`**; this page is
+kept as the original feasibility study. Written 2026-08-26 to answer "can
+freedj do the file transfer of songs over the CDJ link like the XDJ does?" —
+short answer: **yes for nexus/nexus2-era gear (incl. XDJ-1000MK2), with real
+caveats.**
 
 > Protocol details here are recalled from the reverse-engineering community and
 > should be verified against **Deep Symmetry's** current docs before coding

@@ -455,10 +455,15 @@ the cue overlays once the transport is wired (C2).
 `crates/db` (SQLite + FTS5) becomes the cache/index over imported exports and
 our own analysed files.
 
-### F3. Network library (dbserver, port 1051 via 12523 lookup) — **large**
+### F3. Network library (dbserver, port 1051 via 12523 lookup) — **done** (2026-09-17)
 
-Browse a linked CDJ's USB from freedj, and eventually serve ours. Same
-ecosystem as Link; later.
+Both directions. freedj browses any Link peer over dbserver (players and
+rekordbox 7) and loads audio over NFSv2 (portmap 111 for players, 50111 for
+rekordbox), with 32 reads in flight and the fetch on a background thread. It
+also *serves*: dbserver + NFSv2 servers, media-query answers and USB-loaded
+status flags, so other decks list it under LINK and load from it (proven
+OpenDeck→OpenDeck across machines; XDJ acceptance test pending). Reference:
+`docs/reference/prodj-link-media.md`; issues #27, #30, #31, #44.
 
 ### F4. Write rekordbox exports — **large, low priority**
 

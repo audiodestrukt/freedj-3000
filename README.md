@@ -29,11 +29,13 @@ This project takes the position that DJ equipment protocols are infrastructure, 
 | Beat detection (MiniBPM) | ✅ Working |
 | Beat grid overlay | ✅ Working |
 | MIDI controller input | ✅ Working |
-| ProDJ Link beat sync (receive + send) | ✅ Working — status packets and SYNC follow pending |
+| ProDJ Link beat sync (receive + send, SYNC, master handoff) | ✅ Working on a real XDJ-1000MK2 |
+| ProDJ Link media: load tracks from linked players / rekordbox | ✅ Working (dbserver + NFS) |
+| ProDJ Link media: serve tracks to other decks | ✅ Working — OpenDeck→OpenDeck proven; XDJ acceptance test pending |
 | Cue points / loops | 📋 Planned |
 | Key lock / timestretching | ✅ Working |
 | Hardware control surface | 📋 Planned |
-| rekordbox library import | 📋 Planned |
+| rekordbox library import (USB export, LINK, rekordbox 7 in LINK mode) | ✅ Working |
 
 ---
 
@@ -153,7 +155,16 @@ FreeDJ-3000 is a Link peer: it announces itself on UDP 50000 every 1.5 s and
 sends a beat packet on 50001 at every beat of the audible position, as player
 `--player N` (default 1; `OPENDECK_PLAYER` also works). It listens on 50001
 (where real CDJ/XDJ hardware sends beats) and 50002, ignoring its own
-broadcasts. Status packets (50002) are not sent yet.
+broadcasts. Status packets go out on 50002; SYNC follows the master and the
+master handoff works both ways with a real XDJ.
+
+**Media over the link.** The LINK folder in the browser lists every peer with
+media (players and a rekordbox laptop in LINK mode); tracks browse over
+Pioneer's dbserver protocol and load over NFSv2. The app also *serves* its
+music folder the same way, so other decks list it under LINK and load from
+it (`OPENDECK_SERVE=0` disables; `opendeck-serve <dir>` is the stand-alone
+server). Wire details, rekordbox quirks and test recipes:
+`docs/reference/prodj-link-media.md`.
 
 Two instances on one machine link to each other:
 
@@ -250,9 +261,8 @@ The name is deliberately provocative. The CDJ-3000 is not a trademark we are imi
 The codebase is Rust throughout. Contributions welcome in any area. The most useful near-term work:
 
 - **Beat grid editor** — UI for manually correcting auto-detected beat grids
-- **rekordbox USB export parser** — read Pioneer's USB drive format to import existing libraries
 - **RP2350 firmware** — no_std Rust for the control surface MCU
-- **ProDJ Link status parsing** — receive track info and waveform data from real CDJs
+- **XDJ media-source acceptance** — an XDJ browsing and loading from OpenDeck over LINK (dbserver + NFS servers are in; see `docs/reference/prodj-link-media.md`)
 - **Hardware BOM and PCB** — the physical build hasn't started yet
 
 See `AUDIO_ENGINE.md` for detailed design documentation on the audio engine.
