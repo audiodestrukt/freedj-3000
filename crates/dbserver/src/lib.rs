@@ -38,6 +38,10 @@ pub mod kind {
     pub const ALL_TRACKS:     u16 = 0x1004;
     pub const PLAYLIST:       u16 = 0x1105;
     pub const METADATA:       u16 = 0x2002;
+    /// Track "info" menu: the row with item type 0 carries the absolute file
+    /// path on the serving device (what a CDJ asks before loading from
+    /// rekordbox — dysentery #5's "21 02" request).
+    pub const TRACK_INFO:     u16 = 0x2102;
     pub const ARTWORK:        u16 = 0x2003;
     pub const WAVE_PREVIEW:   u16 = 0x2004;
     pub const CUES:           u16 = 0x2104;
@@ -51,6 +55,13 @@ pub mod kind {
     pub const MENU_ITEM:      u16 = 0x4101;
     pub const MENU_FOOTER:    u16 = 0x4201;
     pub const UNAVAILABLE:    u16 = 0x4003;
+    pub const ARTWORK_BLOB:   u16 = 0x4002;
+    pub const WAVE_PREVIEW_BLOB: u16 = 0x4402;
+    pub const BEAT_GRID_BLOB: u16 = 0x4602;
+    pub const CUES_BLOB:      u16 = 0x4702;
+    pub const WAVE_DETAIL_BLOB: u16 = 0x4a02;
+    pub const CUES_EXT_BLOB:  u16 = 0x4e02;
+    pub const ANLZ_TAG_BLOB:  u16 = 0x4f02;
 }
 
 /// Media slot (byte 2 of the DMST argument).
@@ -183,7 +194,7 @@ impl MenuItem {
             0x000b => "duration", 0x000d => "tempo",    0x000e => "label",    0x000f => "key",
             0x0010 => "bitrate",  0x0011 => "year",     0x0013..=0x001a => "color",
             0x0023 => "comment",  0x0024 => "history",  0x0028 => "orig-artist", 0x0029 => "remixer",
-            0x002e => "date-added", 0x0080 => "root",   0x0081 => "root-genre", 0x0082 => "root-artist",
+            0x002e => "date-added", 0x0000 => "path",   0x002f => "flag?",  0x0080 => "root",   0x0081 => "root-genre", 0x0082 => "root-artist",
             0x0083 => "root-album", 0x0084 => "root-track", 0x0085 => "root-playlist",
             0x0086 => "root-bpm", 0x0087 => "root-rating", 0x0088 => "root-year", 0x0089 => "root-remixer",
             0x008a => "root-label", 0x008b => "root-orig-artist", 0x008c => "root-key",
@@ -306,6 +317,50 @@ impl Client {
     /// Metadata rows (title, artist, album, duration, tempo, key, …) for one track.
     pub fn metadata(&mut self, slot: Slot, rekordbox_id: u32) -> Result<Vec<MenuItem>> {
         self.menu(kind::METADATA, slot, TrackType::Rekordbox, vec![Field::U32(rekordbox_id)])
+    }
+
+    /// The track's absolute path on the serving device (e.g.
+    /// `/Users/me/Music/rekordbox/x.wav` from rekordbox on a Mac), or None if
+    /// the info menu has no path row.  Read it over NFS afterwards.
+    pub fn file_path(&mut self, slot: Slot, rekordbox_id: u32) -> Result<Option<String>> {
+        let rows = self.menu(kind::TRACK_INFO, slot, TrackType::Rekordbox, vec![Field::U32(rekordbox_id)])?;
+        Ok(rows.into_iter().find(|r| r.item_type & 0xffff == 0 && !r.label.is_empty()).map(|r| r.label))
+    }
+
+    /// Send a blob request and return the blob argument of the reply.
+    fn blob(&mut self, kind_: u16, want: u16, args: Vec<Field>) -> Result<Vec<u8>> {
+        let r = self.request(kind_, args)?;
+        if r.kind != want { bail!("dbserver: 0x{kind_:04x} answered with 0x{:04x}", r.kind); }
+        r.args.iter().find_map(|f| if let Field::Blob(b) = f { Some(b.clone()) } else { None })
+            .ok_or_else(|| anyhow::anyhow!("dbserver: 0x{want:04x} reply carries no blob"))
+    }
+
+    /// Waveform preview (the 400-column overview; 0x2004 → 0x4402).
+    pub fn waveform_preview(&mut self, slot: Slot, id: u32) -> Result<Vec<u8>> {
+        let d = self.dmst(8, slot, TrackType::Rekordbox);
+        self.blob(kind::WAVE_PREVIEW, kind::WAVE_PREVIEW_BLOB, vec![d, Field::U32(4), Field::U32(id), Field::U32(0)])
+    }
+
+    /// Waveform detail (0x2904 → 0x4a02).
+    pub fn waveform_detail(&mut self, slot: Slot, id: u32) -> Result<Vec<u8>> {
+        let d = self.dmst(1, slot, TrackType::Rekordbox);
+        self.blob(kind::WAVE_DETAIL, kind::WAVE_DETAIL_BLOB, vec![d, Field::U32(id), Field::U32(0)])
+    }
+
+    /// Beat grid (0x2204 → 0x4602).
+    pub fn beat_grid(&mut self, slot: Slot, id: u32) -> Result<Vec<u8>> {
+        let d = self.dmst(8, slot, TrackType::Rekordbox);
+        self.blob(kind::BEAT_GRID, kind::BEAT_GRID_BLOB, vec![d, Field::U32(id)])
+    }
+
+    /// A raw ANLZ section by four-character tag (e.g. `b"PWV4"`, `b"PSSI"`)
+    /// from the `.EXT` (`b"EXT"`) or `.DAT`/`.2EX` file (0x2c04 → 0x4f02).
+    /// This is what rekordbox serves instead of some native requests.
+    pub fn anlz_tag(&mut self, slot: Slot, id: u32, tag: &[u8; 4], ext: &[u8; 3]) -> Result<Vec<u8>> {
+        let d = self.dmst(1, slot, TrackType::Rekordbox);
+        let tag_code = u32::from_be_bytes([tag[3], tag[2], tag[1], tag[0]]);
+        let ext_code = u32::from_be_bytes([0, ext[2], ext[1], ext[0]]);
+        self.blob(kind::ANLZ_TAG, kind::ANLZ_TAG_BLOB, vec![d, Field::U32(id), Field::U32(tag_code), Field::U32(ext_code)])
     }
 }
 

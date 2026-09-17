@@ -31,7 +31,10 @@ fn main() -> anyhow::Result<()> {
 
     if let Some(t) = tracks.first() {
         println!("\n== metadata for #{} ==", t.id);
-        for i in c.metadata(slot, t.id)? { println!("  {:<12} {}  {}", i.type_name(), i.label, i.label2); }
+        for i in c.metadata(slot, t.id)? {
+            // Numeric rows (duration in s, tempo ×100, rating, year…) carry the value in `id`.
+            println!("  {:<12} {:<32} {:<12} id={}", i.type_name(), i.label, i.label2, i.id);
+        }
     }
     Ok(())
 }
