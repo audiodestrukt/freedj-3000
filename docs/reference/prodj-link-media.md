@@ -131,7 +131,10 @@ stand-alone as `opendeck-serve`. What "serving" means:
    as loaded (`0x6f = 0`, SD `0x73 = 4`, link media `0x75 = 1`), which is
    what makes another player list us under LINK.
 2. **Media query → media response** (`crates/link/src/prodj.rs`,
-   `build_media_response`): name "OPENDECK", track and playlist counts, capacity.
+   `build_media_response`): name "OPENDECK", track and playlist counts,
+   capacity. The reply goes to the address inside the query *and*, when that
+   differs, to the address the query came from (port 50002 either way):
+   across a routed link the inner address is the peer's LAN address.
 3. **dbserver** (`crates/dbserver/src/server.rs`): port query, setup, root
    menu (`0x1000`: PLAYLIST / ARTIST / ALBUM / TRACK / FILENAME), all tracks,
    artists and albums with their drill-downs (`0x1002`, `0x1003`, `0x1102`,
@@ -155,7 +158,9 @@ writes the result to a cache (`app data/linkcache/<hash>.v1`, keyed by path +
 size + mtime) so only the first launch pays. Rows update in place behind an
 `RwLock`; artist and album ids are hashes of the name so a menu stays valid
 while rows are still being renamed. Artwork is read from the file on request
-rather than kept in memory.
+rather than kept in memory. The deck's own loads read and write the same
+cache (`docs/design/track-loading.md`), so a track is analysed once whether
+the deck or the library got to it first.
 
 Waveform encoding follows what Beat Link decodes from a player, since no
 capture from a real one exists yet: preview = 400 × (height 0–31, whiteness

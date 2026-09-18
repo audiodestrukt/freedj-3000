@@ -14,11 +14,11 @@
 //! binary run exactly this.
 
 use anyhow::{Context, Result};
-use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder};
+use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_dbserver::server::{Library, SharedLibrary, Track};
-use opendeck_decode::SymphoniaDecoder;
+use opendeck_decode::{SymphoniaDecoder, TrackTags};
 use opendeck_nfs::server::Tree;
-use opendeck_types::{BeatAnalyzer, Decoder};
+use opendeck_types::{BeatAnalyzer, BeatGrid, Decoder};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -86,6 +86,29 @@ pub struct Analysis {
 }
 
 impl Analysis {
+    /// The same record from what a deck load already produced (its tags, the
+    /// grid it resolved, its waveform cache), so a track the deck analysed is
+    /// never analysed again for the library, and the other way round.
+    /// `frames` and `sr` describe the samples the waveform and grid are in.
+    pub fn from_deck(tags: &TrackTags, grid: Option<&BeatGrid>, wave: &WaveformCache, frames: u64, sr: u32, file_bytes: u64) -> Analysis {
+        let duration_s = (frames as f64 / sr as f64).round() as u32;
+        let (bpm, beats) = match grid {
+            Some(g) => (g.bpm as f32, grid_beats(g.anchor_sample, g.bpm, g.downbeat_offset, sr, frames)),
+            None => (0.0, Vec::new()),
+        };
+        let (preview, detail) = waveform_blobs(wave, frames, sr);
+        Analysis {
+            title:   tags.title.clone().unwrap_or_default(),
+            artist:  tags.artist.clone().unwrap_or_default(),
+            album:   tags.album.clone().unwrap_or_default(),
+            comment: tags.comment.clone().unwrap_or_default(),
+            key:     tags.key.clone().unwrap_or_default(),
+            duration_s, bpm, beats, preview, detail,
+            bitrate: if duration_s > 0 { (file_bytes * 8 / duration_s as u64 / 1000) as u32 } else { 0 },
+            has_art: tags.artwork.is_some(),
+        }
+    }
+
     fn apply(&self, t: &mut Track) {
         if !self.title.is_empty() { t.title = self.title.clone(); }
         t.artist = self.artist.clone();
@@ -134,28 +157,29 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
             lead.extend_from_slice(&stereo[..take]);
         }
     }
-    let duration_s = (frames as f64 / sr as f64).round() as u32;
     let wave = wb.finish();
-
     let mut ba = BeatAnalyzerImpl::new(sr);
     ba.push(&lead, sr);
     drop(lead);
-    let (bpm, beats) = match ba.beat_grid() {
-        Some(g) => (g.bpm as f32, grid_beats(g.anchor_sample, g.bpm, g.downbeat_offset, sr, frames)),
-        None => (0.0, Vec::new()),
-    };
+    let grid = ba.beat_grid();
+    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    Ok(Analysis::from_deck(&tags, grid.as_deref(), &wave, frames, sr, bytes))
+}
 
-    // Column c covers hop_size frames; amplitude and the high band drive the
-    // height and whiteness the way a player's blue waveform reads, scaled so
-    // the track's loudest column fills the 31 px a player draws.
+/// The two waveform blobs a player asks for, from a deck-style waveform
+/// cache.  Column c covers `hop_size` frames; amplitude and the high band
+/// drive height and whiteness the way a player's blue waveform reads, scaled
+/// so the track's loudest column fills the 31 px a player draws.
+pub fn waveform_blobs(wave: &WaveformCache, frames: u64, sr: u32) -> (Vec<u8>, Vec<u8>) {
     let cols = &wave.columns;
-    let hop = wave.hop_size as u64;
-    let col_at = |frame: u64| ((frame / hop) as usize).min(cols.len().saturating_sub(1));
+    if cols.is_empty() || frames == 0 { return (Vec::new(), Vec::new()); }
+    let hop = wave.hop_size.max(1) as u64;
+    let col_at = |frame: u64| ((frame / hop) as usize).min(cols.len() - 1);
     let max_amp  = cols.iter().map(|c| c[3] as u32).max().unwrap_or(0).max(1);
     let max_high = cols.iter().map(|c| c[2] as u32).max().unwrap_or(0).max(1);
     let pack = |c: &[u8; 4]| -> (u8, u8) { ((c[3] as u32 * 31 / max_amp) as u8, (c[2] as u32 * 7 / max_high) as u8) };
     let mut preview = Vec::with_capacity(PREVIEW_COLUMNS * 2);
-    for i in 0..PREVIEW_COLUMNS * (!cols.is_empty()) as usize {
+    for i in 0..PREVIEW_COLUMNS {
         let (a, b) = (col_at(frames * i as u64 / PREVIEW_COLUMNS as u64), col_at(frames * (i as u64 + 1) / PREVIEW_COLUMNS as u64));
         let (mut h, mut w) = (0u8, 0u8);
         for c in &cols[a..=b.max(a)] { let (ch, cw) = pack(c); h = h.max(ch); w = w.max(cw); }
@@ -163,28 +187,16 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     }
     let half_frames = (frames * DETAIL_PER_SEC as u64 / sr as u64) as usize;
     let mut detail = Vec::with_capacity(half_frames);
-    for j in 0..half_frames * (!cols.is_empty()) as usize {
-        let c = col_at(j as u64 * sr as u64 / DETAIL_PER_SEC as u64);
-        let (h, w) = pack(&cols[c]);
+    for j in 0..half_frames {
+        let (h, w) = pack(&cols[col_at(j as u64 * sr as u64 / DETAIL_PER_SEC as u64)]);
         detail.push((w << 5) | h);
     }
-
-    let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    let bitrate = if duration_s > 0 { (bytes * 8 / duration_s as u64 / 1000) as u32 } else { 0 };
-    Ok(Analysis {
-        title:   tags.title.clone().unwrap_or_default(),
-        artist:  tags.artist.clone().unwrap_or_default(),
-        album:   tags.album.clone().unwrap_or_default(),
-        comment: tags.comment.clone().unwrap_or_default(),
-        key:     tags.key.clone().unwrap_or_default(),
-        duration_s, bpm, bitrate, beats, preview, detail,
-        has_art: tags.artwork.is_some(),
-    })
+    (preview, detail)
 }
 
 /// Expand a constant grid into the per-beat list a `0x4602` blob carries:
 /// from the anchor to the end of the track, beat-in-bar 1–4.
-fn grid_beats(anchor: u64, bpm: f64, downbeat_offset: u8, sr: u32, frames: u64) -> Vec<(u8, f32, u32)> {
+pub fn grid_beats(anchor: u64, bpm: f64, downbeat_offset: u8, sr: u32, frames: u64) -> Vec<(u8, f32, u32)> {
     if bpm <= 0.0 { return Vec::new(); }
     let period = 60.0 * sr as f64 / bpm;
     let mut out = Vec::new();
@@ -214,6 +226,20 @@ fn cache_key(path: &Path) -> Option<String> {
         h ^= b as u64; h = h.wrapping_mul(0x0100_0000_01b3);
     }
     Some(format!("{h:016x}.v{CACHE_VERSION}"))
+}
+
+/// The cached analysis of `path`, if the file is unchanged since it was written.
+pub fn load_cached(cache_dir: &Path, path: &Path) -> Option<Analysis> {
+    let key = cache_key(path)?;
+    decode(&std::fs::read(cache_dir.join(key)).ok()?)
+}
+
+/// Write `a` as the cached analysis of `path` (as it is now).
+pub fn store_cached(cache_dir: &Path, path: &Path, a: &Analysis) -> Result<()> {
+    let key = cache_key(path).context("stat for cache key")?;
+    std::fs::create_dir_all(cache_dir)?;
+    std::fs::write(cache_dir.join(key), encode(a))?;
+    Ok(())
 }
 
 fn put_str(out: &mut Vec<u8>, s: &str) { out.extend_from_slice(&(s.len() as u32).to_le_bytes()); out.extend_from_slice(s.as_bytes()); }
@@ -263,14 +289,13 @@ pub fn start_analysis(lib: SharedLibrary, files: Vec<(u32, PathBuf)>, cache_dir:
         let t0 = Instant::now();
         let (mut cached, mut fresh, mut failed) = (0, 0, 0);
         for (id, path) in &files {
-            let cache_file = cache_dir.as_ref().and_then(|d| cache_key(path).map(|k| d.join(k)));
-            let from_cache = cache_file.as_ref().and_then(|f| std::fs::read(f).ok()).and_then(|b| decode(&b));
+            let from_cache = cache_dir.as_ref().and_then(|d| load_cached(d, path));
             let a = match from_cache {
                 Some(a) => { cached += 1; a }
                 None => match analyze(path) {
                     Ok(a) => {
                         fresh += 1;
-                        if let Some(f) = &cache_file { if let Err(e) = std::fs::write(f, encode(&a)) { log::warn!("media: cache {}: {e}", f.display()); } }
+                        if let Some(d) = &cache_dir { if let Err(e) = store_cached(d, path, &a) { log::warn!("media: cache {}: {e:#}", path.display()); } }
                         log::info!("media: analysed [{id}] {:?}: {}:{:02} {:.1} BPM, {} beats{}", if a.title.is_empty() { path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default() } else { a.title.clone() },
                                    a.duration_s / 60, a.duration_s % 60, a.bpm, a.beats.len(), if a.has_art { ", art" } else { "" });
                         std::thread::sleep(PAUSE_BETWEEN);

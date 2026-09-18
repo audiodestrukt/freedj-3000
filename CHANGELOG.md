@@ -47,6 +47,12 @@ All notable changes to this project will be documented in this file.
   data dir), and answers artist / album / filename menus and the artwork and
   waveform requests. Other decks see file names at once and the full rows as
   each track is analysed. (#44)
+- **One analysis per track.** Deck loads and the served library share the
+  link cache: a load takes its grid from the server's analysis when there is
+  one and writes its own analysis when there is not, so MiniBPM no longer
+  runs twice per track (once for the deck, once for the library).
+- Media responses also go to the address a query came from, so a peer across
+  a routed link (Tailscale) sees our media name.
 - Dev: `OPENDECK_SCREENSHOT_FRAME=n` picks the captured frame;
   `PROBE_DUMP=file` makes `dbserver_probe` write a reply's blob out.
 

@@ -90,6 +90,17 @@ later cue capture (CUE, hot cues, loops) must use `smoothed_pos`, the heard
 position, not `audio.position`. See the memory note "cue capture uses heard,
 not raw".
 
+**A local load and the media server share one analysis.** The app serves
+its browse root over Link, and that server analyses every file in the
+background (`opendeck-mediaserver`). Without sharing, each track would be
+analysed twice: once for the deck and once for the library. So `Prep`
+carries the link cache dir (`linkcache/` in the app data dir): a local load
+with no ANLZ takes its grid from the cache when the server already analysed
+the file (`grid_src = "cache"`, no detector pass), and when it had to detect
+it writes the record (tags, grid, waveforms from its own `WaveformCache`)
+so the server skips the file. The startup track does the same in `run`.
+Cache keys are path + size + mtime, so a re-tagged file re-analyses.
+
 **Grid precedence in `apply_prepared`.** A hand-adjusted grid in `grids.json`
 (keyed by path) beats whatever the loader resolved. `grid_orig` keeps the
 loader's grid so GRID ADJUST can reset. The Link sender's grid is swapped at

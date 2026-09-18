@@ -397,8 +397,14 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
                 let n = link.serve_tracks.load(Ordering::Relaxed);
                 log::info!("ProDJ Link: media query from device {dev} ({rip}) for player {target} slot {slot}; serving {n} tracks");
                 if target == link.player && n > 0 && matches!(slot, 0 | 3) {
+                    // To the address inside the packet and, across a routed
+                    // link where that is the peer's LAN address, to where the
+                    // query came from — on the status port either way.
                     let resp = me.build_media_response(rip, 3, "OPENDECK", n.min(u16::MAX as u32) as u16, 0, 32 << 30, 16 << 30);
-                    if let Some(s) = &reply_sock { let _ = s.send_to(&resp, (rip, PORT_STATUS)); }
+                    if let Some(s) = &reply_sock {
+                        let _ = s.send_to(&resp, (rip, PORT_STATUS));
+                        if let std::net::SocketAddr::V4(f) = addr { if *f.ip() != rip { let _ = s.send_to(&resp, (*f.ip(), PORT_STATUS)); } }
+                    }
                 }
             }
             return;

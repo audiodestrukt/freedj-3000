@@ -115,9 +115,13 @@ fn main() -> Result<()> {
                             Some((dev, rip, target, slot)) => {
                                 log::info!("link: media query from device {dev} {rip} (via {from}) for player {target} slot {slot}");
                                 if target == o.player && (slot == 3 || slot == 0) {
+                                    // Reply to the address inside the packet (a player on the
+                                    // LAN) and to where it actually came from, on the status
+                                    // port: across a routed link the inner address is the
+                                    // peer's LAN address, unreachable from here.
                                     let resp = link.build_media_response(rip, 3, "OPENDECK", n_tracks, 0, 32 << 30, 16 << 30);
                                     let _ = st.send_to(&resp, SocketAddrV4::new(rip, PORT_STATUS));
-                                    let _ = st.send_to(&resp, from);
+                                    if let std::net::SocketAddr::V4(f) = from { if *f.ip() != rip { let _ = st.send_to(&resp, SocketAddrV4::new(*f.ip(), PORT_STATUS)); } }
                                     log::info!("link: → media response ({} tracks) to {rip}", n_tracks);
                                 }
                             }

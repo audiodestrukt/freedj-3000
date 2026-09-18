@@ -1152,8 +1152,32 @@ impl DeckApp {
     fn prepare_local(prep: Prep, path: std::path::PathBuf, analyze: Option<std::path::PathBuf>) -> Result<Prepared> {
         let t0 = Instant::now();
         let (samples, sr, ch, tags) = audio::decode_file(&path)?;
-        let grid_cue = analyze.and_then(|p| Self::grid_from_anlz(&p, prep.deck_sr, ch as u8));
-        prep.finish(path.display().to_string(), path, samples, sr, ch, tags, grid_cue, t0)
+        // Grid: the rekordbox ANLZ next to the file, else what the media
+        // server's analysis cached for it, else detect (and cache) it here.
+        let cached = opendeck_mediaserver::load_cached(&prep.cache_dir, &path).filter(|a| !a.beats.is_empty());
+        let from_cache = cached.is_some();
+        let grid_cue = analyze.and_then(|p| Self::grid_from_anlz(&p, prep.deck_sr, ch as u8))
+            .or_else(|| cached.as_ref().and_then(|a| Self::grid_from_analysis(a, prep.deck_sr, ch as u8)));
+        let (cache_dir, deck_sr) = (prep.cache_dir.clone(), prep.deck_sr);
+        let mut p = prep.finish(path.display().to_string(), path.clone(), samples, sr, ch, tags, grid_cue, t0)?;
+        if from_cache { p.grid_src = "cache"; }
+        else {
+            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let a = opendeck_mediaserver::Analysis::from_deck(&p.tags, p.beat_grid.as_ref(), &p.waveform, (p.samples.len() / p.ch.max(1)) as u64, deck_sr, bytes);
+            if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, &path, &a) { log::info!("link cache: {e:#}"); }
+        }
+        Ok(p)
+    }
+
+    /// A grid from a cached media-server analysis (our own detector's beats,
+    /// or a rekordbox grid a previous load resolved), as a load would take
+    /// from an ANLZ file.
+    fn grid_from_analysis(a: &opendeck_mediaserver::Analysis, deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
+        let rb = opendeck_rekordbox::RbAnalysis {
+            beats: a.beats.iter().map(|&(bib, bpm, ms)| opendeck_rekordbox::RbBeat { time_ms: ms, bpm, beat_in_bar: bib }).collect(),
+            memory_cues: Vec::new(), hot_cues: Vec::new(),
+        };
+        Self::anlz_to_grid(rb, deck_sr, ch)
     }
 
     /// Load a track from a linked player over NFS: pull the audio + ANLZ off the
@@ -1222,6 +1246,7 @@ impl DeckApp {
         Prep {
             deck_sr: self.audio.sample_rate, deck_ch: self.audio.channels,
             auto_cue: self.auto_cue, auto_cue_level_db: self.settings.auto_cue_level_db,
+            cache_dir: link_cache_dir(),
         }
     }
 
@@ -1725,8 +1750,15 @@ struct Fetched { name: String, path: String, audio: Vec<u8>, grid: FetchedGrid, 
 enum FetchedGrid { None, Anlz(Vec<u8>), Beats(Vec<opendeck_dbserver::GridBeat>) }
 
 /// The deck facts a loader thread needs; captured before the thread starts.
-#[derive(Clone, Copy)]
-struct Prep { deck_sr: u32, deck_ch: u8, auto_cue: bool, auto_cue_level_db: f32 }
+#[derive(Clone)]
+struct Prep {
+    deck_sr: u32, deck_ch: u8, auto_cue: bool, auto_cue_level_db: f32,
+    /// The Link media cache (`linkcache/` in the app data dir): a local load
+    /// takes its grid from there when the media server already analysed the
+    /// file, and writes there when it had to analyse, so no track is
+    /// analysed twice between the deck and the served library.
+    cache_dir: std::path::PathBuf,
+}
 
 /// A track ready to swap in: decoded at the deck rate, waveform built, grid
 /// and cues resolved.  Everything here was produced off the UI thread.
@@ -2206,12 +2238,25 @@ pub fn run(cfg: Config) -> Result<()> {
     let t0 = Instant::now();
     let mut waveform_builder = WaveformBuilder::new(audio.sample_rate);
     let mut beat_analyzer    = BeatAnalyzerImpl::new(audio.sample_rate);
+    // The Link media cache may already hold this file's grid (the media
+    // server analyses the browse root); use it and skip the detector.
+    let cache_dir = link_cache_dir();
+    let cached_grid = track.as_ref()
+        .and_then(|p| opendeck_mediaserver::load_cached(&cache_dir, p)).filter(|a| !a.beats.is_empty())
+        .and_then(|a| DeckApp::grid_from_analysis(&a, audio.sample_rate, audio.channels)).map(|l| l.grid);
+    if cached_grid.is_some() { log::info!("grid: from the link cache"); }
     if !samples_arc.is_empty() {
         waveform_builder.push(&samples_arc);
-        beat_analyzer.push(&samples_arc, audio.sample_rate);
+        if cached_grid.is_none() { beat_analyzer.push(&samples_arc, audio.sample_rate); }
     }
     let waveform  = waveform_builder.finish();
-    let beat_grid = beat_analyzer.beat_grid().map(|g| (*g).clone());
+    let analysed_here = cached_grid.is_none();
+    let beat_grid = cached_grid.or_else(|| beat_analyzer.beat_grid().map(|g| (*g).clone()));
+    if analysed_here { if let Some(p) = &track {
+        let bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+        let a = opendeck_mediaserver::Analysis::from_deck(&audio.tags, beat_grid.as_ref(), &waveform, (samples_arc.len() / audio.channels.max(1) as usize) as u64, audio.sample_rate, bytes);
+        if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, p, &a) { log::info!("link cache: {e:#}"); }
+    } }
     match &beat_grid {
         Some(g) => log::info!(
             "waveform done: {} columns, {:.1} BPM (confidence {:.2}) in {:.1}s",
@@ -2519,6 +2564,10 @@ fn first_audio_in(dir: &std::path::Path) -> Option<PathBuf> {
     found.into_iter().next()
 }
 
+/// Where the Link media cache lives: one analysis record per track, shared by
+/// the deck's loads and the media server (`opendeck_mediaserver`).
+fn link_cache_dir() -> std::path::PathBuf { taglist::app_data_dir().join("linkcache") }
+
 /// Start the Link media-source services over `root`: NFSv2 (portmap 111,
 /// nfsd 2049, export "/C/") for the audio and dbserver (12523 + ephemeral) for
 /// browsing.  The library starts as file names; a background thread fills in
@@ -2532,6 +2581,6 @@ fn start_media_server(root: &std::path::Path, player: u8) -> Result<u32> {
     let nfs = NfsServer::start(scanned.tree, "/C/", 111, 2049)?;
     let db = DbServer::start(Arc::clone(&scanned.library), player, 0)?;
     log::info!("media server: {n} tracks under {} — nfs portmap {} nfsd {}, dbserver {}", root.display(), nfs.portmap, nfs.nfsd, db.db_port);
-    opendeck_mediaserver::start_analysis(scanned.library, scanned.files, Some(taglist::app_data_dir().join("linkcache")))?;
+    opendeck_mediaserver::start_analysis(scanned.library, scanned.files, Some(link_cache_dir()))?;
     Ok(n)
 }
