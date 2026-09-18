@@ -119,8 +119,8 @@ from the loader thread, a `loaded …` line a few ms later, and no
 is available to the screen for the XDJ's loading indicator. Nothing renders
 it yet; that is the next visual piece.
 
-**Memory.** The whole decoded track is in RAM (stereo 44.1 kHz is about
-10 MB a minute). Two tracks exist briefly during a load: the playing one and
+**Memory.** The whole decoded track is in RAM as f32 (stereo 44.1 kHz is
+about 21 MB a minute; a 6-minute track is ~127 MB). Two tracks exist briefly during a load: the playing one and
 the prepared one, until the audio thread drops the old `Arc`. The streaming
 loader (WORKSTREAMS A4) is the answer if that ever matters; this pipeline is
 where it would plug in, since stage 2 is already the only producer of
