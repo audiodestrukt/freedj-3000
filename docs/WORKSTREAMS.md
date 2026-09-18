@@ -465,8 +465,12 @@ rekordbox 7) and loads audio over NFSv2 (portmap 111 for players, 50111 for
 rekordbox), with 32 reads in flight and the fetch on a background thread. It
 also *serves*: dbserver + NFSv2 servers, media-query answers and USB-loaded
 status flags, so other decks list it under LINK and load from it (proven
-OpenDeck→OpenDeck across machines; XDJ acceptance test pending). Reference:
-`docs/reference/prodj-link-media.md`; issues #27, #30, #31, #44.
+OpenDeck→OpenDeck across machines; XDJ acceptance test pending). Since
+2026-09-18 the served library carries real tags, duration, tempo, grid,
+waveforms and art from a cached background analysis, and the client lists
+peers per slot by media name and walks the category menu. Reference:
+`docs/reference/prodj-link-media.md`; issues #27, #30, #31, #44 (closed),
+#32 (browse fidelity, open).
 
 ### F4. Write rekordbox exports — **large, low priority**
 

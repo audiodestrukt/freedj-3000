@@ -32,6 +32,24 @@ All notable changes to this project will be documented in this file.
 - `docs/reference/prodj-link-media.md`: how media browsing and loading works
   between decks (dbserver + NFS), rekordbox 7 findings, test recipes.
 
+### Added — 2026-09-18
+- **LOADING readout.** While a track is fetched and prepared on the loader
+  thread, the title bar (playback and BROWSE screens) shows "LOADING name"
+  with a sweeping bar; it clears the frame the track lands.
+- **LINK list like a player's.** Peers are listed per media slot with the
+  player number, slot and volume name ("3 USB: OPENDECK", "3 SD: …") from
+  the Link media query the deck now sends, and entering a source opens its
+  category menu (PLAYLIST / ARTIST / ALBUM / TRACK / FILENAME) instead of
+  jumping to ALL TRACKS. SD slots load from the player's "/B/" export. (#32)
+- **Served library with real metadata.** The media source now fills in tags,
+  duration, tempo, beat grid, waveform preview + detail and cover art per
+  track from a background analysis (one track at a time, cached in the app
+  data dir), and answers artist / album / filename menus and the artwork and
+  waveform requests. Other decks see file names at once and the full rows as
+  each track is analysed. (#44)
+- Dev: `OPENDECK_SCREENSHOT_FRAME=n` picks the captured frame;
+  `PROBE_DUMP=file` makes `dbserver_probe` write a reply's blob out.
+
 ## [0.1.13] — 2026-09-16
 
 First public release of **OpenDeck DJ** on the App Store (iPad, build

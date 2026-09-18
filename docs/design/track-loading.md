@@ -115,9 +115,14 @@ Expected: a `loading … in the background` line, a `prepared … in N ms` line
 from the loader thread, a `loaded …` line a few ms later, and no
 `frame spike` between them.
 
-**`DeckApp::loading` is set but not drawn.** The name of the track in flight
-is available to the screen for the XDJ's loading indicator. Nothing renders
-it yet; that is the next visual piece.
+**`DeckApp::loading` drives the LOADING readout.** The name of the track in
+flight reaches the screen through `DeckSnapshot::loading`; `draw_loading`
+puts "LOADING  name" with a sweeping bar at the right of the title bar, on the
+playback screen and on BROWSE (where the deck sits while the track comes in).
+It is an indeterminate sweep: the loader thread reports nothing until it is
+done, and the swap-in clears the name the same frame. The name is the file
+name for local loads and the menu title for Link loads. Capture it headless
+with `OPENDECK_SCREENSHOT_FRAME=175` alongside the autoload recipe below.
 
 **Memory.** The whole decoded track is in RAM as f32 (stereo 44.1 kHz is
 about 21 MB a minute; a 6-minute track is ~127 MB). Two tracks exist briefly during a load: the playing one and

@@ -37,8 +37,21 @@ const TIMEOUT: Duration = Duration::from_secs(5);
 // ── message types ─────────────────────────────────────────────────────────────
 pub mod kind {
     pub const SETUP:          u16 = 0x0000;
+    /// Root menu: the browse categories of a slot (args: dmst, 0, 0xffffff).
+    pub const ROOT_MENU:      u16 = 0x1000;
+    pub const ARTIST_MENU:    u16 = 0x1002;
+    pub const ALBUM_MENU:     u16 = 0x1003;
     pub const ALL_TRACKS:     u16 = 0x1004;
+    /// Tracks listed by file name (args: dmst, sort).
+    pub const FILENAME_MENU:  u16 = 0x1013;
+    /// Albums of one artist (args: dmst, sort, artist id).
+    pub const ALBUMS_FOR_ARTIST: u16 = 0x1102;
+    /// Tracks of one album (args: dmst, sort, album id).
+    pub const TRACKS_FOR_ALBUM:  u16 = 0x1103;
     pub const PLAYLIST:       u16 = 0x1105;
+    /// Tracks of one artist on one album, or all its albums with id
+    /// 0xffffffff (args: dmst, sort, artist id, album id).
+    pub const TRACKS_FOR_ARTIST_ALBUM: u16 = 0x1202;
     pub const METADATA:       u16 = 0x2002;
     /// Track "info" menu: the row with item type 0 carries the absolute file
     /// path on the serving device (what a CDJ asks before loading from
@@ -308,6 +321,39 @@ impl Client {
     /// Every track in the slot (rekordbox: the collection), sorted by `sort`.
     pub fn all_tracks(&mut self, slot: Slot, sort: u32) -> Result<Vec<MenuItem>> {
         self.menu(kind::ALL_TRACKS, slot, TrackType::Rekordbox, vec![Field::U32(sort)])
+    }
+
+    /// The slot's browse categories (TRACK, PLAYLIST, ARTIST, …): what a
+    /// player shows first when you enter a linked source.  Rows are typed
+    /// `root-*`; see [`MenuItem::type_name`].
+    pub fn root_menu(&mut self, slot: Slot) -> Result<Vec<MenuItem>> {
+        self.menu(kind::ROOT_MENU, slot, TrackType::Rekordbox, vec![Field::U32(0), Field::U32(0xff_ffff)])
+    }
+
+    /// ARTIST category: every artist.
+    pub fn artists(&mut self, slot: Slot) -> Result<Vec<MenuItem>> {
+        self.menu(kind::ARTIST_MENU, slot, TrackType::Rekordbox, vec![Field::U32(0)])
+    }
+
+    /// ALBUM category: every album.
+    pub fn albums(&mut self, slot: Slot) -> Result<Vec<MenuItem>> {
+        self.menu(kind::ALBUM_MENU, slot, TrackType::Rekordbox, vec![Field::U32(0)])
+    }
+
+    /// Every track of one artist, across its albums.
+    pub fn tracks_for_artist(&mut self, slot: Slot, artist: u32) -> Result<Vec<MenuItem>> {
+        self.menu(kind::TRACKS_FOR_ARTIST_ALBUM, slot, TrackType::Rekordbox,
+                  vec![Field::U32(0), Field::U32(artist), Field::U32(0xffff_ffff)])
+    }
+
+    /// Every track of one album.
+    pub fn tracks_for_album(&mut self, slot: Slot, album: u32) -> Result<Vec<MenuItem>> {
+        self.menu(kind::TRACKS_FOR_ALBUM, slot, TrackType::Rekordbox, vec![Field::U32(0), Field::U32(album)])
+    }
+
+    /// FILENAME category: every track, labelled by file name.
+    pub fn filenames(&mut self, slot: Slot) -> Result<Vec<MenuItem>> {
+        self.menu(kind::FILENAME_MENU, slot, TrackType::Rekordbox, vec![Field::U32(0)])
     }
 
     /// Contents of a playlist folder (`id` 0 = root) or a playlist.

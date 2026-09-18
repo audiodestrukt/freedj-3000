@@ -6,8 +6,9 @@ tracks from a real XDJ-1000MK2's USB and from a rekordbox 7 laptop, and it
 at home, a real XDJ) can browse and load from it. This page is the reference
 for how it works, what is on the wire, and how to test it away from the
 hardware. The original feasibility study is `docs/design/prodj-link-library.md`;
-the tracking issues are #27 (client), #30 (rekordbox), #31 (windowed reads),
-#44 (server), #32 (browse UI fidelity).
+the tracking issues were #27 (client), #30 (rekordbox), #31 (windowed reads)
+and #44 (server), all closed into this page; #32 (browse UI fidelity) stays
+open for the source-selector decision.
 
 ## The two channels
 
@@ -87,16 +88,27 @@ player number when it is 1–4, else as 1.
 ## Client side (LINK in the browser)
 
 `crates/app/src/browser.rs`. LINK is a folder row at the top of the file
-browser; inside it, one row per Link peer with media:
+browser; inside it, one row per media slot a Link peer has answered a
+**media query** for, labelled the way a player's own LINK list is:
 
-- `Player N   <ip>` for a device numbered 1–16;
+- `3 USB: OPENDECK` / `3 SD: MYCARD` for a player numbered 1–16 (number,
+  slot, volume name from the media response);
+- `Player N   <ip>` while a player has not answered yet (tried as USB);
 - `rekordbox   <ip>` for device ≥ 17 or a name containing "rekordbox".
 
-Entering a player tries dbserver first (`connect_db`, USB slot), falling back
-to the older path of mounting the export and parsing `export.pdb` with
-rekordcrate. Entering rekordbox uses the collection slot. The root of a
-dbserver source is ALL TRACKS plus the playlist tree (`0x1105`); tracks list
-title / artist / BPM from the menu rows.
+The sender thread queries every player's USB and SD slot every 5 s
+(`build_media_query`); responses land in `LinkState::peer_media` and expire
+after 20 s, so a pulled stick drops off the list.
+
+Entering a slot opens a dbserver session (`connect_db`) and shows the
+source's **category menu** (`0x1000`), as a player does: PLAYLIST, ARTIST,
+ALBUM, TRACK, FILENAME are walkable (playlist tree `0x1105`, artists
+`0x1002` → tracks `0x1202`, albums `0x1003` → tracks `0x1103`, all tracks
+`0x1004`, by file name `0x1013`); any other category the source lists is
+shown but inert. A source with no root menu falls back to ALL TRACKS + the
+playlist tree; a player with no dbserver at all falls back to mounting the
+export and parsing `export.pdb` with rekordcrate. Entering rekordbox uses the
+collection slot. Track rows carry title / artist from the menu.
 
 Loading: `0x2102` for the path, then `read_file` over NFS. The whole load
 (fetch, decode, resample, waveform, grid, auto cue) runs on a **loader
@@ -121,18 +133,37 @@ stand-alone as `opendeck-serve`. What "serving" means:
 2. **Media query → media response** (`crates/link/src/prodj.rs`,
    `build_media_response`): name "OPENDECK", track and playlist counts, capacity.
 3. **dbserver** (`crates/dbserver/src/server.rs`): port query, setup, root
-   menu (`0x1000`: the rekordbox categories), all tracks, playlist folder
-   (empty for now), metadata (16 rows), track info (7 rows, path in row type
-   0), beat grid blob, paged render. Anything else is answered `0x4003` and
-   logged, so an unexpected request from a real player shows up in the log.
+   menu (`0x1000`: PLAYLIST / ARTIST / ALBUM / TRACK / FILENAME), all tracks,
+   artists and albums with their drill-downs (`0x1002`, `0x1003`, `0x1102`,
+   `0x1103`, `0x1202`), file names (`0x1013`), playlist folder (empty for
+   now), metadata (16 rows incl. duration, tempo, key), track info (7 rows,
+   path in row type 0), beat grid (`0x4602`), waveform preview (`0x4402`),
+   waveform detail (`0x4a02`), artwork (`0x4002`), paged render. Cue lists
+   and raw ANLZ tags answer `0x4003`; so does anything unknown, logged, so an
+   unexpected request from a real player shows up in the log.
 4. **NFSv2** (`crates/nfs/src/server.rs`): portmap (NULL / GETPORT / DUMP),
    mountd (MNT accepts any name and returns the root handle, EXPORT lists one
    export), nfsd (NULL / GETATTR / LOOKUP / READ ≤ 8 KB / READDIR / STATFS).
    The tree is scanned once at start; handles are the node index.
 
-The library is built from audio files under the root; title is the file stem
-and duration / BPM / grid are zero until the app's own analysis is wired in
-(see "open items").
+**The library** (`crates/mediaserver/src/lib.rs`) starts as file names the
+moment the folder is scanned, so the services are up at launch. A background
+thread (`media-analysis`) then decodes one track at a time and fills in tags
+(title / artist / album / key / comment / cover art), duration, tempo and beat
+grid (our detector over the leading two minutes) and the two waveforms, and
+writes the result to a cache (`app data/linkcache/<hash>.v1`, keyed by path +
+size + mtime) so only the first launch pays. Rows update in place behind an
+`RwLock`; artist and album ids are hashes of the name so a menu stays valid
+while rows are still being renamed. Artwork is read from the file on request
+rather than kept in memory.
+
+Waveform encoding follows what Beat Link decodes from a player, since no
+capture from a real one exists yet: preview = 400 × (height 0–31, whiteness
+0–7) byte pairs; detail = 19 lead bytes then one byte per 1/150 s, height in
+the low five bits, whiteness in the top three. Heights are scaled so the
+track's loudest column is full height. **Unverified against an XDJ**; rekordbox
+7 on the Mac could not confirm it because its copy of the test track is
+unanalysed and it answers `0x4003` for both.
 
 **Ports.** 111 and 2049 are below 1024. On Linux the workstation has
 `net.ipv4.ip_unprivileged_port_start=80`; on iOS Apple DTS says low ports
@@ -199,18 +230,18 @@ over the same NFS. The presentation differs, and #32 tracks closing the gap:
 
 - On the XDJ, LINK is a **source button** beside USB / SD / rekordbox, not a
   folder in a list.
-- The XDJ labels each remote by **player number + media name** from the media
-  response ("3 USB: OPENDECK"); we show `Player 3   <ip>`.
-- The XDJ opens a remote's **category menu** (PLAYLIST / ARTIST / ALBUM /
-  TRACK / …); we go straight to ALL TRACKS + playlists. Our server already
-  answers the category root, so this is client work only.
+- Labels (player number + slot + media name) and the category menu on entry
+  now match the XDJ (2026-09-18). Categories we do not walk yet (BPM, KEY,
+  SEARCH, FOLDER on a real player) are listed but inert; rows are plain text
+  without the XDJ's colour labels, art or detail pane.
 
 ## Open items
 
-- Real duration / BPM / beat grid in the served library from the app's own
-  analysis (currently zeros; players show duration and tempo in the list).
-- Artwork and waveform requests on the server (`0x2003`, `0x2004`, `0x2904`,
-  `0x2c04`) currently answer unavailable.
 - The XDJ acceptance test: LINK → OpenDeck → load, watching the server log for
-  any `0x4003` we send.
+  any `0x4003` / "unhandled" we send, and whether the served waveforms draw
+  (see the encoding note above).
 - Confirm port binding on the iPad (TestFlight 0.1.14).
+- Cue lists (`0x2104` / `0x2b04`) once the deck has memory cues of its own
+  to share; colour waveforms (`0x2c04` PWV4/PWV5) are not produced.
+- Client: BPM / KEY / SEARCH categories, colour labels, art in the detail pane
+  (#32's remaining scope).

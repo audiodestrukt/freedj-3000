@@ -28,6 +28,25 @@ pub const PKT_ANNOUNCE:   u8 = 0x06;
 /// distinguished by port).
 pub const PKT_MEDIA_QUERY: u8 = 0x05;
 pub const PKT_MEDIA_RESP:  u8 = 0x06;
+
+/// What a player reports about one media slot (a media response, 0x06).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MediaInfo {
+    pub player:    u8,
+    /// 1 CD, 2 SD, 3 USB, 5 rekordbox collection.
+    pub slot:      u8,
+    /// The volume name ("OPENDECK", the USB stick's label, …).
+    pub name:      String,
+    pub tracks:    u16,
+    pub playlists: u16,
+}
+
+impl MediaInfo {
+    /// The slot as a player labels it in its LINK list.
+    pub fn slot_name(&self) -> &'static str {
+        match self.slot { 1 => "CD", 2 => "SD", 3 => "USB", 5 => "rekordbox", _ => "?" }
+    }
+}
 pub const PKT_BEAT:       u8 = 0x28;
 pub const PKT_STATUS:     u8 = 0x0A;
 /// Tempo-master handoff: request (to the current master, port 50001) and
@@ -213,6 +232,40 @@ impl ProDjLink {
     pub fn parse_media_query(data: &[u8]) -> Option<(u8, Ipv4Addr, u8, u8)> {
         (Self::packet_type(data)? == PKT_MEDIA_QUERY && data.len() >= 0x35).then(|| {
             (data[0x26], Ipv4Addr::new(data[0x29], data[0x2a], data[0x2b], data[0x2c]), data[0x30], data[0x34])
+        })
+    }
+
+    /// Build a media query (0x05 on port 50002, 0x35 bytes): "what is in
+    /// `slot` of player `target`?"  The mirror of [`parse_media_query`]; the
+    /// answer is a media response (0x06) sent to `our_ip`.
+    pub fn build_media_query(&self, our_ip: Ipv4Addr, target: u8, slot: u8) -> Vec<u8> {
+        let mut pkt = vec![0u8; 0x35];
+        pkt[..10].copy_from_slice(MAGIC);
+        pkt[0x0a] = PKT_MEDIA_QUERY;
+        pkt[0x0b..0x0b + 20].copy_from_slice(&self.device_name);
+        pkt[0x1f] = 0x01;
+        pkt[0x21] = self.player_num;
+        pkt[0x22..0x24].copy_from_slice(&((0x35u16) - 0x24).to_be_bytes());
+        pkt[0x24] = 0x01;
+        pkt[0x26] = self.player_num;
+        pkt[0x28] = 0x0c;
+        pkt[0x29..0x2d].copy_from_slice(&our_ip.octets());
+        pkt[0x30] = target;
+        pkt[0x34] = slot;
+        pkt
+    }
+
+    /// Parse a media response (0x06): what a player has in one slot.  The
+    /// mirror of [`build_media_response`]; `None` for anything else.
+    pub fn parse_media_response(data: &[u8]) -> Option<MediaInfo> {
+        if Self::packet_type(data)? != PKT_MEDIA_RESP || data.len() < 0xc0 { return None; }
+        let units: Vec<u16> = data[0x2c..0x6c].chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect();
+        Some(MediaInfo {
+            player:    data[0x27],
+            slot:      data[0x2b],
+            name:      String::from_utf16_lossy(&units),
+            tracks:    u16::from_be_bytes([data[0xa6], data[0xa7]]),
+            playlists: u16::from_be_bytes([data[0xae], data[0xaf]]),
         })
     }
 
@@ -637,5 +690,17 @@ mod tests {
         assert_eq!(pkt[0x0a], PKT_ANNOUNCE);
         assert_eq!(pkt[0x24], 2);
         assert_eq!(&pkt[0x2c..0x30], &[192, 168, 68, 64]);
+    }
+
+    #[test]
+    fn media_query_and_response_round_trip() {
+        let me = ProDjLink::new(2);
+        let q = me.build_media_query(Ipv4Addr::new(10, 0, 0, 2), 3, 3);
+        assert_eq!(q.len(), 0x35);
+        assert_eq!(ProDjLink::parse_media_query(&q), Some((2, Ipv4Addr::new(10, 0, 0, 2), 3, 3)));
+        let src = ProDjLink::new(3);
+        let r = src.build_media_response(Ipv4Addr::new(10, 0, 0, 2), 3, "OPENDECK", 226, 4, 32 << 30, 16 << 30);
+        assert_eq!(ProDjLink::parse_media_response(&r), Some(MediaInfo { player: 3, slot: 3, name: "OPENDECK".into(), tracks: 226, playlists: 4 }));
+        assert_eq!(ProDjLink::parse_media_response(&q), None);
     }
 }

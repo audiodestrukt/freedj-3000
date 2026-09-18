@@ -602,7 +602,7 @@ pub fn draw(
                 // BROWSE: the middle band (title + phase + enlarged waveform)
                 // becomes the file list.  The source column, info row and the
                 // overview keep running — the loaded track plays while you browse.
-                ScreenView::Browse(browser) => draw_browse(ui, browser, tag_list, lay, h),
+                ScreenView::Browse(browser) => draw_browse(ui, browser, tag_list, lay, h, snap.loading),
                 // TAG LIST: the same list, of the tagged tracks.
                 ScreenView::TagList => draw_tag_list(ui, tag_list, lay, h),
                 // INFO: the middle band shows the loaded track's details.
@@ -710,7 +710,7 @@ fn draw_list_screen(ui: &Ui, lay: &Layout, h: f32, header: &str, rows: &[ListRow
     }
 }
 
-fn draw_browse(ui: &Ui, browser: &Browser, tag_list: &TagList, lay: &Layout, h: f32) {
+fn draw_browse(ui: &Ui, browser: &Browser, tag_list: &TagList, lay: &Layout, h: f32, loading: Option<&str>) {
     let rows: Vec<ListRow> = browser.entries().iter().map(|e| ListRow {
         name: &e.name, is_dir: e.is_dir,
         tagged: e.load().map_or(false, |l| tag_list.contains(l)),
@@ -724,6 +724,9 @@ fn draw_browse(ui: &Ui, browser: &Browser, tag_list: &TagList, lay: &Layout, h: 
         (if e.is_dir { "FOLDER" } else if tagged { "TRACK  (TAGGED)" } else { "TRACK" }, e.name.as_str(), hint)
     });
     draw_list_screen(ui, lay, h, &header, &rows, browser.selected, "— empty —", detail);
+    // A LOAD from this list shows its progress here too (the deck keeps the
+    // browse screen up while the track comes in, as the unit does).
+    draw_loading(ui, loading, lay.title, h);
 }
 
 /// TAG LIST: the tagged tracks, browse-style.  LOAD plays the highlighted
@@ -1201,6 +1204,7 @@ fn draw_title(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
     let r = lay.title;
     ui.painter().rect_filled(r, 0.0, BAR);
     text(ui, Pos2::new(r.min.x + h * 0.02, r.center().y), Align2::LEFT_CENTER, format!("♪ {}", snap.title), h * 0.036, TEXT);
+    draw_loading(ui, snap.loading, r, h);
     // Key badge + key name, right.  We don't detect key; show the file's own
     // key tag when it has one (ID3 TKEY / INITIALKEY), else a dash.
     let kx = r.max.x - h * 0.02;
@@ -1209,6 +1213,31 @@ fn draw_title(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
     let badge = Rect::from_center_size(Pos2::new(kx - h * 0.075, r.center().y), Vec2::new(h * 0.030, h * 0.030));
     ui.painter().rect_filled(badge, 2.0, KEY);
     text(ui, badge.center(), Align2::CENTER_CENTER, "b#", h * 0.017, TEXT);
+}
+
+/// LOADING readout in the title bar while a track is on the loader thread:
+/// the name of the track in flight and a sweeping bar under it, right of the
+/// current title (which keeps playing).  Gone the frame the load lands.
+fn draw_loading(ui: &Ui, loading: Option<&str>, bar: Rect, h: f32) {
+    let Some(name) = loading else { return };
+    let w = bar.width() * 0.34;
+    let r = Rect::from_min_max(Pos2::new(bar.max.x - w - h * 0.14, bar.min.y), Pos2::new(bar.max.x - h * 0.14, bar.max.y));
+    ui.painter().rect_filled(r, 0.0, BAR);
+    // Fit the name to the box (about 0.55 em per glyph at this size).
+    let budget = ((w - h * 0.02) / (h * 0.026 * 0.55)) as usize;
+    let room = budget.saturating_sub("LOADING  ".len());
+    let shown: String = if name.chars().count() > room && room > 1 {
+        name.chars().take(room - 1).chain(std::iter::once('…')).collect()
+    } else { name.to_string() };
+    text(ui, Pos2::new(r.min.x + h * 0.01, r.center().y - h * 0.006), Align2::LEFT_CENTER, format!("LOADING  {shown}"), h * 0.026, ORANGE);
+    // Indeterminate sweep: a short segment moving along the bottom edge.
+    let t = ui.input(|i| i.time) as f32;
+    let track = Rect::from_min_max(Pos2::new(r.min.x + h * 0.01, r.max.y - h * 0.010), Pos2::new(r.max.x - h * 0.01, r.max.y - h * 0.004));
+    ui.painter().rect_filled(track, 0.0, KEY_LO);
+    let seg = track.width() * 0.25;
+    let x = track.min.x + (t * 0.8).fract() * (track.width() - seg);
+    ui.painter().rect_filled(Rect::from_min_max(Pos2::new(x, track.min.y), Pos2::new(x + seg, track.max.y)), 0.0, ORANGE);
+    ui.ctx().request_repaint();
 }
 
 // ── Phase meter + beat countdown ──────────────────────────────────────────────

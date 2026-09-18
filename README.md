@@ -31,7 +31,7 @@ This project takes the position that DJ equipment protocols are infrastructure, 
 | MIDI controller input | ✅ Working |
 | ProDJ Link beat sync (receive + send, SYNC, master handoff) | ✅ Working on a real XDJ-1000MK2 |
 | ProDJ Link media: load tracks from linked players / rekordbox | ✅ Working (dbserver + NFS) |
-| ProDJ Link media: serve tracks to other decks | ✅ Working — OpenDeck→OpenDeck proven; XDJ acceptance test pending |
+| ProDJ Link media: serve tracks to other decks (metadata, grid, waveforms, art) | ✅ Working — OpenDeck→OpenDeck proven; XDJ acceptance test pending |
 | Cue points / loops | 📋 Planned |
 | Key lock / timestretching | ✅ Working |
 | Hardware control surface | 📋 Planned |
@@ -158,12 +158,16 @@ sends a beat packet on 50001 at every beat of the audible position, as player
 broadcasts. Status packets go out on 50002; SYNC follows the master and the
 master handoff works both ways with a real XDJ.
 
-**Media over the link.** The LINK folder in the browser lists every peer with
-media (players and a rekordbox laptop in LINK mode); tracks browse over
-Pioneer's dbserver protocol and load over NFSv2. The app also *serves* its
-music folder the same way, so other decks list it under LINK and load from
-it (`OPENDECK_SERVE=0` disables; `opendeck-serve <dir>` is the stand-alone
-server). Wire details, rekordbox quirks and test recipes:
+**Media over the link.** The LINK folder in the browser lists every peer's
+media slots the way a player does ("3 USB: OPENDECK"; players and a
+rekordbox laptop in LINK mode), opens the source's category menu (PLAYLIST /
+ARTIST / ALBUM / TRACK / FILENAME) over Pioneer's dbserver protocol and loads
+over NFSv2. The app also *serves* its music folder the same way, with tags,
+duration, tempo, beat grid, waveforms and cover art filled in by a background
+analysis that is cached after the first launch, so other decks list it under
+LINK and load from it (`OPENDECK_SERVE=0` disables; `opendeck-serve <dir>` is
+the stand-alone server). A track in flight shows a LOADING readout in the
+title bar. Wire details, rekordbox quirks and test recipes:
 `docs/reference/prodj-link-media.md`.
 
 Two instances on one machine link to each other:

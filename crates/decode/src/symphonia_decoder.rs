@@ -25,6 +25,10 @@ pub struct TrackTags {
     pub key:     Option<String>,
     /// BPM as tagged by the producer/DJ software (not our analysis).
     pub bpm:     Option<f32>,
+    /// Embedded cover art (ID3 APIC / FLAC picture / MP4 covr), encoded bytes
+    /// as stored (JPEG or PNG), and its MIME type.  Served to other decks as
+    /// the track's artwork over Link; not drawn by the deck itself yet.
+    pub artwork: Option<(String, Vec<u8>)>,
 }
 
 impl TrackTags {
@@ -51,6 +55,15 @@ impl TrackTags {
                     let k = t.key.to_ascii_uppercase();
                     if k == "TKEY" || k == "INITIALKEY" || k == "KEY" { set(&mut self.key, t); }
                 }
+            }
+        }
+    }
+
+    /// Keep the first embedded picture (the front cover, in practice).
+    fn absorb_visuals(&mut self, visuals: &[symphonia::core::meta::Visual]) {
+        if self.artwork.is_none() {
+            if let Some(v) = visuals.iter().find(|v| !v.data.is_empty()) {
+                self.artwork = Some((v.media_type.clone(), v.data.to_vec()));
             }
         }
     }
@@ -104,10 +117,10 @@ impl SymphoniaDecoder {
         // re-surface it once decoding starts.
         let mut tags = TrackTags::default();
         if let Some(mut md) = probed.metadata.get() {
-            if let Some(rev) = md.skip_to_latest() { tags.absorb(rev.tags()); }
+            if let Some(rev) = md.skip_to_latest() { tags.absorb(rev.tags()); tags.absorb_visuals(rev.visuals()); }
         }
         let mut format = probed.format;
-        if let Some(rev) = format.metadata().skip_to_latest() { tags.absorb(rev.tags()); }
+        if let Some(rev) = format.metadata().skip_to_latest() { tags.absorb(rev.tags()); tags.absorb_visuals(rev.visuals()); }
 
         let track = format.default_track()
             .ok_or_else(|| DecodeError::UnsupportedFormat("no default track".into()))?;

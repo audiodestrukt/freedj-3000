@@ -9,10 +9,17 @@ license.workspace = true
 name = "opendeck-serve"
 path = "src/main.rs"
 
+[lib]
+name = "opendeck_mediaserver"
+path = "src/lib.rs"
+
 [dependencies]
 opendeck-link     = { workspace = true }
 opendeck-nfs      = { path = "../nfs" }
 opendeck-dbserver = { path = "../dbserver" }
+opendeck-decode   = { workspace = true }
+opendeck-analysis = { workspace = true }
+opendeck-types    = { workspace = true }
 anyhow     = { workspace = true }
 log        = { workspace = true }
 env_logger = { workspace = true }

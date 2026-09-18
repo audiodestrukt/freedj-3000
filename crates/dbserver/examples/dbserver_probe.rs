@@ -25,6 +25,11 @@ fn main() -> anyhow::Result<()> {
     println!("-> 0x{ty:04x} {args:?}");
     let r = c.request(ty, args)?;
     println!("<- 0x{:04x} {:?}", r.kind, r.args.iter().map(short).collect::<Vec<_>>());
+    // PROBE_DUMP=<file>: write the reply's blob argument out whole, for layout work.
+    if let (Ok(path), Some(Field::Blob(b))) = (std::env::var("PROBE_DUMP"), r.args.iter().find(|f| matches!(f, Field::Blob(_)))) {
+        std::fs::write(&path, b)?;
+        println!("   blob written to {path}");
+    }
     if r.kind == kind::MENU_AVAILABLE {
         let count = r.args.get(1).map(|f| f.as_u32()).unwrap_or(0);
         println!("   menu with {count} items; rendering");

@@ -16,7 +16,7 @@
 
 use opendeck_link::prodj::{
     ProDjLink, Status, StatusFields, BECOME_MASTER, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS,
-    SYNC_OFF, SYNC_ON, PKT_MEDIA_QUERY};
+    SYNC_OFF, SYNC_ON, PKT_MEDIA_QUERY, MediaInfo};
 use arc_swap::ArcSwap;
 use opendeck_types::{BeatGrid, EngineSnapshot};
 use socket2::{Domain, Protocol, Socket, Type};
@@ -32,6 +32,11 @@ use std::{
 };
 
 // ── Shared link state ─────────────────────────────────────────────────────────
+
+/// A media response older than this no longer counts (the stick was pulled,
+/// or the player went away); queries go out every [`MEDIA_QUERY_EVERY`].
+const MEDIA_STALE:       Duration = Duration::from_secs(20);
+const MEDIA_QUERY_EVERY: Duration = Duration::from_secs(5);
 
 /// Everything the Link threads and the UI share.  Written by the threads,
 /// read by the snapshot; `want_master` / `sync` are written by `DeckApp::apply`.
@@ -69,6 +74,10 @@ pub struct LinkState {
     /// Tracks we serve as a Link media source (0 = not serving).  Non-zero
     /// answers media queries and flags our USB slot loaded in status.
     pub serve_tracks:  AtomicU32,
+    /// (player, slot) → what that player said is in the slot, and when.  The
+    /// sender asks every player about USB and SD periodically; a stick that
+    /// is pulled simply stops being confirmed, see [`LinkState::media`].
+    pub peer_media:    Mutex<HashMap<(u8, u8), (MediaInfo, Instant)>>,
 }
 
 impl LinkState {
@@ -90,7 +99,18 @@ impl LinkState {
             peers: Mutex::new(HashMap::new()),
             peer_names: Mutex::new(HashMap::new()),
             serve_tracks: AtomicU32::new(0),
+            peer_media: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Media a player currently has, freshest first by slot (USB before SD):
+    /// responses confirmed within the last [`MEDIA_STALE`].
+    pub fn media(&self, player: u8) -> Vec<MediaInfo> {
+        let mut v: Vec<MediaInfo> = self.peer_media.lock().map(|m| m.iter()
+            .filter(|((p, _), (_, at))| *p == player && at.elapsed() < MEDIA_STALE)
+            .map(|(_, (info, _))| info.clone()).collect()).unwrap_or_default();
+        v.sort_by_key(|m| std::cmp::Reverse(m.slot));
+        v
     }
 
     /// Assert the master role with a sync counter newer than anything seen.
@@ -383,6 +403,17 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
             }
             return;
         }
+        // Media response: a player answering our query about one of its slots.
+        if let Some(info) = ProDjLink::parse_media_response(data) {
+            if let Ok(mut m) = link.peer_media.lock() {
+                let key = (info.player, info.slot);
+                if m.get(&key).map_or(true, |(old, _)| *old != info) {
+                    log::info!("ProDJ Link: player {} {}: {:?}, {} tracks, {} playlists", info.player, info.slot_name(), info.name, info.tracks, info.playlists);
+                }
+                m.insert(key, (info, Instant::now()));
+            }
+            return;
+        }
         let Some(st) = ProDjLink::parse_status(data) else { return };
         if st.player == link.player { return; }
 
@@ -498,6 +529,7 @@ impl ProDjSender {
                 let mut known_peers: Vec<Ipv4Addr> = Vec::new();
                 let mut bcast_warned = false;
                 let mut last_announce = Instant::now() - Duration::from_secs(5);
+                let mut last_media_query = Instant::now() - Duration::from_secs(5);
                 let mut last_status   = Instant::now() - Duration::from_secs(5);
                 let mut last_request  = Instant::now() - Duration::from_secs(5);
                 // When MASTER is pressed we may not have heard the current
@@ -624,6 +656,22 @@ impl ProDjSender {
                             }
                         }
                         last_announce = now;
+                    }
+
+                    // ── Media queries ────────────────────────────────────────
+                    // Ask every player what is in its USB and SD slots, the way
+                    // a CDJ fills its LINK list.  Players without media in a
+                    // slot do not answer; see LinkState::media for staleness.
+                    if now.duration_since(last_media_query) >= MEDIA_QUERY_EVERY {
+                        let peers: Vec<(u8, Ipv4Addr)> = link.peers.lock()
+                            .map(|p| p.iter().map(|(k, v)| (*k, *v)).collect()).unwrap_or_default();
+                        for (p, pip) in peers {
+                            if p == player || p > 16 { continue; }
+                            for slot in [3u8, 2] {
+                                let _ = sock.send_to(&me.build_media_query(ip, p, slot), (pip, PORT_STATUS));
+                            }
+                        }
+                        last_media_query = now;
                     }
 
                     // ── Master handoff ───────────────────────────────────────

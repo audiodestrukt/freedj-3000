@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use crate::prodj::LinkState;
-use opendeck_dbserver::{Client as DbClient, Slot};
+use opendeck_dbserver::{Client as DbClient, MenuItem, Slot};
 use opendeck_nfs::Nfs;
 use opendeck_rekordbox::{read_export, read_export_from, RbExport};
 
@@ -43,10 +43,10 @@ pub enum Load {
     Local { path: PathBuf, analyze: Option<PathBuf> },
     /// A track on a linked player, read over NFS.  Paths are rekordbox-relative.
     Link  { ip: Ipv4Addr, rel_path: String, analyze_rel: String },
-    /// A track served by a peer's dbserver (a player's USB, or a rekordbox
-    /// laptop's collection when `rekordbox`): path and beat grid come from
-    /// dbserver, the audio over the peer's NFS export.
-    Db { ip: Ipv4Addr, id: u32, title: String, rekordbox: bool },
+    /// A track served by a peer's dbserver (a player's USB or SD, or a
+    /// rekordbox laptop's collection when `rekordbox`): path and beat grid
+    /// come from dbserver, the audio over the peer's NFS export.
+    Db { ip: Ipv4Addr, id: u32, title: String, rekordbox: bool, #[serde(default)] sd: bool },
 }
 
 /// One visible row.
@@ -72,11 +72,14 @@ impl Entry {
 #[derive(Clone)]
 enum EntryKind {
     Descend(Loc),
-    /// Connect to a linked player, then browse its rekordbox library.
-    ConnectLink(Ipv4Addr),
+    /// Connect to a linked player's media slot, then browse it.
+    ConnectLink(Ipv4Addr, Slot),
     /// Connect to a rekordbox laptop's dbserver, then browse its collection.
     ConnectDb(Ipv4Addr),
     Track(Load),
+    /// A category the source offers that this browser cannot walk yet
+    /// (BPM, KEY, SEARCH, …): shown, but LOAD does nothing.
+    Unsupported,
 }
 
 #[derive(Clone)]
@@ -88,11 +91,20 @@ enum Loc {
     RbTree(u32),
     /// The tracks of a rekordbox playlist.
     RbPlaylist(u32),
-    /// rekordbox-over-dbserver: a playlist folder (0 = root, which also lists
-    /// ALL TRACKS), a playlist's tracks, or the whole collection.
+    /// A dbserver source's category menu (PLAYLIST / ARTIST / ALBUM / TRACK /
+    /// FILENAME …), the first thing a player shows for a linked source.
+    DbRoot,
+    /// dbserver categories: a playlist folder (0 = root), a playlist's tracks,
+    /// every track, the artists, one artist's tracks, the albums, one
+    /// album's tracks, every track by file name.
     DbFolder(u32),
     DbPlaylist(u32),
     DbAllTracks,
+    DbArtists,
+    DbArtist(u32),
+    DbAlbums,
+    DbAlbum(u32),
+    DbFilenames,
 }
 
 /// Which media the currently-loaded rekordbox export came from — decides how a
@@ -118,8 +130,10 @@ pub struct Browser {
     /// Open dbserver session to a peer: its address, the client, and the slot
     /// we browse (USB on a player, Collection on rekordbox).
     db:        Option<(Ipv4Addr, DbClient, Slot)>,
-    /// Name of the dbserver folder/playlist being shown (set on descend).
+    /// Name of the dbserver folder/playlist/artist/album being shown (set on
+    /// descend), and the source's own label ("3 USB: OPENDECK") for the root.
     db_title:  String,
+    db_label:  String,
     link:      Arc<LinkState>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
@@ -146,6 +160,7 @@ impl Browser {
             rb_source: None,
             db: None,
             db_title: String::new(),
+            db_label: String::new(),
             link,
         };
         b.rebuild();
@@ -166,13 +181,13 @@ impl Browser {
             Some(Loc::RbTree(id)) | Some(Loc::RbPlaylist(id)) => self.rb.as_ref()
                 .and_then(|e| e.playlists.iter().find(|n| n.id == *id))
                 .map(|n| n.name.clone()).unwrap_or_else(|| "rekordbox".to_string()),
-            Some(Loc::DbFolder(0)) => match &self.db {
-                Some((ip, _, Slot::Collection)) => format!("rekordbox  {ip}"),
-                Some((ip, _, _)) => format!("LINK  {ip}"),
-                None => "LINK".to_string(),
-            },
-            Some(Loc::DbAllTracks) => "ALL TRACKS".to_string(),
-            Some(Loc::DbFolder(_)) | Some(Loc::DbPlaylist(_)) => self.db_title.clone(),
+            Some(Loc::DbRoot) => self.db_label.clone(),
+            Some(Loc::DbFolder(0)) => "PLAYLIST".to_string(),
+            Some(Loc::DbAllTracks) => "TRACK".to_string(),
+            Some(Loc::DbArtists) => "ARTIST".to_string(),
+            Some(Loc::DbAlbums) => "ALBUM".to_string(),
+            Some(Loc::DbFilenames) => "FILENAME".to_string(),
+            Some(Loc::DbFolder(_)) | Some(Loc::DbPlaylist(_)) | Some(Loc::DbArtist(_)) | Some(Loc::DbAlbum(_)) => self.db_title.clone(),
             None => "/".to_string(),
         }
     }
@@ -185,9 +200,15 @@ impl Browser {
             Some(Loc::Link)           => self.link_entries(),
             Some(Loc::RbTree(node))   => self.rb_tree_entries(node),
             Some(Loc::RbPlaylist(id)) => self.rb_playlist_entries(id),
+            Some(Loc::DbRoot)         => self.db_root_entries(),
             Some(Loc::DbFolder(id))   => self.db_folder_entries(id),
-            Some(Loc::DbPlaylist(id)) => self.db_track_entries(Some(id)),
-            Some(Loc::DbAllTracks)    => self.db_track_entries(None),
+            Some(Loc::DbPlaylist(id)) => self.db_track_entries(|c, s| c.playlist(s, id, false)),
+            Some(Loc::DbAllTracks)    => self.db_track_entries(|c, s| c.all_tracks(s, 0)),
+            Some(Loc::DbArtists)      => self.db_name_entries(|c, s| c.artists(s), Loc::DbArtist),
+            Some(Loc::DbArtist(id))   => self.db_track_entries(|c, s| c.tracks_for_artist(s, id)),
+            Some(Loc::DbAlbums)       => self.db_name_entries(|c, s| c.albums(s), Loc::DbAlbum),
+            Some(Loc::DbAlbum(id))    => self.db_track_entries(|c, s| c.tracks_for_album(s, id)),
+            Some(Loc::DbFilenames)    => self.db_track_entries(|c, s| c.filenames(s)),
             None                      => Vec::new(),
         };
         self.entries = entries;
@@ -244,32 +265,80 @@ impl Browser {
         out
     }
 
-    /// The LINK source: discovered players from the ProDJ Link peer table.
-    /// A rekordbox laptop (device number 17+, or announcing as "rekordbox")
-    /// is browsed over its dbserver rather than NFS + export.pdb.
+    /// The LINK source: discovered players from the ProDJ Link peer table,
+    /// one row per media slot they answered a media query for, labelled the
+    /// way a player's LINK list does ("3 USB: OPENDECK").  A player that has
+    /// not (yet) told us about its media is listed by number and address and
+    /// tried as USB.  A rekordbox laptop (device number 17+, or announcing as
+    /// "rekordbox") is browsed over its dbserver collection.
     fn link_entries(&self) -> Vec<Entry> {
         let peers = self.link.peers.lock().map(|p| p.clone()).unwrap_or_default();
         let names = self.link.peer_names.lock().map(|p| p.clone()).unwrap_or_default();
         let mut v: Vec<(u8, Ipv4Addr)> = peers.into_iter().collect();
         v.sort_by_key(|(p, _)| *p);
-        v.into_iter().map(|(player, ip)| {
+        let dir = |name: String, kind| Entry { name, is_dir: true, artist: None, bpm: None, kind };
+        let mut out = Vec::new();
+        for (player, ip) in v {
             let name = names.get(&player).cloned().unwrap_or_default();
             if player >= 17 || name.to_ascii_lowercase().contains("rekordbox") {
-                Entry { name: format!("rekordbox   {ip}"), is_dir: true, artist: None, bpm: None,
-                        kind: EntryKind::ConnectDb(ip) }
-            } else {
-                Entry { name: format!("Player {player}   {ip}"), is_dir: true, artist: None, bpm: None,
-                        kind: EntryKind::ConnectLink(ip) }
+                out.push(dir(format!("rekordbox   {ip}"), EntryKind::ConnectDb(ip)));
+                continue;
             }
+            let media = self.link.media(player);
+            if media.is_empty() {
+                out.push(dir(format!("Player {player}   {ip}"), EntryKind::ConnectLink(ip, Slot::Usb)));
+            }
+            for m in media {
+                let slot = match m.slot { 2 => Slot::Sd, 1 => Slot::Cd, _ => Slot::Usb };
+                out.push(dir(format!("{player} {}: {}", m.slot_name(), m.name), EntryKind::ConnectLink(ip, slot)));
+            }
+        }
+        out
+    }
+
+    /// A dbserver source's category menu, as the source lists it.  Each row
+    /// is typed (`root-track`, `root-playlist`, …); the ones we can walk
+    /// descend, the rest are shown but inert.  A source without a root menu
+    /// (older servers) falls back to PLAYLIST view with ALL TRACKS on top.
+    fn db_root_entries(&mut self) -> Vec<Entry> {
+        let Some((_, c, slot)) = self.db.as_mut() else { return Vec::new() };
+        let slot = *slot;
+        let items = match c.root_menu(slot) {
+            Ok(items) if !items.is_empty() => items,
+            Ok(_) => { log::info!("LINK: empty category menu; showing playlists"); return self.db_folder_entries(0); }
+            Err(e) => { log::info!("LINK: no category menu ({e:#}); showing playlists"); return self.db_folder_entries(0); }
+        };
+        items.into_iter().map(|i| {
+            let kind = match i.type_name() {
+                "root-track"    => EntryKind::Descend(Loc::DbAllTracks),
+                "root-playlist" => EntryKind::Descend(Loc::DbFolder(0)),
+                "root-artist"   => EntryKind::Descend(Loc::DbArtists),
+                "root-album"    => EntryKind::Descend(Loc::DbAlbums),
+                "root-filename" => EntryKind::Descend(Loc::DbFilenames),
+                _ => EntryKind::Unsupported,
+            };
+            Entry { name: i.label, is_dir: true, artist: None, bpm: None, kind }
         }).collect()
     }
 
-    /// Root of a dbserver library: ALL TRACKS, then the playlist tree.
+    /// A list of names (artists, albums) that each open as a track list.
+    fn db_name_entries(&mut self, fetch: impl FnOnce(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>, loc: fn(u32) -> Loc) -> Vec<Entry> {
+        let Some((_, c, slot)) = self.db.as_mut() else { return Vec::new() };
+        match fetch(c, *slot) {
+            Ok(items) => items.into_iter().map(|i| Entry {
+                name: i.label, is_dir: true, artist: None, bpm: None, kind: EntryKind::Descend(loc(i.id)),
+            }).collect(),
+            Err(e) => { log::warn!("LINK names: {e:#}"); Vec::new() }
+        }
+    }
+
+    /// A playlist folder of a dbserver library (0 = the tree's root, which for
+    /// a source without a category menu also lists ALL TRACKS on top).
     fn db_folder_entries(&mut self, folder: u32) -> Vec<Entry> {
         let Some((_, c, slot)) = self.db.as_mut() else { return Vec::new() };
         let slot = *slot;
         let mut out = Vec::new();
-        if folder == 0 {
+        if folder == 0 && !matches!(self.stack.last(), Some(Loc::DbFolder(0))) {
             out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None,
                              kind: EntryKind::Descend(Loc::DbAllTracks) });
         }
@@ -284,21 +353,17 @@ impl Browser {
         out
     }
 
-    /// Tracks of a playlist, or the whole collection.
-    fn db_track_entries(&mut self, playlist: Option<u32>) -> Vec<Entry> {
+    /// A track list: a playlist, a category's tracks, or the whole collection.
+    fn db_track_entries(&mut self, fetch: impl FnOnce(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>) -> Vec<Entry> {
         let Some((ip, c, slot)) = self.db.as_mut() else { return Vec::new() };
         let (ip, slot) = (*ip, *slot);
-        let items = match playlist {
-            Some(id) => c.playlist(slot, id, false),
-            None     => c.all_tracks(slot, 0),
-        };
-        match items {
+        match fetch(c, slot) {
             Ok(items) => items.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
                 name: i.label.clone(), is_dir: false,
                 artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None,
-                kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection }),
+                kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }),
             }).collect(),
-            Err(e) => { log::warn!("rekordbox tracks: {e:#}"); Vec::new() }
+            Err(e) => { log::warn!("LINK tracks: {e:#}"); Vec::new() }
         }
     }
 
@@ -360,9 +425,11 @@ impl Browser {
 
     pub fn enter(&mut self) -> Enter {
         let Some(sel) = self.entries.get(self.selected) else { return Enter::Nothing };
-        match sel.kind.clone() {
+        let (sel_name, kind) = (sel.name.clone(), sel.kind.clone());
+        match kind {
+            EntryKind::Unsupported => { log::info!("BROWSE: {:?} is not browsable here yet", sel_name); Enter::Nothing }
             EntryKind::Descend(loc) => {
-                if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_)) { self.db_title = sel.name.clone(); }
+                if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_)) { self.db_title = sel_name.clone(); }
                 self.stack.push(loc);
                 self.selected = 0;
                 self.rebuild();
@@ -370,18 +437,20 @@ impl Browser {
             }
             EntryKind::ConnectDb(ip) => match self.connect_db(ip, Slot::Collection) {
                 Ok(()) => {
-                    self.stack.push(Loc::DbFolder(0));
+                    self.db_label = sel_name.clone();
+                    self.stack.push(Loc::DbRoot);
                     self.selected = 0;
                     self.rebuild();
                     Enter::Folder
                 }
                 Err(e) => { log::warn!("LINK rekordbox {ip} failed: {e:#}"); Enter::Nothing }
             },
-            // A player: browse its USB over dbserver like a CDJ does; if it has
-            // no database service, fall back to reading export.pdb over NFS.
-            EntryKind::ConnectLink(ip) => match self.connect_db(ip, Slot::Usb) {
+            // A player: browse the slot over dbserver like a CDJ does; if it
+            // has no database service, fall back to reading export.pdb over NFS.
+            EntryKind::ConnectLink(ip, slot) => match self.connect_db(ip, slot) {
                 Ok(()) => {
-                    self.stack.push(Loc::DbFolder(0));
+                    self.db_label = sel_name.clone();
+                    self.stack.push(Loc::DbRoot);
                     self.selected = 0;
                     self.rebuild();
                     Enter::Folder
@@ -422,7 +491,7 @@ impl Browser {
     /// Whether the browser is on the LINK side (the player list, or a linked
     /// player's library) — lights the LINK source key rather than FILE.
     pub fn on_link(&self) -> bool {
-        self.stack.iter().any(|l| matches!(l, Loc::Link | Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbAllTracks))
+        self.stack.iter().any(|l| matches!(l, Loc::Link | Loc::DbRoot))
             || (matches!(self.stack.last(), Some(Loc::RbTree(_) | Loc::RbPlaylist(_)))
                 && matches!(self.rb_source, Some(RbSource::Link(_))))
     }
@@ -465,10 +534,13 @@ mod tests {
         assert!(matches!(b.enter(), Enter::Folder));                    // LINK list
         assert_eq!(b.entries().len(), 1, "one peer listed");
         b.selected = 0;
-        assert!(matches!(b.enter(), Enter::Folder));                    // dbserver root
-        let all = b.entries().iter().position(|e| e.name == "ALL TRACKS").expect("ALL TRACKS row");
+        assert!(matches!(b.enter(), Enter::Folder));                    // category menu
+        let cats: Vec<&str> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert!(cats.contains(&"TRACK") && cats.contains(&"PLAYLIST"), "categories: {cats:?}");
+        let all = b.entries().iter().position(|e| e.name == "TRACK").expect("TRACK category");
         b.selected = all;
         assert!(matches!(b.enter(), Enter::Folder));
+        assert_eq!(b.title(), "TRACK");
         assert!(b.entries().iter().all(|e| !e.is_dir) && !b.entries().is_empty(), "tracks");
         b.selected = 0;
         let (tip, id, rekordbox) = match b.enter() {

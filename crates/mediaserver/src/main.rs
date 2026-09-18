@@ -9,15 +9,13 @@
 //! services that clients then use to browse and read.
 
 use anyhow::{Context, Result};
-use opendeck_dbserver::server::{Library, Server as DbServer, Track};
+use opendeck_dbserver::server::Server as DbServer;
 use opendeck_link::prodj::{ProDjLink, StatusFields, PKT_MEDIA_QUERY, PORT_ANNOUNCE, PORT_STATUS};
-use opendeck_nfs::server::{NfsServer, Tree};
+use opendeck_nfs::server::NfsServer;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-
-const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg"];
 
 struct Opts { dir: PathBuf, player: u8, peers: Vec<Ipv4Addr>, ip: Option<Ipv4Addr>, portmap: u16, nfsd: u16 }
 
@@ -53,22 +51,20 @@ fn main() -> Result<()> {
     let mac = [0x02, 0x0d, 0xec, 0x00, 0x00, o.player];
 
     // ── library from the folder ───────────────────────────────────────────────
-    let tree = Tree::scan(&o.dir).with_context(|| format!("scan {}", o.dir.display()))?;
-    let mut tracks = Vec::new();
-    for (i, (nfs_path, local)) in tree.files().into_iter().enumerate() {
-        let ext = local.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if !AUDIO_EXTS.contains(&ext.as_str()) { continue; }
-        let title = local.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
-        tracks.push(Track { id: i as u32 + 1, title, artist: String::new(), album: String::new(), path: nfs_path,
-                            duration_s: 0, bpm: 0.0, comment: String::new(), bitrate: 0, date_added: "2026-09-17".into(), beats: Vec::new() });
-    }
-    let n_tracks = tracks.len() as u16;
-    log::info!("library: {} tracks under {}", tracks.len(), o.dir.display());
-    for t in tracks.iter().take(10) { log::info!("  [{}] {}  {}", t.id, t.title, t.path); }
+    // File names now; tags, duration, tempo, grid and waveforms as the
+    // analysis thread gets to each track (cached in ~/.cache/opendeck).
+    let scanned = opendeck_mediaserver::scan(&o.dir, "OpenDeck")?;
+    let n_tracks = scanned.files.len() as u16;
+    log::info!("library: {} tracks under {}", n_tracks, o.dir.display());
+    for (id, p) in scanned.files.iter().take(10) { log::info!("  [{id}] {}", p.display()); }
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .map(|c| c.join("opendeck").join("linkcache"));
 
     // ── services ─────────────────────────────────────────────────────────────
-    let _nfs = NfsServer::start(tree, "/C/", o.portmap, o.nfsd)?;
-    let _db  = DbServer::start(Library { tracks, name: "OpenDeck".into() }, o.player, 0)?;
+    let _nfs = NfsServer::start(scanned.tree, "/C/", o.portmap, o.nfsd)?;
+    let _db  = DbServer::start(Arc::clone(&scanned.library), o.player, 0)?;
+    let _analysis = opendeck_mediaserver::start_analysis(scanned.library, scanned.files, cache)?;
 
     // ── Link: announce + status + media query ─────────────────────────────────
     let link = Arc::new(ProDjLink::new(o.player));

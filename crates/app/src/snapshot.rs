@@ -10,6 +10,9 @@ use opendeck_types::BeatGrid;
 pub struct DeckSnapshot<'a> {
     /// Track name shown in the title bar (tag title, else file name).
     pub title:        &'a str,
+    /// A track being fetched / prepared on the loader thread, by name: the
+    /// title bar shows a LOADING readout until it lands (`DeckApp::loading`).
+    pub loading:      Option<&'a str>,
 
     /// Playhead in interleaved source samples — latency-compensated and
     /// phase-locked, i.e. what the listener is hearing right now.

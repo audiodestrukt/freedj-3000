@@ -203,6 +203,7 @@ fn make_snapshot<'a>(
         title:         if path.as_os_str().is_empty() { "NO TRACK" }
                        else { tags.title.as_deref()
                                 .unwrap_or_else(|| path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")) },
+        loading:       None,
         tags,
         file:          path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
         position:      pos,
@@ -1135,7 +1136,7 @@ impl DeckApp {
         match load {
             Load::Local { path, analyze } => self.load_track(&path, analyze.as_deref()),
             Load::Link { ip, rel_path, analyze_rel } => self.load_track_link(ip, &rel_path, &analyze_rel),
-            Load::Db { ip, id, title, rekordbox } => self.load_track_db(ip, id, &title, rekordbox),
+            Load::Db { ip, id, title, rekordbox, sd } => self.load_track_db(ip, id, &title, rekordbox, sd),
         }
     }
 
@@ -1144,7 +1145,8 @@ impl DeckApp {
     fn load_track(&mut self, path: &std::path::Path, analyze: Option<&std::path::Path>) -> Result<()> {
         let (path, analyze) = (path.to_path_buf(), analyze.map(|p| p.to_path_buf()));
         let prep = self.prep();
-        self.start_fetch(path.display().to_string(), move || Self::prepare_local(prep, path, analyze))
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
+        self.start_fetch(name, move || Self::prepare_local(prep, path, analyze))
     }
 
     fn prepare_local(prep: Prep, path: std::path::PathBuf, analyze: Option<std::path::PathBuf>) -> Result<Prepared> {
@@ -1181,9 +1183,9 @@ impl DeckApp {
     /// beat grid, then read the audio over the peer's NFS export.  A player's
     /// portmapper is on 111 and exports "/C/"; rekordbox uses 50111 and "/".
     /// All of that runs on a fetch thread; see [`poll_fetch`](Self::poll_fetch).
-    fn load_track_db(&mut self, ip: std::net::Ipv4Addr, id: u32, title: &str, rekordbox: bool) -> Result<()> {
+    fn load_track_db(&mut self, ip: std::net::Ipv4Addr, id: u32, title: &str, rekordbox: bool, sd: bool) -> Result<()> {
         use opendeck_dbserver::{parse_beat_grid, Client, Slot};
-        let slot = if rekordbox { Slot::Collection } else { Slot::Usb };
+        let slot = if rekordbox { Slot::Collection } else if sd { Slot::Sd } else { Slot::Usb };
         let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
         let title = title.to_string();
         let prep = self.prep();
@@ -1199,9 +1201,13 @@ impl DeckApp {
             log::info!("LINK {ip}: track {id} at {path:?}, {} grid beats ({:.0} ms)", beats.len(), t0.elapsed().as_secs_f64() * 1e3);
             let pm = if rekordbox { opendeck_nfs::PORTMAP_REKORDBOX } else { opendeck_nfs::PORTMAP_PLAYER };
             let mut nfs = opendeck_nfs::Nfs::connect_at(ip, pm)?;
-            let fallback = if rekordbox { "/" } else { "/C/" };
-            let export = nfs.exports()?.into_iter().next()
-                .unwrap_or_else(|| fallback.encode_utf16().flat_map(|u| u.to_le_bytes()).collect());
+            // A player exports its USB as "/C/" and its SD as "/B/"; rekordbox
+            // exports "/".  Take the slot's export when listed, else the first.
+            let want = if rekordbox { "/" } else if sd { "/B/" } else { "/C/" };
+            let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
+            let exports = nfs.exports()?;
+            let export = exports.iter().find(|e| **e == utf16(want)).or_else(|| exports.first()).cloned()
+                .unwrap_or_else(|| utf16(want));
             let root = nfs.mount(&export)?;
             let (fh, size) = nfs.lookup_path(&root, &path)?;
             let audio = nfs.read_file(&fh, size)?;
@@ -1542,7 +1548,8 @@ impl DeckApp {
             slip_shadow,
         };
         let _t_snap = Instant::now();
-        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        snap.loading = self.loading.as_deref();
         perf_accum("make_snapshot", _t_snap.elapsed());
 
         // Screen layout in logical points; the shader gets its two rects in pixels.
@@ -1658,11 +1665,13 @@ impl DeckApp {
             tempo_range: self.settings.tempo_range, quantize: self.settings.quantize,
             slip_shadow,
         };
-        let snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        snap.loading = self.loading.as_deref();
 
-        // Dev: OPENDECK_SCREENSHOT=path captures frame 90 and exits.
+        // Dev: OPENDECK_SCREENSHOT=path captures frame 90 (or
+        // OPENDECK_SCREENSHOT_FRAME=n) and exits.
         self.frame_count += 1;
-        if self.frame_count == 90 {
+        if self.frame_count == std::env::var("OPENDECK_SCREENSHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(90) {
             if let Ok(path) = std::env::var("OPENDECK_SCREENSHOT") {
                 renderer.request_capture(path.into());
                 self.exit_after_capture = true;
@@ -2512,23 +2521,17 @@ fn first_audio_in(dir: &std::path::Path) -> Option<PathBuf> {
 
 /// Start the Link media-source services over `root`: NFSv2 (portmap 111,
 /// nfsd 2049, export "/C/") for the audio and dbserver (12523 + ephemeral) for
-/// browsing.  Returns the number of tracks served.
+/// browsing.  The library starts as file names; a background thread fills in
+/// tags, duration, tempo, grid and waveforms per track (cached in the app data
+/// dir, so only the first launch pays).  Returns the number of tracks served.
 fn start_media_server(root: &std::path::Path, player: u8) -> Result<u32> {
-    use opendeck_dbserver::server::{Library, Server as DbServer, Track};
-    use opendeck_nfs::server::{NfsServer, Tree};
-    const EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg"];
-    let tree = Tree::scan(root)?;
-    let mut tracks = Vec::new();
-    for (i, (nfs_path, local)) in tree.files().into_iter().enumerate() {
-        let ext = local.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
-        if !EXTS.contains(&ext.as_str()) { continue; }
-        let title = local.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
-        tracks.push(Track { id: i as u32 + 1, title, artist: String::new(), album: String::new(), path: nfs_path,
-                            duration_s: 0, bpm: 0.0, comment: String::new(), bitrate: 0, date_added: String::new(), beats: Vec::new() });
-    }
-    let n = tracks.len() as u32;
-    let nfs = NfsServer::start(tree, "/C/", 111, 2049)?;
-    let db = DbServer::start(Library { tracks, name: "OpenDeck".into() }, player, 0)?;
+    use opendeck_dbserver::server::Server as DbServer;
+    use opendeck_nfs::server::NfsServer;
+    let scanned = opendeck_mediaserver::scan(root, "OpenDeck")?;
+    let n = scanned.files.len() as u32;
+    let nfs = NfsServer::start(scanned.tree, "/C/", 111, 2049)?;
+    let db = DbServer::start(Arc::clone(&scanned.library), player, 0)?;
     log::info!("media server: {n} tracks under {} — nfs portmap {} nfsd {}, dbserver {}", root.display(), nfs.portmap, nfs.nfsd, db.db_port);
+    opendeck_mediaserver::start_analysis(scanned.library, scanned.files, Some(taglist::app_data_dir().join("linkcache")))?;
     Ok(n)
 }
