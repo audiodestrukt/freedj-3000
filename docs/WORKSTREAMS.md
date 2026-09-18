@@ -150,6 +150,9 @@ on a Pi 5 8 GB. Instant load is a headline CDJ feature for a reason.
 
 Defer until C1 lands — the transport refactor changes who owns the buffer.
 
+The load pipeline itself is already off the UI thread (#19, 2026-09-17;
+`docs/design/track-loading.md`); a streaming loader would replace its stage 2.
+
 ---
 
 ## B. ProDJ Link and two-deck testing

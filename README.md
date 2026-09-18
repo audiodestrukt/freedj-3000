@@ -265,7 +265,8 @@ The codebase is Rust throughout. Contributions welcome in any area. The most use
 - **XDJ media-source acceptance** — an XDJ browsing and loading from OpenDeck over LINK (dbserver + NFS servers are in; see `docs/reference/prodj-link-media.md`)
 - **Hardware BOM and PCB** — the physical build hasn't started yet
 
-See `AUDIO_ENGINE.md` for detailed design documentation on the audio engine.
+See `AUDIO_ENGINE.md` for detailed design documentation on the audio engine,
+and `docs/design/track-loading.md` for how a track load runs off the UI thread.
 
 ---
 
