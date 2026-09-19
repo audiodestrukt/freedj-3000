@@ -10,6 +10,7 @@
 mod audio;
 mod browser;
 pub mod chrome;
+mod cpumeter;
 mod grids;
 mod input;
 mod midi;
@@ -179,6 +180,19 @@ struct DeckApp {
     /// stop requesting redraws so the app can quiesce and be suspended cleanly;
     /// see the WindowEvent::Occluded handler for the full rationale.
     occluded: bool,
+    /// Frame pacing while nothing moves (paused, no touch, nothing loading):
+    /// render at this rate instead of the display's.  `None` = always the
+    /// display rate.  iOS defaults to 10 fps idle; OPENDECK_IDLE_FPS overrides
+    /// (0 = off).  The deck's screen is static when paused apart from the
+    /// flashing play lamp, and a phone drawing 60 frames a second of it for an
+    /// hour is what made it warm.
+    idle_fps: Option<f32>,
+    /// What the last frame decided for the next: due at the display rate
+    /// (playing, loading, input, egui animating) or at `idle_fps`.
+    full_rate: bool,
+    /// Last frame that saw pointer/touch input; full rate is held for a
+    /// second after, so a tap's feedback and a scroll are never throttled.
+    last_input: Instant,
     /// Last-seen audio glitch counters, to log only on change.
     prev_underruns: u64,
     prev_drops:     u64,
@@ -430,6 +444,13 @@ impl DeckApp {
             prev_underruns: 0,
             prev_drops:     0,
             occluded:       false,
+            idle_fps: match std::env::var("OPENDECK_IDLE_FPS").ok().and_then(|v| v.parse::<f32>().ok()) {
+                Some(f) if f > 0.0 => Some(f),
+                Some(_)            => None,
+                None               => cfg!(target_os = "ios").then_some(10.0),
+            },
+            full_rate:      true,
+            last_input:     Instant::now(),
         }
     }
 
@@ -449,7 +470,7 @@ impl DeckApp {
                     log::info!("play locked in from cue preview");
                 } else {
                     let was = self.audio.playing.load(Ordering::Relaxed);
-                    self.audio.playing.store(!was, Ordering::Relaxed);
+                    self.audio.set_playing(!was);
                     log::info!("{}", if was { "paused" } else { "playing" });
                 }
             }
@@ -529,7 +550,7 @@ impl DeckApp {
                         // the same point (never adopt a raced-forward position).
                         self.cue_preview = true;
                         self.seek_to(self.cue_point);
-                        self.audio.playing.store(true, Ordering::Relaxed);
+                        self.audio.set_playing(true);
                         log::debug!("cue: preview from {:.2}s", self.cue_point as f64 / sr_ch);
                     } else {
                         // Paused after searching away → set a new cue here, then
@@ -545,7 +566,7 @@ impl DeckApp {
                         self.cue_point   = self.quantized(self.smoothed_pos);
                         self.cue_preview = true;
                         self.cued        = true;
-                        self.audio.playing.store(true, Ordering::Relaxed);
+                        self.audio.set_playing(true);
                         log::info!("cue: set + preview at {:.2}s", self.cue_point as f64 / sr_ch);
                     }
                 } else if self.cue_preview {
@@ -982,7 +1003,7 @@ impl DeckApp {
     fn lock_in_play(&mut self) {
         self.cue_preview = false;   // release won't return to the cue
         self.cued        = false;   // playhead is leaving the cue
-        self.audio.playing.store(true, Ordering::Relaxed);
+        self.audio.set_playing(true);
     }
 
     // ── Loop helpers ─────────────────────────────────────────────────────────
@@ -1205,7 +1226,7 @@ impl DeckApp {
         let prep = self.prep();
         self.start_fetch(name.clone(), move || {
             let t0 = Instant::now();
-            let mut nfs = opendeck_nfs::Nfs::connect(ip)?;
+            let mut nfs = opendeck_nfs::Nfs::connect_any(ip)?;
             let root = nfs.mount_usb()?;
             let (fh, size) = nfs.lookup_path(&root, &rel_path)?;
             let audio = nfs.read_file(&fh, size)?;
@@ -1240,8 +1261,8 @@ impl DeckApp {
                 Err(e) => { log::info!("LINK {ip} beat grid {id}: {e:#}"); Vec::new() }
             };
             log::info!("LINK {ip}: track {id} at {path:?}, {} grid beats ({:.0} ms)", beats.len(), t0.elapsed().as_secs_f64() * 1e3);
-            let pm = if rekordbox { opendeck_nfs::PORTMAP_REKORDBOX } else { opendeck_nfs::PORTMAP_PLAYER };
-            let mut nfs = opendeck_nfs::Nfs::connect_at(ip, pm)?;
+            let mut nfs = if rekordbox { opendeck_nfs::Nfs::connect_at(ip, opendeck_nfs::PORTMAP_REKORDBOX)? }
+                          else         { opendeck_nfs::Nfs::connect_any(ip)? };
             // A player exports its USB as "/C/" and its SD as "/B/"; rekordbox
             // exports "/".  Take the slot's export when listed, else the first.
             let want = if rekordbox { "/" } else if sd { "/B/" } else { "/C/" };
@@ -1312,7 +1333,7 @@ impl DeckApp {
         self.loading = None;
         match got.and_then(|p| self.apply_prepared(p)) {
             Ok(()) => if std::mem::take(&mut self.play_on_load) {
-                self.audio.playing.store(true, Ordering::Relaxed);
+                self.audio.set_playing(true);
                 log::info!("autoload ok");
             },
             Err(e) => { self.play_on_load = false; log::warn!("load failed: {e:#}"); }
@@ -1388,7 +1409,7 @@ impl DeckApp {
         // quiet and a hitch prints one attributed line.
         let refresh = self.refresh_interval.as_secs_f64();
         let dt_s    = frame_dt.as_secs_f64();
-        if self.frame_count > 60 && dt_s > refresh * 2.5 {
+        if self.frame_count > 60 && self.full_rate && dt_s > refresh * 2.5 {
             self.frame_spikes += 1;
             let ours = self.last_frame_total.as_secs_f64();
             let idle = (dt_s - ours).max(0.0);
@@ -1617,7 +1638,7 @@ impl DeckApp {
 
         // Screen layout in logical points; the shader gets its two rects in pixels.
         let ppp  = window.scale_factor() as f32;
-        let size = window.inner_size();
+        let size = window_px(window);
         let win  = egui::Rect::from_min_size(egui::Pos2::ZERO,
                        egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
         // Faceplate renders the screen into a sub-rect of the deck body; with
@@ -1631,11 +1652,12 @@ impl DeckApp {
         // A phone (or a phone-sized window) gets the two-page layout instead
         // of any faceplate: the LCD page or the controls page.
         let phone = self.phone || (cfg!(target_os = "ios") && win.width().min(win.height()) < 600.0);
+        let insets = phone_insets(window, ppp, win);
         let phone_layout = phone.then(|| if self.phone_controls {
-            let (f, strip) = screen::phone_controls_layout(win);
+            let (f, strip) = screen::phone_controls_layout(win, insets);
             screen::PhoneLayout::Controls(f, strip)
         } else {
-            screen::PhoneLayout::Screen(screen::phone_screen_layout(win).1)
+            screen::PhoneLayout::Screen(screen::phone_screen_layout(win, insets).1)
         });
         let chrome = !phone && (self.faceplate || self.portrait);
         let base = chrome.then(|| {
@@ -1656,7 +1678,7 @@ impl DeckApp {
                 let (s, f) = if self.portrait { screen::portrait_layout(b) } else { screen::faceplate_layout(b) };
                 (s, Some(f))
             }
-            None if phone => (screen::phone_screen_layout(win).0, None),
+            None if phone => (screen::phone_screen_layout(win, insets).0, None),
             None => (win, None),
         };
         let lay  = screen::layout(screen_rect);
@@ -1670,7 +1692,10 @@ impl DeckApp {
         let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(over_rect), dim_played: self.remain_mode };
 
         // Build egui overlay.
-        let raw = egui_state.take_egui_input(window.as_ref());
+        let mut raw = egui_state.take_egui_input(window.as_ref());
+        // egui-winit sizes its screen rect from `inner_size`, which on iOS is
+        // the safe area; hit-testing must cover the whole view like the layout.
+        if cfg!(target_os = "ios") { raw.screen_rect = Some(win); }
         let mut touch = Vec::new();
         let _t_run = Instant::now();
         let view = match self.screen_mode {
@@ -1687,6 +1712,20 @@ impl DeckApp {
         let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, phone_ref, chrome, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
+
+        // ── Idle pacing decision for the next frame ──────────────────────────
+        // Full rate while anything moves: audio, a load in flight, a CUE
+        // preview, input in the last second, or egui asking to animate.
+        let input_now = self.egui_ctx.input(|i| i.pointer.any_down() || !i.events.is_empty());
+        if input_now { self.last_input = frame_start; }
+        let egui_animating = output.viewport_output.values().any(|v| v.repaint_delay.is_zero());
+        self.full_rate = self.idle_fps.is_none()
+            || self.frame_count < 120
+            || self.audio.playing.load(Ordering::Relaxed)
+            || self.loading.is_some()
+            || self.cue_preview
+            || egui_animating
+            || frame_start.duration_since(self.last_input) < Duration::from_secs(1);
         if phone { self.phone_swipe(&mut touch); }
         self.events.append(&mut touch);
         let mut pending = std::mem::take(&mut self.events);
@@ -1785,6 +1824,7 @@ impl DeckApp {
 #[cfg(target_os = "ios")]
 extern "C" {
     fn freedj_set_idle_timer_disabled(disabled: bool);
+    fn freedj_is_phone() -> bool;
 }
 fn set_idle_timer_disabled(disabled: bool) {
     #[cfg(target_os = "ios")]
@@ -1943,7 +1983,7 @@ impl ApplicationHandler for DeckApp {
                 .expect("failed to create window"),
         );
 
-        let sz = window.inner_size();
+        let sz = window_px(&window);
         log::info!("window {}x{} px, scale {:.2}", sz.width, sz.height, window.scale_factor());
 
         // The display's refresh period is the unit the playhead advances in.
@@ -2000,7 +2040,10 @@ impl ApplicationHandler for DeckApp {
         // Forward all events to egui first.
         if let (Some(state), Some(window)) = (&mut self.egui_state, &self.window) {
             let resp = state.on_window_event(window.as_ref(), &event);
-            if resp.repaint {
+            // egui-winit answers "repaint" to RedrawRequested itself; honouring
+            // that here would request the next frame from inside every frame
+            // and defeat the idle pacing below.  The frame loop owns that.
+            if resp.repaint && !matches!(event, WindowEvent::RedrawRequested) {
                 window.request_redraw();
             }
         }
@@ -2118,7 +2161,7 @@ impl ApplicationHandler for DeckApp {
                 } else {
                     log::info!("un-occluded (foreground): reconfiguring surface, resuming");
                     if let (Some(r), Some(w)) = (&mut self.renderer, &self.window) {
-                        let sz = w.inner_size();
+                        let sz = window_px(w);
                         r.resize(sz.width, sz.height);   // reconfigure at current size
                         w.request_redraw();
                     }
@@ -2142,8 +2185,9 @@ impl ApplicationHandler for DeckApp {
                 // position smoothing can fix a frame that lands in the wrong
                 // vsync slot.  While occluded (iOS background) we stop the loop
                 // here so the app can idle and suspend; Occluded(false) restarts
-                // it.
-                if !self.occluded {
+                // it.  Idle-paced (nothing moving), the next frame is scheduled
+                // by the timer in about_to_wait instead.
+                if !self.occluded && self.full_rate {
                     if let Some(w) = &self.window {
                         w.request_redraw();
                     }
@@ -2161,6 +2205,23 @@ impl ApplicationHandler for DeckApp {
         if self.occluded {
             event_loop.set_control_flow(ControlFlow::Wait);
             return;
+        }
+        // Idle pacing: nothing moves, so the next frame is due at `idle_fps`
+        // rather than the display rate.  Input reaches us through the window
+        // events, which request a redraw of their own, and that frame's
+        // decision brings the display rate straight back.
+        if !self.full_rate {
+            if let Some(fps) = self.idle_fps {
+                let period = Duration::from_secs_f32(1.0 / fps);
+                let now    = Instant::now();
+                let due    = self.last_render + period;
+                let next = if now >= due {
+                    if let Some(w) = &self.window { w.request_redraw(); }
+                    now + period
+                } else { due };
+                event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+                return;
+            }
         }
         // Default: redraws are requested from RedrawRequested and paced entirely
         // by the compositor's frame callback (ControlFlow::Wait).  Clean phase-
@@ -2190,6 +2251,36 @@ impl ApplicationHandler for DeckApp {
 }
 
 // ── Entry point ───────────────────────────────────────────────────────────────
+
+/// The drawable's size in pixels.  On iOS winit's `inner_size` is the *safe
+/// area*, while the view — and so the Metal layer — covers the whole screen.
+/// Sizing the surface, the layout and egui's screen rect from it stretched the
+/// frame over the display and put every touch target off by the safe-area
+/// insets (0.2.0 on iPhone: CUE/PLAY and the MENU rows missed by up to 120 pt).
+/// `outer_size` is the view.  Desktop windows have decorations in their outer
+/// size, so they keep `inner_size`.
+pub(crate) fn window_px(window: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
+    if cfg!(target_os = "ios") { window.outer_size() } else { window.inner_size() }
+}
+
+/// Safe-area insets in points (left, top, right, bottom).  On iOS winit reports
+/// the safe area as the window's inner position + size, so the insets are the
+/// gap between that and the full view — per device, with the Dynamic Island
+/// on whichever side the phone is turned.  Elsewhere the fixed iPhone table
+/// stands in for the desktop preview.
+fn phone_insets(window: &winit::window::Window, ppp: f32, win: egui::Rect) -> (f32, f32, f32, f32) {
+    if cfg!(target_os = "ios") {
+        if let Ok(pos) = window.inner_position() {
+            let inner = window.inner_size();
+            let l = (pos.x as f32 / ppp).max(0.0);
+            let t = (pos.y as f32 / ppp).max(0.0);
+            let r = (win.width()  - (pos.x as f32 + inner.width  as f32) / ppp).max(0.0);
+            let b = (win.height() - (pos.y as f32 + inner.height as f32) / ppp).max(0.0);
+            return (l, t, r, b);
+        }
+    }
+    screen::PHONE_INSETS
+}
 
 /// Aspect-fit (contain) a texture of size `ts` into `win`, centered.
 fn fit_contain(ts: egui::Vec2, win: egui::Rect) -> egui::Rect {
@@ -2355,6 +2446,12 @@ pub fn run(cfg: Config) -> Result<()> {
             }
         }
     }
+    // Self-measured CPU use, every 10 s: the log, and on iOS a file the Files
+    // app can show (no profiler reaches an App Store build).  INFO shows it.
+    #[cfg(target_os = "ios")]
+    cpumeter::start(Some(taglist::documents_dir().join("opendeck-perf.log")));
+    #[cfg(not(target_os = "ios"))]
+    cpumeter::start(None);
     // Dev hooks for headless tests: OPENDECK_SYNC=1 / OPENDECK_MASTER=1.
     if std::env::var("OPENDECK_SYNC").map(|v| v == "1").unwrap_or(false)   { link.sync.store(true, Ordering::Relaxed); }
     if std::env::var("OPENDECK_MASTER").map(|v| v == "1").unwrap_or(false) { link.want_master.store(true, Ordering::Relaxed); }
@@ -2572,11 +2669,14 @@ pub extern "C" fn freedj_ios_main() {
     }
 
     // Demo config: portrait iPad chrome, player 3 (the ADK-1000 is a drop-in
-    // "deck 3" next to CDJs 1-2, so 3 avoids the default collision), Link send on.
+    // "deck 3" next to CDJs 1-2, so 3 avoids the default collision) — and 4 on
+    // an iPhone, so an iPad and an iPhone on one network see each other
+    // (same-numbered players drop each other's packets).  Link send on.
     // OPENDECK_PLAYER overrides, matching the desktop `--player` arg; otherwise
-    // the MENU's persisted PLAYER No. (seeded to 3 on first run).
+    // the MENU's persisted PLAYER No. (seeded on first run).
     std::env::set_var("OPENDECK_PORTRAIT", "1");
     let player: Option<u8> = std::env::var("OPENDECK_PLAYER").ok().and_then(|v| v.parse().ok());
+    let default_player = if unsafe { freedj_is_phone() } { 4 } else { 3 };
 
     // Music lives in Documents (shared with the Files app, so the user drops
     // tracks in there).  The bundled demo track is copied in once — if the user
@@ -2597,7 +2697,7 @@ pub extern "C" fn freedj_ios_main() {
         Some(t) => log::info!("track: {}", t.display()),
         None => log::info!("no audio in Documents — booting to an empty deck; add tracks via the Files app"),
     }
-    if let Err(e) = run(Config { track, player, default_player: 3, deck_channel: 0, link_send: true, browse_root: Some(docs) }) {
+    if let Err(e) = run(Config { track, player, default_player, deck_channel: 0, link_send: true, browse_root: Some(docs) }) {
         log::error!("freedj_ios_main: {e:#}");
     }
 }

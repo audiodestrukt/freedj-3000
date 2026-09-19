@@ -193,3 +193,26 @@ reports real ones.
 Preview on the desktop with `OPENDECK_PHONE=1` (932×430 pt window, Tab flips
 pages); App Store captures use `OPENDECK_WINDOW=2868x1320` with
 `OPENDECK_PHONE_PAGE=screen|controls`.
+
+## CPU use and the perf log
+
+There is no profiler on an App Store build, so the app measures itself: every
+10 s a line like
+
+```
+cpu: 18.4% of one core — main 9.1  audio-proc 6.2  prodj-tx 0.7
+```
+
+goes to the log and to `Documents/opendeck-perf.log` (open it from the Files
+app → On My iPhone → OpenDeck DJ; it is rewritten on every launch). INFO
+shows the process figure as its last row. Threads: `main` is rendering and
+UI, `audio-proc` is decode + Rubber Band R3, `prodj-tx` the Link sender,
+`media-analysis` the one-off library analysis after an install.
+
+What the numbers mean for heat: a paused deck should sit near 0 % — the frame
+loop drops to 10 fps (`OPENDECK_IDLE_FPS`) and the audio and Link threads
+park. Playing, the CPU side is small (R3 is ~5 % of a desktop core, ~10 % of a
+phone core), so if the device still warms while `cpu:` stays low the load is
+the GPU and the display: the waveform shader redraws the whole LCD at the
+panel rate for as long as audio runs. That is the next thing to cut
+(render the static overview once per track, pace ProMotion iPads at 60).

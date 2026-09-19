@@ -92,6 +92,8 @@ pub struct AudioHandle {
     pub position:    Arc<AtomicU64>,
     /// Play / pause.
     pub playing:     Arc<AtomicBool>,
+    /// The processor thread, parked while paused; see `set_playing`.
+    proc_thread:     std::thread::Thread,
     /// Playback speed as f32 bits (1.0 = normal, 0.5 = half, 2.0 = double).
     /// Set via `speed_store` / `speed_load` helpers.
     pub speed:       Arc<AtomicU32>,
@@ -132,6 +134,14 @@ pub struct AudioHandle {
 }
 
 impl AudioHandle {
+    /// Start or stop playback.  Starting also wakes the processor thread,
+    /// which parks while paused instead of polling — every PLAY path must
+    /// come through here or the first block waits for the park timeout.
+    pub fn set_playing(&self, on: bool) {
+        self.playing.store(on, Ordering::Relaxed);
+        if on { self.proc_thread.unpark(); }
+    }
+
     /// Convenience: read current speed.
     pub fn speed_load(&self) -> f32 {
         f32::from_bits(self.speed.load(Ordering::Relaxed))
@@ -279,6 +289,7 @@ impl AudioHandle {
                 );
             })
             .context("failed to spawn processor thread")?;
+        let proc_thread = processor.thread().clone();
 
         // ── 6. cpal stream (RT callback, no allocation) ────────────────────────
         let cpal_playing    = Arc::clone(&playing);
@@ -335,6 +346,7 @@ impl AudioHandle {
             samples,
             position,
             playing,
+            proc_thread,
             speed,
             key_lock,
             loop_start,
@@ -493,8 +505,13 @@ fn processor_loop(
 
     loop {
         // ── Pause handling ────────────────────────────────────────────────────
+        // Park rather than poll: `AudioHandle::set_playing(true)` unparks us,
+        // so PLAY/CUE still start within a block, and a paused deck costs no
+        // wakeups (this loop ran 500 times a second doing nothing, which on a
+        // phone keeps the core out of its idle state).  The timeout is only a
+        // safety net for a store that bypassed `set_playing`.
         if !playing.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(2));
+            thread::park_timeout(Duration::from_millis(50));
             continue;
         }
 
@@ -507,7 +524,7 @@ fn processor_loop(
         // Empty deck (no track loaded yet): idle exactly like the paused path so
         // nothing indexes a zero-length buffer even if PLAY is pressed.
         if samples.is_empty() {
-            thread::sleep(Duration::from_millis(2));
+            thread::park_timeout(Duration::from_millis(50));
             continue;
         }
 

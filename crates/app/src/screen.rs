@@ -362,12 +362,15 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
 // 6.9" in landscape; the screenshot harness uses OPENDECK_WINDOW=2868x1320.
 
 /// Safe-area insets of a landscape iPhone with a Dynamic Island, in points:
-/// (left, top, right, bottom).  Fixed for now; the UIKit bridge could report
-/// the real ones per device.
+/// (left, top, right, bottom).  The desktop preview's stand-in; on the device
+/// the real insets come from winit (`phone_insets` in lib.rs).
 pub const PHONE_INSETS: (f32, f32, f32, f32) = (59.0, 0.0, 59.0, 21.0);
 
-fn inset(win: Rect) -> Rect {
-    let (l, t, r, b) = PHONE_INSETS;
+/// Safe-area insets as `PHONE_INSETS`: (left, top, right, bottom) in points.
+pub type Insets = (f32, f32, f32, f32);
+
+fn inset(win: Rect, ins: Insets) -> Rect {
+    let (l, t, r, b) = ins;
     Rect::from_min_max(Pos2::new(win.min.x + l, win.min.y + t), Pos2::new(win.max.x - r, win.max.y - b))
 }
 
@@ -379,6 +382,8 @@ pub struct PhoneSide {
     pub cue:       Rect,
     pub play:      Rect,
     pub caption:   f32,
+    /// Bottom safe-area band (home indicator), where the page-flip pill sits.
+    pub bottom:    f32,
 }
 
 /// The controls page's readout strip across the top.
@@ -386,6 +391,8 @@ pub struct PhoneStrip {
     pub meter: Rect,
     pub tempo: Rect,
     pub bpm:   Rect,
+    /// Bottom safe-area band (home indicator), where the page-flip pill sits.
+    pub bottom: f32,
 }
 
 /// The phone's two pages.
@@ -395,8 +402,8 @@ pub enum PhoneLayout {
 }
 
 /// SCREEN page: (lcd rect, side column).
-pub fn phone_screen_layout(win: Rect) -> (Rect, PhoneSide) {
-    let base = inset(win);
+pub fn phone_screen_layout(win: Rect, ins: Insets) -> (Rect, PhoneSide) {
+    let base = inset(win, ins);
     let h = base.height();
     let lcd_w = (h * 800.0 / 480.0).min(base.width() - 110.0);
     let lcd = Rect::from_min_size(base.min, Vec2::new(lcd_w, h));
@@ -413,13 +420,14 @@ pub fn phone_screen_layout(win: Rect) -> (Rect, PhoneSide) {
         cue:       disk(0.66, btn),
         play:      disk(0.86, btn),
         caption:   (h * 0.026).min(11.0),
+        bottom:    ins.3,
     })
 }
 
 /// CONTROLS page: the faceplate table (no LCD, no browse knob) plus the
 /// readout strip.  Fractions of the inset window.
-pub fn phone_controls_layout(win: Rect) -> (FaceLayout, PhoneStrip) {
-    let base = inset(win);
+pub fn phone_controls_layout(win: Rect, ins: Insets) -> (FaceLayout, PhoneStrip) {
+    let base = inset(win, ins);
     let (w, h) = (base.width(), base.height());
     let disk = |cx: f32, cy: f32, rw: f32|
         Rect::from_center_size(base.min + Vec2::new(cx * w, cy * h), Vec2::splat(2.0 * rw * w));
@@ -450,6 +458,7 @@ pub fn phone_controls_layout(win: Rect) -> (FaceLayout, PhoneStrip) {
         meter: face_rect(base, 0.220, 0.020, 0.600, 0.140),
         tempo: face_rect(base, 0.640, 0.010, 0.825, 0.150),
         bpm:   face_rect(base, 0.840, 0.010, 0.985, 0.150),
+        bottom: ins.3,
     };
     (face, strip)
 }
@@ -541,10 +550,11 @@ fn draw_phone_strip(ui: &Ui, snap: &DeckSnapshot, st: &PhoneStrip, out: &mut Vec
 /// which is 90 degrees from the screen when the phone is held portrait — so the
 /// gesture alone is not discoverable.  This is the visible way.
 ///
-/// The band is only `PHONE_INSETS.3` tall, but it is the full width of the
-/// window and holds no other content, so the target is wide instead of tall.
-fn draw_phone_pager(ui: &Ui, win: Rect, controls: bool, out: &mut Vec<Event>) {
-    let band_h = PHONE_INSETS.3;
+/// The band is only the bottom safe-area inset tall (the home-indicator strip,
+/// 21 pt on a landscape iPhone), but it is the full width of the window and
+/// holds no other content, so the target is wide instead of tall.
+fn draw_phone_pager(ui: &Ui, win: Rect, controls: bool, bottom: f32, out: &mut Vec<Event>) {
+    let band_h = bottom.max(16.0);
     let y      = win.max.y - band_h * 0.5;
     let pill   = Rect::from_center_size(
         Pos2::new(win.center().x, y),
@@ -801,7 +811,7 @@ pub fn draw(
                 ui.painter().rect_filled(ui.max_rect(), 0.0, FACE_BODY);
                 draw_phone_strip(ui, snap, strip, out);
                 draw_faceplate(ui, ctx, snap, f, false, chrome, out);
-                draw_phone_pager(ui, ui.max_rect(), true, out);
+                draw_phone_pager(ui, ui.max_rect(), true, strip.bottom, out);
                 return;
             }
             if phone.is_some() {
@@ -884,7 +894,7 @@ pub fn draw(
                     _ => false,
                 };
                 draw_phone_side(ui, ctx, snap, side, sel_tagged, chrome, out);
-                draw_phone_pager(ui, ui.max_rect(), false, out);
+                draw_phone_pager(ui, ui.max_rect(), false, side.bottom, out);
             }
         });
 }
@@ -1080,7 +1090,7 @@ fn draw_info_screen(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
         0 => "none".to_string(), 1 => "1 point".to_string(), n => format!("{n} points"),
     };
 
-    let rows: [(&str, String); 11] = [
+    let rows: [(&str, String); 12] = [
         ("TITLE",   snap.title.to_string()),
         ("ARTIST",  or_dash(&t.artist)),
         ("ALBUM",   or_dash(&t.album)),
@@ -1092,6 +1102,7 @@ fn draw_info_screen(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
         ("FORMAT",  format),
         ("MEMORY",  memory),
         ("FILE",    snap.file.to_string()),
+        ("CPU",     format!("{:.0} %  of one core, this app", crate::cpumeter::process_pct())),
     ];
 
     // Two columns of label/value rows.

@@ -46,3 +46,4 @@ if-addrs          = "0.13"
 png               = "0.17"
 serde             = { workspace = true }
 serde_json        = "1"     # TAG LIST persistence
+libc              = "0.2"   # CPU meter: /proc on Linux, Mach thread_info on Apple

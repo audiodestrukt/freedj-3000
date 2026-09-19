@@ -406,7 +406,7 @@ impl Browser {
 
     /// Connect to a linked player, read its `export.pdb` over NFS, and browse it.
     fn connect_link(&mut self, ip: Ipv4Addr) -> anyhow::Result<()> {
-        let mut nfs = Nfs::connect(ip)?;
+        let mut nfs = Nfs::connect_any(ip)?;
         let root = nfs.mount_usb()?;
         let (fh, size) = nfs.lookup_path(&root, "PIONEER/rekordbox/export.pdb")?;
         let bytes = nfs.read_file(&fh, size)?;

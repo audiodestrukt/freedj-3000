@@ -22,6 +22,13 @@ void freedj_set_idle_timer_disabled(bool disabled) {
     }
 }
 
+// Device idiom, for the Link player-number default: an iPad comes up as
+// player 3 and an iPhone as 4, so two OpenDecks on one network do not both
+// claim 3 (same-numbered players ignore each other's packets).
+bool freedj_is_phone(void) {
+    return [UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPhone;
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
         freedj_ios_main();

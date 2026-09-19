@@ -110,7 +110,7 @@ pub struct Renderer {
 
 impl Renderer {
     pub async fn new(window: Arc<Window>, waveform: &WaveformCache) -> Result<Self> {
-        let size = window.inner_size();
+        let size = crate::window_px(&window);
 
         // ── wgpu instance / surface ───────────────────────────────────────────
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {

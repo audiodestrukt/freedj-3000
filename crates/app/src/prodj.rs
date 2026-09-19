@@ -807,7 +807,20 @@ impl ProDjSender {
                         last_status = now;
                     }
 
-                    thread::sleep(Duration::from_millis(1));
+                    // Tick at 1 ms while playing — the beat clock is read off
+                    // this loop.  Paused there is no beat, so sleep to the next
+                    // periodic deadline instead: a thousand wakeups a second,
+                    // not the work they do, is what keeps a phone's core out of
+                    // its idle state.  Capped so flag changes (MASTER, SYNC) and
+                    // a fresh peer are still picked up within 100 ms.
+                    let nap = if playing { Duration::from_millis(1) } else {
+                        let left = |last: Instant, every: Duration| every.saturating_sub(now.duration_since(last));
+                        let mut n = left(last_announce, Duration::from_millis(1500))
+                            .min(left(last_media_query, MEDIA_QUERY_EVERY));
+                        if send_full { n = n.min(left(last_status, Duration::from_millis(200))); }
+                        n.clamp(Duration::from_millis(1), Duration::from_millis(100))
+                    };
+                    thread::sleep(nap);
                 }
             })
             .ok()?;

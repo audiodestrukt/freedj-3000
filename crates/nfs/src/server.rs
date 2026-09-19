@@ -266,7 +266,17 @@ impl NfsServer {
     /// = ephemeral (players use 2049).
     pub fn start(tree: Tree, export_name: &str, portmap_port: u16, nfsd_port: u16) -> Result<NfsServer> {
         let any = |p: u16| UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, p));
-        let pm = any(portmap_port).with_context(|| format!("bind portmap {portmap_port}"))?;
+        // 111 needs privilege (root on Linux; never granted to an iOS app), so
+        // an unprivileged server does what rekordbox does and answers on
+        // 50111 instead; clients try both (`Nfs::connect_any`).
+        let pm = match any(portmap_port) {
+            Ok(s) => s,
+            Err(e) if portmap_port == crate::PORTMAP_PLAYER => {
+                log::info!("nfs: portmap {portmap_port} not bindable ({e}); serving on {} like rekordbox", crate::PORTMAP_REKORDBOX);
+                any(crate::PORTMAP_REKORDBOX).with_context(|| format!("bind portmap {}", crate::PORTMAP_REKORDBOX))?
+            }
+            Err(e) => return Err(e).with_context(|| format!("bind portmap {portmap_port}")),
+        };
         let md = any(0).context("bind mountd")?;
         let nd = any(nfsd_port).or_else(|_| any(0)).context("bind nfsd")?;
         let ports = NfsServer { portmap: pm.local_addr()?.port(), mountd: md.local_addr()?.port(), nfsd: nd.local_addr()?.port() };

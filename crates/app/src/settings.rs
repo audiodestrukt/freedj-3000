@@ -40,11 +40,18 @@ pub struct Settings {
     /// has no push sensor), false = CDJ (a drag while playing nudges).  Paused,
     /// the platter scrubs in either mode.  Remembered, as on the unit.
     pub jog_vinyl: bool,
+    /// Which player-number seeding this file has had (0 = written before
+    /// 0.2.1, when every iOS device was seeded to 3).  Lets a later default
+    /// re-seed a device once without touching a number the user chose.
+    pub seed: u8,
 }
+
+/// Seeding generation written by this build; see `Settings::seed`.
+const SEED: u8 = 1;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true }
+        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, seed: 0 }
     }
 }
 
@@ -52,15 +59,30 @@ impl Settings {
     fn path() -> PathBuf { app_data_dir().join("settings.json") }
 
     /// Load the persisted settings; `default_player` seeds the player number
-    /// when no file exists yet (1 on the desktop, 3 on the iPad).
+    /// when no file exists yet (1 on the desktop, 3 on an iPad, 4 on an
+    /// iPhone).  An iOS file from before 0.2.1 still carrying that era's
+    /// blanket seed of 3 is re-seeded once to the device's default, so an
+    /// iPhone installed as 0.2.0 stops colliding with the iPad.
     pub fn load(default_player: u8) -> Self {
         let path = Self::path();
+        let fresh = || Self { player: default_player, seed: SEED, ..Self::default() };
         match std::fs::read(&path) {
             Ok(b) => match serde_json::from_slice::<Settings>(&b) {
-                Ok(s)  => { log::info!("settings: {:?} from {}", s, path.display()); s }
-                Err(e) => { log::warn!("settings {}: {e} — using defaults", path.display()); Self { player: default_player, ..Self::default() } }
+                Ok(mut s) => {
+                    log::info!("settings: {:?} from {}", s, path.display());
+                    if s.seed < SEED {
+                        if cfg!(target_os = "ios") && s.player == 3 && default_player != 3 {
+                            log::info!("settings: PLAYER No. re-seeded {} → {default_player} for this device", s.player);
+                            s.player = default_player;
+                        }
+                        s.seed = SEED;
+                        s.save();
+                    }
+                    s
+                }
+                Err(e) => { log::warn!("settings {}: {e} — using defaults", path.display()); fresh() }
             },
-            Err(_) => Self { player: default_player, ..Self::default() },
+            Err(_) => fresh(),
         }
     }
 

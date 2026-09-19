@@ -2,6 +2,46 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] — 2026-09-19
+
+Point release after the first day of two-device testing: iPhone touch
+targets, iPhone ↔ iPad browsing, and power.
+
+### Fixed
+- **iPhone touch targets were off by the safe-area insets.** winit reports
+  the *safe area* as the window's `inner_size` on iOS while the view (and the
+  Metal layer) covers the whole screen. The surface, the layout and egui's
+  screen rect were all sized from it, so the frame was stretched over the
+  display and every tap landed up to 120 pt from where it was drawn (CUE, PLAY,
+  the MENU rows). The drawable and the layout now use the full view, and the
+  safe-area insets come from the device (`inner_position` / `inner_size`)
+  instead of a fixed table — the Dynamic Island side is right whichever way
+  the phone is turned. The iPad's 3.5 % vertical stretch is gone too. (#43)
+- **Two OpenDecks on one network could not browse each other.** Both iOS
+  devices seeded PLAYER No. 3 and same-numbered players ignore each other's
+  packets; an iPhone now seeds 4 (an iPad stays 3), and a 0.2.0 install still
+  on the blanket seed is re-seeded once. Separately, the media server never
+  started on iOS because the NFS portmapper needs UDP 111, a privileged port:
+  it now falls back to 50111 like rekordbox, and the client tries 111 then
+  50111 — so the desktop build serves too. (#44)
+
+### Changed — power
+- **Idle frame pacing on iOS.** A paused deck with no finger on it renders at
+  10 fps (`OPENDECK_IDLE_FPS`, 0 = off) instead of the display rate; anything
+  moving — audio, a load, CUE, a touch in the last second, an egui animation —
+  brings the display rate straight back. egui-winit's "repaint" answer to
+  `RedrawRequested` no longer requests the next frame, which had made the loop
+  self-driving.
+- **No idle wakeups.** The audio thread parks while paused (PLAY unparks it)
+  instead of polling every 2 ms; the Link sender sleeps to its next announce /
+  status / media-query deadline when not playing instead of ticking every
+  millisecond. Measured on the desktop: both drop to 0 % paused.
+- **The app measures its own CPU.** Every 10 s a `cpu:` line names the
+  process' share of one core and the threads it went to (Linux: /proc;
+  Apple: Mach `thread_info`). iOS also appends it to
+  `Documents/opendeck-perf.log` for the Files app, and INFO shows the process
+  figure — the numbers to read before and after each power change.
+
 ## [0.2.0] — 2026-09-19
 
 First Universal build (iPhone + iPad): TestFlight build 1789780380.

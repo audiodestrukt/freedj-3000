@@ -82,10 +82,28 @@ impl Nfs {
     /// portmapper on [`PORTMAP_REKORDBOX`] (UDP 50111); a CDJ loading from
     /// rekordbox asks there.
     pub fn connect_at(ip: Ipv4Addr, portmap_port: u16) -> Result<Self> {
+        Self::connect_with(ip, portmap_port, Duration::from_secs(3))
+    }
+
+    /// A player that may be hardware (portmap 111) or software that cannot
+    /// bind 111 unprivileged — another OpenDeck, or rekordbox — and so serves
+    /// on [`PORTMAP_REKORDBOX`]: ask the standard port briefly, then the high
+    /// one.  Both are on the same host, so a short first timeout is enough.
+    pub fn connect_any(ip: Ipv4Addr) -> Result<Self> {
+        match Self::connect_with(ip, PORTMAP_PLAYER, Duration::from_millis(400)) {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                log::debug!("nfs {ip}: portmap {PORTMAP_PLAYER}: {e:#}; trying {PORTMAP_REKORDBOX}");
+                Self::connect_with(ip, PORTMAP_REKORDBOX, Duration::from_secs(3))
+            }
+        }
+    }
+
+    fn connect_with(ip: Ipv4Addr, portmap_port: u16, timeout: Duration) -> Result<Self> {
         // Bind a privileged source port; the CDJ NFS server expects < 1024.
         // Fall back to an ephemeral port if we can't (works on some setups).
         let sock = bind_privileged().context("bind UDP socket")?;
-        sock.set_read_timeout(Some(Duration::from_secs(3)))?;
+        sock.set_read_timeout(Some(timeout))?;
         let mut me = Nfs {
             sock,
             server: SocketAddrV4::new(ip, portmap_port),
