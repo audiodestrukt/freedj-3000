@@ -158,6 +158,34 @@ Small, and each one is a test case, so after 2–4:
 - Dim the screen.  The user's choice; the black UI is already the best
   case for an OLED.
 
+## The Raspberry Pi
+
+The Pi build (the ADK-1000 box: 7" 1024×600 panel, wired Ethernet, Pi 4 or
+Pi 5 with V3DV Vulkan) is the other target, after iOS.  Same code, a
+different budget: no battery, no radio to speak of, a panel at 1× — but a
+GPU an order of magnitude weaker and, on the Pi 4, a CPU where Rubber Band
+R3 alone was measured at ~72 % of a core (see the pi4 memory / PERFORMANCE
+notes).  What carries over, and what flips:
+
+| phase | on the Pi |
+|---|---|
+| 1 wakeups / idle pacing | carries over as is; worth less for heat, but every idle wakeup on a Pi 4 is CPU headroom the stretcher needs |
+| 2 meter | carries over: `cpu:` uses /proc on Linux already; GPU timestamps work on V3DV; thermal state from `/sys/class/thermal` instead of ProcessInfo |
+| 3a lower-res render + upscale | mostly moot: 1024×600 at 1× is already 6× fewer pixels than the phone. Keep the option of shading the waveform at half width on a Pi 4 if 3b is not enough |
+| **3b re-sample, don't re-shade** | **the big one.** VideoCore is fill-rate and ALU poor; one texture sample per pixel is exactly what it is good at, the per-pixel loops are exactly what it is not. The overview loop of ≤18 storage reads per pixel is a real cost there today |
+| 4 frame rate by screen | carries over; the panel is 60 Hz, so the ProMotion cap is irrelevant, and Mailbox at 60 is what the Pi 5 already does |
+| 5 remaining wakeups | carries over |
+| "will not do": R2 / bypass | **flips on the Pi 4.** There the stretcher *is* the cost. Options, in order: R2 (`OptionEngineFaster`, several times cheaper, a step down in quality at large ratios), and the varispeed path for Master Tempo off (a plain resampler instead of stretch + pitch-shift; the resample stage is stubbed today). The perf guard (`make perf`, `timestretch_realtime_factor`) is the yardstick |
+
+Two Pi-specific items that are not on the phone list: the open playhead
+jump on the Pi audio path (memory: audio-position-jump — verify on Pi 5
+before any of this), and active cooling on the Pi 5, which is a symptom of
+the same always-on rendering this note is about.
+
+Order for the Pi once iOS is done: 2 (numbers first), 3b, then the
+stretcher question on the Pi 4 by measurement — the meter says whether it
+is `audio-proc` or the main thread that is short of a core.
+
 ## Order and expected result
 
 | phase | effort | expected saving while playing | while paused |
