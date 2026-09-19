@@ -103,6 +103,15 @@ struct DeckApp {
     /// screen.  Off by default — the Pi/hardware target runs screen-only.
     faceplate:         bool,
     portrait:          bool,   // iPad 13" portrait chrome (OPENDECK_PORTRAIT=1)
+    /// iPhone layout (`OPENDECK_PHONE=1`, or an iOS window narrower than an
+    /// iPad's): two pages, SCREEN and CONTROLS, flipped with a two-finger
+    /// swipe (up = controls).  `phone_controls` is the page showing.
+    phone:             bool,
+    phone_controls:    bool,
+    /// Two-finger swipe in progress: vertical travel so far, and whether it
+    /// already flipped the page (one flip per gesture).
+    swipe_acc:         f32,
+    swipe_done:        bool,
     /// Same-thread sources (keyboard, touch) push here.
     events:            Vec<Event>,
     /// Off-thread sources (MIDI, later HID/serial) send here; drained per frame.
@@ -378,6 +387,10 @@ impl DeckApp {
             phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
             faceplate:         std::env::var("OPENDECK_FACEPLATE").map(|v| v == "1").unwrap_or(false),
             portrait:          std::env::var("OPENDECK_PORTRAIT").map(|v| v == "1").unwrap_or(false),
+            phone:             std::env::var("OPENDECK_PHONE").map(|v| v == "1").unwrap_or(false),
+            phone_controls:    std::env::var("OPENDECK_PHONE_PAGE").map(|v| v == "controls").unwrap_or(false),
+            swipe_acc:         0.0,
+            swipe_done:        false,
             events:            Vec::new(),
             event_rx,
             fetch_rx: None,
@@ -1241,6 +1254,27 @@ impl DeckApp {
         })
     }
 
+    /// Phone page flip: a two-finger vertical swipe (egui's multi-touch
+    /// gesture) of more than `SWIPE_PT` flips once per gesture — fingers up
+    /// brings the controls page, down the screen page.  While two fingers
+    /// are down the first finger's drag must not also scrub the jog or move
+    /// the fader, so those events are dropped for the frame.
+    fn phone_swipe(&mut self, touch: &mut Vec<Event>) {
+        const SWIPE_PT: f32 = 60.0;
+        match self.egui_ctx.input(|i| i.multi_touch()) {
+            Some(mt) if mt.num_touches >= 2 => {
+                self.swipe_acc += mt.translation_delta.y;
+                if !self.swipe_done && self.swipe_acc.abs() > SWIPE_PT {
+                    self.phone_controls = self.swipe_acc < 0.0;
+                    self.swipe_done = true;
+                    log::info!("phone: {} page", if self.phone_controls { "CONTROLS" } else { "SCREEN" });
+                }
+                touch.retain(|e| !matches!(e, Event::Deck(ControlEvent::JogDelta { .. }) | Event::Deck(ControlEvent::TempoFader { .. })));
+            }
+            _ => { self.swipe_acc = 0.0; self.swipe_done = false; }
+        }
+    }
+
     /// What the loader thread needs to know about the deck to prepare a track.
     fn prep(&self) -> Prep {
         Prep {
@@ -1590,7 +1624,16 @@ impl DeckApp {
         // Deriving the rect from a fixed aspect when there is no photo keeps the
         // faceplate usable: the screen stays correctly proportioned inside the
         // window instead of stretching to it, and the transport stays reachable.
-        let chrome = self.faceplate || self.portrait;
+        // A phone (or a phone-sized window) gets the two-page layout instead
+        // of any faceplate: the LCD page or the controls page.
+        let phone = self.phone || (cfg!(target_os = "ios") && win.width().min(win.height()) < 600.0);
+        let phone_layout = phone.then(|| if self.phone_controls {
+            let (f, strip) = screen::phone_controls_layout(win);
+            screen::PhoneLayout::Controls(f, strip)
+        } else {
+            screen::PhoneLayout::Screen(screen::phone_screen_layout(win).1)
+        });
+        let chrome = !phone && (self.faceplate || self.portrait);
         let base = chrome.then(|| {
             if self.portrait {
                 // Portrait chrome is synthesised (no fixed-aspect photo body to
@@ -1609,14 +1652,18 @@ impl DeckApp {
                 let (s, f) = if self.portrait { screen::portrait_layout(b) } else { screen::faceplate_layout(b) };
                 (s, Some(f))
             }
+            None if phone => (screen::phone_screen_layout(win).0, None),
             None => (win, None),
         };
         let lay  = screen::layout(screen_rect);
         let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
         let perform = self.screen_mode == ScreenMode::Perform;
         // PERFORM shrinks the enlarged waveform to a strip above the pads.
-        let wave_rect = if perform { screen::perform_layout(screen_rect).wave } else { lay.wave };
-        let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(lay.overview), dim_played: self.remain_mode };
+        // The phone's controls page has no LCD: the shader gets empty rects.
+        let none = egui::Rect::NOTHING;
+        let wave_rect = if phone && self.phone_controls { none } else if perform { screen::perform_layout(screen_rect).wave } else { lay.wave };
+        let over_rect = if phone && self.phone_controls { none } else { lay.overview };
+        let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(over_rect), dim_played: self.remain_mode };
 
         // Build egui overlay.
         let raw = egui_state.take_egui_input(window.as_ref());
@@ -1631,10 +1678,12 @@ impl DeckApp {
             ScreenMode::Menu     => screen::ScreenView::Menu(&self.settings, self.menu_cursor),
         };
         let face_ref = face.as_ref();
+        let phone_ref = phone_layout.as_ref();
         let chrome = &mut self.chrome;
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, chrome, &mut touch));
+        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, phone_ref, chrome, &mut touch));
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
+        if phone { self.phone_swipe(&mut touch); }
         self.events.append(&mut touch);
         let mut pending = std::mem::take(&mut self.events);
         pending.extend(self.event_rx.try_iter());
@@ -1863,7 +1912,8 @@ impl ApplicationHandler for DeckApp {
 
         // Screen-only is the 7" panel; the faceplate window matches the deck
         // photo's aspect (the image is aspect-fit inside it).
-        let (win_w, win_h) = if self.portrait { (966u32, 1288u32) }   // iPad 13" portrait (0.75)
+        let (win_w, win_h) = if self.phone { (932u32, 430u32) }        // iPhone 6.9" landscape, points
+                             else if self.portrait { (966u32, 1288u32) }   // iPad 13" portrait (0.75)
                              else if self.faceplate { (860u32, 1090u32) } else { (1024u32, 600u32) };
         // Dev: OPENDECK_WINDOW=WxH overrides the window size (App Store
         // screenshots want the iPad 13" panel's exact 2064x2752).
@@ -1970,6 +2020,12 @@ impl ApplicationHandler for DeckApp {
                 }
                 // Everything else acts on key-down only.
                 if state != ElementState::Pressed { return; }
+                // Phone preview: Tab flips SCREEN / CONTROLS (the swipe on device).
+                if self.phone && code == Tab {
+                    self.phone_controls = !self.phone_controls;
+                    if let Some(w) = &self.window { w.request_redraw(); }
+                    return;
+                }
                 // In a list screen (BROWSE / TAG LIST) the keys navigate the
                 // list, not the transport.  G = TAG TRACK / REMOVE.
                 if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu) {

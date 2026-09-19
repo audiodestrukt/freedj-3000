@@ -211,7 +211,9 @@ pub struct FaceLayout {
     /// RELOOP/EXIT: on the landscape photo, but None in portrait/iOS — it needs
     /// the loop engine (unbuilt in the app), same as loop_in/loop_out.
     pub reloop:   Option<Rect>,
-    pub browse:   Rect,
+    /// BROWSE rotary: None on the phone's controls page (it lives beside the
+    /// LCD on the screen page instead).
+    pub browse:   Option<Rect>,
     pub mt:       Rect,   // MASTER TEMPO (key lock)
     /// Portrait-only physical buttons left of the screen (None in landscape,
     /// where TIME/AUTO CUE live inside the LCD as on the real XDJ faceplate).
@@ -255,7 +257,7 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
         loop_in:  Some(face_rect(base, 0.040, 0.345, 0.110, 0.390)),
         loop_out: Some(face_rect(base, 0.125, 0.345, 0.185, 0.390)),
         reloop:   Some(disk(0.255, 0.370, 0.025)),
-        browse:   disk(0.845, 0.205, 0.065),
+        browse:   Some(disk(0.845, 0.205, 0.065)),
         mt:       disk(0.925, 0.565, 0.018),
         time_mode: None,
         auto_cue:  None,
@@ -322,7 +324,7 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         reloop:   Some(disk(0.775, 0.920, 0.026)),
         // Browse knob in the right margin beside the screen; TIME/AUTO CUE stacked
         // in the left margin.  (Margins are (1-sw)/2 ≈ 0.117 wide at 6".)
-        browse:   disk(0.945, 0.105, 0.048),
+        browse:   Some(disk(0.945, 0.105, 0.048)),
         // MASTER TEMPO: centred above the tempo fader (x = the fader's centre),
         // in the gap between the LCD's lower edge (~0.37) and the fader top.
         mt:       disk(0.918, 0.400, 0.020),
@@ -338,6 +340,207 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         caption:   w * 0.018,
     };
     (screen, face)
+}
+
+// ── Phone (iPhone, landscape) ─────────────────────────────────────────────────
+//
+// A phone has no room for the LCD and the deck side by side, so it gets two
+// pages the DJ flips between with a two-finger swipe (up = controls, down =
+// screen; see `DeckApp::phone_swipe`):
+//
+// - SCREEN: the XDJ LCD at full height (5:3), with a slim column beside it
+//   holding the controls you need while looking at the screen — BROWSE knob,
+//   TAG TRACK, BACK, CUE, PLAY.
+// - CONTROLS: the jog, tempo fader, transport, loops, MASTER TEMPO and JOG
+//   MODE, with the phase meter and the BPM / TEMPO readouts across the top so
+//   nudges and tempo moves can be watched without flipping back.
+//
+// Everything else stays on the LCD.  A translucent overlay was considered and
+// rejected as visually confusing (#43).
+
+// Desktop preview (`OPENDECK_PHONE=1`) opens a 932×430 pt window, an iPhone
+// 6.9" in landscape; the screenshot harness uses OPENDECK_WINDOW=2868x1320.
+
+/// Safe-area insets of a landscape iPhone with a Dynamic Island, in points:
+/// (left, top, right, bottom).  Fixed for now; the UIKit bridge could report
+/// the real ones per device.
+pub const PHONE_INSETS: (f32, f32, f32, f32) = (59.0, 0.0, 59.0, 21.0);
+
+fn inset(win: Rect) -> Rect {
+    let (l, t, r, b) = PHONE_INSETS;
+    Rect::from_min_max(Pos2::new(win.min.x + l, win.min.y + t), Pos2::new(win.max.x - r, win.max.y - b))
+}
+
+/// The screen page's side column.
+pub struct PhoneSide {
+    pub browse:    Rect,
+    pub tag_track: Rect,
+    pub back:      Rect,
+    pub cue:       Rect,
+    pub play:      Rect,
+    pub caption:   f32,
+}
+
+/// The controls page's readout strip across the top.
+pub struct PhoneStrip {
+    pub meter: Rect,
+    pub tempo: Rect,
+    pub bpm:   Rect,
+}
+
+/// The phone's two pages.
+pub enum PhoneLayout {
+    Screen(PhoneSide),
+    Controls(FaceLayout, PhoneStrip),
+}
+
+/// SCREEN page: (lcd rect, side column).
+pub fn phone_screen_layout(win: Rect) -> (Rect, PhoneSide) {
+    let base = inset(win);
+    let h = base.height();
+    let lcd_w = (h * 800.0 / 480.0).min(base.width() - 110.0);
+    let lcd = Rect::from_min_size(base.min, Vec2::new(lcd_w, h));
+    let col = Rect::from_min_max(Pos2::new(lcd.max.x + 6.0, base.min.y), base.max);
+    let cx = col.center().x;
+    let disk = |cy: f32, d: f32| Rect::from_center_size(Pos2::new(cx, base.min.y + cy * h), Vec2::splat(d));
+    let slab = |cy: f32| Rect::from_center_size(Pos2::new(cx, base.min.y + cy * h), Vec2::new(col.width() - 12.0, (h * 0.10).min(44.0)));
+    let knob = (col.width() * 0.66).min(h * 0.22);
+    let btn  = (col.width() * 0.50).min(h * 0.16);
+    (lcd, PhoneSide {
+        browse:    disk(0.13, knob),
+        tag_track: slab(0.36),
+        back:      slab(0.49),
+        cue:       disk(0.66, btn),
+        play:      disk(0.86, btn),
+        caption:   (h * 0.026).min(11.0),
+    })
+}
+
+/// CONTROLS page: the faceplate table (no LCD, no browse knob) plus the
+/// readout strip.  Fractions of the inset window.
+pub fn phone_controls_layout(win: Rect) -> (FaceLayout, PhoneStrip) {
+    let base = inset(win);
+    let (w, h) = (base.width(), base.height());
+    let disk = |cx: f32, cy: f32, rw: f32|
+        Rect::from_center_size(base.min + Vec2::new(cx * w, cy * h), Vec2::splat(2.0 * rw * w));
+    let loop_btn = |cx: f32, cy: f32| {
+        let hpx = 0.075 * h;
+        Rect::from_center_size(base.min + Vec2::new(cx * w, cy * h), Vec2::new(hpx * crate::chrome::LOOP_ASPECT, hpx))
+    };
+    let face = FaceLayout {
+        base,
+        // Jog fills the height under the strip; its top clears the strip's
+        // lower edge (0.16) and its bottom sits just above the home indicator.
+        jog:      disk(0.500, 0.590, 0.185),
+        fader:    face_rect(base, 0.905, 0.290, 0.945, 0.900),
+        cue:      disk(0.085, 0.420, 0.040),
+        play:     disk(0.085, 0.730, 0.040),
+        loop_in:  Some(loop_btn(0.225, 0.330)),
+        loop_out: Some(loop_btn(0.225, 0.530)),
+        reloop:   Some(disk(0.225, 0.730, 0.024)),
+        browse:   None,
+        mt:       disk(0.925, 0.215, 0.018),
+        time_mode: None, auto_cue: None, tag_track: None, back: None,
+        // JOG MODE: bottom right, between the jog's edge and the fader.
+        jog_mode:  Some(face_rect(base, 0.745, 0.800, 0.840, 0.900)),
+        caption:   w * 0.012,
+    };
+    let strip = PhoneStrip {
+        meter: face_rect(base, 0.220, 0.020, 0.600, 0.140),
+        tempo: face_rect(base, 0.640, 0.010, 0.825, 0.150),
+        bpm:   face_rect(base, 0.840, 0.010, 0.985, 0.150),
+    };
+    (face, strip)
+}
+
+/// The screen page's side column: BROWSE knob, TAG TRACK, BACK, CUE, PLAY.
+fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &PhoneSide, sel_tagged: bool,
+                   chrome: &mut ChromeCache, out: &mut Vec<Event>) {
+    let p = ui.painter();
+    let lbl = sd.caption;
+    let play_resp = ui.interact(sd.play, Id::new("fp-play"), Sense::click());
+    let cue_resp  = ui.interact(sd.cue,  Id::new("fp-cue"),  Sense::click_and_drag());
+    let play_lamp = if snap.playing { Some(Lamp::Green) }
+                    else if play_resp.is_pointer_button_down_on() { Some(Lamp::White) }
+                    else { None };
+    let cue_lit = cue_resp.is_pointer_button_down_on();
+    {
+        let mut sprite = |what: Sprite, r: Rect| crate::chrome::paint(p, ctx, chrome, what, r);
+        sprite(Sprite::Round(RoundKind::Knob, None), sd.browse);
+        sprite(Sprite::Round(RoundKind::Silver, play_lamp), sd.play);
+        sprite(Sprite::Round(RoundKind::Silver, cue_lit.then_some(Lamp::Orange)), sd.cue);
+    }
+    play_pause_glyph(p, sd.play.center(), sd.play.width() * 0.19, play_lamp.map_or(PRINT, lamp_col));
+    text(ui, sd.cue.center(), Align2::CENTER_CENTER, "CUE", sd.cue.width() * 0.30, if cue_lit { ORANGE } else { PRINT });
+    let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl * 0.4), Align2::CENTER_TOP, s, lbl, DIM);
+    cap(sd.browse, "BROWSE");   // CUE / PLAY carry their own glyphs; no room for captions
+    for (r, label, name, lit) in [(sd.tag_track, "TAG TRACK", "fp-tag", sel_tagged), (sd.back, "BACK", "fp-back", false)] {
+        p.rect_filled(r, 3.0, KEY_LO);
+        p.rect_stroke(r, 3.0, Stroke::new(1.0, FAINT));
+        let resp = ui.interact(r, Id::new(name), Sense::click());
+        if lit { p.rect_filled(r, 3.0, tint(BLUE, 120)); }
+        else if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
+        text(ui, r.center(), Align2::CENTER_CENTER, label, lbl * 0.95, DIM);
+        if resp.clicked() { out.push(if name == "fp-tag" { Event::Ui(UiEvent::TagTrack) } else { Event::Deck(ControlEvent::Back) }); }
+    }
+    if play_resp.clicked() { out.push(Event::Deck(ControlEvent::PlayPause)); }
+    if cue_resp.drag_started() || cue_resp.clicked() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
+    if cue_resp.drag_stopped()                       { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
+    browse_knob(ui, sd.browse, out);
+}
+
+/// The controls page's readout strip: phase meter, TEMPO %, BPM — the LCD's
+/// own readouts, restated so a nudge or a fader move can be watched here.
+fn draw_phone_strip(ui: &Ui, snap: &DeckSnapshot, st: &PhoneStrip, out: &mut Vec<Event>) {
+    let p = ui.painter();
+    // Sizes are relative to a nominal LCD height so the readouts match the
+    // screen page's proportions.
+    let h = st.meter.height() / 0.076;
+    p.rect_filled(st.meter, 0.0, BG);
+    let (toggle, _) = tap(ui, st.meter, "phase-meter");
+    if toggle { out.push(Event::Ui(UiEvent::PhaseMeterView)); }
+    if snap.phase_ticks_view { draw_phase_ticks(ui, snap, st.meter, h); } else { draw_phase_boxes(ui, snap, st.meter, h); }
+
+    // TEMPO: caption top-left, the percentage sized to the box's height with
+    // the MT pill beside the caption (tap toggles master tempo, as on the LCD).
+    let te = st.tempo;
+    p.rect_filled(te, 2.0, BG);
+    let cap = te.height() * 0.26;
+    text(ui, Pos2::new(te.min.x + h * 0.010, te.min.y + h * 0.004), Align2::LEFT_TOP, "TEMPO", cap, TEXT);
+    let mt = Rect::from_min_size(Pos2::new(te.min.x + h * 0.010 + cap * 3.6, te.min.y + h * 0.004), Vec2::new(cap * 1.7, cap * 1.1));
+    let (mt_tap, _) = tap(ui, mt, "phone-mt");
+    if mt_tap { out.push(Event::Deck(ControlEvent::KeyLockToggle)); }
+    if snap.key_lock { p.rect_filled(mt, 2.0, RED); text(ui, mt.center(), Align2::CENTER_CENTER, "MT", cap * 0.8, TEXT); }
+    else { p.rect_stroke(mt, 2.0, Stroke::new(1.0, FAINT)); text(ui, mt.center(), Align2::CENTER_CENTER, "MT", cap * 0.8, FAINT); }
+    let v = snap.tempo_percent();
+    let s = if v.abs() < 0.005 { "0.00".to_string() } else { format!("{:+.2}", v) };
+    let big = te.height() * 0.58;
+    text(ui, Pos2::new(te.max.x - big * 0.55, te.max.y - h * 0.008), Align2::RIGHT_BOTTOM, s, big, TEXT);
+    text(ui, Pos2::new(te.max.x - h * 0.006, te.max.y - h * 0.012), Align2::RIGHT_BOTTOM, "%", big * 0.45, TEXT);
+
+    let b = st.bpm;
+    p.rect_filled(b, 2.0, if snap.master { GOLD } else { KEY_LO });
+    let ink = if snap.master { Color32::BLACK } else { TEXT };
+    let (txt, col) = match (snap.bpm(), snap.beat_grid) {
+        (Some(v), Some(g)) => (format!("{:.1}", v), if snap.master { Color32::BLACK } else if g.confidence >= 0.7 { TEXT } else { ORANGE }),
+        _ => ("---.-".into(), DIM),
+    };
+    let dot = txt.find('.').unwrap_or(txt.len());
+    let (ip, fp) = txt.split_at(dot);
+    let base = b.max.y - h * 0.030;
+    let ip_size = h * 0.060;
+    text(ui, Pos2::new(b.min.x + h * 0.012, base), Align2::LEFT_BOTTOM, ip, ip_size, col);
+    text(ui, Pos2::new(b.min.x + h * 0.012 + ip.len() as f32 * ip_size * 0.56, base), Align2::LEFT_BOTTOM, fp, h * 0.040, col);
+    text(ui, Pos2::new(b.max.x - h * 0.010, b.max.y - h * 0.008), Align2::RIGHT_BOTTOM, if snap.master { "MASTER" } else { "BPM" }, h * 0.018, ink);
+}
+
+/// Page dots in the home-indicator margin: which of the two pages is up.
+fn draw_phone_pager(ui: &Ui, win: Rect, controls: bool) {
+    let y = win.max.y - PHONE_INSETS.3 * 0.5;
+    for (i, on) in [(0, !controls), (1, controls)] {
+        let x = win.center().x + (i as f32 - 0.5) * 14.0;
+        ui.painter().circle_filled(Pos2::new(x, y), 3.0, if on { DIM } else { FAINT });
+    }
 }
 
 /// A round touch target with a translucent lit/press overlay — the photo IS the
@@ -397,6 +600,16 @@ fn fader_knob(p: &egui::Painter, ctx: &egui::Context, chrome: &mut ChromeCache, 
     );
 }
 
+/// BROWSE rotary touch behaviour: drag up/down steps the list, tap = LOAD.
+fn browse_knob(ui: &Ui, r: Rect, out: &mut Vec<Event>) {
+    let brr = ui.interact(r, Id::new("fp-browse"), Sense::click_and_drag());
+    if brr.dragged() {
+        let d = brr.drag_delta().y;
+        if d.abs() > 4.0 { out.push(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: if d > 0.0 { 1 } else { -1 } })); }
+    }
+    if brr.clicked() { out.push(Event::Deck(ControlEvent::Load)); }
+}
+
 /// A rectangular touch target, same overlay treatment as `round_btn`.
 fn rect_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<Event>, ev: ControlEvent) {
     let resp = ui.interact(r, Id::new(name), Sense::click());
@@ -427,7 +640,7 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
         sprite(Sprite::Jog, f.jog);
         sprite(Sprite::Round(RoundKind::Silver, play_lamp), f.play);
         sprite(Sprite::Round(RoundKind::Silver, cue_lit.then_some(Lamp::Orange)), f.cue);
-        sprite(Sprite::Round(RoundKind::Knob, None), f.browse);
+        if let Some(r) = f.browse { sprite(Sprite::Round(RoundKind::Knob, None), r); }
         sprite(Sprite::Round(RoundKind::Lamp, snap.key_lock.then_some(Lamp::Orange)), f.mt);
         if let Some(r) = f.reloop   { sprite(Sprite::Round(RoundKind::Black, None), r); }
         if let Some(r) = f.loop_in  { sprite(Sprite::Square(snap.loop_active), r); }
@@ -458,7 +671,7 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
     let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
     cap(f.play,   "PLAY/PAUSE");
     cap(f.cue,    "CUE");
-    cap(f.browse, "BROWSE");
+    if let Some(r) = f.browse { cap(r, "BROWSE"); }
     cap(f.mt,     "MASTER TEMPO");   // key-lock button
     if let Some(r) = f.loop_in  { cap(r, "LOOP IN"); }
     if let Some(r) = f.loop_out { cap(r, "LOOP OUT"); }
@@ -502,12 +715,7 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
     if let Some(r) = f.jog_mode { rect_btn(ui, r, "fp-jogmode", None, out, ControlEvent::JogModeToggle); }
 
     // ── Browse rotary ────────────────────────────────────────────────────────
-    let brr = ui.interact(f.browse, Id::new("fp-browse"), Sense::click_and_drag());
-    if brr.dragged() {
-        let d = brr.drag_delta().y;
-        if d.abs() > 4.0 { out.push(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: if d > 0.0 { 1 } else { -1 } })); }
-    }
-    if brr.clicked() { out.push(Event::Deck(ControlEvent::Load)); }
+    if let Some(r) = f.browse { browse_knob(ui, r, out); }
 
     // ── Portrait left column: TIME toggles elapsed/remain; AUTO CUE toggles
     //    cue-at-first-sound on load (lit while on, mirrored by the A.CUE badge). ──
@@ -554,6 +762,7 @@ pub fn draw(
     view:   ScreenView,
     tag_list: &TagList,                        // tag marks in BROWSE + the TAG LIST screen
     face:   Option<&FaceLayout>,
+    phone:  Option<&PhoneLayout>,              // iPhone: one of the two pages
     chrome: &mut ChromeCache,                  // baked jog / button sprites
     out:    &mut Vec<Event>,
 ) {
@@ -561,6 +770,22 @@ pub fn draw(
         .frame(egui::Frame::none())
         .show(ctx, |ui| {
             let h = lay.screen.height();
+
+            // Phone CONTROLS page: no LCD at all — the deck body with the
+            // readout strip and the faceplate controls.
+            if let Some(PhoneLayout::Controls(f, strip)) = phone {
+                ui.painter().rect_filled(ui.max_rect(), 0.0, FACE_BODY);
+                draw_phone_strip(ui, snap, strip, out);
+                draw_faceplate(ui, ctx, snap, f, false, chrome, out);
+                draw_phone_pager(ui, ui.max_rect(), true);
+                return;
+            }
+            if phone.is_some() {
+                // Deck body around the LCD (the shader rects inside it stay untouched).
+                for part in cover(ui.max_rect(), lay.screen, lay.screen) {
+                    ui.painter().rect_filled(part, 0.0, FACE_BODY);
+                }
+            }
 
             // Faceplate: paint the deck body behind everything (letterboxing
             // the window); the screen renders into its sub-rect over it and the
@@ -627,6 +852,15 @@ pub fn draw(
                     _ => false,
                 };
                 draw_faceplate(ui, ctx, snap, f, sel_tagged, chrome, out);
+            }
+            if let Some(PhoneLayout::Screen(side)) = phone {
+                let sel_tagged = match view {
+                    ScreenView::Browse(b) => b.selected_entry().and_then(|e| e.load()).map_or(false, |l| tag_list.contains(l)),
+                    ScreenView::TagList   => true,
+                    _ => false,
+                };
+                draw_phone_side(ui, ctx, snap, side, sel_tagged, chrome, out);
+                draw_phone_pager(ui, ui.max_rect(), false);
             }
         });
 }

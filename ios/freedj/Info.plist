@@ -30,11 +30,18 @@
     <true/>
     <key>MinimumOSVersion</key>
     <string>$(IPHONEOS_DEPLOYMENT_TARGET)</string>
-    <!-- The faceplate is portrait (taller than wide); lock to portrait. -->
+    <!-- iPad: the faceplate is portrait (taller than wide); lock to portrait.
+         iPhone: two landscape pages (SCREEN / CONTROLS, two-finger swipe);
+         lock to landscape so nothing changes mid-set on a stand. -->
     <key>UISupportedInterfaceOrientations~ipad</key>
     <array>
         <string>UIInterfaceOrientationPortrait</string>
         <string>UIInterfaceOrientationPortraitUpsideDown</string>
+    </array>
+    <key>UISupportedInterfaceOrientations~iphone</key>
+    <array>
+        <string>UIInterfaceOrientationLandscapeLeft</string>
+        <string>UIInterfaceOrientationLandscapeRight</string>
     </array>
     <key>UILaunchScreen</key>
     <dict/>

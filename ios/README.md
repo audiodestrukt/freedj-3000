@@ -177,3 +177,19 @@ with `make ios-device MULTICAST=1` once Apple grants it for your App ID.
 
 Note the simulator shares the Mac's network stack, so Link working there says
 nothing about the device sandbox — only the on-device test counts.
+
+## iPhone
+
+The app builds for iPhone and iPad (`TARGETED_DEVICE_FAMILY = "1,2"`). On a
+phone the window is narrower than any iPad, and the app switches to the
+two-page landscape layout (`screen::phone_screen_layout` /
+`phone_controls_layout`): SCREEN is the LCD plus a slim BROWSE / TAG TRACK /
+BACK / CUE / PLAY column, CONTROLS is the jog, fader, transport, loops and
+the meter + TEMPO / BPM strip. A two-finger swipe flips pages (up = controls).
+iPhones are locked to landscape in `Info.plist`; the safe-area insets are the
+fixed Dynamic-Island values in `screen::PHONE_INSETS` until the UIKit bridge
+reports real ones.
+
+Preview on the desktop with `OPENDECK_PHONE=1` (932×430 pt window, Tab flips
+pages); App Store captures use `OPENDECK_WINDOW=2868x1320` with
+`OPENDECK_PHONE_PAGE=screen|controls`.

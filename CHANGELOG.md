@@ -33,6 +33,14 @@ All notable changes to this project will be documented in this file.
   between decks (dbserver + NFS), rekordbox 7 findings, test recipes.
 
 ### Added — 2026-09-18
+- **iPhone layout (#43).** On a phone the deck is two landscape pages
+  flipped with a two-finger swipe: SCREEN (the XDJ LCD at full height with
+  BROWSE, TAG TRACK, BACK, CUE and PLAY beside it) and CONTROLS (jog, tempo
+  fader, transport, loops, MASTER TEMPO, JOG MODE, with the phase meter and
+  the TEMPO / BPM readouts across the top). Swipe up for the controls, down
+  for the screen. The iOS target now builds for iPhone and iPad; iPhones are
+  landscape-only. Desktop preview: `OPENDECK_PHONE=1` (Tab flips pages;
+  `OPENDECK_PHONE_PAGE=controls` picks the page for captures).
 - **LOADING readout.** While a track is fetched and prepared on the loader
   thread, the title bar (playback and BROWSE screens) shows "LOADING name"
   with a sweeping bar; it clears the frame the track lands.
