@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.2.0] — 2026-09-19
+
+First Universal build (iPhone + iPad): TestFlight build 1789780380.
 
 ### Added — 2026-09-17
 - **OpenDeck is a Pro DJ Link media source.** The app now serves its music

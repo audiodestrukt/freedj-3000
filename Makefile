@@ -156,6 +156,9 @@ MUSIC ?= $(dir $(TRACK))
 shots-appstore: build ## App Store screenshots (iPad 13", 2064x2752) from MUSIC folder + TRACK
 	TRACK="$(TRACK)" ios/appstore/capture.sh "$(MUSIC)" ios/appstore/screenshots/ipad-13
 
+shots-appstore-iphone: build ## App Store screenshots (iPhone 6.9", 2868x1320 landscape) from MUSIC folder + TRACK
+	DEVICE=iphone TRACK="$(TRACK)" ios/appstore/capture.sh "$(MUSIC)" ios/appstore/screenshots/iphone-6.9
+
 ## ── Quality ────────────────────────────────────────────────────────────────
 
 check: ## Type-check the whole workspace

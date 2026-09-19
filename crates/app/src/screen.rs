@@ -432,14 +432,15 @@ pub fn phone_controls_layout(win: Rect) -> (FaceLayout, PhoneStrip) {
         // Jog fills the height under the strip; its top clears the strip's
         // lower edge (0.16) and its bottom sits just above the home indicator.
         jog:      disk(0.500, 0.590, 0.185),
-        fader:    face_rect(base, 0.905, 0.290, 0.945, 0.900),
+        // Fader starts below the MASTER TEMPO lamp's caption.
+        fader:    face_rect(base, 0.905, 0.330, 0.945, 0.910),
         cue:      disk(0.085, 0.420, 0.040),
         play:     disk(0.085, 0.730, 0.040),
         loop_in:  Some(loop_btn(0.225, 0.330)),
         loop_out: Some(loop_btn(0.225, 0.530)),
         reloop:   Some(disk(0.225, 0.730, 0.024)),
         browse:   None,
-        mt:       disk(0.925, 0.215, 0.018),
+        mt:       disk(0.925, 0.200, 0.018),
         time_mode: None, auto_cue: None, tag_track: None, back: None,
         // JOG MODE: bottom right, between the jog's edge and the fader.
         jog_mode:  Some(face_rect(base, 0.745, 0.800, 0.840, 0.900)),

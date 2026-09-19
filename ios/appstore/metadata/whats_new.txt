@@ -1,1 +1,7 @@
-First release: a single-deck DJ player with Pro DJ Link sync, your own music via the Files app, hot cues, beat loops, GRID ADJUST and MASTER TEMPO.
+Now on iPhone. Two landscape pages: the screen, and the controls (jog, tempo fader, transport, loops) with the beat meter and BPM in view. Flip with the button or a two-finger swipe.
+
+Share your music over Pro DJ Link: the app now shows up in other players' LINK menus as a media source, with tags, BPM, beat grid and waveforms.
+
+Loading no longer interrupts playback: tracks decode in the background with a LOADING readout, and loads from linked players are many times faster.
+
+The LINK list names each player's media as the players do, and opens their category menu.

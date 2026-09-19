@@ -1,10 +1,13 @@
-OpenDeck DJ turns your device into a single-deck DJ player modeled on a professional club media player: a large jog wheel with a spinning platter display, a tempo fader, transport controls, a zoomable waveform, hot cues, beat loops, and automatic BPM and beat-grid analysis.
+OpenDeck DJ turns your iPhone or iPad into a single-deck DJ player modeled on a professional club media player: a large jog wheel with a spinning platter display, a tempo fader, transport controls, a zoomable waveform, hot cues, beat loops, and automatic BPM and beat-grid analysis.
 
 BRING YOUR OWN MUSIC
-Drop MP3, AAC/M4A, WAV, AIFF, FLAC or OGG files into the OpenDeck DJ folder in the Files app (On My iPad → OpenDeck DJ), or from a Mac via Finder, and browse them from the deck's BROWSE screen. A demo track is included so you can try everything straight away.
+Drop MP3, AAC/M4A, WAV, AIFF, FLAC or OGG files into the OpenDeck DJ folder in the Files app (On My iPhone / On My iPad → OpenDeck DJ), or from a Mac via Finder, and browse them from the deck's BROWSE screen. A demo track is included so you can try everything straight away.
+
+ON IPHONE AND IPAD
+On an iPad the whole deck is on one screen. On an iPhone it is two landscape pages: the player's screen, and the controls (jog wheel, tempo fader, transport, loops) with the beat meter and BPM in view. Flip between them with the page button or a two-finger swipe.
 
 PLAY ALONGSIDE THE CLUB STANDARD
-OpenDeck DJ speaks Pro DJ Link. On a local network it appears as another player next to CDJ/XDJ decks: it can follow the shared tempo and beat grid with SYNC, or take MASTER and lead. Link hardware is optional — the app is a complete standalone player on its own.
+OpenDeck DJ speaks Pro DJ Link. On a local network it appears as another player next to CDJ/XDJ decks: it can follow the shared tempo and beat grid with SYNC, or take MASTER and lead. It also shares its music: other players list it in their LINK menu and can browse and load its tracks, with BPM, beat grid and waveforms. Link hardware is optional — the app is a complete standalone player on its own.
 
 FEATURES
 • Jog wheel with vinyl (scratch) and nudge modes and a live centre display
@@ -13,7 +16,7 @@ FEATURES
 • Zoomable waveform with beat and bar markers, full-track overview and needle search
 • Automatic BPM and beat-grid analysis, with GRID ADJUST (snap, shift, reset)
 • QUANTIZE so cues and loops land on the beat
-• Pro DJ Link: SYNC, MASTER, beat and phase meter, and LINK browsing of other players' media
+• Pro DJ Link: SYNC, MASTER, beat and phase meter, LINK browsing of other players' media, and serving your own to them
 • TAG LIST, track INFO and a UTILITY menu (player number, tempo range, quantize, auto-cue level)
 • Runs entirely on-device: no account, no sign-in, no analytics
 
