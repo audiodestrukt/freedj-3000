@@ -50,6 +50,9 @@ pub enum UiEvent {
     /// GRID ADJUST touch keys (shown in place of the Bars readouts while the
     /// "– GRID" half of the ZOOM pill is selected).
     GridAdjust(GridAdjust),
+    /// iPhone: flip between the SCREEN and CONTROLS pages.  The two-finger
+    /// swipe does the same thing; this is the visible control for it.
+    PhonePageFlip,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

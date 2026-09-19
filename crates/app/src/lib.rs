@@ -895,6 +895,10 @@ impl DeckApp {
                     }
                 }
             }
+            Event::Ui(UiEvent::PhonePageFlip) => {
+                self.phone_controls = !self.phone_controls;
+                log::info!("phone: {} page", if self.phone_controls { "CONTROLS" } else { "SCREEN" });
+            }
             Event::Ui(UiEvent::PhaseMeterView) => { self.phase_ticks_view = !self.phase_ticks_view; log::info!("phase meter → {}", if self.phase_ticks_view { "alignment" } else { "beat display" }); }
             // Source keys: open the browser on that source — LINK lists the
             // linked players, FILE the local root.

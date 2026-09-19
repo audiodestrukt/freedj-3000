@@ -534,13 +534,36 @@ fn draw_phone_strip(ui: &Ui, snap: &DeckSnapshot, st: &PhoneStrip, out: &mut Vec
     text(ui, Pos2::new(b.max.x - h * 0.010, b.max.y - h * 0.008), Align2::RIGHT_BOTTOM, if snap.master { "MASTER" } else { "BPM" }, h * 0.018, ink);
 }
 
-/// Page dots in the home-indicator margin: which of the two pages is up.
-fn draw_phone_pager(ui: &Ui, win: Rect, controls: bool) {
-    let y = win.max.y - PHONE_INSETS.3 * 0.5;
+/// Page flip control in the home-indicator margin: the two page dots plus the
+/// name of the page a tap goes to.  The two-finger swipe does the same thing,
+/// but a swipe is invisible and its axis follows the *app's* landscape frame,
+/// which is 90 degrees from the screen when the phone is held portrait — so the
+/// gesture alone is not discoverable.  This is the visible way.
+///
+/// The band is only `PHONE_INSETS.3` tall, but it is the full width of the
+/// window and holds no other content, so the target is wide instead of tall.
+fn draw_phone_pager(ui: &Ui, win: Rect, controls: bool, out: &mut Vec<Event>) {
+    let band_h = PHONE_INSETS.3;
+    let y      = win.max.y - band_h * 0.5;
+    let pill   = Rect::from_center_size(
+        Pos2::new(win.center().x, y),
+        Vec2::new(152.0_f32.min(win.width() - 16.0), (band_h - 2.0).max(14.0)),
+    );
+
+    let resp = ui.interact(pill, Id::new("phone-pager"), Sense::click());
+    if resp.clicked() { out.push(Event::Ui(UiEvent::PhonePageFlip)); }
+
+    let p = ui.painter();
+    p.rect_filled(pill, pill.height() * 0.5, if resp.is_pointer_button_down_on() { KEY_HI } else { KEY_LO });
+    p.rect_stroke(pill, pill.height() * 0.5, Stroke::new(1.0_f32, FAINT));
+
+    // Dots sit left inside the pill; the caption names the page a tap goes to.
+    let dot_x = pill.min.x + 14.0;
     for (i, on) in [(0, !controls), (1, controls)] {
-        let x = win.center().x + (i as f32 - 0.5) * 14.0;
-        ui.painter().circle_filled(Pos2::new(x, y), 3.0, if on { DIM } else { FAINT });
+        p.circle_filled(Pos2::new(dot_x + i as f32 * 9.0, y), 2.5, if on { TEXT } else { FAINT });
     }
+    let label = if controls { "SCREEN" } else { "CONTROLS" };
+    text(ui, Pos2::new(dot_x + 20.0, y), Align2::LEFT_CENTER, label, (band_h * 0.52).min(11.0), DIM);
 }
 
 /// A round touch target with a translucent lit/press overlay — the photo IS the
@@ -777,7 +800,7 @@ pub fn draw(
                 ui.painter().rect_filled(ui.max_rect(), 0.0, FACE_BODY);
                 draw_phone_strip(ui, snap, strip, out);
                 draw_faceplate(ui, ctx, snap, f, false, chrome, out);
-                draw_phone_pager(ui, ui.max_rect(), true);
+                draw_phone_pager(ui, ui.max_rect(), true, out);
                 return;
             }
             if phone.is_some() {
@@ -860,7 +883,7 @@ pub fn draw(
                     _ => false,
                 };
                 draw_phone_side(ui, ctx, snap, side, sel_tagged, chrome, out);
-                draw_phone_pager(ui, ui.max_rect(), false);
+                draw_phone_pager(ui, ui.max_rect(), false, out);
             }
         });
 }
