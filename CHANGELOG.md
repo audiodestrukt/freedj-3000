@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.2] — 2026-09-19
+
+### Fixed
+- **Swiping back from CONTROLS could leave the transport stopped.** A
+  two-finger swipe begins as one finger, and on the controls page that finger
+  lands on the platter (VINYL mode holds the transport while it is down) or on
+  CUE. Their releases come from the widgets' own drag-stop, and once the page
+  had flipped the widgets were no longer drawn, so the release never came.
+  A page flip now releases whatever a finger was holding. (#43)
+
 ## [0.2.1] — 2026-09-19
 
 Point release after the first day of two-device testing: iPhone touch

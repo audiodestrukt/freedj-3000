@@ -919,6 +919,7 @@ impl DeckApp {
             Event::Ui(UiEvent::PhonePageFlip) => {
                 self.phone_controls = !self.phone_controls;
                 log::info!("phone: {} page", if self.phone_controls { "CONTROLS" } else { "SCREEN" });
+                self.release_held_controls();
             }
             Event::Ui(UiEvent::PhaseMeterView) => { self.phase_ticks_view = !self.phase_ticks_view; log::info!("phase meter → {}", if self.phase_ticks_view { "alignment" } else { "beat display" }); }
             // Source keys: open the browser on that source — LINK lists the
@@ -1289,15 +1290,31 @@ impl DeckApp {
         match self.egui_ctx.input(|i| i.multi_touch()) {
             Some(mt) if mt.num_touches >= 2 => {
                 self.swipe_acc += mt.translation_delta.y;
-                if !self.swipe_done && self.swipe_acc.abs() > SWIPE_PT {
+                let flipped = !self.swipe_done && self.swipe_acc.abs() > SWIPE_PT;
+                if flipped {
                     self.phone_controls = self.swipe_acc < 0.0;
                     self.swipe_done = true;
                     log::info!("phone: {} page", if self.phone_controls { "CONTROLS" } else { "SCREEN" });
                 }
                 touch.retain(|e| !matches!(e, Event::Deck(ControlEvent::JogDelta { .. }) | Event::Deck(ControlEvent::TempoFader { .. })));
+                if flipped { self.release_held_controls(); }
             }
             _ => { self.swipe_acc = 0.0; self.swipe_done = false; }
         }
+    }
+
+    /// Let go of anything a finger was holding when the phone page flips.
+    ///
+    /// A two-finger swipe starts as one finger, and on the CONTROLS page that
+    /// finger lands on the platter (VINYL: the transport is held while it is
+    /// down) or on CUE (held: previewing).  Their releases come from the
+    /// widgets' own drag-stop, and once the page has flipped the widgets are
+    /// no longer drawn, so the release never arrives — the transport just
+    /// stayed stopped after a swipe back to the SCREEN page.  Flipping the
+    /// page is the finger lifting.
+    fn release_held_controls(&mut self) {
+        if self.jog_hold_resume { self.apply(Event::Deck(ControlEvent::JogTouch { touched: false })); }
+        if self.cue_preview     { self.apply(Event::Deck(ControlEvent::Cue { pressed: false })); }
     }
 
     /// What the loader thread needs to know about the deck to prepare a track.
