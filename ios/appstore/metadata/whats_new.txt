@@ -1,7 +1,7 @@
-Fixes and a cooler phone.
+UI fixes and a cooler device.
 
-iPhone: touch targets now land where they are drawn (CUE, PLAY and the MENU rows were off by the safe-area insets), and flipping pages no longer stops the deck.
+iPhone: CUE, PLAY and the MENU rows now respond exactly where they are drawn, and switching pages no longer stops the deck.
 
 Two OpenDecks on one network can browse and load from each other: an iPhone and an iPad, or two iPads.
 
-Much less heat over a set: a paused deck renders at a low rate and its audio and Link threads sleep instead of polling. INFO now shows the app's own CPU use, and Documents/opendeck-perf.log records it for the Files app.
+Much less heat over a set: a paused deck renders at a low rate, and its audio and Link threads sleep instead of polling. INFO shows the app's CPU use.
