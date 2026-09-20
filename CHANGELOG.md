@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Hold CUE, hit PLAY: playback locks in.** The transport already latched
+  on PLAY during a CUE preview, but on the phone and iPad the second finger
+  never reached PLAY: egui-winit turns only the first finger into the
+  pointer, and every later finger arrives as a bare touch event that no
+  widget sees. PLAY and CUE now also answer a second finger (tracked the way
+  egui-winit tracks the first), so with one finger holding CUE, or resting
+  on the platter, the other can hit PLAY or CUE. PLAY takes the second
+  finger's tap on lift, so the second finger of a page swipe landing on it
+  does not toggle the deck.
+
 ## [0.2.4] — 2026-09-20
 
 TestFlight build.

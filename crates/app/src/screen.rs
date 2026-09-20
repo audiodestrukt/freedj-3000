@@ -463,6 +463,78 @@ pub fn phone_controls_layout(win: Rect, ins: Insets) -> (FaceLayout, PhoneStrip)
     (face, strip)
 }
 
+
+// ── Second-finger transport ──────────────────────────────────────────────────
+// egui-winit turns only the FIRST finger into the pointer; every later finger
+// arrives as a bare `Event::Touch`.  So while one finger holds CUE (preview)
+// or the platter (vinyl), a second finger on PLAY or CUE reached no widget and
+// nothing happened — and "hold CUE, hit PLAY to lock playback in" is the deck
+// move that needs exactly that.  This mirrors egui-winit's primary-finger
+// rule (first Start becomes the pointer until it Ends) and reports the other
+// fingers landing in / lifting from the given rects.
+
+/// What secondary fingers did to one rect this frame.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct SecondTouch {
+    /// A second finger landed in the rect this frame.
+    pub pressed:  bool,
+    /// A second finger that landed in the rect lifted this frame.
+    pub released: bool,
+    /// `released` with the finger having stayed put — a tap.  PLAY acts on
+    /// this, not on `pressed`, so the second finger of a page swipe that
+    /// happens to land on PLAY does not toggle the transport.
+    pub tapped:   bool,
+    /// A second finger is down in the rect (for the lit state).
+    pub down:     bool,
+}
+
+#[derive(Clone, Default)]
+struct TouchTrack {
+    primary: Option<u64>,
+    /// (touch id, rect index, start position, distance moved)
+    held:    Vec<(u64, usize, Pos2, f32)>,
+}
+
+/// Fingers beyond the first that land in / lift from `rects` this frame.
+/// Movement under `TAP_PT` points still counts as a tap.
+pub fn second_touches(ui: &Ui, rects: &[Rect]) -> Vec<SecondTouch> {
+    use egui::{Event as E, TouchPhase as P};
+    const TAP_PT: f32 = 12.0;
+    let key = Id::new("second-touches");
+    let mut st: TouchTrack = ui.data(|d| d.get_temp(key)).unwrap_or_default();
+    let mut out = vec![SecondTouch::default(); rects.len()];
+    ui.input(|i| for ev in &i.events {
+        let E::Touch { id, phase, pos, .. } = ev else { continue };
+        let tid = id.0;
+        match phase {
+            P::Start => {
+                if st.primary.is_none() {
+                    st.primary = Some(tid);           // egui-winit's pointer finger
+                } else if let Some(k) = rects.iter().position(|r| r.contains(*pos)) {
+                    st.held.push((tid, k, *pos, 0.0));
+                    out[k].pressed = true;
+                }
+            }
+            P::Move => {
+                if let Some(h) = st.held.iter_mut().find(|h| h.0 == tid) {
+                    h.3 = h.3.max(h.2.distance(*pos));
+                }
+            }
+            P::End | P::Cancel => {
+                if st.primary == Some(tid) { st.primary = None; }
+                if let Some(p) = st.held.iter().position(|h| h.0 == tid) {
+                    let (_, k, _, moved) = st.held.remove(p);
+                    out[k].released = true;
+                    out[k].tapped   = *phase == P::End && moved < TAP_PT && rects[k].contains(*pos);
+                }
+            }
+        }
+    });
+    for h in &st.held { out[h.1].down = true; }
+    ui.data_mut(|d| d.insert_temp(key, st));
+    out
+}
+
 /// The screen page's side column: BROWSE knob, TAG TRACK, BACK, CUE, PLAY.
 fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &PhoneSide, sel_tagged: bool,
                    chrome: &mut ChromeCache, out: &mut Vec<Event>) {
@@ -470,10 +542,12 @@ fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &Phone
     let lbl = sd.caption;
     let play_resp = ui.interact(sd.play, Id::new("fp-play"), Sense::click());
     let cue_resp  = ui.interact(sd.cue,  Id::new("fp-cue"),  Sense::drag());   // drag-only: press/release fire at once, even for a still finger
+    let sec = second_touches(ui, &[sd.play, sd.cue]);
+    let (play2, cue2) = (sec[0], sec[1]);
     let play_lamp = if snap.playing { Some(Lamp::Green) }
-                    else if play_resp.is_pointer_button_down_on() { Some(Lamp::White) }
+                    else if play_resp.is_pointer_button_down_on() || play2.down { Some(Lamp::White) }
                     else { None };
-    let cue_lit = cue_resp.is_pointer_button_down_on();
+    let cue_lit = cue_resp.is_pointer_button_down_on() || cue2.down;
     {
         let mut sprite = |what: Sprite, r: Rect| crate::chrome::paint(p, ctx, chrome, what, r);
         sprite(Sprite::Round(RoundKind::Knob, None), sd.browse);
@@ -493,14 +567,15 @@ fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &Phone
         text(ui, r.center(), Align2::CENTER_CENTER, label, lbl * 0.95, DIM);
         if resp.clicked() { out.push(if name == "fp-tag" { Event::Ui(UiEvent::TagTrack) } else { Event::Deck(ControlEvent::Back) }); }
     }
-    if play_resp.clicked() { out.push(Event::Deck(ControlEvent::PlayPause)); }
+    // PLAY also answers a second finger's tap (hold CUE, hit PLAY → locked in).
+    if play_resp.clicked() || play2.tapped { out.push(Event::Deck(ControlEvent::PlayPause)); }
     // CUE is momentary.  With Sense::click_and_drag egui only reported a drag
     // after the pointer moved and a still finger became a *click on release*,
     // so a steady hold sent PRESS on lift and never a RELEASE: the preview
     // started as the finger came off and ran on.  Sense::drag marks the widget
     // dragged the moment it is pressed, so drag_started/stopped are press/release.
-    if cue_resp.drag_started() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
-    if cue_resp.drag_stopped() { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
+    if cue_resp.drag_started() || cue2.pressed  { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
+    if cue_resp.drag_stopped() || cue2.released { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
     browse_knob(ui, sd.browse, out);
 }
 
@@ -668,10 +743,12 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
     // Touch state first: the sprites pick their lit / pressed variant from it.
     let play_resp = ui.interact(f.play, Id::new("fp-play"), Sense::click());
     let cue_resp  = ui.interact(f.cue,  Id::new("fp-cue"),  Sense::drag());   // drag-only: press/release fire at once, even for a still finger
+    let sec = second_touches(ui, &[f.play, f.cue]);
+    let (play2, cue2) = (sec[0], sec[1]);
     let play_lamp = if snap.playing { Some(Lamp::Green) }
-                    else if play_resp.is_pointer_button_down_on() { Some(Lamp::White) }
+                    else if play_resp.is_pointer_button_down_on() || play2.down { Some(Lamp::White) }
                     else { None };
-    let cue_lit = cue_resp.is_pointer_button_down_on();
+    let cue_lit = cue_resp.is_pointer_button_down_on() || cue2.down;
 
     // ── Chrome sprites ───────────────────────────────────────────────────────
     {
@@ -745,14 +822,15 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
     }
 
     // ── Transport + buttons (targets; lit states are in the sprites) ─────────
-    if play_resp.clicked() { out.push(Event::Deck(ControlEvent::PlayPause)); }
+    // PLAY also answers a second finger's tap (hold CUE, hit PLAY → locked in).
+    if play_resp.clicked() || play2.tapped { out.push(Event::Deck(ControlEvent::PlayPause)); }
     // CUE is momentary.  With Sense::click_and_drag egui only reported a drag
     // after the pointer moved and a still finger became a *click on release*,
     // so a steady hold sent PRESS on lift and never a RELEASE: the preview
     // started as the finger came off and ran on.  Sense::drag marks the widget
     // dragged the moment it is pressed, so drag_started/stopped are press/release.
-    if cue_resp.drag_started() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
-    if cue_resp.drag_stopped() { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
+    if cue_resp.drag_started() || cue2.pressed  { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
+    if cue_resp.drag_stopped() || cue2.released { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
 
     if let Some(r) = f.loop_in  { rect_btn(ui, r, "fp-loopin",  None, out, ControlEvent::LoopIn); }
     if let Some(r) = f.loop_out { rect_btn(ui, r, "fp-loopout", None, out, ControlEvent::LoopOut); }
@@ -1861,4 +1939,61 @@ fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec
     text(ui, Pos2::new(b.min.x + h * 0.012, base), Align2::LEFT_BOTTOM, ip, ip_size, col);
     text(ui, Pos2::new(b.min.x + h * 0.012 + ip.len() as f32 * ip_size * 0.56, base), Align2::LEFT_BOTTOM, fp, h * 0.040, col);
     text(ui, Pos2::new(b.max.x - h * 0.010, b.max.y - h * 0.008), Align2::RIGHT_BOTTOM, if snap.master { "MASTER" } else { "BPM" }, h * 0.018, ink);
+}
+
+#[cfg(test)]
+mod second_touch_tests {
+    use super::*;
+    use egui::{Event as E, RawInput, TouchDeviceId, TouchId, TouchPhase as P};
+
+    const PLAY: Rect = Rect { min: Pos2::new(100.0, 100.0), max: Pos2::new(160.0, 160.0) };
+    const CUE:  Rect = Rect { min: Pos2::new(100.0, 200.0), max: Pos2::new(160.0, 260.0) };
+
+    fn touch(id: u64, phase: P, x: f32, y: f32) -> E {
+        E::Touch { device_id: TouchDeviceId(0), id: TouchId(id), phase, pos: Pos2::new(x, y), force: None }
+    }
+
+    /// One frame: feed `events`, run the helper, return what it saw.
+    fn frame(ctx: &egui::Context, events: Vec<E>) -> Vec<SecondTouch> {
+        let mut got = Vec::new();
+        let _ = ctx.run(RawInput { events, ..Default::default() }, |ctx| {
+            egui::CentralPanel::default().show(ctx, |ui| { got = second_touches(ui, &[PLAY, CUE]); });
+        });
+        got
+    }
+
+    #[test]
+    fn second_finger_taps_play_while_first_holds_cue() {
+        let ctx = egui::Context::default();
+        let f = frame(&ctx, vec![touch(1, P::Start, 130.0, 230.0)]);       // finger 1 lands on CUE: it is the pointer
+        assert_eq!(f, vec![SecondTouch::default(); 2]);
+        let f = frame(&ctx, vec![touch(2, P::Start, 130.0, 130.0)]);       // finger 2 lands on PLAY
+        assert!(f[0].pressed && f[0].down && !f[0].tapped);
+        let f = frame(&ctx, vec![touch(2, P::End, 132.0, 131.0)]);         // …and lifts: a tap
+        assert!(f[0].released && f[0].tapped && !f[0].down);
+        let f = frame(&ctx, vec![touch(1, P::End, 130.0, 230.0)]);         // finger 1 lifts: nothing reported (it was the pointer)
+        assert_eq!(f, vec![SecondTouch::default(); 2]);
+        let f = frame(&ctx, vec![touch(3, P::Start, 130.0, 130.0)]);       // next finger is the pointer again
+        assert_eq!(f, vec![SecondTouch::default(); 2]);
+    }
+
+    #[test]
+    fn a_swiping_second_finger_is_not_a_play_tap() {
+        let ctx = egui::Context::default();
+        frame(&ctx, vec![touch(1, P::Start, 300.0, 300.0)]);
+        let f = frame(&ctx, vec![touch(2, P::Start, 130.0, 130.0), touch(2, P::Move, 130.0, 60.0)]);
+        assert!(f[0].pressed);
+        let f = frame(&ctx, vec![touch(2, P::End, 130.0, 20.0)]);
+        assert!(f[0].released && !f[0].tapped);
+    }
+
+    #[test]
+    fn second_finger_on_cue_reports_press_and_release() {
+        let ctx = egui::Context::default();
+        frame(&ctx, vec![touch(1, P::Start, 400.0, 250.0)]);              // finger 1 on the platter, say
+        let f = frame(&ctx, vec![touch(2, P::Start, 130.0, 230.0)]);
+        assert!(f[1].pressed && f[1].down && !f[0].pressed);
+        let f = frame(&ctx, vec![touch(2, P::Cancel, 130.0, 230.0)]);
+        assert!(f[1].released && !f[1].tapped);
+    }
 }
