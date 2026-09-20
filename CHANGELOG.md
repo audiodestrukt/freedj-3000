@@ -2,6 +2,14 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.3] — 2026-09-20
+
+### Changed
+- **The perf log is opt-in.** The CPU meter's file (`Documents/opendeck-perf.log`)
+  is now written only while MENU → PERF LOG is ON, and removed when it is
+  OFF (the default), so a production install never carries a log in the
+  user's Documents. The `cpu:` log line and the CPU row on INFO stay.
+
 ## [0.2.2] — 2026-09-19
 
 Submitted for App Store review 2026-09-20 (build 1789863307, manual release); carries 0.2.1 too. 0.2.0 was approved 2026-09-19.

@@ -11,7 +11,7 @@
 //! The meter itself wakes once per interval.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 /// Sampling interval.
@@ -23,6 +23,13 @@ pub static CPU_PCT: AtomicU32 = AtomicU32::new(0);
 /// Latest process CPU use, percent of one core (0 until the first sample).
 pub fn process_pct() -> f32 { f32::from_bits(CPU_PCT.load(Ordering::Relaxed)) }
 
+/// Whether report lines also go to the file given to [`start`].  Off by
+/// default; the MENU's PERF LOG setting drives it.  While off, the file is
+/// removed, so a production install never carries a log in the user's
+/// Documents.
+pub static FILE_LOG: AtomicBool = AtomicBool::new(false);
+pub fn set_file_log(on: bool) { FILE_LOG.store(on, Ordering::Relaxed); }
+
 /// CPU seconds consumed so far: by the process, and per thread (name, seconds).
 #[derive(Debug, Default, Clone)]
 pub struct Sample {
@@ -30,32 +37,55 @@ pub struct Sample {
     pub threads: Vec<(String, f64)>,
 }
 
-/// Start the meter thread.  `file`: append each report line there as well.
+/// Start the meter thread.  `file`: where report lines also go while
+/// [`FILE_LOG`] is on (fresh per run; removed while off).
 pub fn start(file: Option<PathBuf>) {
-    if let Some(f) = &file {
-        // Fresh file per run: what matters is this session, and it must not
-        // grow forever in a folder the user sees.
-        let head = format!("# OpenDeck CPU meter — % of one core, sampled every {} s\n", EVERY.as_secs());
-        if let Err(e) = std::fs::write(f, head) { log::warn!("cpu meter: cannot write {}: {e}", f.display()); }
-    }
     let r = std::thread::Builder::new().name("cpu-meter".into()).spawn(move || {
         let mut prev = (Instant::now(), sample());
+        let mut file_open = false;   // header written this run
+        sync_file(file.as_deref(), &mut file_open);
         loop {
             std::thread::sleep(EVERY);
             let now = Instant::now();
             let cur = sample();
             let line = report(&prev.1, &cur, now.duration_since(prev.0));
             log::info!("{line}");
-            if let Some(f) = &file {
-                use std::io::Write;
-                if let Ok(mut fh) = std::fs::OpenOptions::new().append(true).open(f) {
-                    let _ = writeln!(fh, "{line}");
+            sync_file(file.as_deref(), &mut file_open);
+            if file_open {
+                if let Some(f) = &file {
+                    use std::io::Write;
+                    if let Ok(mut fh) = std::fs::OpenOptions::new().append(true).open(f) {
+                        let _ = writeln!(fh, "{line}");
+                    }
                 }
             }
             prev = (now, cur);
         }
     });
     if let Err(e) = r { log::warn!("cpu meter: {e}"); }
+}
+
+/// Bring the file into line with [`FILE_LOG`]: create it with a header when
+/// the setting turns on (fresh per run — what matters is this session, and
+/// it must not grow forever in a folder the user sees), remove it when off.
+fn sync_file(file: Option<&std::path::Path>, open: &mut bool) {
+    let Some(f) = file else { return };
+    let want = FILE_LOG.load(Ordering::Relaxed);
+    if want && !*open {
+        let head = format!("# OpenDeck CPU meter — % of one core, sampled every {} s\n", EVERY.as_secs());
+        match std::fs::write(f, head) {
+            Ok(())  => *open = true,
+            Err(e)  => log::warn!("cpu meter: cannot write {}: {e}", f.display()),
+        }
+    } else if !want {
+        if f.exists() {
+            match std::fs::remove_file(f) {
+                Ok(())  => log::info!("cpu meter: removed {}", f.display()),
+                Err(e)  => log::warn!("cpu meter: cannot remove {}: {e}", f.display()),
+            }
+        }
+        *open = false;
+    }
 }
 
 /// One report line for the interval between two samples; also updates

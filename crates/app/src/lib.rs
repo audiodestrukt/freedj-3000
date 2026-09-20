@@ -766,7 +766,7 @@ impl DeckApp {
                         }
                     }
                     // In MENU the selector's press steps the highlighted setting.
-                    ScreenMode::Menu => self.settings.cycle(settings::MENU[self.menu_cursor].0, 1),
+                    ScreenMode::Menu => self.cycle_setting(settings::MENU[self.menu_cursor].0),
                     _ => {
                         self.screen_mode = ScreenMode::Browse;
                         self.browser.refresh();
@@ -783,7 +783,7 @@ impl DeckApp {
             Event::Ui(UiEvent::MenuTap(i)) => {
                 if i < settings::MENU.len() {
                     self.menu_cursor = i;
-                    self.settings.cycle(settings::MENU[i].0, 1);
+                    self.cycle_setting(settings::MENU[i].0);
                 }
             }
             Event::Ui(UiEvent::TagTrack) => {
@@ -1301,6 +1301,12 @@ impl DeckApp {
             }
             _ => { self.swipe_acc = 0.0; self.swipe_done = false; }
         }
+    }
+
+    /// Step a MENU setting and apply whatever it controls at runtime.
+    fn cycle_setting(&mut self, s: settings::Setting) {
+        self.settings.cycle(s, 1);
+        cpumeter::set_file_log(self.settings.perf_log);
     }
 
     /// Let go of anything a finger was holding when the phone page flips.
@@ -2465,6 +2471,7 @@ pub fn run(cfg: Config) -> Result<()> {
     }
     // Self-measured CPU use, every 10 s: the log, and on iOS a file the Files
     // app can show (no profiler reaches an App Store build).  INFO shows it.
+    cpumeter::set_file_log(settings.perf_log);
     #[cfg(target_os = "ios")]
     cpumeter::start(Some(taglist::documents_dir().join("opendeck-perf.log")));
     #[cfg(not(target_os = "ios"))]

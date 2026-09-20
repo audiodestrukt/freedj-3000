@@ -203,9 +203,11 @@ There is no profiler on an App Store build, so the app measures itself: every
 cpu: 18.4% of one core — main 9.1  audio-proc 6.2  prodj-tx 0.7
 ```
 
-goes to the log and to `Documents/opendeck-perf.log` (open it from the Files
-app → On My iPhone → OpenDeck DJ; it is rewritten on every launch). INFO
-shows the process figure as its last row. Threads: `main` is rendering and
+goes to the log and, while **MENU → PERF LOG** is ON, to
+`Documents/opendeck-perf.log` (open it from the Files app → On My iPhone →
+OpenDeck DJ; rewritten on every launch, removed when the setting is OFF —
+the default, so a production install carries no log). INFO shows the process
+figure as its last row either way. Threads: `main` is rendering and
 UI, `audio-proc` is decode + Rubber Band R3, `prodj-tx` the Link sender,
 `media-analysis` the one-off library analysis after an install.
 

@@ -9,13 +9,14 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, PerfLog }
 
-pub const MENU: [(Setting, &str); 4] = [
+pub const MENU: [(Setting, &str); 5] = [
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::Player,       "PLAYER No."),
+    (Setting::PerfLog,      "PERF LOG"),
 ];
 
 /// The unit's AUTO CUE LEVEL choices (dB).
@@ -40,6 +41,11 @@ pub struct Settings {
     /// has no push sensor), false = CDJ (a drag while playing nudges).  Paused,
     /// the platter scrubs in either mode.  Remembered, as on the unit.
     pub jog_vinyl: bool,
+    /// Write the CPU meter's lines to a file the user can see (iOS:
+    /// Documents/opendeck-perf.log, in the Files app).  Off by default — a
+    /// production install should not grow a log in the user's folder; turn
+    /// it on to investigate heat, off again when done (the file is removed).
+    pub perf_log: bool,
     /// Which player-number seeding this file has had (0 = written before
     /// 0.2.1, when every iOS device was seeded to 3).  Lets a later default
     /// re-seed a device once without touching a number the user chose.
@@ -51,7 +57,7 @@ const SEED: u8 = 1;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, seed: 0 }
+        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, perf_log: false, seed: 0 }
     }
 }
 
@@ -119,6 +125,7 @@ impl Settings {
             Setting::Quantize     => c.quantize = !c.quantize,
             Setting::TempoRange   => c.tempo_range = step(&TEMPO_RANGES, c.tempo_range, dir),
             Setting::Player       => c.player = step(&[1u8, 2, 3, 4], c.player, dir),
+            Setting::PerfLog      => c.perf_log = !c.perf_log,
         }
         c
     }
@@ -130,6 +137,7 @@ impl Settings {
             Setting::Quantize     => if self.quantize { "ON".into() } else { "OFF".into() },
             Setting::TempoRange   => Self::range_label(self.tempo_range),
             Setting::Player       => format!("{}   (applies at next launch)", self.player),
+            Setting::PerfLog      => if self.perf_log { "ON   (Documents/opendeck-perf.log)".into() } else { "OFF".into() },
         }
     }
 
