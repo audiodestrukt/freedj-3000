@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **A held CUE now plays while held and snaps back on release, from the first
+  millisecond.** CUE, the platter and the performance pads sensed
+  click-and-drag, and egui only calls a still press a "drag" after 0.8 s; a
+  shorter still tap became a click on lift. So a quick CUE tap on the phone
+  started the preview as the finger came off and never stopped it, and a
+  longer hold started 0.8 s late. They now sense drag only, so press and
+  release fire the moment the finger lands and lifts. Transport behaviour is
+  the XDJ's: paused → hold plays from the cue, release returns and pauses;
+  playing → press returns to the cue and pauses.
+
 ## [0.2.3] — 2026-09-20
 
 Submitted for App Store review 2026-09-20 (build 1789864853, manual release), replacing the withdrawn 0.2.2 submission; carries 0.2.1 and 0.2.2.

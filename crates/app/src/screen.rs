@@ -469,7 +469,7 @@ fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &Phone
     let p = ui.painter();
     let lbl = sd.caption;
     let play_resp = ui.interact(sd.play, Id::new("fp-play"), Sense::click());
-    let cue_resp  = ui.interact(sd.cue,  Id::new("fp-cue"),  Sense::click_and_drag());
+    let cue_resp  = ui.interact(sd.cue,  Id::new("fp-cue"),  Sense::drag());   // drag-only: press/release fire at once, even for a still finger
     let play_lamp = if snap.playing { Some(Lamp::Green) }
                     else if play_resp.is_pointer_button_down_on() { Some(Lamp::White) }
                     else { None };
@@ -494,8 +494,13 @@ fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &Phone
         if resp.clicked() { out.push(if name == "fp-tag" { Event::Ui(UiEvent::TagTrack) } else { Event::Deck(ControlEvent::Back) }); }
     }
     if play_resp.clicked() { out.push(Event::Deck(ControlEvent::PlayPause)); }
-    if cue_resp.drag_started() || cue_resp.clicked() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
-    if cue_resp.drag_stopped()                       { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
+    // CUE is momentary.  With Sense::click_and_drag egui only reported a drag
+    // after the pointer moved and a still finger became a *click on release*,
+    // so a steady hold sent PRESS on lift and never a RELEASE: the preview
+    // started as the finger came off and ran on.  Sense::drag marks the widget
+    // dragged the moment it is pressed, so drag_started/stopped are press/release.
+    if cue_resp.drag_started() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
+    if cue_resp.drag_stopped() { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
     browse_knob(ui, sd.browse, out);
 }
 
@@ -662,7 +667,7 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
 
     // Touch state first: the sprites pick their lit / pressed variant from it.
     let play_resp = ui.interact(f.play, Id::new("fp-play"), Sense::click());
-    let cue_resp  = ui.interact(f.cue,  Id::new("fp-cue"),  Sense::click_and_drag());
+    let cue_resp  = ui.interact(f.cue,  Id::new("fp-cue"),  Sense::drag());   // drag-only: press/release fire at once, even for a still finger
     let play_lamp = if snap.playing { Some(Lamp::Green) }
                     else if play_resp.is_pointer_button_down_on() { Some(Lamp::White) }
                     else { None };
@@ -715,7 +720,9 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
     // ── Jog: spinning centre display (CDJ/XDJ platter position indicator) ────
     let r = f.jog.width() * 0.5;
     draw_jog_center(p, f.jog.center(), r * JOG_HUB_R, snap);
-    let jr = ui.interact(f.jog, Id::new("fp-jog"), Sense::click_and_drag());
+    // Drag-only so a still finger counts as a touch at once (vinyl: touch stops
+    // the platter); click_and_drag only reported the touch once it moved.
+    let jr = ui.interact(f.jog, Id::new("fp-jog"), Sense::drag());
     if jr.drag_started() { out.push(Event::Deck(ControlEvent::JogTouch { touched: true })); }
     if jr.drag_stopped() { out.push(Event::Deck(ControlEvent::JogTouch { touched: false })); }
     if jr.dragged() {
@@ -739,8 +746,13 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
 
     // ── Transport + buttons (targets; lit states are in the sprites) ─────────
     if play_resp.clicked() { out.push(Event::Deck(ControlEvent::PlayPause)); }
-    if cue_resp.drag_started() || cue_resp.clicked() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
-    if cue_resp.drag_stopped()                       { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
+    // CUE is momentary.  With Sense::click_and_drag egui only reported a drag
+    // after the pointer moved and a still finger became a *click on release*,
+    // so a steady hold sent PRESS on lift and never a RELEASE: the preview
+    // started as the finger came off and ran on.  Sense::drag marks the widget
+    // dragged the moment it is pressed, so drag_started/stopped are press/release.
+    if cue_resp.drag_started() { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
+    if cue_resp.drag_stopped() { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
 
     if let Some(r) = f.loop_in  { rect_btn(ui, r, "fp-loopin",  None, out, ControlEvent::LoopIn); }
     if let Some(r) = f.loop_out { rect_btn(ui, r, "fp-loopout", None, out, ControlEvent::LoopOut); }
@@ -1401,8 +1413,10 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
         let name = format!("pf-pad{i}");
         // Pads are press/release (not click): a set hot cue plays on press and,
         // under SLIP, its release returns to the shadow.
-        let resp = ui.interact(*r, Id::new(&name), Sense::click_and_drag());
-        let (pressed, released, down) = (resp.drag_started() || resp.clicked(), resp.drag_stopped(), resp.is_pointer_button_down_on());
+        // Sense::drag (not click_and_drag): a still finger then reports press
+        // and release immediately instead of a click on lift with no release.
+        let resp = ui.interact(*r, Id::new(&name), Sense::drag());
+        let (pressed, released, down) = (resp.drag_started(), resp.drag_stopped(), resp.is_pointer_button_down_on());
         let clicked = pressed;
         match snap.perform_mode {
             PM::HotCue => {
