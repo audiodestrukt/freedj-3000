@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [0.2.2] — 2026-09-19
 
+Submitted for App Store review 2026-09-20 (build 1789863307, manual release); carries 0.2.1 too. 0.2.0 was approved 2026-09-19.
+
 ### Fixed
 - **Swiping back from CONTROLS could leave the transport stopped.** A
   two-finger swipe begins as one finger, and on the controls page that finger
