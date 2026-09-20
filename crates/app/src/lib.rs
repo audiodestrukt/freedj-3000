@@ -2326,6 +2326,9 @@ pub struct Config {
     pub link_send:    bool,
     /// Where BROWSE starts; `None` = the startup track's folder (or cwd).
     pub browse_root:  Option<PathBuf>,
+    /// Start the startup track playing at once (the desktop dev loop); off,
+    /// the deck boots paused at the cue, as a CDJ sits after a load (iOS).
+    pub autoplay:     bool,
 }
 
 fn init_logging() {
@@ -2377,7 +2380,9 @@ pub fn desktop_main() -> Result<()> {
         }
     }
 
-    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root: None })
+    // Dev: OPENDECK_AUTOPLAY=0 boots paused at the cue, as the iOS app does.
+    let autoplay = std::env::var("OPENDECK_AUTOPLAY").map(|v| v != "0").unwrap_or(true);
+    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root: None, autoplay })
 }
 
 /// Start a deck and run the UI event loop.  Platform-agnostic: every entry point
@@ -2405,6 +2410,10 @@ pub fn run(cfg: Config) -> Result<()> {
             AudioHandle::open_empty()?
         }
     };
+    // `open` boots the audio thread playing.  Stop it here, before the
+    // analysis below, when the platform wants a paused deck at launch; the
+    // playhead is parked at the cue once the app exists (see below).
+    if !cfg.autoplay { audio.set_playing(false); log::info!("autoplay off — booting paused at the cue"); }
 
     // ── 2. Build waveform + detect beat grid (synchronous, before window opens) ─
     let samples_arc = audio.current();
@@ -2721,7 +2730,7 @@ pub extern "C" fn freedj_ios_main() {
         Some(t) => log::info!("track: {}", t.display()),
         None => log::info!("no audio in Documents — booting to an empty deck; add tracks via the Files app"),
     }
-    if let Err(e) = run(Config { track, player, default_player, deck_channel: 0, link_send: true, browse_root: Some(docs) }) {
+    if let Err(e) = run(Config { track, player, default_player, deck_channel: 0, link_send: true, browse_root: Some(docs), autoplay: false }) {
         log::error!("freedj_ios_main: {e:#}");
     }
 }

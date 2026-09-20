@@ -473,6 +473,23 @@ pub fn phone_controls_layout(win: Rect, ins: Insets) -> (FaceLayout, PhoneStrip)
 // rule (first Start becomes the pointer until it Ends) and reports the other
 // fingers landing in / lifting from the given rects.
 
+/// A tap whose press AND release land in one frame.  egui never calls that a
+/// drag (interaction.rs: "a press-release in the same frame is NOT considered
+/// a drag"), so a drag-only momentary control would lose the tap entirely.
+/// Callers treat it as a press followed by a release.
+fn same_frame_tap(ui: &Ui, r: Rect) -> bool {
+    // Read the raw events: `press_origin` is already cleared by the release.
+    ui.input(|i| {
+        let (mut down_in, mut up) = (false, false);
+        for ev in &i.events {
+            if let egui::Event::PointerButton { pos, pressed, .. } = ev {
+                if *pressed { down_in = r.contains(*pos); } else if down_in { up = true; }
+            }
+        }
+        down_in && up
+    })
+}
+
 /// What secondary fingers did to one rect this frame.
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct SecondTouch {
@@ -574,8 +591,8 @@ fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &Phone
     // so a steady hold sent PRESS on lift and never a RELEASE: the preview
     // started as the finger came off and ran on.  Sense::drag marks the widget
     // dragged the moment it is pressed, so drag_started/stopped are press/release.
-    if cue_resp.drag_started() || cue2.pressed  { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
-    if cue_resp.drag_stopped() || cue2.released { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
+    if cue_resp.drag_started() || cue2.pressed  || same_frame_tap(ui, sd.cue) { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
+    if cue_resp.drag_stopped() || cue2.released || same_frame_tap(ui, sd.cue) { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
     browse_knob(ui, sd.browse, out);
 }
 
@@ -829,8 +846,8 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
     // so a steady hold sent PRESS on lift and never a RELEASE: the preview
     // started as the finger came off and ran on.  Sense::drag marks the widget
     // dragged the moment it is pressed, so drag_started/stopped are press/release.
-    if cue_resp.drag_started() || cue2.pressed  { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
-    if cue_resp.drag_stopped() || cue2.released { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
+    if cue_resp.drag_started() || cue2.pressed  || same_frame_tap(ui, f.cue) { out.push(Event::Deck(ControlEvent::Cue { pressed: true })); }
+    if cue_resp.drag_stopped() || cue2.released || same_frame_tap(ui, f.cue) { out.push(Event::Deck(ControlEvent::Cue { pressed: false })); }
 
     if let Some(r) = f.loop_in  { rect_btn(ui, r, "fp-loopin",  None, out, ControlEvent::LoopIn); }
     if let Some(r) = f.loop_out { rect_btn(ui, r, "fp-loopout", None, out, ControlEvent::LoopOut); }
@@ -1494,7 +1511,8 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
         // Sense::drag (not click_and_drag): a still finger then reports press
         // and release immediately instead of a click on lift with no release.
         let resp = ui.interact(*r, Id::new(&name), Sense::drag());
-        let (pressed, released, down) = (resp.drag_started(), resp.drag_stopped(), resp.is_pointer_button_down_on());
+        let tap = same_frame_tap(ui, *r);
+        let (pressed, released, down) = (resp.drag_started() || tap, resp.drag_stopped() || tap, resp.is_pointer_button_down_on());
         let clicked = pressed;
         match snap.perform_mode {
             PM::HotCue => {

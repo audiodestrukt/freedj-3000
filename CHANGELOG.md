@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **iOS boots paused.** The app no longer starts playing the first track in
+  Documents at launch; the deck sits cued at the track's first sound, as a
+  CDJ does after a load, and PLAY starts it. The desktop keeps autoplay for
+  the dev loop (`OPENDECK_AUTOPLAY=0` boots it paused too).
+
+### Fixed
+- **A tap that lands and lifts inside one frame no longer vanishes.** egui
+  never counts a same-frame press and release as a drag, so a drag-only
+  momentary control (CUE, the pads) would drop such a tap. They now read the
+  raw pointer events and treat it as a press followed by a release.
+
 ## [0.2.5] — 2026-09-20
 
 TestFlight build.
