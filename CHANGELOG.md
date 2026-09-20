@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.2.5] — 2026-09-20
+
+TestFlight build.
 
 ### Fixed
 - **Hold CUE, hit PLAY: playback locks in.** The transport already latched
