@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [0.2.3] — 2026-09-20
 
+Submitted for App Store review 2026-09-20 (build 1789864853, manual release), replacing the withdrawn 0.2.2 submission; carries 0.2.1 and 0.2.2.
+
 ### Changed
 - **The perf log is opt-in.** The CPU meter's file (`Documents/opendeck-perf.log`)
   is now written only while MENU → PERF LOG is ON, and removed when it is
@@ -12,7 +14,7 @@ All notable changes to this project will be documented in this file.
 
 ## [0.2.2] — 2026-09-19
 
-Submitted for App Store review 2026-09-20 (build 1789863307, manual release); carries 0.2.1 too. 0.2.0 was approved 2026-09-19.
+TestFlight build 1789863307; its review submission was withdrawn in favour of 0.2.3. 0.2.0 was approved 2026-09-19.
 
 ### Fixed
 - **Swiping back from CONTROLS could leave the transport stopped.** A
