@@ -1,0 +1,34 @@
+# The behaviours of the deck transport, as physical inputs and observable
+# results. Run against crates/transport by `cargo test -p opendeck-transport`,
+# and runnable against any other implementation of the same rules through the
+# panelspec adapter protocol.
+device: xdj-1000mk2
+title: Pioneer XDJ-1000MK2 — deck transport (CUE / PLAY) subset
+profiles: [xdj-1000mk2]
+clock: [ms]
+
+controls:
+  play: button
+  cue: button
+  needle_search:
+    kind: touchstrip
+    range: [0, 1]
+    doc: Touch position on the overview waveform; 0 = track start, 1 = track end.
+
+observables:
+  deck.playing: bool
+  deck.position_ms:
+    type: number
+    unit: ms
+    doc: Playhead as heard (not the decoder's read-ahead cursor).
+  deck.cue_ms:
+    type: number
+    unit: ms
+    doc: The current momentary cue point.
+
+fixtures:
+  loaded-paused:
+    doc: A track of `track_ms` is loaded and paused, with the playhead and the cue point both at `cue_ms`.
+    params:
+      track_ms: 240000
+      cue_ms: 0

@@ -29,6 +29,7 @@ use renderer::Renderer;
 use input::{ControlEvent, Event, PerformMode, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
 use browser::{Browser, Enter, Load};
 use snapshot::DeckSnapshot;
+use transport::Transport;
 use std::{
     path::PathBuf,
     sync::{
@@ -89,6 +90,10 @@ struct DeckApp {
     prev_beat2_anchor: u64,       // detect changes in beat2_anchor
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
     prev_pos:          u64,       // previous frame's audio position (scroll instrument)
+    /// CUE/PLAY rules — cue point, whether the playhead sits on it, whether a
+    /// preview is in progress.  Lives in `crates/transport` so the behaviour can
+    /// be verified against `specs/xdj-1000mk2/` without an audio device.
+    transport:         Transport,
     smoothed_pos:      f64,       // phase-locked playhead, source samples
     resync_frames:     u32,       // consecutive frames the reference has been far off
     refresh_interval:  Duration,  // display period; each frame lands in one of these
@@ -127,7 +132,6 @@ struct DeckApp {
     /// Jog nudge: a temporary speed offset that snaps back when the wheel stops.
     jog_offset:        f32,
     jog_until:         Option<Instant>,
-    cue_point:         u64,   // start cue, source sample index (CDJ CUE)
     /// Memory points (interleaved sample indices, sorted): rekordbox's from the
     /// ANLZ on load, plus any set with MEMORY.  CALL ◀▶ steps through them;
     /// DELETE removes the one the deck is cued at.  In-session for now.
@@ -151,8 +155,6 @@ struct DeckApp {
     /// began, audio.source_consumed then).  Shadow = pos + consumed-since.
     /// Ending the action jumps there; a manual seek cancels it.
     slip_anchor:       Option<(f64, u64)>,
-    cue_preview:       bool,  // CUE held → previewing from the cue point
-    cued:              bool,  // playhead is sitting on the cue (not searched away)
     exit_after_capture: bool,
 
     // Created on first `resumed`.
@@ -412,7 +414,7 @@ impl DeckApp {
             play_on_load: false,
             jog_offset:        0.0,
             jog_until:         None,
-            cue_point,
+            transport:         Transport::new(cue_point),
             memory_cues,
             track_tags,
             hot_cues,
@@ -421,8 +423,6 @@ impl DeckApp {
             perform_delete:    false,
             loop_beats:        0.0,
             slip_anchor:       None,
-            cue_preview:       false,
-            cued:              true,
             exit_after_capture: false,
             window:      None,
             renderer:    None,
@@ -462,17 +462,13 @@ impl DeckApp {
             Event::Deck(ControlEvent::Play)  => { self.lock_in_play(); log::info!("playing"); }
             Event::Deck(ControlEvent::Pause) => { self.audio.playing.store(false, Ordering::Relaxed); log::info!("paused"); }
             Event::Deck(ControlEvent::PlayPause) => {
-                if self.cue_preview {
-                    // XDJ: pressing PLAY while CUE is held for a preview latches
-                    // continuous playback — it does NOT toggle to pause.  After
-                    // this, releasing CUE keeps playing instead of returning.
-                    self.lock_in_play();
-                    log::info!("play locked in from cue preview");
-                } else {
-                    let was = self.audio.playing.load(Ordering::Relaxed);
-                    self.audio.set_playing(!was);
-                    log::info!("{}", if was { "paused" } else { "playing" });
-                }
+                // The rules decide (including the XDJ latch during a CUE preview);
+                // this just carries out the result.
+                let playing  = self.audio.playing.load(Ordering::Relaxed);
+                let latching = self.transport.preview;
+                let outcome  = self.transport.play_pause(playing);
+                self.apply_transport(outcome);
+                log::info!("{}", if latching { "play locked in from cue preview" } else if playing { "paused" } else { "playing" });
             }
             Event::Deck(ControlEvent::TempoNudge { delta }) => {
                 let range = self.settings.tempo_range;
@@ -528,7 +524,7 @@ impl DeckApp {
                     let cur   = self.audio.position.load(Ordering::Relaxed) as i64;
                     let new   = (cur + delta as i64 * step).clamp(0, self.audio.len() as i64) as u64;
                     self.seek_to(new);
-                    self.cued = false;
+                    self.transport.searched();
                     log::debug!("jog vinyl {delta:+} → {:.2}s", new as f64 / sr_ch);
                 }
             }
@@ -536,46 +532,31 @@ impl DeckApp {
                 // Momentary CDJ CUE.  PRESS: playing → return to the cue and pause;
                 // paused → set the cue here and preview (play) while held.
                 // RELEASE (while previewing) → jump back to the cue and pause.
+                // The rules are in `crates/transport`, verified against
+                // `specs/xdj-1000mk2/`; what's left here is the audio plumbing.
+                //
+                // The cue is captured at the *displayed* playhead, not the raw
+                // decoder cursor: `position` sits ~in_flight (≈93 ms) ahead of what
+                // is heard and drawn (`smoothed_pos ≈ position − in_flight`), so the
+                // raw cursor stored the cue past the transient under the playhead
+                // and playing from it skipped the kick.  Frame-aligned so channels
+                // stay interleaved.
                 let sr_ch = self.audio.sample_rate as f64 * self.audio.channels as f64;
-                if pressed {
-                    if self.audio.playing.load(Ordering::Relaxed) {
-                        // Playing → return to the cue and pause.
-                        self.audio.playing.store(false, Ordering::Relaxed);
-                        self.seek_to(self.cue_point);
-                        self.cued = true;
-                        log::info!("cue: return to {:.2}s", self.cue_point as f64 / sr_ch);
-                    } else if self.cued {
-                        // Paused, already sitting on the cue → preview from it while
-                        // held; do NOT move the cue.  Rapid re-taps always retrigger
-                        // the same point (never adopt a raced-forward position).
-                        self.cue_preview = true;
-                        self.seek_to(self.cue_point);
-                        self.audio.set_playing(true);
-                        log::debug!("cue: preview from {:.2}s", self.cue_point as f64 / sr_ch);
-                    } else {
-                        // Paused after searching away → set a new cue here, then
-                        // preview it while held.
-                        //
-                        // Capture the cue at the *displayed* playhead, not the raw
-                        // decoder cursor.  `position` is the decode cursor, which
-                        // sits ~in_flight (≈93 ms) ahead of what is actually heard
-                        // and drawn (`smoothed_pos ≈ position − in_flight`).  Using
-                        // the raw cursor stored the cue ~93 ms past the transient
-                        // under the playhead, so playing from it skipped the kick.
-                        // Frame-align so channels stay interleaved.
-                        self.cue_point   = self.quantized(self.smoothed_pos);
-                        self.cue_preview = true;
-                        self.cued        = true;
-                        self.audio.set_playing(true);
-                        log::info!("cue: set + preview at {:.2}s", self.cue_point as f64 / sr_ch);
-                    }
-                } else if self.cue_preview {
-                    self.cue_preview = false;
-                    self.audio.playing.store(false, Ordering::Relaxed);
-                    self.seek_to(self.cue_point);
-                    self.cued = true;
+                let audible = self.quantized(self.smoothed_pos);
+                let playing = self.audio.playing.load(Ordering::Relaxed);
+                let was_preview = self.transport.preview;
+                let outcome = self.transport.cue(pressed, playing, audible);
+                let cue_s = self.transport.cue_point as f64 / sr_ch;
+                if let Some(at) = outcome.cue_point {
+                    log::info!("cue: set + preview at {:.2}s", at as f64 / sr_ch);
+                } else if pressed && playing {
+                    log::info!("cue: return to {cue_s:.2}s");
+                } else if pressed {
+                    log::debug!("cue: preview from {cue_s:.2}s");
+                } else if was_preview {
                     log::debug!("cue: release → back to cue");
                 }
+                self.apply_transport(outcome);
             }
             // ── Memory points (MEMORY / CALL ◀▶ / DELETE) ──────────────────────
             // Matching uses a small tolerance so a point set from a paused cue
@@ -583,7 +564,7 @@ impl DeckApp {
             Event::Deck(ControlEvent::MemoryCueSet) => {
                 let ch  = self.audio.channels as u64;
                 let tol = ch * 64;
-                let c   = self.cue_point;
+                let c   = self.transport.cue_point;
                 if self.audio.len() == 0 {
                     log::info!("memory: no track");
                 } else if memory_at(&self.memory_cues, c, tol).is_some() {
@@ -608,9 +589,8 @@ impl DeckApp {
                 match target {
                     Some(m) => {
                         self.audio.playing.store(false, Ordering::Relaxed);
-                        self.cue_point   = m;
-                        self.cue_preview = false;
-                        self.cued        = true;
+                        self.transport.preview = false;
+                        self.transport.arrived_at_cue(m);
                         self.seek_to(m);
                         let sr_ch = self.audio.sample_rate as f64 * ch as f64;
                         log::info!("call {}: cued at {:.2}s", if next { "▶" } else { "◀" }, m as f64 / sr_ch);
@@ -621,7 +601,7 @@ impl DeckApp {
             Event::Deck(ControlEvent::MemoryCueDelete) => {
                 let ch  = self.audio.channels as u64;
                 let tol = ch * 64;
-                let c   = self.cue_point;
+                let c   = self.transport.cue_point;
                 match memory_at(&self.memory_cues, c, tol) {
                     Some(i) => {
                         self.memory_cues.remove(i);
@@ -679,7 +659,7 @@ impl DeckApp {
                 let ch = self.audio.channels as u64;
                 let target = ((position.clamp(0.0, 1.0) as f64 * total) as u64 / ch) * ch;
                 self.seek_to(target);
-                self.cued = false;   // searched away from the cue
+                self.transport.searched();   // no longer sitting on the cue
             }
             Event::Deck(ControlEvent::TempoFader { position }) => {
                 let s = input::fader_to_speed(position, self.settings.tempo_range);
@@ -875,11 +855,11 @@ impl DeckApp {
                 // 0:00 and paused: re-cue to the first sound so the change shows
                 // immediately (turning it off leaves an existing cue alone, as
                 // the unit does — AUTO CUE otherwise governs future loads).
-                if self.auto_cue && self.cue_point == 0 && !self.audio.playing.load(Ordering::Relaxed) {
+                if self.auto_cue && self.transport.cue_point == 0 && !self.audio.playing.load(Ordering::Relaxed) {
                     let ch = self.audio.channels as usize;
                     let lvl = self.settings.auto_cue_level_db;
                     let fs = { let s = self.audio.samples.load(); first_sound(s.as_slice(), ch, lvl) };
-                    if fs > 0 { self.cue_point = fs; self.seek_to(fs); self.cued = true; }
+                    if fs > 0 { self.seek_to(fs); self.transport.arrived_at_cue(fs); }
                 }
             }
             Event::Ui(UiEvent::CycleColor) => {
@@ -907,7 +887,7 @@ impl DeckApp {
                         log::info!("grid: reset to analysed");
                     }
                     SnapCue | ShiftCue => {
-                        let frame = self.cue_point / self.audio.channels as u64;
+                        let frame = self.transport.cue_point / self.audio.channels as u64;
                         if let Some(g) = self.beat_grid.as_mut() {
                             let per = grids::period_frames(g, self.audio.sample_rate);
                             grids::snap_to(g, frame, per, op == ShiftCue);
@@ -1002,9 +982,24 @@ impl DeckApp {
     /// keeps playing (the XDJ "hold CUE, tap PLAY to lock in" gesture).  Also the
     /// plain PLAY action, which should always mean sustained play.
     fn lock_in_play(&mut self) {
-        self.cue_preview = false;   // release won't return to the cue
-        self.cued        = false;   // playhead is leaving the cue
-        self.audio.set_playing(true);
+        let outcome = self.transport.play();
+        self.apply_transport(outcome);
+    }
+
+    /// Carry out what the transport rules asked for: pause, then seek, then play.
+    /// That order is what each case needs — returning to the cue stops before
+    /// seeking, a preview seeks before starting.  Starting goes through
+    /// `set_playing` so the parked processor thread wakes at once (0.2.1).
+    fn apply_transport(&mut self, outcome: transport::Outcome) {
+        if outcome.playing == Some(false) {
+            self.audio.set_playing(false);
+        }
+        if let Some(to) = outcome.seek_to {
+            self.seek_to(to);
+        }
+        if outcome.playing == Some(true) {
+            self.audio.set_playing(true);
+        }
     }
 
     // ── Loop helpers ─────────────────────────────────────────────────────────
@@ -1320,7 +1315,7 @@ impl DeckApp {
     /// page is the finger lifting.
     fn release_held_controls(&mut self) {
         if self.jog_hold_resume { self.apply(Event::Deck(ControlEvent::JogTouch { touched: false })); }
-        if self.cue_preview     { self.apply(Event::Deck(ControlEvent::Cue { pressed: false })); }
+        if self.transport.preview    { self.apply(Event::Deck(ControlEvent::Cue { pressed: false })); }
     }
 
     /// What the loader thread needs to know about the deck to prepare a track.
@@ -1387,9 +1382,8 @@ impl DeckApp {
         self.link_grid.store(Arc::new(self.beat_grid.clone()));
         self.smoothed_pos = 0.0;
         self.prev_pos     = 0;
-        self.cue_point    = p.cue_pt;
-        self.cue_preview  = false;
-        self.cued         = true;
+        self.transport.preview = false;
+        self.transport.arrived_at_cue(p.cue_pt);
         // Park the deck at the cue (a CDJ sits at the cue after load) so PLAY
         // starts there — with AUTO CUE that's the first sound, not the leader.
         if p.cue_pt > 0 { self.seek_to(p.cue_pt); }
@@ -1645,7 +1639,7 @@ impl DeckApp {
                 self.link.master_player.load(Ordering::Relaxed) as u8
             },
             player: self.link.player,
-            cue_point: self.cue_point,
+            cue_point: self.transport.cue_point,
             hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
             loop_active: self.audio.loop_active.load(Ordering::Relaxed),
             loop_start: self.audio.loop_start.load(Ordering::Relaxed),
@@ -1746,7 +1740,7 @@ impl DeckApp {
             || self.frame_count < 120
             || self.audio.playing.load(Ordering::Relaxed)
             || self.loading.is_some()
-            || self.cue_preview
+            || self.transport.preview
             || egui_animating
             || frame_start.duration_since(self.last_input) < Duration::from_secs(1);
         if phone { self.phone_swipe(&mut touch); }
@@ -1796,7 +1790,7 @@ impl DeckApp {
                 self.link.master_player.load(Ordering::Relaxed) as u8
             },
             player: self.link.player,
-            cue_point: self.cue_point,
+            cue_point: self.transport.cue_point,
             hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
             loop_active: self.audio.loop_active.load(Ordering::Relaxed),
             loop_start: self.audio.loop_start.load(Ordering::Relaxed),
@@ -2526,7 +2520,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, settings);
     // Park the startup track at its cue (AUTO CUE's first sound, or the
     // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
-    if app.cue_point > 0 { let c = app.cue_point; app.seek_to(c); }
+    if app.transport.cue_point > 0 { let c = app.transport.cue_point; app.seek_to(c); }
     // Dev: OPENDECK_SLIP=1 engages SLIP at startup; OPENDECK_LOOP=start_secs,
     // beats arms a beat loop on the startup track (e.g. "30,4") — together they
     // exercise the loop engine, SLIP's shadow and both displays headlessly.

@@ -1,0 +1,33 @@
+spec: xdj.cue.play-locks-in-preview
+title: Tapping PLAY while CUE is held latches playback
+device: xdj-1000mk2
+tags: [cue, play, combo]
+description: >
+  Hold CUE on a paused deck to preview from the cue point, then tap PLAY while
+  still holding CUE. PLAY must not act as a pause toggle here, and releasing
+  CUE afterwards must keep playing instead of jumping back to the cue.
+provenance:
+  status: draft
+  source: freedj-3000 crates/app/src/lib.rs, Deck::apply (PlayPause during cue_preview)
+  notes: Confirm on the XDJ-1000MK2, then set status to verified and add a `verified` entry.
+
+given:
+  fixture: loaded-paused
+  params: {cue_ms: 10000}
+
+steps:
+  - hold:
+      keys: cue
+      then:
+        - expect: {deck.playing: true}
+        - wait: 2s
+        - press: play
+        - expect: {deck.playing: true}
+  - note: CUE is now released.
+  - expect:
+      deck.playing: true
+      deck.position_ms: {$approx: 12000, $tol: 50}
+      deck.cue_ms: 10000
+  - wait: 1s
+  - expect:
+      deck.position_ms: {$approx: 13000, $tol: 50}

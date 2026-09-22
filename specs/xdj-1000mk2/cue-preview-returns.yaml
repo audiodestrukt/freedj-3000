@@ -1,0 +1,22 @@
+spec: xdj.cue.preview-returns-on-release
+title: Holding CUE previews; releasing it returns to the cue and pauses
+device: xdj-1000mk2
+tags: [cue]
+provenance:
+  status: draft
+  source: freedj-3000 crates/app/src/lib.rs, Deck::apply (Cue pressed/released)
+
+given:
+  fixture: loaded-paused
+  params: {cue_ms: 10000}
+
+steps:
+  - down: cue
+  - expect: {deck.playing: true}
+  - wait: 1500ms
+  - expect: {deck.position_ms: {$approx: 11500, $tol: 50}}
+  - up: cue
+  - expect:
+      deck.playing: false
+      deck.position_ms: {$approx: 10000, $tol: 20}
+      deck.cue_ms: 10000

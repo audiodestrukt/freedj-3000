@@ -16,6 +16,7 @@ name = "opendeck"
 path = "src/main.rs"
 
 [dependencies]
+opendeck-transport = { path = "../transport" }
 arc-swap = "1"
 rubato = "0.15"
 opendeck-types       = { workspace = true }

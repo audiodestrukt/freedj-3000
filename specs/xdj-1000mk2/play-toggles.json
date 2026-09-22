@@ -1,0 +1,17 @@
+{
+  "spec": "xdj.play.toggles",
+  "title": "PLAY/PAUSE toggles when CUE isn't held",
+  "device": "xdj-1000mk2",
+  "tags": ["play"],
+  "provenance": {"status": "draft"},
+  "given": "loaded-paused",
+  "steps": [
+    {"press": "play"},
+    {"expect": {"deck.playing": true}},
+    {"wait": "1s"},
+    {"press": "play"},
+    {"expect": {"deck.playing": false, "deck.position_ms": {"$approx": 1000, "$tol": 50}}},
+    {"wait": "1s"},
+    {"expect": {"deck.position_ms": {"$approx": 1000, "$tol": 50}}}
+  ]
+}

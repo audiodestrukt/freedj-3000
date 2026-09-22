@@ -1,0 +1,23 @@
+spec: xdj.cue.retap-keeps-point
+title: Re-tapping CUE on the cue point previews from the same point every time
+device: xdj-1000mk2
+tags: [cue]
+description: >
+  Rapid CUE taps from a deck sitting on its cue must always restart from that
+  cue, never adopt a position the preview drifted to.
+provenance:
+  status: draft
+  source: freedj-3000 crates/app/src/lib.rs ("Rapid re-taps always retrigger the same point")
+
+given:
+  fixture: loaded-paused
+  params: {cue_ms: 10000}
+
+steps:
+  - hold: {keys: cue, then: [{wait: 300ms}]}
+  - hold: {keys: cue, then: [{wait: 300ms}]}
+  - hold: {keys: cue, then: [{wait: 300ms}]}
+  - expect:
+      deck.playing: false
+      deck.cue_ms: 10000
+      deck.position_ms: {$approx: 10000, $tol: 20}

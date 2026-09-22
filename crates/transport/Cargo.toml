@@ -1,0 +1,24 @@
+[package]
+name        = "opendeck-transport"
+description = "CUE/PLAY transport rules, as a pure state machine — verifiable without audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "transport"
+path = "src/lib.rs"
+
+[dependencies]
+
+[dev-dependencies]
+# The behaviour-spec runner. Specs live in ../../specs/xdj-1000mk2 and describe
+# the deck as physical inputs and observable results, so the same suite can be
+# run against any implementation of these rules.
+#
+# Pinned by revision on purpose: Cargo.lock is gitignored in this workspace, so
+# an unpinned git dependency would silently follow that repo's default branch and
+# could break CI without anything changing here. Bump deliberately.
+panelspec = { git = "https://github.com/audiodestrukt/hexatrack", rev = "722828ccb171f12ee7c707607b43229f376160af" }
+anyhow = "1"
+serde_json = "1"

@@ -1,0 +1,34 @@
+spec: xdj.cue.pause-then-cue-sets-point
+title: Pausing with PLAY, then pressing CUE, sets the cue where you paused
+device: xdj-1000mk2
+tags: [cue, play]
+description: >
+  The standard CDJ way to set a cue point: play, pause with PLAY/PAUSE at the
+  spot you want, press CUE. The cue moves to the paused position. Pressing CUE
+  again from there previews from the new point, not the old one.
+provenance:
+  status: draft
+  source: Standard CDJ/XDJ operation (Pioneer manuals, "setting cue points")
+  notes: >
+    freedj-3000 probably fails this: its PlayPause toggle doesn't clear `cued`,
+    so the deck still believes it sits on the old cue after playing away and
+    CUE previews the old point. Confirm on the XDJ-1000MK2.
+
+given:
+  fixture: loaded-paused
+  params: {cue_ms: 10000}
+
+steps:
+  - press: play
+  - wait: 3s
+  - press: play
+  - expect: {deck.playing: false, deck.position_ms: {$approx: 13000, $tol: 50}}
+  - hold:
+      keys: cue
+      then:
+        - expect: {deck.playing: true, deck.cue_ms: {$approx: 13000, $tol: 50}}
+        - wait: 500ms
+  - expect:
+      deck.playing: false
+      deck.cue_ms: {$approx: 13000, $tol: 50}
+      deck.position_ms: {$approx: 13000, $tol: 50}

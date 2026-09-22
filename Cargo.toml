@@ -8,6 +8,7 @@ members = [
     "crates/minibpm-sys",
     "crates/timestretch",
     "crates/timecode",
+    "crates/transport",
     "crates/link",
     "crates/db",
     "crates/rekordbox",

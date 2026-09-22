@@ -1,0 +1,31 @@
+spec: xdj.cue.sets-point-after-search
+title: CUE on a paused deck that was searched away sets a new cue there
+device: xdj-1000mk2
+tags: [cue, needle]
+provenance:
+  status: draft
+  source: freedj-3000 crates/app/src/lib.rs, Deck::apply (Cue pressed, paused, not cued)
+
+cases:
+  - {needle: 0.25, at_ms: 60000}
+  - {needle: 0.5, at_ms: 120000}
+  - {needle: 0.9, at_ms: 216000}
+
+given:
+  fixture: loaded-paused
+  params: {track_ms: 240000, cue_ms: 0}
+
+steps:
+  - set: {control: needle_search, value: "${needle}"}
+  - expect:
+      deck.playing: false
+      deck.position_ms: {$approx: "${at_ms}", $tol: 20}
+      deck.cue_ms: 0
+  - hold:
+      keys: cue
+      then:
+        - expect: {deck.playing: true, deck.cue_ms: {$approx: "${at_ms}", $tol: 20}}
+        - wait: 500ms
+  - expect:
+      deck.playing: false
+      deck.position_ms: {$approx: "${at_ms}", $tol: 20}

@@ -1,0 +1,22 @@
+spec: xdj.cue.while-playing-returns-and-pauses
+title: CUE during playback returns to the cue point and pauses
+device: xdj-1000mk2
+tags: [cue, play]
+provenance:
+  status: draft
+  source: freedj-3000 crates/app/src/lib.rs, Deck::apply (Cue pressed while playing)
+
+given:
+  fixture: loaded-paused
+  params: {cue_ms: 10000}
+
+steps:
+  - press: play
+  - wait: 3s
+  - expect: {deck.playing: true, deck.position_ms: {$approx: 13000, $tol: 50}}
+  - press: cue
+  - note: Releasing CUE here must not start a preview.
+  - expect:
+      deck.playing: false
+      deck.position_ms: {$approx: 10000, $tol: 20}
+      deck.cue_ms: 10000
