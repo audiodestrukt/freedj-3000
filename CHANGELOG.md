@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.2.7] — 2026-09-22
+
+TestFlight build.
 
 ### Changed
 - **iOS boots paused.** The app no longer starts playing the first track in
@@ -16,7 +18,9 @@ All notable changes to this project will be documented in this file.
   momentary control (CUE, the pads) would drop such a tap. They now read the
   raw pointer events and treat it as a press followed by a release.
 
-## [Unreleased]
+## [0.2.7] — 2026-09-22
+
+TestFlight build.
 
 ### Fixed
 - **No more phantom deck on the phase meter.** With nobody on the network
