@@ -308,10 +308,44 @@ impl AudioHandle {
         // ── 6. cpal stream (RT callback, no allocation) ────────────────────────
         let cpal_playing    = Arc::clone(&playing);
         let cpal_stats      = Arc::clone(&stats);
+        // Stop fade: cutting to silence mid-waveform is a step, and a step is
+        // the click heard on every CUE release / pause.  On stop the callback
+        // keeps playing what the ring already holds while a gain ramps to
+        // zero over STOP_FADE_S (below anything audible as a fade), THEN goes
+        // silent and honours any pending flush.  Start is untouched — no
+        // fade-in — so cue latency stays exactly as it is.
+        const STOP_FADE_S: f32 = 0.003;
+        let fade_step = 1.0 / (device_sr as f32 * STOP_FADE_S).max(1.0);   // per frame
+        let mut gain: f32 = 1.0;
         let stream = device
             .build_output_stream::<f32, _, _>(
                 &stream_config,
                 move |out: &mut [f32], _info| {
+                    if !cpal_playing.load(Ordering::Relaxed) {
+                        if gain > 0.0 {
+                            // Fading out: ring audio × a falling gain, frame by
+                            // frame.  A flush requested meanwhile waits until
+                            // the fade is done (the ring holds ~90 ms, plenty).
+                            for frame in out.chunks_mut(device_ch) {
+                                let g = gain * gain;   // squared ramp: lands with zero slope
+                                for sample in frame.iter_mut() {
+                                    *sample = consumer.pop().unwrap_or(0.0) * g;
+                                }
+                                gain = (gain - fade_step).max(0.0);
+                                if gain == 0.0 { break; }
+                            }
+                            if gain > 0.0 { return; }
+                            // Fell to zero inside this buffer: the rest is
+                            // silence and the flush can proceed.
+                        }
+                        if drain_flag.swap(false, Ordering::AcqRel) {
+                            while consumer.pop().is_ok() {}
+                        }
+                        out.fill(0.0);
+                        return;
+                    }
+                    gain = 1.0;   // playing: no fade-in, and a restart mid-fade snaps up
+
                     // On seek, flush stale buffered audio.  This same buffer will
                     // then fill with silence until the producer re-primes from the
                     // new position — expected, so attribute it to seek priming,
@@ -319,11 +353,6 @@ impl AudioHandle {
                     let draining = drain_flag.swap(false, Ordering::AcqRel);
                     if draining {
                         while consumer.pop().is_ok() {}
-                    }
-
-                    if !cpal_playing.load(Ordering::Relaxed) {
-                        out.fill(0.0);
-                        return;
                     }
 
                     // Fill from the ring; count any sample we had to invent as

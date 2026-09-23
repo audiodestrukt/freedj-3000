@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **No click when playback stops.** Releasing CUE, pausing, or a platter or
+  waveform hold used to cut to silence on the next sample, a step you hear
+  as a click. The output now fades over 3 ms on stop, on the audio already
+  buffered, with a soft landing. Starting is untouched: no fade-in, so cue
+  latency is exactly as before.
+
 ## [0.2.9] — 2026-09-22
 
 TestFlight build.
