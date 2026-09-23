@@ -77,7 +77,6 @@ struct DeckApp {
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
     beat2_bpm:    Arc<AtomicU32>,  // f32 bits; BPM of the second grid
-    beat2_anchor: Arc<AtomicU64>, // written by MIDI Cue B to signal a phase reset
     beat2_player: Arc<AtomicU32>, // player number of the last Link beat sender
     beat2_bib:    Arc<AtomicU32>, // external deck's beat within its bar (1-4, 0=unknown)
     link:         Arc<prodj::LinkState>,
@@ -87,6 +86,10 @@ struct DeckApp {
     /// Enable ProDJ Link sending (beats/status/master); set true by MASTER.
     link_send:    Arc<AtomicBool>,
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
+    /// The other deck's beat phase, free-running in beats (<0 = not started),
+    /// and the arrival time of the last beat packet folded into it.
+    beat2_phase:       f64,
+    beat2_folded_ms:   u64,
     prev_pos:          u64,       // previous frame's audio position (scroll instrument)
     /// CUE/PLAY rules — cue point, whether the playhead sits on it, whether a
     /// preview is in progress.  Lives in `crates/transport` so the behaviour can
@@ -309,7 +312,7 @@ impl DeckApp {
         beat_grid:    Option<BeatGrid>,
         fader_speed:  Arc<AtomicU32>,
         beat2_bpm:    Arc<AtomicU32>,
-        beat2_anchor: Arc<AtomicU64>,
+        _beat2_anchor: Arc<AtomicU64>,
         beat2_player: Arc<AtomicU32>,
         beat2_bib:    Arc<AtomicU32>,
         link:         Arc<prodj::LinkState>,
@@ -378,13 +381,14 @@ impl DeckApp {
             menu_cursor:       0,
             fader_speed,
             beat2_bpm,
-            beat2_anchor,
             beat2_player,
             beat2_bib,
             link,
             link_grid,
             link_send,
             prev_beat2_bpm:    0.0,
+            beat2_phase:       -1.0,
+            beat2_folded_ms:   0,
             prev_pos:          0,
             smoothed_pos:      0.0,
             resync_frames:     0,
@@ -1622,17 +1626,37 @@ impl DeckApp {
             self.prev_beat2_bpm = beat2_bpm;
         }
 
-        // Phase of the peer's row: extrapolate from its last beat packet at
-        // its tempo, for at most ONE beat.  The next packet is due exactly
-        // then; if it never comes the peer is paused (or stopped), so the row
-        // holds on the beat instead of running on.  (min(·,1).fract() is 0 at
-        // the hold point, i.e. on the beat the missing packet would have
-        // marked.)
+        // Phase of the peer's row: a phase-locked free-run, like our own
+        // playhead.  Beat packets over Wi-Fi arrive late and in bursts (the
+        // access point holds broadcasts for a power-saving client until its
+        // beacon), so the row runs at the peer's tempo on its own clock and
+        // each packet only PULLS the phase a quarter of the way toward the
+        // beat it marks — jitter averages out instead of showing.  It holds
+        // only when the peer's status says it is paused and no beat has come
+        // for two periods; an earlier "hold after one beat" rule made the row
+        // stop and restart on every late packet.
         let beat_ms = self.link.beat2_beat_ms.load(Ordering::Relaxed);
         let beat2_phase_beats = if beat2_bpm > 0.0 && beat_ms > 0 {
-            let beats = now_ms.saturating_sub(beat_ms) as f32 / 1000.0 * beat2_bpm / 60.0;
-            beats.min(1.0).fract()
+            let period_s = 60.0 / beat2_bpm as f64;
+            let age_s    = now_ms.saturating_sub(beat_ms) as f64 / 1000.0;
+            let running  = self.link.beat2_playing.load(Ordering::Relaxed) || age_s < 2.0 * period_s;
+            if self.beat2_phase < 0.0 {
+                self.beat2_phase = age_s / period_s;               // first packet: the beat was `age` ago
+                self.beat2_folded_ms = beat_ms;
+            } else if running {
+                self.beat2_phase += frame_dt.as_secs_f64() / period_s;
+            }
+            if beat_ms != self.beat2_folded_ms {
+                // A new packet marked a beat at (now − age): pull toward it.
+                self.beat2_folded_ms = beat_ms;
+                let at_arrival = self.beat2_phase - age_s / period_s;
+                let err = at_arrival.rem_euclid(1.0);
+                let err = if err > 0.5 { err - 1.0 } else { err };  // beats, ±0.5
+                self.beat2_phase -= err * 0.25;
+            }
+            self.beat2_phase.rem_euclid(1.0) as f32
         } else {
+            self.beat2_phase = -1.0;
             0.0
         };
         let flags = UiFlags {

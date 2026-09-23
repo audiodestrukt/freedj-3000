@@ -12,6 +12,23 @@ All notable changes to this project will be documented in this file.
   device itself.
 
 ### Fixed
+- **A deck that sat suspended no longer comes back hot and deaf.** iOS
+  reclaims an app's sockets while it is suspended; afterwards every receive
+  failed at once and the three Link listeners retried without waiting, a
+  core each (the iPad "running hot again", and Link dead until a restart).
+  Listeners now back off and bind afresh, the sender reopens its socket
+  after three failed announces, and it re-checks its interface on every
+  announce, so an app carried from one Wi-Fi to another without a restart
+  moves to the new network's broadcast address on its own.
+- **The other deck's phase row runs smoothly over Wi-Fi.** An access point
+  holds broadcast packets for a power-saving client until its beacon
+  interval, so beats arrive late and bunched; 0.2.7's "hold after one beat"
+  rule made the row stop and restart on every late packet. The row is now a
+  phase-locked free-run, like our own playhead: it runs at the peer's tempo
+  and each packet pulls it a quarter of the way to the beat it marks. It
+  holds only when the peer's status says it is paused. Beats also go by
+  unicast to every OpenDeck peer, which is not held that way, and the
+  duplicate is dropped on receipt; CDJs still see broadcast only.
 - **Hold CUE, hold PLAY, release CUE, release PLAY: playback stays locked.**
   The second finger's PLAY latched on its press, but whether it should act on
   the press or on its lift was re-evaluated when it lifted, by which time CUE

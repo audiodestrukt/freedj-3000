@@ -84,6 +84,10 @@ pub struct LinkState {
     /// beat time and drops the row when the peer falls silent.
     pub beat2_beat_ms: AtomicU64,
     pub beat2_seen_ms: AtomicU64,
+    /// Whether that deck's last status said PLAY: its beat row free-runs while
+    /// this is set even if beats arrive late or bunched (Wi-Fi power save
+    /// delivers broadcasts in bursts), and holds when it is not.
+    pub beat2_playing: AtomicBool,
     /// What the sender is speaking from: "ip (iface) → broadcast", for the
     /// INFO page — so a deck on the wrong interface or subnet is visible on
     /// the device itself.
@@ -112,8 +116,17 @@ impl LinkState {
             peer_media: Mutex::new(HashMap::new()),
             beat2_beat_ms: AtomicU64::new(0),
             beat2_seen_ms: AtomicU64::new(0),
+            beat2_playing: AtomicBool::new(false),
             own_addr: Mutex::new(String::new()),
         })
+    }
+
+    /// Peers that are OpenDecks (by announce name), for beat unicast.
+    pub fn opendeck_peers(&self) -> Vec<(u8, Ipv4Addr)> {
+        let names = self.peer_names.lock().map(|n| n.clone()).unwrap_or_default();
+        self.peers.lock().map(|p| p.iter()
+            .filter(|(pl, _)| names.get(pl).map_or(false, |n| n.starts_with("freedj") || n.starts_with("OpenDeck")))
+            .map(|(pl, ip)| (*pl, *ip)).collect()).unwrap_or_default()
     }
 
     /// The players heard on the network, one line for the INFO page:
@@ -289,14 +302,16 @@ impl ProDjHandle {
     }
 }
 
-fn spawn(name: &str, sock: UdpSocket, mut f: impl FnMut(&[u8], SocketAddr) + Send + 'static) -> Option<thread::JoinHandle<()>> {
+fn spawn(name: &str, port: u16, sock: UdpSocket, mut f: impl FnMut(&[u8], SocketAddr) + Send + 'static) -> Option<thread::JoinHandle<()>> {
     thread::Builder::new()
         .name(name.into())
         .spawn(move || {
+            let mut sock = sock;
             let mut buf = [0u8; 1500];
+            let mut failures = 0u32;
             loop {
                 match sock.recv_from(&mut buf) {
-                    Ok((n, addr)) => f(&buf[..n], addr),
+                    Ok((n, addr)) => { failures = 0; f(&buf[..n], addr) }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
                     // Benign on Linux UDP: a prior unicast to a peer that has
                     // gone draws an ICMP port-unreachable, surfaced on the next
@@ -304,7 +319,22 @@ fn spawn(name: &str, sock: UdpSocket, mut f: impl FnMut(&[u8], SocketAddr) + Sen
                     // running, so this never affects playback or sync.
                     Err(e) if matches!(e.kind(), std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::ConnectionReset) =>
                         log::debug!("ProDJ Link recv (transient, ignored): {e}"),
-                    Err(e) => log::warn!("ProDJ Link recv: {e}"),
+                    Err(e) => {
+                        // Any other error means the socket itself is dead — iOS
+                        // reclaims sockets from an app that sat suspended — and
+                        // recv then fails at once, every call.  This loop used
+                        // to spin on that (a core each for three listeners: the
+                        // "iPad runs hot and Link is gone until a restart"
+                        // report).  Back off, then bind afresh.
+                        failures += 1;
+                        if failures == 1 { log::warn!("ProDJ Link recv on {port}: {e} — rebinding"); }
+                        thread::sleep(Duration::from_millis(250));
+                        if let Some(s) = bind_shared(port) {
+                            sock = s;
+                            failures = 0;
+                            log::info!("ProDJ Link: port {port} rebound");
+                        }
+                    }
                 }
             }
         })
@@ -315,7 +345,7 @@ fn spawn(name: &str, sock: UdpSocket, mut f: impl FnMut(&[u8], SocketAddr) + Sen
 fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(PORT_ANNOUNCE)?;
     log::info!("ProDJ Link: listening for announces on port {PORT_ANNOUNCE}");
-    spawn("prodj-rx-50000", sock, move |data, addr| {
+    spawn("prodj-rx-50000", PORT_ANNOUNCE, sock, move |data, addr| {
         log::trace!("ProDJ rx :50000 {} bytes from {addr} — {:02X?}", data.len(), data);
         if let Some((player, pkt_ip)) = ProDjLink::parse_announce(data) {
             if player == link.player { return; }
@@ -347,11 +377,20 @@ fn listen_beat(
     log::info!("ProDJ Link: listening for beats on port {PORT_BEAT}");
     let me = ProDjLink::new(link.player);
     let tx = UdpSocket::bind("0.0.0.0:0").ok()?;
-    spawn("prodj-rx-50001", sock, move |data, addr| {
+    let mut last_beat_at: HashMap<u8, Instant> = HashMap::new();
+    spawn("prodj-rx-50001", PORT_BEAT, sock, move |data, addr| {
         log::debug!("ProDJ rx :50001 {} bytes from {addr} — {:02X?}", data.len(), data);
 
         if let Some(b) = ProDjLink::parse_beat(data) {
             if b.player == link.player { return; }           // our own broadcast
+            // An OpenDeck sends each beat by broadcast AND unicast (see the
+            // sender); the second copy lands within a few ms.  A real beat is
+            // never closer than 300 ms (200 BPM), so drop the twin.
+            let now = Instant::now();
+            if let Some(t) = last_beat_at.get(&b.player) {
+                if now.duration_since(*t) < Duration::from_millis(100) { return; }
+            }
+            last_beat_at.insert(b.player, now);
             let master = link.master_player.load(Ordering::Relaxed) as u8;
             // Effective tempo = track BPM × the sender's pitch.  The beat packet
             // carries them separately; use the product so a pitched master
@@ -423,7 +462,7 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
     let mut last: HashMap<u8, Status> = HashMap::new();
     let reply_sock = UdpSocket::bind("0.0.0.0:0").ok();
     let me = ProDjLink::new(link.player);
-    spawn("prodj-rx-50002", sock, move |data, addr| {
+    spawn("prodj-rx-50002", PORT_STATUS, sock, move |data, addr| {
         log::trace!("ProDJ rx :50002 {} bytes from {addr} — {:02X?}", data.len(), data);
         // Media query: a peer asks what is in one of our slots.  Answer when we
         // are serving (the media response names the library and its size).
@@ -486,6 +525,7 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
         }
         if beat2_player.load(Ordering::Relaxed) == st.player as u32 {
             link.beat2_seen_ms.store(link.now_ms(), Ordering::Relaxed);
+            link.beat2_playing.store(st.playing, Ordering::Relaxed);
         }
 
         // Master bookkeeping.  Its effective tempo comes from status as well
@@ -550,7 +590,7 @@ pub struct ProDjSender {
 
 impl ProDjSender {
     pub fn start(link: Arc<LinkState>, st: SenderState) -> Option<Self> {
-        let sock = UdpSocket::bind("0.0.0.0:0")
+        let mut sock = UdpSocket::bind("0.0.0.0:0")
             .map_err(|e| log::warn!("ProDJ Link: sender socket failed: {e}"))
             .ok()?;
         if let Err(e) = sock.set_broadcast(true) {
@@ -573,8 +613,9 @@ impl ProDjSender {
                 // Re-selected below once players are discovered.
                 let (mut ip, mut bcast, mut mac) = (ip, bcast, mac);
                 let mut announce = me.build_announce(ip, mac);
-                let mut known_peers: Vec<Ipv4Addr> = Vec::new();
+                let mut known_peers: Vec<Ipv4Addr>;
                 let mut bcast_warned = false;
+                let mut send_failures = 0u32;
                 let mut last_announce = Instant::now() - Duration::from_secs(5);
                 let mut last_media_query = Instant::now() - Duration::from_secs(5);
                 let mut last_status   = Instant::now() - Duration::from_secs(5);
@@ -667,6 +708,16 @@ impl ProDjSender {
                                     log::warn!("ProDJ Link: beat broadcast to {bcast}:{PORT_BEAT} failed: {e}");
                                 }
                             }
+                            // Also straight to each OpenDeck peer.  An access
+                            // point holds broadcasts for a power-saving Wi-Fi
+                            // client until its beacon interval, so an iPad
+                            // gets beats late and in bursts; unicast is not
+                            // held that way.  Only our own kind: a CDJ must
+                            // not see each beat twice.  The receiver drops
+                            // the duplicate (see listen_beat).
+                            for (pl, pip) in link.opendeck_peers() {
+                                if pl != player { let _ = sock.send_to(&pkt, (pip, PORT_BEAT)); }
+                            }
                             log::debug!("ProDJ tx: beat {beat} ({bib}/4) @ {:.2} BPM  +{:.2}ms", snap.bpm, sent_at.duration_since(last_sent).as_secs_f64() * 1000.0);
                             last_sent = sent_at;
                             last_beat = Some(beat);
@@ -679,28 +730,47 @@ impl ProDjSender {
                         // Now that some are, re-check: only an interface on a
                         // player's subnet can reach it by broadcast.  Cheap, and
                         // only when the peer set actually changed.
+                        // Re-check the interface on EVERY announce, not only
+                        // when the peer set changes: an iOS app is kept alive
+                        // for days, and one carried from one Wi-Fi to another
+                        // without a restart kept announcing to the old
+                        // network's broadcast address.  get_if_addrs is cheap.
                         let mut peers: Vec<Ipv4Addr> = link.peers.lock()
                             .map(|p| p.values().copied().collect()).unwrap_or_default();
                         peers.sort();
-                        if peers != known_peers {
-                            known_peers = peers;
-                            let (nip, nbc, nmac, niface) = link_interface(&known_peers);
-                            if nbc != bcast {
-                                log::info!(
-                                    "ProDJ Link: moving to {nip} ({niface}) to {nbc} — reaches {} player(s), was {ip} to {bcast}",
-                                    known_peers.len(),
-                                );
-                                ip = nip; bcast = nbc; mac = nmac;
-                                if let Ok(mut a) = link.own_addr.lock() { *a = format!("{ip} ({niface}) to {bcast}"); }
-                                announce = me.build_announce(ip, mac);
-                                bcast_warned = false;   // re-warn if the new one also fails
-                            }
+                        known_peers = peers;
+                        let (nip, nbc, nmac, niface) = link_interface(&known_peers);
+                        if nbc != bcast || nip != ip {
+                            log::info!(
+                                "ProDJ Link: moving to {nip} ({niface}) to {nbc} — reaches {} player(s), was {ip} to {bcast}",
+                                known_peers.len(),
+                            );
+                            ip = nip; bcast = nbc; mac = nmac;
+                            if let Ok(mut a) = link.own_addr.lock() { *a = format!("{ip} ({niface}) to {bcast}"); }
+                            announce = me.build_announce(ip, mac);
+                            bcast_warned = false;   // re-warn if the new one also fails
                         }
                         for p in &unicast_peers { let _ = sock.send_to(&announce, (*p, PORT_ANNOUNCE)); }
-                        if let Err(e) = sock.send_to(&announce, (bcast, PORT_ANNOUNCE)) {
-                            if !bcast_warned {
-                                bcast_warned = true;
-                                log::warn!("ProDJ Link: announce broadcast to {bcast}:{PORT_ANNOUNCE} failed: {e}");
+                        match sock.send_to(&announce, (bcast, PORT_ANNOUNCE)) {
+                            Ok(_) => send_failures = 0,
+                            Err(e) => {
+                                if !bcast_warned {
+                                    bcast_warned = true;
+                                    log::warn!("ProDJ Link: announce broadcast to {bcast}:{PORT_ANNOUNCE} failed: {e}");
+                                }
+                                // Three announces in a row failing = a dead
+                                // socket (iOS reclaims them after a suspension);
+                                // open a new one.
+                                send_failures += 1;
+                                if send_failures >= 3 {
+                                    if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
+                                        let _ = s.set_broadcast(true);
+                                        sock = s;
+                                        send_failures = 0;
+                                        bcast_warned = false;
+                                        log::info!("ProDJ Link: sender socket reopened");
+                                    }
+                                }
                             }
                         }
                         last_announce = now;
