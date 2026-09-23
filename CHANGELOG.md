@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.2.8] — 2026-09-22
+
+TestFlight build.
 
 ### Added
 - **LINK and PLAYERS rows on INFO.** LINK shows this deck's player number
@@ -33,7 +35,9 @@ All notable changes to this project will be documented in this file.
   remembered its last master forever, so after a long idle it kept asking a
   deck that was no longer answering for a handoff, and MASTER lit on
   neither. A master that has sent no status for five seconds is forgotten,
-  and the next MASTER press takes the role.
+  and the next MASTER press takes the role. A deck in SYNC whose master
+  vanishes promotes itself, as the protocol analysis says a CDJ does (to be
+  confirmed against the XDJ-1000MK2).
 - **Hold CUE, hold PLAY, release CUE, release PLAY: playback stays locked.**
   The second finger's PLAY latched on its press, but whether it should act on
   the press or on its lift was re-evaluated when it lifted, by which time CUE

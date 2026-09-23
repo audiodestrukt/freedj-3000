@@ -896,6 +896,13 @@ impl ProDjSender {
                             log::info!("ProDJ Link: master player {cur} silent for {}s — forgetting it", MASTER_GONE_MS / 1000);
                             link.master_player.store(0, Ordering::Relaxed);
                             link.yielded_from.store(0, Ordering::Relaxed);
+                            // A synced player whose master vanishes promotes
+                            // itself, so the synced group keeps a tempo
+                            // reference (per the Pro DJ Link analysis; to be
+                            // confirmed against the XDJ-1000MK2).
+                            if link.sync.load(Ordering::Relaxed) && send_full {
+                                link.take_master("our master vanished while we were synced");
+                            }
                         }
                     }
 
