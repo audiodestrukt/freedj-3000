@@ -19,6 +19,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **No more phantom deck on the phase meter.** With nobody on the network
+  the top row still ran, because the "other deck" tempo was seeded with our
+  own BPM at launch and its phase was a free-running clock anchored to
+  nothing, so it drifted against our beat. The row now appears only once a
+  peer has sent a beat, its phase extrapolates from that deck's last beat
+  packet for at most one beat and then holds (a paused deck sends no beats),
+  and the row is dropped after three seconds without a beat or a status
+  packet from that deck (it left, slept, or was unplugged).
 - **PLAY acts on the press, not the lift.** The button sensed clicks, which
   egui reports on release, so playback started when the finger came off. It
   now senses the downstroke, on both the phone pages and the iPad faceplate.

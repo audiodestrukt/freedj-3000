@@ -86,8 +86,6 @@ struct DeckApp {
     link_grid:    Arc<arc_swap::ArcSwap<Option<BeatGrid>>>,
     /// Enable ProDJ Link sending (beats/status/master); set true by MASTER.
     link_send:    Arc<AtomicBool>,
-    beat2_start:  Instant,        // wall-clock time of the last phase reset
-    prev_beat2_anchor: u64,       // detect changes in beat2_anchor
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
     prev_pos:          u64,       // previous frame's audio position (scroll instrument)
     /// CUE/PLAY rules — cue point, whether the playhead sits on it, whether a
@@ -384,8 +382,6 @@ impl DeckApp {
             link,
             link_grid,
             link_send,
-            beat2_start:       Instant::now(),
-            prev_beat2_anchor: 0,
             prev_beat2_bpm:    0.0,
             prev_pos:          0,
             smoothed_pos:      0.0,
@@ -1598,10 +1594,25 @@ impl DeckApp {
         }
         self.prev_pos = pos;
         let fader_speed  = f32::from_bits(self.fader_speed.load(Ordering::Relaxed));
-        let beat2_bpm    = f32::from_bits(self.beat2_bpm.load(Ordering::Relaxed));
-        let beat2_anchor = self.beat2_anchor.load(Ordering::Relaxed);
-        let beat2_player = self.beat2_player.load(Ordering::Relaxed);
-        let beat2_bib_v  = self.beat2_bib.load(Ordering::Relaxed) as u8;
+        let mut beat2_bpm    = f32::from_bits(self.beat2_bpm.load(Ordering::Relaxed));
+        let mut beat2_player = self.beat2_player.load(Ordering::Relaxed);
+        let mut beat2_bib_v  = self.beat2_bib.load(Ordering::Relaxed) as u8;
+
+        // The peer on the top row must still be there: status arrives every
+        // 200 ms even from a paused deck, so PEER_GONE_MS of silence on both
+        // ports means it left (sleep, unplugged, app closed).  Drop the row
+        // rather than free-run it at its last tempo forever.
+        const PEER_GONE_MS: u64 = 3000;
+        let now_ms  = self.link.now_ms();
+        let seen_ms = self.link.beat2_seen_ms.load(Ordering::Relaxed);
+        if beat2_player > 0 && seen_ms > 0 && now_ms.saturating_sub(seen_ms) > PEER_GONE_MS {
+            log::info!("ProDJ: player {beat2_player} silent for {}s — dropping its beat row", PEER_GONE_MS / 1000);
+            self.beat2_player.store(0, Ordering::Relaxed);
+            self.beat2_bpm.store(0.0f32.to_bits(), Ordering::Relaxed);
+            self.beat2_bib.store(0, Ordering::Relaxed);
+            self.link.beat2_beat_ms.store(0, Ordering::Relaxed);
+            beat2_player = 0; beat2_bpm = 0.0; beat2_bib_v = 0;
+        }
 
         // Log when beat2_bpm changes (confirms ProDJ data is reaching the renderer).
         if (beat2_bpm - self.prev_beat2_bpm).abs() > 0.01 {
@@ -1609,14 +1620,16 @@ impl DeckApp {
             self.prev_beat2_bpm = beat2_bpm;
         }
 
-        // Reset the phase timer whenever the MIDI Cue B button is pressed.
-        if beat2_anchor != self.prev_beat2_anchor {
-            self.beat2_start       = Instant::now();
-            self.prev_beat2_anchor = beat2_anchor;
-        }
-        let beat2_phase_beats = if beat2_bpm > 0.0 {
-            let elapsed = self.beat2_start.elapsed().as_secs_f32();
-            (elapsed * beat2_bpm / 60.0).fract()
+        // Phase of the peer's row: extrapolate from its last beat packet at
+        // its tempo, for at most ONE beat.  The next packet is due exactly
+        // then; if it never comes the peer is paused (or stopped), so the row
+        // holds on the beat instead of running on.  (min(·,1).fract() is 0 at
+        // the hold point, i.e. on the beat the missing packet would have
+        // marked.)
+        let beat_ms = self.link.beat2_beat_ms.load(Ordering::Relaxed);
+        let beat2_phase_beats = if beat2_bpm > 0.0 && beat_ms > 0 {
+            let beats = now_ms.saturating_sub(beat_ms) as f32 / 1000.0 * beat2_bpm / 60.0;
+            beats.min(1.0).fract()
         } else {
             0.0
         };
@@ -2444,14 +2457,16 @@ pub fn run(cfg: Config) -> Result<()> {
     }
 
     // ── 3. Create second beat grid state ─────────────────────────────────────
-    let base_bpm     = beat_grid.as_ref().map(|g| g.bpm as f32).unwrap_or(120.0);
     // Dev hook: OPENDECK_PITCH=+0.06 sets the initial fader for layout screenshots.
     let init_pitch = std::env::var("OPENDECK_PITCH").ok()
         .and_then(|v| v.parse::<f32>().ok())
         .map(|p| (1.0 + p).clamp(1.0 - 0.16, 1.0 + 0.16))
         .unwrap_or(1.0);
     let fader_speed  = Arc::new(AtomicU32::new(init_pitch.to_bits()));
-    let beat2_bpm    = Arc::new(AtomicU32::new(base_bpm.to_bits()));
+    // 0 until a peer actually sends a beat: seeding it with our own BPM drew a
+    // free-running "other deck" row on the phase meter with nobody on the
+    // network, drifting against our beat.
+    let beat2_bpm    = Arc::new(AtomicU32::new(0.0f32.to_bits()));
     let beat2_anchor = Arc::new(AtomicU64::new(0));
     let beat2_player = Arc::new(AtomicU32::new(0));
     let beat2_bib    = Arc::new(AtomicU32::new(0));

@@ -78,6 +78,12 @@ pub struct LinkState {
     /// sender asks every player about USB and SD periodically; a stick that
     /// is pulled simply stops being confirmed, see [`LinkState::media`].
     pub peer_media:    Mutex<HashMap<(u8, u8), (MediaInfo, Instant)>>,
+    /// When the deck plotted on the phase meter's top row (`beat2_player`)
+    /// last sent a beat, and last sent anything (beat or status), in ms since
+    /// `epoch`; 0 = never.  The renderer extrapolates the row's phase from the
+    /// beat time and drops the row when the peer falls silent.
+    pub beat2_beat_ms: AtomicU64,
+    pub beat2_seen_ms: AtomicU64,
 }
 
 impl LinkState {
@@ -100,7 +106,15 @@ impl LinkState {
             peer_names: Mutex::new(HashMap::new()),
             serve_tracks: AtomicU32::new(0),
             peer_media: Mutex::new(HashMap::new()),
+            beat2_beat_ms: AtomicU64::new(0),
+            beat2_seen_ms: AtomicU64::new(0),
         })
+    }
+
+    /// Milliseconds since this Link state was created (the clock the
+    /// `*_ms` fields use).
+    pub fn now_ms(&self) -> u64 {
+        self.epoch.elapsed().as_millis() as u64
     }
 
     /// Media a player currently has, freshest first by slot (USB before SD):
@@ -333,6 +347,9 @@ fn listen_beat(
                 beat2_player.store(b.player as u32, Ordering::Relaxed);
                 beat2_bib.store(b.beat_in_bar as u32, Ordering::Relaxed);
                 beat2_anchor.fetch_add(1, Ordering::Relaxed);
+                let now = link.now_ms();
+                link.beat2_beat_ms.store(now, Ordering::Relaxed);
+                link.beat2_seen_ms.store(now, Ordering::Relaxed);
                 if (old - eff).abs() > 0.005 {
                     log::info!("ProDJ beat: player {} @ {:.2} BPM (was {old:.2})", b.player, eff);
                 } else {
@@ -443,9 +460,14 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
 
         link.largest_sync.fetch_max(st.sync_counter, Ordering::Relaxed);
 
-        // Linked as soon as any peer sends us status.
+        // Linked as soon as any peer sends us status.  Status keeps coming
+        // every 200 ms from a paused deck, so it is what proves the tracked
+        // peer is still there once its beats stop.
         if beat2_player.load(Ordering::Relaxed) == 0 {
             beat2_player.store(st.player as u32, Ordering::Relaxed);
+        }
+        if beat2_player.load(Ordering::Relaxed) == st.player as u32 {
+            link.beat2_seen_ms.store(link.now_ms(), Ordering::Relaxed);
         }
 
         // Master bookkeeping.  Its effective tempo comes from status as well
