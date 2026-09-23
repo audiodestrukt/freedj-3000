@@ -498,8 +498,9 @@ pub struct SecondTouch {
     /// A second finger that landed in the rect lifted this frame.
     pub released: bool,
     /// `released` with the finger having stayed put — a tap.  PLAY acts on
-    /// this, not on `pressed`, so the second finger of a page swipe that
-    /// happens to land on PLAY does not toggle the transport.
+    /// this when no other finger is holding a control, so the second finger
+    /// of a page swipe that happens to land on PLAY does not toggle the
+    /// transport; while CUE or the platter is held it acts on `pressed`.
     pub tapped:   bool,
     /// A second finger is down in the rect (for the lit state).
     pub down:     bool,
@@ -557,7 +558,7 @@ fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &Phone
                    chrome: &mut ChromeCache, out: &mut Vec<Event>) {
     let p = ui.painter();
     let lbl = sd.caption;
-    let play_resp = ui.interact(sd.play, Id::new("fp-play"), Sense::click());
+    let play_resp = ui.interact(sd.play, Id::new("fp-play"), Sense::drag());    // drag-only: PLAY acts on the press, not the lift
     let cue_resp  = ui.interact(sd.cue,  Id::new("fp-cue"),  Sense::drag());   // drag-only: press/release fire at once, even for a still finger
     let sec = second_touches(ui, &[sd.play, sd.cue]);
     let (play2, cue2) = (sec[0], sec[1]);
@@ -584,8 +585,14 @@ fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &Phone
         text(ui, r.center(), Align2::CENTER_CENTER, label, lbl * 0.95, DIM);
         if resp.clicked() { out.push(if name == "fp-tag" { Event::Ui(UiEvent::TagTrack) } else { Event::Deck(ControlEvent::Back) }); }
     }
-    // PLAY also answers a second finger's tap (hold CUE, hit PLAY → locked in).
-    if play_resp.clicked() || play2.tapped { out.push(Event::Deck(ControlEvent::PlayPause)); }
+    // PLAY acts on the PRESS (a deck starts on the downstroke, and a lock-in
+    // must land before the CUE finger lifts).  A second finger gets the same
+    // when the first is holding CUE — that is a deliberate deck gesture, not
+    // a page swipe — and a tap-on-lift otherwise, so a swipe's second finger
+    // landing on PLAY cannot toggle the transport.
+    let holding = cue_resp.is_pointer_button_down_on();
+    let play2_hit = if holding { play2.pressed } else { play2.tapped };
+    if play_resp.drag_started() || same_frame_tap(ui, sd.play) || play2_hit { out.push(Event::Deck(ControlEvent::PlayPause)); }
     // CUE is momentary.  With Sense::click_and_drag egui only reported a drag
     // after the pointer moved and a still finger became a *click on release*,
     // so a steady hold sent PRESS on lift and never a RELEASE: the preview
@@ -758,7 +765,7 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
     let lbl = f.caption;
 
     // Touch state first: the sprites pick their lit / pressed variant from it.
-    let play_resp = ui.interact(f.play, Id::new("fp-play"), Sense::click());
+    let play_resp = ui.interact(f.play, Id::new("fp-play"), Sense::drag());    // drag-only: PLAY acts on the press, not the lift
     let cue_resp  = ui.interact(f.cue,  Id::new("fp-cue"),  Sense::drag());   // drag-only: press/release fire at once, even for a still finger
     let sec = second_touches(ui, &[f.play, f.cue]);
     let (play2, cue2) = (sec[0], sec[1]);
@@ -839,8 +846,11 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
     }
 
     // ── Transport + buttons (targets; lit states are in the sprites) ─────────
-    // PLAY also answers a second finger's tap (hold CUE, hit PLAY → locked in).
-    if play_resp.clicked() || play2.tapped { out.push(Event::Deck(ControlEvent::PlayPause)); }
+    // PLAY acts on the PRESS (see draw_phone_side).  Here the first finger may
+    // also be holding the platter (VINYL: touch-hold, then PLAY).
+    let holding = cue_resp.is_pointer_button_down_on() || jr.is_pointer_button_down_on();
+    let play2_hit = if holding { play2.pressed } else { play2.tapped };
+    if play_resp.drag_started() || same_frame_tap(ui, f.play) || play2_hit { out.push(Event::Deck(ControlEvent::PlayPause)); }
     // CUE is momentary.  With Sense::click_and_drag egui only reported a drag
     // after the pointer moved and a still finger became a *click on release*,
     // so a steady hold sent PRESS on lift and never a RELEASE: the preview

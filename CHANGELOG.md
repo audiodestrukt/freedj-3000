@@ -16,6 +16,20 @@ All notable changes to this project will be documented in this file.
   momentary control (CUE, the pads) would drop such a tap. They now read the
   raw pointer events and treat it as a press followed by a release.
 
+## [Unreleased]
+
+### Fixed
+- **PLAY acts on the press, not the lift.** The button sensed clicks, which
+  egui reports on release, so playback started when the finger came off. It
+  now senses the downstroke, on both the phone pages and the iPad faceplate.
+  This is also why "hold CUE, hit PLAY" sometimes restarted from the cue: the
+  late PLAY could land after the CUE release had already returned and paused,
+  so the lock-in became a fresh start. With PLAY on the press the lock-in
+  lands while CUE is still held, and playback simply continues. A second
+  finger's PLAY acts on its press while CUE or the platter is held, and on a
+  still tap's lift otherwise, so a page swipe's second finger landing on PLAY
+  still cannot toggle the transport.
+
 ## [0.2.6] — 2026-09-22
 
 TestFlight build.
