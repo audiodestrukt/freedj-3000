@@ -90,6 +90,11 @@ pub struct DeckSnapshot<'a> {
     pub beat2_phase_beats: f32,
     /// External deck's beat within its bar, 1–4 (0 = unknown).
     pub beat2_beat_in_bar: u8,
+
+    /// INFO page: what Link is speaking from ("ip (iface) → broadcast") and
+    /// the players heard.  Empty until the sender has started.
+    pub link_addr:    String,
+    pub link_peers:   String,
 }
 
 impl DeckSnapshot<'_> {

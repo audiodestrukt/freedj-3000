@@ -260,6 +260,8 @@ fn make_snapshot<'a>(
         linked:        f.linked,
         master_player: f.master_player,
         player:        f.player,
+        link_addr:     String::new(),
+        link_peers:    String::new(),
         beat_grid,
         beat2_bpm,
         beat2_phase_beats,
@@ -1661,6 +1663,10 @@ impl DeckApp {
         };
         let _t_snap = Instant::now();
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        if self.screen_mode == ScreenMode::Info {
+            snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
+            snap.link_peers = self.link.peers_summary();
+        }
         snap.loading = self.loading.as_deref();
         perf_accum("make_snapshot", _t_snap.elapsed());
 
@@ -1811,6 +1817,10 @@ impl DeckApp {
             slip_shadow,
         };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        if self.screen_mode == ScreenMode::Info {
+            snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
+            snap.link_peers = self.link.peers_summary();
+        }
         snap.loading = self.loading.as_deref();
 
         // Dev: OPENDECK_SCREENSHOT=path captures frame 90 (or

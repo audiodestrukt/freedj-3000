@@ -84,6 +84,10 @@ pub struct LinkState {
     /// beat time and drops the row when the peer falls silent.
     pub beat2_beat_ms: AtomicU64,
     pub beat2_seen_ms: AtomicU64,
+    /// What the sender is speaking from: "ip (iface) → broadcast", for the
+    /// INFO page — so a deck on the wrong interface or subnet is visible on
+    /// the device itself.
+    pub own_addr:      Mutex<String>,
 }
 
 impl LinkState {
@@ -108,7 +112,21 @@ impl LinkState {
             peer_media: Mutex::new(HashMap::new()),
             beat2_beat_ms: AtomicU64::new(0),
             beat2_seen_ms: AtomicU64::new(0),
+            own_addr: Mutex::new(String::new()),
         })
+    }
+
+    /// The players heard on the network, one line for the INFO page:
+    /// "3 XDJ-1000MK2 192.168.1.10 · 4 freedj-3000 192.168.1.57 (master)".
+    pub fn peers_summary(&self) -> String {
+        let peers = self.peers.lock().map(|p| { let mut v: Vec<_> = p.iter().map(|(k, v)| (*k, *v)).collect(); v.sort(); v }).unwrap_or_default();
+        if peers.is_empty() { return "none heard".into(); }
+        let names = self.peer_names.lock().map(|n| n.clone()).unwrap_or_default();
+        let master = self.master_player.load(Ordering::Relaxed) as u8;
+        peers.iter().map(|(pl, ip)| {
+            let name = names.get(pl).cloned().unwrap_or_default();
+            format!("{pl} {name} {ip}{}", if *pl == master { " (master)" } else { "" })
+        }).collect::<Vec<_>>().join(" · ")
     }
 
     /// Milliseconds since this Link state was created (the clock the
@@ -540,6 +558,7 @@ impl ProDjSender {
         }
         let (ip, bcast, mac, iface) = link_interface(&[]);
         let player = link.player;
+        if let Ok(mut a) = link.own_addr.lock() { *a = format!("{ip} ({iface}) to {bcast}"); }
         // OPENDECK_LINK_UNICAST=ip,ip — also send announces straight to these
         // devices (broadcast does not cross a VPN such as Tailscale).
         let unicast_peers: Vec<Ipv4Addr> = std::env::var("OPENDECK_LINK_UNICAST").ok()
@@ -672,6 +691,7 @@ impl ProDjSender {
                                     known_peers.len(),
                                 );
                                 ip = nip; bcast = nbc; mac = nmac;
+                                if let Ok(mut a) = link.own_addr.lock() { *a = format!("{ip} ({niface}) to {bcast}"); }
                                 announce = me.build_announce(ip, mac);
                                 bcast_warned = false;   // re-warn if the new one also fails
                             }

@@ -1219,7 +1219,8 @@ fn draw_info_screen(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
         0 => "none".to_string(), 1 => "1 point".to_string(), n => format!("{n} points"),
     };
 
-    let rows: [(&str, String); 12] = [
+    let link = format!("player {} · {}", snap.player, if snap.link_addr.is_empty() { "not sending" } else { snap.link_addr.as_str() });
+    let rows: [(&str, String); 14] = [
         ("TITLE",   snap.title.to_string()),
         ("ARTIST",  or_dash(&t.artist)),
         ("ALBUM",   or_dash(&t.album)),
@@ -1232,6 +1233,8 @@ fn draw_info_screen(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
         ("MEMORY",  memory),
         ("FILE",    snap.file.to_string()),
         ("CPU",     format!("{:.0} %  of one core, this app", crate::cpumeter::process_pct())),
+        ("LINK",    link),
+        ("PLAYERS", snap.link_peers.clone()),
     ];
 
     // Two columns of label/value rows.

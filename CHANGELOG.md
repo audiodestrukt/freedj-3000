@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **LINK and PLAYERS rows on INFO.** LINK shows this deck's player number
+  and the address, interface and broadcast it speaks Link from; PLAYERS
+  lists every player heard with its name and address and marks the master.
+  A deck on the wrong interface or an isolated network now shows it on the
+  device itself.
+
 ### Fixed
 - **Hold CUE, hold PLAY, release CUE, release PLAY: playback stays locked.**
   The second finger's PLAY latched on its press, but whether it should act on
