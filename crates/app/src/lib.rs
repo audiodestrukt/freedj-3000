@@ -131,6 +131,8 @@ struct DeckApp {
     /// Jog nudge: a temporary speed offset that snaps back when the wheel stops.
     jog_offset:        f32,
     jog_until:         Option<Instant>,
+    /// The enlarged waveform is being dragged and the transport was held for it.
+    wave_hold_resume:  bool,
     /// Memory points (interleaved sample indices, sorted): rekordbox's from the
     /// ANLZ on load, plus any set with MEMORY.  CALL ◀▶ steps through them;
     /// DELETE removes the one the deck is cued at.  In-session for now.
@@ -263,6 +265,7 @@ fn make_snapshot<'a>(
         player:        f.player,
         link_addr:     String::new(),
         link_peers:    String::new(),
+        cols_visible:  ZOOM_LEVELS[ZOOM_DEFAULT],
         beat_grid,
         beat2_bpm,
         beat2_phase_beats,
@@ -413,6 +416,7 @@ impl DeckApp {
             play_on_load: false,
             jog_offset:        0.0,
             jog_until:         None,
+            wave_hold_resume:  false,
             transport:         Transport::new(cue_point),
             memory_cues,
             track_tags,
@@ -526,6 +530,32 @@ impl DeckApp {
                     self.transport.searched();
                     log::debug!("jog vinyl {delta:+} → {:.2}s", new as f64 / sr_ch);
                 }
+            }
+            Event::Deck(ControlEvent::WaveTouch { touched }) => {
+                // Grabbing the enlarged waveform: always direct manipulation
+                // (there is no nudge reading of "drag the waveform"), so the
+                // transport is held while the finger is down regardless of
+                // JOG MODE, and resumes when it lifts.  Same plumbing as the
+                // VINYL platter touch, its own flag.
+                if touched && self.audio.playing.load(Ordering::Relaxed) {
+                    self.audio.set_playing(false);
+                    self.wave_hold_resume = true;
+                    log::debug!("wave grab: holding transport");
+                } else if !touched && self.wave_hold_resume {
+                    self.wave_hold_resume = false;
+                    self.lock_in_play();
+                    log::debug!("wave release: transport resumes");
+                }
+            }
+            Event::Deck(ControlEvent::WaveDrag { samples }) => {
+                // The finger moved the waveform by `samples`; the playhead
+                // stays under the centre line, so the track moves the other
+                // way.  Frame-aligned, like every seek.
+                let ch  = self.audio.channels as i64;
+                let cur = self.audio.position.load(Ordering::Relaxed) as i64;
+                let new = ((cur - samples) / ch * ch).clamp(0, self.audio.len() as i64) as u64;
+                self.seek_to(new);
+                self.transport.searched();
             }
             Event::Deck(ControlEvent::Cue { pressed }) => {
                 // Momentary CDJ CUE.  PRESS: playing → return to the cue and pause;
@@ -1288,7 +1318,7 @@ impl DeckApp {
                     self.swipe_done = true;
                     log::info!("phone: {} page", if self.phone_controls { "CONTROLS" } else { "SCREEN" });
                 }
-                touch.retain(|e| !matches!(e, Event::Deck(ControlEvent::JogDelta { .. }) | Event::Deck(ControlEvent::TempoFader { .. })));
+                touch.retain(|e| !matches!(e, Event::Deck(ControlEvent::JogDelta { .. }) | Event::Deck(ControlEvent::WaveDrag { .. }) | Event::Deck(ControlEvent::TempoFader { .. })));
                 if flipped { self.release_held_controls(); }
             }
             _ => { self.swipe_acc = 0.0; self.swipe_done = false; }
@@ -1311,7 +1341,8 @@ impl DeckApp {
     /// stayed stopped after a swipe back to the SCREEN page.  Flipping the
     /// page is the finger lifting.
     fn release_held_controls(&mut self) {
-        if self.jog_hold_resume { self.apply(Event::Deck(ControlEvent::JogTouch { touched: false })); }
+        if self.jog_hold_resume  { self.apply(Event::Deck(ControlEvent::JogTouch  { touched: false })); }
+        if self.wave_hold_resume { self.apply(Event::Deck(ControlEvent::WaveTouch { touched: false })); }
         if self.transport.preview    { self.apply(Event::Deck(ControlEvent::Cue { pressed: false })); }
     }
 
@@ -1655,6 +1686,7 @@ impl DeckApp {
         };
         let _t_snap = Instant::now();
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        snap.cols_visible = ZOOM_LEVELS[self.zoom_level];
         if self.screen_mode == ScreenMode::Info {
             snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
             snap.link_peers = self.link.peers_summary();
@@ -1809,6 +1841,7 @@ impl DeckApp {
             slip_shadow,
         };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
+        snap.cols_visible = ZOOM_LEVELS[self.zoom_level];
         if self.screen_mode == ScreenMode::Info {
             snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
             snap.link_peers = self.link.peers_summary();

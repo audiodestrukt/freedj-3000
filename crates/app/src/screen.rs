@@ -1798,15 +1798,59 @@ fn draw_phase_ticks(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
 
 // ── Enlarged waveform: zoom by wheel; and the column to its right ────────────
 
+/// Source samples (interleaved) that `dx` points of enlarged-waveform drag
+/// stand for, at `cols_visible` columns of `HOP_SIZE` frames across `width`
+/// points.  Signed like `dx`.
+pub fn wave_drag_samples(dx: f32, cols_visible: f32, width: f32, channels: u8) -> i64 {
+    let per_pt = cols_visible as f64 * opendeck_analysis::waveform::HOP_SIZE as f64 * channels as f64 / width.max(1.0) as f64;
+    (dx as f64 * per_pt).round() as i64
+}
+
+/// A finger on the enlarged waveform: grabbed once it has moved sideways.
+#[derive(Clone, Copy, Default)]
+struct WaveGrab { grabbed: bool, dx: f32, dy: f32 }
+
 fn draw_wave_area(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     // Wheel over the waveform zooms, standing in for the rotary selector.
-    let wave = ui.interact(lay.wave, Id::new("wave"), Sense::hover());
+    // Drag-only sensing so a finger registers the moment it lands.
+    let wave = ui.interact(lay.wave, Id::new("wave"), Sense::drag());
     if wave.hovered() {
         let dy = ui.input(|i| i.raw_scroll_delta.y);
         if dy.abs() > 0.0 {
             out.push(Event::Ui(UiEvent::ZoomStep(if dy > 0.0 { -1 } else { 1 })));
         }
     }
+
+    // Touch-to-jog on the enlarged waveform (an OpenDeck extension; the unit's
+    // enlarged waveform is not draggable).  The transport is held only once
+    // the finger has clearly moved SIDEWAYS — a tap, or the first finger of
+    // the phone's vertical page swipe, must not hold it (a hold-and-resume on
+    // a tap is an audible gap).  From then on every point of movement seeks
+    // by the samples it spans at the current zoom; lifting resumes.  A second
+    // finger (page swipe) releases the grab at once.
+    const GRAB_PT: f32 = 6.0;
+    let key = Id::new("wave-grab");
+    let mut g: WaveGrab = ui.data(|d| d.get_temp(key)).unwrap_or_default();
+    let multi = ui.input(|i| i.multi_touch().is_some());
+    if wave.drag_started() { g = WaveGrab::default(); }
+    if wave.dragged() && !multi {
+        let d = wave.drag_delta();
+        if !g.grabbed {
+            g.dx += d.x; g.dy += d.y;
+            if g.dx.abs() >= GRAB_PT && g.dx.abs() > g.dy.abs() * 1.5 {
+                g.grabbed = true;
+                out.push(Event::Deck(ControlEvent::WaveTouch { touched: true }));
+                out.push(Event::Deck(ControlEvent::WaveDrag { samples: wave_drag_samples(g.dx, snap.cols_visible, lay.wave.width(), snap.channels) }));
+            }
+        } else if d.x != 0.0 {
+            out.push(Event::Deck(ControlEvent::WaveDrag { samples: wave_drag_samples(d.x, snap.cols_visible, lay.wave.width(), snap.channels) }));
+        }
+    }
+    if g.grabbed && (wave.drag_stopped() || multi) {
+        g = WaveGrab::default();
+        out.push(Event::Deck(ControlEvent::WaveTouch { touched: false }));
+    }
+    ui.data_mut(|d| d.insert_temp(key, g));
 
     // ZOOM – GRID pill: one key, as on the unit — a tap anywhere on it flips
     // what the browse knob does (zoom the waveform / slide the grid).
@@ -2056,5 +2100,21 @@ mod second_touch_tests {
         assert!(f[1].pressed && f[1].down && !f[0].pressed);
         let f = frame(&ctx, vec![touch(2, P::Cancel, 130.0, 230.0)]);
         assert!(f[1].released && !f[1].tapped);
+    }
+}
+
+#[cfg(test)]
+mod wave_drag_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_width_drag_spans_the_visible_columns() {
+        // 600 columns × 512 frames × 2 ch across 700 pt: the whole width is
+        // exactly the visible audio, and a point is 1/700 of it.
+        let all = 600.0 * 512.0 * 2.0;
+        assert_eq!(wave_drag_samples(700.0, 600.0, 700.0, 2), all as i64);
+        assert_eq!(wave_drag_samples(-1.0, 600.0, 700.0, 2), -(all / 700.0_f64).round() as i64);
+        // Zooming in (fewer columns visible) makes a point worth less audio.
+        assert!(wave_drag_samples(10.0, 300.0, 700.0, 2) < wave_drag_samples(10.0, 600.0, 700.0, 2));
     }
 }

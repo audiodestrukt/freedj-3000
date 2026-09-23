@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- **Touch-to-jog on the enlarged waveform.** Drag the big waveform sideways
+  to move through the track: the transport is held while the finger is
+  down, every point of movement seeks by the audio it spans at the current
+  zoom, and lifting resumes, like a VINYL platter drag but pixel-exact. The
+  grab only starts once the finger has clearly moved sideways, so a tap or
+  the first finger of the phone's page swipe never holds the transport, and
+  a second finger releases it. An OpenDeck extension: the XDJ's enlarged
+  waveform is not draggable. No cost when not dragging.
+
 ## [0.2.8] — 2026-09-22
 
 TestFlight build.

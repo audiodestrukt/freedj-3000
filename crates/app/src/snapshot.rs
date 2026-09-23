@@ -95,6 +95,10 @@ pub struct DeckSnapshot<'a> {
     /// the players heard.  Empty until the sender has started.
     pub link_addr:    String,
     pub link_peers:   String,
+
+    /// Waveform columns (of `HOP_SIZE` frames) across the enlarged waveform:
+    /// the zoom, for turning a drag in points into samples.
+    pub cols_visible: f32,
 }
 
 impl DeckSnapshot<'_> {

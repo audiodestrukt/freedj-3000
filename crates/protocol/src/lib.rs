@@ -171,6 +171,14 @@ pub enum ControlEvent {
     TempoFader   { position: f32 },  // 0.0–1.0 normalised
     KeyShift     { semitones: i8 },
     NeedleSearch { position: f32 },  // 0.0–1.0 absolute track position
+    /// The enlarged waveform grabbed by a finger (an OpenDeck extension: the
+    /// XDJ's enlarged waveform is not draggable).  Holds the transport while
+    /// down, as a VINYL platter touch does, and resumes on release.
+    WaveTouch { touched: bool },
+    /// …and the drag moves the playhead by exactly this many source samples
+    /// (interleaved, signed): the distance the finger moved at the current
+    /// zoom.  Dragging the waveform right moves the track earlier.
+    WaveDrag  { samples: i64 },
     BrowseEncoderDelta { delta: i32 },
     Load,
     /// Browser: go up a level / back.
