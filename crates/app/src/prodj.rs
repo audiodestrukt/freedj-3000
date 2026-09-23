@@ -88,6 +88,11 @@ pub struct LinkState {
     /// this is set even if beats arrive late or bunched (Wi-Fi power save
     /// delivers broadcasts in bursts), and holds when it is not.
     pub beat2_playing: AtomicBool,
+    /// When the deck we hold as `master_player` last sent status (ms since
+    /// `epoch`).  A master silent for `MASTER_GONE_MS` is forgotten, so a
+    /// MASTER press after a long idle takes the role instead of asking a
+    /// deck that is no longer there.
+    pub master_seen_ms: AtomicU64,
     /// What the sender is speaking from: "ip (iface) → broadcast", for the
     /// INFO page — so a deck on the wrong interface or subnet is visible on
     /// the device itself.
@@ -117,6 +122,7 @@ impl LinkState {
             beat2_beat_ms: AtomicU64::new(0),
             beat2_seen_ms: AtomicU64::new(0),
             beat2_playing: AtomicBool::new(false),
+            master_seen_ms: AtomicU64::new(0),
             own_addr: Mutex::new(String::new()),
         })
     }
@@ -192,6 +198,91 @@ pub struct SenderState {
     /// Live beat grid — updated by the deck on every track load so the
     /// sender's sync/broadcast use the CURRENT track, not the startup one.
     pub grid:        Arc<ArcSwap<Option<BeatGrid>>>,
+}
+
+// ── The other deck's beat phase ───────────────────────────────────────────────
+
+/// The phase-meter row for the deck we follow, as a phase-locked free-run.
+///
+/// Beat packets over Wi-Fi arrive late and in bursts (an access point holds
+/// broadcasts for a power-saving client until its beacon), so the row runs
+/// at the peer's tempo on our own clock and each packet only asks for a
+/// correction of a quarter of the error toward the beat it marks.  That
+/// correction is not applied as a jump: it is bled in as a rate change of at
+/// most `SLEW` of the free-run speed, so the row never runs backwards and
+/// never jumps — jitter shows as a brief, invisible change of pace.  It holds
+/// only when the peer's status says it is paused and no beat has come for two
+/// periods.  (A "hold after one beat" rule made the row stop and restart on
+/// every late packet.)
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PeerPhase {
+    /// Free-running phase in beats; negative = not started.
+    phase:     f64,
+    /// Arrival time (ms) of the last packet folded in.
+    folded_ms: u64,
+    /// Correction still to be bled in, beats (signed).
+    pending:   f64,
+}
+
+impl Default for PeerPhase {
+    fn default() -> Self { Self::new() }
+}
+
+impl PeerPhase {
+    /// Fraction of a packet's phase error requested as correction.
+    pub const PULL: f64 = 0.25;
+    /// Largest change of pace while a correction bleeds in (0.25 = between
+    /// 75 % and 125 % of the free-run speed).
+    pub const SLEW: f64 = 0.25;
+
+    pub const fn new() -> Self {
+        Self { phase: -1.0, folded_ms: 0, pending: 0.0 }
+    }
+
+    /// One frame: `dt_s` since the last call; `beat_ms` is when the latest
+    /// beat packet arrived (same clock as `now_ms`, 0 = none yet).  Returns
+    /// the phase to draw, 0..1.
+    pub fn advance(&mut self, now_ms: u64, beat_ms: u64, bpm: f32, peer_playing: bool, dt_s: f64) -> f32 {
+        if bpm <= 0.0 || beat_ms == 0 {
+            *self = Self::new();
+            return 0.0;
+        }
+        let period_s = 60.0 / bpm as f64;
+        let age_s    = now_ms.saturating_sub(beat_ms) as f64 / 1000.0;
+        let running  = peer_playing || age_s < 2.0 * period_s;
+        if self.phase < 0.0 {
+            self.phase = age_s / period_s;          // first packet: the beat was `age` ago
+            self.folded_ms = beat_ms;
+            self.pending = 0.0;
+        } else if running {
+            let inc = dt_s / period_s;
+            let adj = self.pending.clamp(-inc * Self::SLEW, inc * Self::SLEW);
+            self.phase += inc + adj;
+            self.pending -= adj;
+        }
+        if beat_ms != self.folded_ms {
+            // A new packet marked a beat at (now − age): ask for a pull toward it.
+            self.folded_ms = beat_ms;
+            let at_arrival = self.phase - age_s / period_s;
+            let err = at_arrival.rem_euclid(1.0);
+            let err = if err > 0.5 { err - 1.0 } else { err };   // beats, ±0.5
+            self.pending -= err * Self::PULL;
+        }
+        self.phase.rem_euclid(1.0) as f32
+    }
+}
+
+/// An OpenDeck sends each beat by broadcast AND unicast (the unicast copy is
+/// not held back by Wi-Fi power save); the second copy lands within a few
+/// ms.  A real beat is never closer than 300 ms (200 BPM), so a beat from the
+/// same player inside `TWIN_MS` is the twin.
+pub const TWIN_MS: u64 = 100;
+pub fn beat_is_twin(last: &mut HashMap<u8, Instant>, player: u8, now: Instant) -> bool {
+    if let Some(t) = last.get(&player) {
+        if now.duration_since(*t) < Duration::from_millis(TWIN_MS) { return true; }
+    }
+    last.insert(player, now);
+    false
 }
 
 // ── Sockets ───────────────────────────────────────────────────────────────────
@@ -386,11 +477,7 @@ fn listen_beat(
             // An OpenDeck sends each beat by broadcast AND unicast (see the
             // sender); the second copy lands within a few ms.  A real beat is
             // never closer than 300 ms (200 BPM), so drop the twin.
-            let now = Instant::now();
-            if let Some(t) = last_beat_at.get(&b.player) {
-                if now.duration_since(*t) < Duration::from_millis(100) { return; }
-            }
-            last_beat_at.insert(b.player, now);
+            if beat_is_twin(&mut last_beat_at, b.player, Instant::now()) { return; }
             let master = link.master_player.load(Ordering::Relaxed) as u8;
             // Effective tempo = track BPM × the sender's pitch.  The beat packet
             // carries them separately; use the product so a pitched master
@@ -537,6 +624,9 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
         }
         let cur = link.master_player.load(Ordering::Relaxed) as u8;
         let handing_to_us = st.handoff_to == Some(link.player);
+        if st.master || st.player == cur {
+            link.master_seen_ms.store(link.now_ms(), Ordering::Relaxed);
+        }
 
         // The master names us as its successor: take the role.  It keeps
         // reporting MASTER (with Mh = us) until it sees our status with the
@@ -792,6 +882,23 @@ impl ProDjSender {
                         last_media_query = now;
                     }
 
+                    // ── A master that fell silent is forgotten ───────────────
+                    // Status comes every 200 ms from any deck, paused or not.
+                    // Without this, two decks that both went quiet (iOS
+                    // reclaimed their sockets; the other side slept) each
+                    // kept asking the other for a handoff that never came,
+                    // and MASTER could not be set on either.
+                    {
+                        const MASTER_GONE_MS: u64 = 5000;
+                        let cur = link.master_player.load(Ordering::Relaxed) as u8;
+                        let seen = link.master_seen_ms.load(Ordering::Relaxed);
+                        if cur != 0 && cur != link.player && seen > 0 && link.now_ms().saturating_sub(seen) > MASTER_GONE_MS {
+                            log::info!("ProDJ Link: master player {cur} silent for {}s — forgetting it", MASTER_GONE_MS / 1000);
+                            link.master_player.store(0, Ordering::Relaxed);
+                            link.yielded_from.store(0, Ordering::Relaxed);
+                        }
+                    }
+
                     // ── Master handoff ───────────────────────────────────────
                     if send_full && link.want_master.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed) {
                         let since = *want_since.get_or_insert(now);
@@ -972,5 +1079,110 @@ mod interface_tests {
         // .56-.63.  (/28 would NOT — both sit in .48-.63.)
         assert!(!same_subnet(wifi, xdj, "255.255.255.248".parse().unwrap()));
         assert!(same_subnet(wifi, xdj, "255.255.255.240".parse().unwrap()));
+    }
+}
+
+#[cfg(test)]
+mod peer_phase_tests {
+    use super::*;
+
+    const BPM: f32 = 120.0;              // 500 ms per beat
+    const DT: f64 = 1.0 / 60.0;          // one 60 Hz frame
+
+    /// Run frames from `from_ms` to `to_ms`, delivering packets whose ARRIVAL
+    /// times are in `arrivals`, and return the drawn phase per frame.
+    fn run(pp: &mut PeerPhase, from_ms: u64, to_ms: u64, arrivals: &[u64], playing: bool) -> Vec<(u64, f32)> {
+        let mut out = Vec::new();
+        let mut t = from_ms as f64;
+        while (t as u64) < to_ms {
+            let now = t as u64;
+            let beat_ms = arrivals.iter().copied().filter(|a| *a <= now).max().unwrap_or(0);
+            out.push((now, pp.advance(now, beat_ms, BPM, playing, DT)));
+            t += DT * 1000.0;
+        }
+        out
+    }
+
+    /// Phase advanced (mod 1) between two frames.
+    fn step(a: f32, b: f32) -> f32 { (b - a).rem_euclid(1.0) }
+
+    #[test]
+    fn steady_beats_run_at_tempo() {
+        let mut pp = PeerPhase::new();
+        let arrivals: Vec<u64> = (0..20).map(|i| 1000 + i * 500).collect();
+        let frames = run(&mut pp, 1000, 8000, &arrivals, true);
+        // 60 Hz at 500 ms/beat: 1/30 beat per frame, every frame.
+        for w in frames.windows(2).skip(5) {
+            let s = step(w[0].1, w[1].1);
+            assert!((s - 1.0 / 30.0).abs() < 0.01, "step {s} at {} ms", w[1].0);
+        }
+    }
+
+    /// Wi-Fi delivers beats late and bunched: packets held up to 400 ms and
+    /// then released together.  The row must keep moving through it.
+    #[test]
+    fn late_bunched_packets_do_not_stall_the_row() {
+        let mut pp = PeerPhase::new();
+        // Beats every 500 ms from t=1000; the AP releases them at 1.4 s intervals.
+        let mut arrivals = Vec::new();
+        for i in 0..20u64 {
+            let due = 1000 + i * 500;
+            arrivals.push(due + (400 - (due % 1400).min(400)));   // 0..400 ms late, bunched
+        }
+        let frames = run(&mut pp, 1000, 11000, &arrivals, true);
+        let inc = (DT / 0.5) as f32;
+        for w in frames.windows(2).skip(10) {
+            let s = step(w[0].1, w[1].1);
+            // Never backwards, never stalled, never a jump: the pace stays
+            // within SLEW of the free-run.
+            assert!(s >= inc * (1.0 - PeerPhase::SLEW as f32) - 1e-4, "row stalled/reversed ({s}) at {} ms", w[1].0);
+            assert!(s <= inc * (1.0 + PeerPhase::SLEW as f32) + 1e-4, "row jumped ({s}) at {} ms", w[1].0);
+        }
+    }
+
+    /// One packet 40 ms late (0.08 beat) asks for a quarter of that, 0.02
+    /// beat, and that is all the row ends up moved by once it has bled in.
+    #[test]
+    fn a_packet_forty_ms_late_moves_phase_by_a_quarter_of_the_error() {
+        let mut pp = PeerPhase::new();
+        let mut arrivals: Vec<u64> = (0..10).map(|i| 1000 + i * 500).collect();   // on time, to 5500
+        arrivals.push(6040);                                                    // the 6 s beat, 40 ms late
+        let frames = run(&mut pp, 1000, 8000, &arrivals, true);                 // status PLAY keeps it running
+        let free_run = (frames.len() as f64 - 1.0) * DT / 0.5;                  // beats a pure free-run adds (the first frame only initialises)
+        let moved = pp.phase - free_run;                                        // started at phase 0
+        let want = -0.08 * PeerPhase::PULL;
+        assert!((moved - want).abs() < 0.003, "moved {moved:.4}, expected {want:.4}");
+        assert!(pp.pending.abs() < 1e-6, "correction not fully bled in: {}", pp.pending);
+    }
+
+    #[test]
+    fn a_paused_peer_holds_after_two_periods() {
+        let mut pp = PeerPhase::new();
+        let arrivals: Vec<u64> = (0..6).map(|i| 1000 + i * 500).collect();   // last beat at 3500
+        run(&mut pp, 1000, 3600, &arrivals, true);
+        // Status now says paused, no more beats: after two periods it must hold.
+        let frames = run(&mut pp, 3600, 6000, &arrivals, false);
+        let held: Vec<_> = frames.iter().filter(|(t, _)| *t > 4600).map(|(_, p)| *p).collect();
+        assert!(held.windows(2).all(|w| w[0] == w[1]), "row still moving while the peer is paused");
+    }
+
+    #[test]
+    fn a_playing_peer_with_late_beats_keeps_running() {
+        let mut pp = PeerPhase::new();
+        let arrivals: Vec<u64> = (0..6).map(|i| 1000 + i * 500).collect();
+        run(&mut pp, 1000, 3600, &arrivals, true);
+        // Status says PLAY, beats simply stop arriving for 3 s: keep running.
+        let frames = run(&mut pp, 3600, 6600, &arrivals, true);
+        assert!(frames.windows(2).all(|w| step(w[0].1, w[1].1) > 0.0));
+    }
+
+    #[test]
+    fn twin_beats_within_100ms_are_dropped_and_real_ones_kept() {
+        let mut last = HashMap::new();
+        let t0 = Instant::now();
+        assert!(!beat_is_twin(&mut last, 3, t0));
+        assert!(beat_is_twin(&mut last, 3, t0 + Duration::from_millis(5)));    // the unicast copy
+        assert!(!beat_is_twin(&mut last, 4, t0 + Duration::from_millis(5)));   // another player
+        assert!(!beat_is_twin(&mut last, 3, t0 + Duration::from_millis(300))); // the next beat (200 BPM)
     }
 }

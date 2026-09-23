@@ -29,6 +29,11 @@ All notable changes to this project will be documented in this file.
   holds only when the peer's status says it is paused. Beats also go by
   unicast to every OpenDeck peer, which is not held that way, and the
   duplicate is dropped on receipt; CDJs still see broadcast only.
+- **MASTER can be taken again after both decks went quiet.** A deck
+  remembered its last master forever, so after a long idle it kept asking a
+  deck that was no longer answering for a handoff, and MASTER lit on
+  neither. A master that has sent no status for five seconds is forgotten,
+  and the next MASTER press takes the role.
 - **Hold CUE, hold PLAY, release CUE, release PLAY: playback stays locked.**
   The second finger's PLAY latched on its press, but whether it should act on
   the press or on its lift was re-evaluated when it lifted, by which time CUE

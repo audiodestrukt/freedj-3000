@@ -86,10 +86,8 @@ struct DeckApp {
     /// Enable ProDJ Link sending (beats/status/master); set true by MASTER.
     link_send:    Arc<AtomicBool>,
     prev_beat2_bpm:    f32,       // detect BPM changes for logging
-    /// The other deck's beat phase, free-running in beats (<0 = not started),
-    /// and the arrival time of the last beat packet folded into it.
-    beat2_phase:       f64,
-    beat2_folded_ms:   u64,
+    /// The other deck's beat phase (phase-locked free-run, see `PeerPhase`).
+    beat2_phase:       prodj::PeerPhase,
     prev_pos:          u64,       // previous frame's audio position (scroll instrument)
     /// CUE/PLAY rules — cue point, whether the playhead sits on it, whether a
     /// preview is in progress.  Lives in `crates/transport` so the behaviour can
@@ -387,8 +385,7 @@ impl DeckApp {
             link_grid,
             link_send,
             prev_beat2_bpm:    0.0,
-            beat2_phase:       -1.0,
-            beat2_folded_ms:   0,
+            beat2_phase:       prodj::PeerPhase::new(),
             prev_pos:          0,
             smoothed_pos:      0.0,
             resync_frames:     0,
@@ -1626,39 +1623,10 @@ impl DeckApp {
             self.prev_beat2_bpm = beat2_bpm;
         }
 
-        // Phase of the peer's row: a phase-locked free-run, like our own
-        // playhead.  Beat packets over Wi-Fi arrive late and in bursts (the
-        // access point holds broadcasts for a power-saving client until its
-        // beacon), so the row runs at the peer's tempo on its own clock and
-        // each packet only PULLS the phase a quarter of the way toward the
-        // beat it marks — jitter averages out instead of showing.  It holds
-        // only when the peer's status says it is paused and no beat has come
-        // for two periods; an earlier "hold after one beat" rule made the row
-        // stop and restart on every late packet.
+        // Phase of the peer's row: a phase-locked free-run (see PeerPhase).
         let beat_ms = self.link.beat2_beat_ms.load(Ordering::Relaxed);
-        let beat2_phase_beats = if beat2_bpm > 0.0 && beat_ms > 0 {
-            let period_s = 60.0 / beat2_bpm as f64;
-            let age_s    = now_ms.saturating_sub(beat_ms) as f64 / 1000.0;
-            let running  = self.link.beat2_playing.load(Ordering::Relaxed) || age_s < 2.0 * period_s;
-            if self.beat2_phase < 0.0 {
-                self.beat2_phase = age_s / period_s;               // first packet: the beat was `age` ago
-                self.beat2_folded_ms = beat_ms;
-            } else if running {
-                self.beat2_phase += frame_dt.as_secs_f64() / period_s;
-            }
-            if beat_ms != self.beat2_folded_ms {
-                // A new packet marked a beat at (now − age): pull toward it.
-                self.beat2_folded_ms = beat_ms;
-                let at_arrival = self.beat2_phase - age_s / period_s;
-                let err = at_arrival.rem_euclid(1.0);
-                let err = if err > 0.5 { err - 1.0 } else { err };  // beats, ±0.5
-                self.beat2_phase -= err * 0.25;
-            }
-            self.beat2_phase.rem_euclid(1.0) as f32
-        } else {
-            self.beat2_phase = -1.0;
-            0.0
-        };
+        let peer_playing = self.link.beat2_playing.load(Ordering::Relaxed);
+        let beat2_phase_beats = self.beat2_phase.advance(now_ms, beat_ms, beat2_bpm, peer_playing, frame_dt.as_secs_f64());
         let flags = UiFlags {
             key_lock: self.key_lock, jog_vinyl: self.settings.jog_vinyl, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,

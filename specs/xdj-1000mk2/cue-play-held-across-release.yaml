@@ -1,0 +1,36 @@
+spec: xdj.cue.play-held-across-cue-release
+title: Holding PLAY while releasing CUE keeps playback locked
+device: xdj-1000mk2
+tags: [cue, play, combo]
+description: >
+  The two-finger lock-in as actually performed: hold CUE (preview), press and
+  HOLD PLAY, release CUE while PLAY is still down, then release PLAY. The deck
+  must keep playing from where it is — no return to the cue on the CUE
+  release, and no pause on the PLAY release.
+provenance:
+  status: draft
+  source: freedj-3000 — reported 2026-09-22, the PLAY release was read as a second tap
+  notes: Confirm on the XDJ-1000MK2, then set status to verified.
+
+given:
+  fixture: loaded-paused
+  params: {cue_ms: 10000}
+
+steps:
+  - down: cue
+  - expect: {deck.playing: true}
+  - wait: 1s
+  - down: play
+  - wait: 500ms
+  - up: cue
+  - expect:
+      deck.playing: true
+      deck.position_ms: {$approx: 11500, $tol: 50}
+  - wait: 500ms
+  - up: play
+  - expect:
+      deck.playing: true
+      deck.position_ms: {$approx: 12000, $tol: 50}
+      deck.cue_ms: 10000
+  - wait: 1s
+  - expect: {deck.position_ms: {$approx: 13000, $tol: 50}}
