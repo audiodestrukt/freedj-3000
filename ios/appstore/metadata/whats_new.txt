@@ -1,7 +1,9 @@
-UI fixes and a cooler device.
+Tighter transport, smoother Link, and a draggable waveform.
 
-iPhone: CUE, PLAY and the MENU rows now respond exactly where they are drawn, and switching pages no longer stops the deck.
+CUE and PLAY act the instant your finger lands. Hold CUE to preview, hit PLAY with another finger to lock playback in, and release in either order. Pause, then press CUE, to set the cue where you stopped.
 
-Two OpenDecks on one network can browse and load from each other: an iPhone and an iPad, or two iPads.
+Drag the big waveform to move through the track, at any zoom.
 
-Much less heat over a set: a paused deck renders at a low rate, and its audio and Link threads sleep instead of polling. INFO shows the app's CPU use.
+Link is steadier: the other deck's beat meter runs smoothly over Wi-Fi, a deck that vanishes is forgotten so MASTER can be taken again, and the app recovers its network after sitting in the background. INFO shows your Link address and the players heard.
+
+On iPhone, turning the BROWSE knob no longer opens Control Center, and the deck starts paused at the cue.
