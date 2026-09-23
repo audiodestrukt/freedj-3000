@@ -2,7 +2,9 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [0.2.9] — 2026-09-22
+
+TestFlight build.
 
 ### Fixed
 - **Turning the BROWSE knob down on the iPhone no longer opens Control
