@@ -16,6 +16,27 @@ All notable changes to this project will be documented in this file.
   momentary control (CUE, the pads) would drop such a tap. They now read the
   raw pointer events and treat it as a press followed by a release.
 
+## [0.2.6] — 2026-09-22
+
+TestFlight build.
+
+### Fixed
+- **Pause, then CUE, sets the cue where you paused.** The play/pause toggle
+  never cleared "sitting on the cue", so after PLAY → PLAY (pause) a CUE press
+  previewed the old point instead of setting one at the paused position, the
+  standard CDJ way to place a cue. The CUE/PLAY rules now live in
+  `crates/transport` as a pure state machine, verified against behaviour specs
+  in `specs/xdj-1000mk2/` (`cargo test -p opendeck-transport`); see
+  `docs/design/transport-rules.md`.
+- **A released CUE no longer sticks on screen where the preview stopped.**
+  The audio thread only honoured seeks while playing, so the return-to-cue
+  seek sat pending until the next press, and its own progress store could
+  overwrite the screen's position hint; after a hold longer than about half a
+  second the playhead then snapped forward to where the preview stopped. Seeks
+  are now applied while paused too (the thread is woken for them) and the
+  progress store yields to a pending seek. Audio was always right; the display
+  was not.
+
 ## [0.2.5] — 2026-09-20
 
 TestFlight build.

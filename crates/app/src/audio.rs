@@ -142,6 +142,20 @@ impl AudioHandle {
         if on { self.proc_thread.unpark(); }
     }
 
+    /// Move the playhead.  The processor acts on `seek_request`; `position`
+    /// and `in_flight` are set here too so the UI reads the sought spot at
+    /// once.  The processor is woken so a seek lands while PAUSED as well:
+    /// it used to sit pending until the next PLAY, and the block-end
+    /// progress store could meanwhile overwrite the hint with the old
+    /// cursor — which is what made a released CUE sometimes stick on screen
+    /// where the preview stopped instead of snapping back.
+    pub fn seek(&self, pos: u64) {
+        self.seek_request.store(pos, Ordering::Release);
+        self.position.store(pos, Ordering::Relaxed);
+        self.in_flight.store(0, Ordering::Relaxed);
+        self.proc_thread.unpark();
+    }
+
     /// Convenience: read current speed.
     pub fn speed_load(&self) -> f32 {
         f32::from_bits(self.speed.load(Ordering::Relaxed))
@@ -511,6 +525,19 @@ fn processor_loop(
         // phone keeps the core out of its idle state).  The timeout is only a
         // safety net for a store that bypassed `set_playing`.
         if !playing.load(Ordering::Relaxed) {
+            // A seek while paused is honoured now, not at the next PLAY: move
+            // the cursor, reset the stretcher and flush the ring (the callback
+            // swaps `drain_flag` every period even while paused), so both the
+            // published position and the first block after PLAY are right.
+            let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
+            if req != NO_SEEK {
+                log::debug!("proc: seek {proc_pos} → {req} (paused)");
+                stretcher.reset();
+                proc_pos = req;
+                position.store(proc_pos, Ordering::Relaxed);
+                in_flight.store(0, Ordering::Relaxed);
+                drain_flag.store(true, Ordering::Release);
+            }
             thread::park_timeout(Duration::from_millis(50));
             continue;
         }
@@ -600,9 +627,13 @@ fn processor_loop(
 
         let final_block = !looping && src_end >= samples.len();
 
-        // Advance the shared position so the UI/renderer sees it.
+        // Advance the shared position so the UI/renderer sees it — unless a
+        // seek arrived during this block: then the UI already published the
+        // new spot and this store would overwrite it with the stale cursor.
         proc_pos = src_end as u64;
-        position.store(proc_pos, Ordering::Relaxed);
+        if seek_request.load(Ordering::Acquire) == NO_SEEK {
+            position.store(proc_pos, Ordering::Relaxed);
+        }
 
         // ── Update speed + key-lock mode ─────────────────────────────────────────
         // Master Tempo on (key_lock): tempo moves, pitch held (pure time-stretch).

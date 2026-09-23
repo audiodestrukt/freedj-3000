@@ -1122,9 +1122,7 @@ impl DeckApp {
         // can't be clobbered by the processor's own progress store (which lost
         // seeks and made CUE sometimes not return).  `position` is set too, as
         // an immediate UI hint and so a paused cue-set reads the sought spot.
-        self.audio.seek_request.store(pos, Ordering::Relaxed);
-        self.audio.position.store(pos, Ordering::Relaxed);
-        self.audio.in_flight.store(0, Ordering::Relaxed);
+        self.audio.seek(pos);
         self.smoothed_pos = pos as f64;
         self.prev_pos     = pos;
     }
