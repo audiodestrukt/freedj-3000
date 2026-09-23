@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Fixed
+- **Hold CUE, hold PLAY, release CUE, release PLAY: playback stays locked.**
+  The second finger's PLAY latched on its press, but whether it should act on
+  the press or on its lift was re-evaluated when it lifted, by which time CUE
+  had already been released, so the lift counted as a second tap and paused
+  the deck. The choice is now made when the finger lands and that finger is
+  then spent.
+
 ## [0.2.7] — 2026-09-22
 
 TestFlight build.
