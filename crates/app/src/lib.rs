@@ -2046,6 +2046,19 @@ impl ApplicationHandler for DeckApp {
                 .expect("failed to create window"),
         );
 
+        // iOS claims a swipe that starts at the top edge (Control Center /
+        // notifications) and at the bottom (home).  On the phone the BROWSE
+        // knob sits at the top of the side column, so a downward turn on it
+        // opened Control Center; the page-flip pill sits at the bottom.
+        // Deferring those edges makes the system gesture take a second swipe
+        // (the first shows the grab indicator), as games do.
+        #[cfg(target_os = "ios")]
+        {
+            use winit::platform::ios::{ScreenEdge, WindowExtIOS};
+            window.set_preferred_screen_edges_deferring_system_gestures(ScreenEdge::TOP | ScreenEdge::BOTTOM);
+            window.set_prefers_home_indicator_hidden(true);
+        }
+
         let sz = window_px(&window);
         log::info!("window {}x{} px, scale {:.2}", sz.width, sz.height, window.scale_factor());
 

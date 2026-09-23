@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Turning the BROWSE knob down on the iPhone no longer opens Control
+  Center.** The knob sits at the top of the side column, so a downward turn
+  that began near the edge was taken by iOS. The app now defers the top and
+  bottom system gestures, so Control Center and the home gesture need a
+  second swipe, as they do in games; this also helps the page-flip pill at
+  the bottom (#45).
+
 ### Added
 - **Touch-to-jog on the enlarged waveform.** Drag the big waveform sideways
   to move through the track: the transport is held while the finger is
