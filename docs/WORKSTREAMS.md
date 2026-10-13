@@ -311,6 +311,9 @@ and the ergonomics are proven.
 
 ### C1. Transport as a value — **large**
 
+**Planned in detail (2026-10-13): [`design/player-crate.md`](design/player-crate.md)** — the
+`Player` / `Output` / `Clock` crates, phases 0–4, and the open product decision.
+
 Today `AudioHandle` owns one `Arc<Vec<f32>>` and `main.rs` builds the entire app
 around a single deck. Refactor so a transport is constructible N times, with its
 own position, speed, key-lock and grid.
