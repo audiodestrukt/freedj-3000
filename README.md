@@ -73,6 +73,8 @@ sampler features are the roadmap.
 Everything in the Link rows has been exercised against an XDJ-1000MK2.
 CDJ-3000s speak the same Pro DJ Link sync protocol; one has not been on this
 network yet, so treat that as compatible-by-protocol rather than tested.
+**Own a CDJ-3000?** Ten minutes and a Python script would settle it:
+[docs/testing/cdj-3000-interop.md](docs/testing/cdj-3000-interop.md).
 
 ---
 

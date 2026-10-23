@@ -433,11 +433,32 @@ fn spawn(name: &str, port: u16, sock: UdpSocket, mut f: impl FnMut(&[u8], Socket
 }
 
 /// 50000: announces → peer table.
+/// Diagnostic file lines for the PERF LOG file (iOS: Documents/opendeck-perf.log):
+/// the first packet of each (port, type, length) per player goes in as hex so a
+/// player generation we have not seen can be replayed through the parser
+/// offline (`cargo run -p opendeck-link --example replay_capture`), after that
+/// only the summary lines.  Nothing happens while the setting is off.
+fn diag_packet(port: u16, addr: SocketAddr, data: &[u8]) {
+    use std::sync::Mutex;
+    static SEEN: Mutex<Vec<(u16, u8, u8, usize)>> = Mutex::new(Vec::new());
+    if !crate::cpumeter::FILE_LOG.load(Ordering::Relaxed) { return; }
+    let Some(t) = ProDjLink::packet_type(data) else { return };
+    let player = if t == opendeck_link::prodj::PKT_ANNOUNCE { data.get(0x24) } else { data.get(0x21) }.copied().unwrap_or(0);
+    let key = (port, t, player, data.len());
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if seen.contains(&key) { return; }
+    seen.push(key);
+    let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    crate::cpumeter::file_line(&format!("link: {now} {port} {addr} {} {hex}  -- first type {t:#04x} from player {player}", data.len()));
+}
+
 fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(PORT_ANNOUNCE)?;
     log::info!("ProDJ Link: listening for announces on port {PORT_ANNOUNCE}");
     spawn("prodj-rx-50000", PORT_ANNOUNCE, sock, move |data, addr| {
         log::trace!("ProDJ rx :50000 {} bytes from {addr} — {:02X?}", data.len(), data);
+        diag_packet(50000, addr, data);
         if let Some((player, pkt_ip)) = ProDjLink::parse_announce(data) {
             if player == link.player { return; }
             // Reach the peer where its packet came FROM: identical to the IP in
@@ -471,6 +492,7 @@ fn listen_beat(
     let mut last_beat_at: HashMap<u8, Instant> = HashMap::new();
     spawn("prodj-rx-50001", PORT_BEAT, sock, move |data, addr| {
         log::debug!("ProDJ rx :50001 {} bytes from {addr} — {:02X?}", data.len(), data);
+        diag_packet(50001, addr, data);
 
         if let Some(b) = ProDjLink::parse_beat(data) {
             if b.player == link.player { return; }           // our own broadcast
@@ -551,6 +573,7 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
     let me = ProDjLink::new(link.player);
     spawn("prodj-rx-50002", PORT_STATUS, sock, move |data, addr| {
         log::trace!("ProDJ rx :50002 {} bytes from {addr} — {:02X?}", data.len(), data);
+        diag_packet(50002, addr, data);
         // Media query: a peer asks what is in one of our slots.  Answer when we
         // are serving (the media response names the library and its size).
         if ProDjLink::packet_type(data) == Some(PKT_MEDIA_QUERY) {
@@ -590,6 +613,10 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
                 || p.handoff_to != st.handoff_to || (p.pitch - st.pitch).abs() > 0.0005
         });
         if changed {
+            crate::cpumeter::file_line(&format!(
+                "link: status player {} fw {} len {:#x} {:?} play={} master={} sync={} onair={} pitch {:+.2}% bpm {:?} handoff {:?} syncN {}",
+                st.player, String::from_utf8_lossy(&st.firmware).trim(), data.len(), st.play,
+                st.playing, st.master, st.sync, st.on_air, (st.pitch - 1.0) * 100.0, st.bpm, st.handoff_to, st.sync_counter));
             log::info!(
                 "ProDJ status: player {} fw {} len {:#x} {:?} {}{}{}{}pitch {:+.2}% bpm {} beat {:?}/{:?} handoff {:?}",
                 st.player, String::from_utf8_lossy(&st.firmware).trim(), data.len(), st.play,

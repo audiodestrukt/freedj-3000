@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **CDJ-3000 tester kit** (`docs/testing/cdj-3000-interop.md`): a
+  dependency-free `tools/link_capture.py` that records every Pro DJ Link
+  packet on the wire with its bytes, a `replay_capture` example in the link
+  crate that runs a capture through the parser offline and fails on a
+  rejected packet, an issue template for reports, and the PERF LOG file on
+  iOS now records Link packets too (first of each kind per player as hex,
+  then every status change) so an App Store install can send one back.
+- The renderer honours `WGPU_BACKEND`, and runs on the GL backend (Mesa
+  llvmpipe, and a Mali-class GLES 3.1 driver) by asking the surface for
+  `COPY_SRC` only where it exists. Assessment of running on a stock CDJ-3000
+  in `docs/reference/cdj-3000-target.md`.
+
 ### Fixed
 - **No click when playback stops.** Releasing CUE, pausing, or a platter or
   waveform hold used to cut to silence on the next sample, a step you hear

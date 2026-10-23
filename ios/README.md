@@ -204,7 +204,9 @@ cpu: 18.4% of one core — main 9.1  audio-proc 6.2  prodj-tx 0.7
 ```
 
 goes to the log and, while **MENU → PERF LOG** is ON, to
-`Documents/opendeck-perf.log` (open it from the Files app → On My iPhone →
+`Documents/opendeck-perf.log` (which also records Pro DJ Link packets: the
+first of each kind per player as hex, then every status change — the file a
+tester with a CDJ-3000 sends back, see `docs/testing/cdj-3000-interop.md`) (open it from the Files app → On My iPhone →
 OpenDeck DJ; rewritten on every launch, removed when the setting is OFF —
 the default, so a production install carries no log). INFO shows the process
 figure as its last row either way. Threads: `main` is rendering and

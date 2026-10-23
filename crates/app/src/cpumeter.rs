@@ -30,6 +30,22 @@ pub fn process_pct() -> f32 { f32::from_bits(CPU_PCT.load(Ordering::Relaxed)) }
 pub static FILE_LOG: AtomicBool = AtomicBool::new(false);
 pub fn set_file_log(on: bool) { FILE_LOG.store(on, Ordering::Relaxed); }
 
+/// The file given to [`start`], so other modules can append diagnostic lines
+/// (Link packets, see `prodj.rs`) to the same file while [`FILE_LOG`] is on.
+static FILE_PATH: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+/// Append one line to the diagnostic file if the PERF LOG setting is on and
+/// the meter has created the file this run.  Cheap when off: one atomic load.
+pub fn file_line(line: &str) {
+    if !FILE_LOG.load(Ordering::Relaxed) { return; }
+    let Some(f) = FILE_PATH.get() else { return };
+    if !f.exists() { return; }
+    use std::io::Write;
+    if let Ok(mut fh) = std::fs::OpenOptions::new().append(true).open(f) {
+        let _ = writeln!(fh, "{line}");
+    }
+}
+
 /// CPU seconds consumed so far: by the process, and per thread (name, seconds).
 #[derive(Debug, Default, Clone)]
 pub struct Sample {
@@ -40,6 +56,7 @@ pub struct Sample {
 /// Start the meter thread.  `file`: where report lines also go while
 /// [`FILE_LOG`] is on (fresh per run; removed while off).
 pub fn start(file: Option<PathBuf>) {
+    if let Some(f) = &file { let _ = FILE_PATH.set(f.clone()); }
     let r = std::thread::Builder::new().name("cpu-meter".into()).spawn(move || {
         let mut prev = (Instant::now(), sample());
         let mut file_open = false;   // header written this run
@@ -72,7 +89,7 @@ fn sync_file(file: Option<&std::path::Path>, open: &mut bool) {
     let Some(f) = file else { return };
     let want = FILE_LOG.load(Ordering::Relaxed);
     if want && !*open {
-        let head = format!("# OpenDeck CPU meter — % of one core, sampled every {} s\n", EVERY.as_secs());
+        let head = format!("# OpenDeck diagnostic log — cpu: lines every {} s (% of one core); link: lines for Pro DJ Link packets (first of each kind per player, then changes)\n", EVERY.as_secs());
         match std::fs::write(f, head) {
             Ok(())  => *open = true,
             Err(e)  => log::warn!("cpu meter: cannot write {}: {e}", f.display()),
