@@ -119,15 +119,82 @@ module and QEMU patches are GPL-2.0 and we would run, not link, them. Our
 decoder is written from their documentation, the same stance as writing the
 Link sender from the public protocol analysis.
 
-## Beyond the emulator: the real board
+## The modders' path: a userspace payload through the deck's own updater
+
+Added 2026-10-23 after looking at [cdj3k-mods](https://github.com/nsaintot/cdj3k-mods)
+(MIT/Apache-2.0), which ships working mods for stock CDJ-3000s. What it
+establishes, from its `package/` docs and scripts:
+
+- **The deck's updater runs third-party code as root.** A `.UPD` is a LUKS
+  container; the deck accepts any one encrypted with its packaging key and
+  named `CDJ3Kv<3 digits>.UPD` on a FAT32/exFAT stick in the top USB port.
+  There is no code signature beyond that symmetric key. The installer scripts
+  inside run with full access: they write an overlay, add an `LD_PRELOAD`
+  drop-in to the player's launcher, optionally enable root SSH with a key
+  from the stick, and log to the stick. Two reboots later the deck runs the
+  payload. Removal is a front-panel key combo or a removal `.UPD`; the rootfs
+  is never rewritten. Logs: `install.log`, `phase1.log`, `phase2.log`.
+- **The packaging key is a secret the modders hold.** It is not in the repo,
+  and the build pipeline says so. It is the same gate as the emulator's
+  firmware key. Nothing in this repo can supply it; a person would have to.
+- **The stock userspace is old.** glibc 2.17 (aarch64 glibc's first release);
+  the mods are built on 2.27 with `.symver` pins and an ABI check. An OpenDeck
+  build for the deck has to target that: `cargo zigbuild` against
+  `aarch64-unknown-linux-gnu.2.17`, or a static musl build with ALSA linked
+  in. The deck's writable mount is `/home/root/settings` (`mmcblk1p7`).
+- **Two hardware generations.** "Renesas" (firmware 1.x/2.x, the G2M) and
+  "Rockchip (rk3399)" (3.x). The emulator only models the latter; the mods
+  support both. Everything above is the RK3399 one.
+
+What this changes: OpenDeck on a stock CDJ-3000 does not need a kernel, a
+device tree, a display driver or maskrom at all. It is a userspace payload
+on Pioneer's own kernel: stop `EP122.service`, start `opendeck` on the same
+X display (or, if the stock stack exposes it, on DRM directly), talk to
+`/dev/subucom_spi1.0` for controls and LEDs, ALSA for audio, eth0 for Link.
+That is the custom firmware the 2024 post wanted, without replacing the
+firmware. The sub-CPU adapter from option B is the one piece of new code
+either way, and it is testable in the emulator first.
+
+What it does not settle, in order of how much it matters:
+
+1. **Is there any GPU in the stock rootfs?** Xorg runs on a customised fbdev
+   driver, which suggests no Mali userspace at all. If there is a `libmali`
+   or an EGL, our GL backend runs; if not, the choice is to ship Mesa
+   llvmpipe with the payload (software GL at 1280×720 on two A72s, likely
+   not 60 fps for the waveform shader) or add a CPU rasteriser path, which
+   we do not have. One `ls /usr/lib | grep -i -e mali -e EGL -e GL` over the
+   mods' root SSH answers this. It is the first thing to ask anyone with a
+   modded deck.
+2. **The key.** Without it nothing installs. Asking the modders is the only
+   route, and whether to go that way is Dan's call, not a code decision.
+3. **Sub-CPU expectations.** Whether the sub-CPU needs polling at its rate
+   to stay happy (a watchdog, power handling) is not written down anywhere
+   public; the emulator's `subucom_virt` documents reset and power-off, not
+   a timeout.
+4. **Audio ownership.** The stock app holds the ALSA device at `SCHED_FIFO`
+   on a pinned core; our payload inherits that setup only if we reproduce
+   the launcher's arrangements (`apl_start.sh` sets taskset and priorities).
+
+Clean-room note: the mods resolve symbols inside Pioneer's stripped player
+binary by signature and patch its vtables, which is binary reverse
+engineering of `EP122`. OpenDeck would not do any of that. It would not load
+into `EP122` or read it; it would replace it as a process and use only the
+kernel's device nodes, with the protocol from the emulator's published
+documentation. The one borrowed thing is the install mechanism, which is the
+modders' MIT-licensed scripts plus their key.
+
+## Beyond the emulator: the real board, from scratch
+
+(The route if the updater path is closed, or for a deck with no key.)
 
 "Unmodified hardware" means no soldering, but it is a firmware replacement.
 What it would take, none of it testable here:
 
 - A unit on the desk, and a full eMMC dump before anything else, so the
   deck can be restored.
-- A boot path. The firmware updater only accepts Pioneer's encrypted
-  `.UPD`. The practical route on an RK3399 is the SoC's maskrom USB mode
+- A boot path. The firmware updater accepts a `.UPD` encrypted with the
+  packaging key (see above), which gets a payload in but leaves the stock
+  kernel in place. For our own kernel the route on an RK3399 is the SoC's maskrom USB mode
   over the OTG port (the USB-B PC-Link jack) with `rkdeveloptool`, which
   works unless the part is secure-boot fused; or a U-Boot console if one is
   exposed. Unknown until someone tries.
@@ -138,7 +205,9 @@ What it would take, none of it testable here:
 - The sub-CPU adapter from option B, unchanged.
 - Audio: the codec and its wiring are unknown; the emulator bypasses it.
 
-The honest ranking: option B is a clean, reusable week or two and makes the
-board port mostly a device-tree job later. Option A answers the Link
+The honest ranking: option B is a clean, reusable week or two and is the
+part every other path needs. With the modders' key, the payload path turns
+"port a kernel" into "ship a binary", gated on whether the stock rootfs has
+a GPU driver at all. Option A answers the Link
 question fastest but is not a code decision. The real-board port is gated on
 owning a CDJ-3000 and on the maskrom question, not on anything in this repo.
