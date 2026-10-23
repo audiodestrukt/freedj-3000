@@ -114,7 +114,7 @@ impl Renderer {
 
         // ── wgpu instance / surface ───────────────────────────────────────────
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends:              wgpu::Backends::all(),
+            backends:              wgpu::util::backend_bits_from_env().unwrap_or(wgpu::Backends::all()),
             dx12_shader_compiler:  wgpu::Dx12Compiler::default(),
             gles_minor_version:    wgpu::Gles3MinorVersion::Automatic,
             flags:                 wgpu::InstanceFlags::default(),
@@ -203,7 +203,11 @@ impl Renderer {
         log::info!("present mode: {present_mode:?} (available: {:?})", caps.present_modes);
 
         let surface_config = wgpu::SurfaceConfiguration {
-            usage:                        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            // COPY_SRC feeds the OPENDECK_SCREENSHOT capture; GL surfaces
+            // (Mali/Panfrost, llvmpipe) only offer RENDER_ATTACHMENT, so ask
+            // for it where it exists and skip the capture where it does not.
+            usage:                        wgpu::TextureUsages::RENDER_ATTACHMENT
+                                              | (caps.usages & wgpu::TextureUsages::COPY_SRC),
             format,
             width:                        size.width.clamp(1, max_dim),
             height:                       size.height.clamp(1, max_dim),
@@ -573,6 +577,12 @@ impl Renderer {
         }
 
         // ── Optional frame capture ────────────────────────────────────────────
+        if self.capture.is_some()
+            && !self.surface_config.usage.contains(wgpu::TextureUsages::COPY_SRC)
+        {
+            log::warn!("frame capture unsupported on this surface (no COPY_SRC); skipping");
+            self.capture = None;
+        }
         let capture = self.capture.take().map(|path| {
             let (w, h) = (self.surface_config.width, self.surface_config.height);
             let bpr = ((w * 4 + 255) / 256) * 256;   // COPY_BYTES_PER_ROW_ALIGNMENT
