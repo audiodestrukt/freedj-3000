@@ -186,6 +186,29 @@ modders' MIT-licensed scripts plus their key.
 The install guide built on this path, with the state of each piece, is
 [docs/hardware/cdj-3000-install.md](../hardware/cdj-3000-install.md).
 
+## And the XDJ-1000MK2? No.
+
+Checked 2026-10-23 from public data only. Pioneer's GPL/LGPL source page
+lists every Linux-based player (CDJ-3000, 3000X, 1500X, XDJ-RX/RX2/RX3,
+XDJ-XZ, XDJ-RR, XDJ-AZ, XDJ-AN, DJS-1000, TORAIZ SP-16, XDJ-AERO) and does
+not list the XDJ-1000MK2, the XDJ-1000 or the CDJ-2000NXS2. The
+XDJ-1000MK2 parts list (RRV4661, main assembly) names the silicon: IC301
+`D810K013DZKB456`, a TI DaVinci DM814x-class SoC by its device marking (a
+single Cortex-A8 with a C674x DSP and a PowerVR SGX530; confirm against the
+service manual's block diagram), two Winbond W971GG6SB DDR2 parts (256 MB),
+two ESMT M12L2561616A SDR parts, an AK4452 DAC, and a 25 MHz crystal for
+the Ethernet PHY.
+
+So the XDJ-1000MK2 is a 2011-generation single-core ARM with a DSP, 256 MB
+of RAM, a GPU with no open driver and OpenGL ES 2.0 at best, and most
+likely no Linux. OpenDeck needs several times that CPU for the R3
+timestretch alone, about 250 MB for one decoded track, and GLES 3.1 with
+storage buffers. Nothing in this project runs there, and no payload path
+exists for it. The XDJ stays what it is: the reference unit next to the
+clone. If the panel is ever wanted, the route is hardware, a Pi behind the
+XDJ's buttons, jog and LCD, which is the faceplate-and-hardware and
+capacitive-jog line of work, not firmware.
+
 ## Beyond the emulator: the real board, from scratch
 
 (The route if the updater path is closed, or for a deck with no key.)
