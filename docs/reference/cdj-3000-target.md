@@ -183,6 +183,9 @@ kernel's device nodes, with the protocol from the emulator's published
 documentation. The one borrowed thing is the install mechanism, which is the
 modders' MIT-licensed scripts plus their key.
 
+The install guide built on this path, with the state of each piece, is
+[docs/hardware/cdj-3000-install.md](../hardware/cdj-3000-install.md).
+
 ## Beyond the emulator: the real board, from scratch
 
 (The route if the updater path is closed, or for a deck with no key.)

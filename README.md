@@ -69,6 +69,7 @@ sampler features are the roadmap.
 | Sampler-deck: auto one-shots, quantized triggers, cue sequencing | 📋 Roadmap ([#24](https://github.com/audiodestrukt/freedj-3000/issues/24)) |
 | Hardware control surface (RP2350) | 📋 Roadmap |
 | CDJ-3000-generation media transfer | 📋 Not started (the 3000 moves files differently) |
+| Running OpenDeck *on* a CDJ-3000 (RK3399, as a payload through the deck's updater) | 📋 Designed, not built ([docs/hardware/cdj-3000-install.md](docs/hardware/cdj-3000-install.md)) |
 
 Everything in the Link rows has been exercised against an XDJ-1000MK2.
 CDJ-3000s speak the same Pro DJ Link sync protocol; one has not been on this
