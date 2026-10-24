@@ -40,10 +40,11 @@ fn main() {
     }
 
     // 2. Vendored source.
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../third_party/rubberband")
-        .canonicalize()
-        .expect("third_party/rubberband missing — see crates/timestretch/build.rs");
+    // No canonicalize(): on Windows it yields a `\\?\` verbatim path, which
+    // cl.exe refuses to open ("Cannot open source file: '\\RubberBandSingle.cpp'").
+    // CARGO_MANIFEST_DIR is already absolute; the `..` components are fine.
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("third_party").join("rubberband");
+    assert!(root.is_dir(), "third_party/rubberband missing ({}) — see crates/timestretch/build.rs", root.display());
     let single = root.join("single/RubberBandSingle.cpp");
     assert!(single.exists(), "{} missing", single.display());
 
