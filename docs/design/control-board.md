@@ -1,8 +1,39 @@
 # Design: the ADK-1000 control board
 
-Status: **design in progress** (2026-10-24). The decisions below are made; the
-board itself is being laid out in `hardware/control-board/`. Nothing has been
-fabricated. Companion documents: [faceplate and hardware](faceplate-and-hardware.md)
+Status: **design in progress** (2026-10-24). Nothing has been fabricated.
+
+**Decision 2026-10-24: one board for the whole face.** Dan chose a single
+panel PCB over a hub plus cluster boards, so there are no board-to-board
+cables. That board lives in `hardware/panel/` and is *generated*: every control
+is a line in `layout.toml` (position in mm from the face's top-left corner,
+cap size, LED colour, provenance), and `gen.py` emits the tscircuit source.
+On it:
+
+- the hub is a **Waveshare RP2350-Zero module** (castellated, USB-C on the
+  module, ~$4) rather than the bare RP2350A below, because a one-shot
+  298 × 380 mm board should not carry the only hard routing problem; the bare
+  chip section is kept here as the v2 / modular-rig variant;
+- the jog is sensed by an **MT6701** (C3003196, SOP-8, 14-bit magnetic angle,
+  ABZ quadrature out) under the platter shaft with a diametric magnet in the
+  shaft end, four M3 bearing bolt holes around it; the ABZ pins land on the
+  same GPIO the hub below uses, so firmware and the MIDI contract are
+  unchanged;
+- buttons are 6 × 6 tact switches under printed caps, LEDs 0805 beside them,
+  on **PCF8574T** expanders (C7605) in groups of eight, addresses 0x20 up,
+  placed near the buttons they serve and kept out of the cutouts;
+- browse is an **EC11E18244A5** (C255515) with push, the tempo fader a 100 mm
+  slide pot over a slot, the 7" display a cutout, the Pi 5 bolts to the back
+  under the jog.
+
+**What is still provisional:** the 13 photo-measured positions are good to a
+few mm; the other controls on the XDJ face (track/search, sync, master, tempo
+range, time mode, auto cue, shortcut, USB stop) are placed by eye and say
+VERIFY on the silkscreen. A caliper pass on the real unit, or a straight-down
+photo with a ruler, turns them into `status = "measured"` and nothing else
+changes. The RP2350-Zero pin order and the fader part are also marked VERIFY.
+
+The rest of this document describes the hub electronics, which are the same
+on both boards. Companion documents: [faceplate and hardware](faceplate-and-hardware.md)
 (the panel this board sits behind), [control surfaces](../hardware/control-surfaces.md)
 (how the app maps any controller, this one included).
 

@@ -11,7 +11,8 @@ dimensions → operations → a watertight, single-body STL — using the
 | File | Part | Status |
 |---|---|---|
 | `cad/jog_wheel.py` | Jog platter: dished top + center recess, ribbed grip skirt, encoder hub with shaft bore + radial grub-screw | v1, prints |
-| `control-board/` | Control hub PCB: RP2350A, USB-C (class-compliant USB MIDI), jog encoder in, fader ADC, browse encoder, I2C panel bus for PCF8574 modules ([design](../docs/design/control-board.md)) | schematic complete, placement + autoroute iterating, not fabricated |
+| `panel/` | **The single panel board**: every button, LED, the browse encoder, the magnetic jog sensor, the fader slot, the display cutout, the Pi mount and the RP2350-Zero hub on one 298 × 380 mm PCB, generated from `panel/layout.toml` ([design](../docs/design/control-board.md)) | generated + routes in TraceMaker; control positions need caliper verification before fab |
+| `control-board/` | Separate hub PCB (bare RP2350A, USB-C): the module-less variant, kept for a v2 or a modular rig ([design](../docs/design/control-board.md)) | schematic complete, QFN escape routing iterating, not fabricated |
 
 ## Build
 
@@ -57,3 +58,25 @@ make all                                     # export -> prep (JLC rules, GND po
 KiCad 9/10's `kicad-cli`, and the system `python3` with the `pcbnew` module for
 `prep_board.py` (from the `pcb-layout` skill).  Outputs land in `build/`:
 `control-board.routed.kicad_pcb` is what you open in KiCad to finish the tail.
+
+## panel — the single board
+
+`panel/layout.toml` lists every control in millimetres from the face's top-left
+corner with a `status` (`photo` = scaled from the faceplate photo, `guess` =
+placed where it sits on the unit but unmeasured, `measured` = caliper).
+`panel/gen.py` turns it into `index.circuit.tsx`: a tact switch (+ LED and
+resistor) per button, PCF8574 expanders in groups of eight placed near the
+buttons they serve and kept out of the cutouts, the RP2350-Zero hub, the MT6701
+under the jog shaft with four bearing bolt holes, the EC11 browse encoder, the
+fader slot, the display cutout, the Pi 5 mount.  Unmeasured controls carry
+"VERIFY" on the silkscreen.
+
+```sh
+cd hardware/panel && npm ci
+make gen check          # regenerate + schematic connectivity
+make all                # export → prep → TraceMaker → DRC   (needs tracemaker, kicad-cli, pcbnew)
+```
+
+The board is big: TraceMaker's default lattice took 20 GB and was OOM-killed.
+The Makefile passes `--pitch-um 100 --fast-bends --no-gpu` and runs under
+`ulimit -v`; see `ROUTE_FLAGS` there.

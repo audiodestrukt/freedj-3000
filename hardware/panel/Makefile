@@ -13,7 +13,11 @@ KICAD_CLI  ?= kicad-cli
 PREP       ?= /usr/bin/python3 $(HOME)/.claude/skills/pcb-layout/scripts/prep_board.py
 SRC         = index.circuit.tsx
 OUT         = build/panel
-ROUTE_TIME ?= 240
+ROUTE_TIME ?= 300
+# The full-face board is 298 x 380 mm: TraceMaker's automatic lattice needed 20 GB and was
+# OOM-killed.  A 0.1 mm lattice without cost fields routes it in a few GB.
+ROUTE_FLAGS ?= --pitch-um 100 --variants 2 --threads 2 --fast-bends --no-field --no-gpu
+MEM_KB     ?= 16000000
 
 .PHONY: all gen check build export prep route drc render clean
 
@@ -42,7 +46,7 @@ prep: export
 
 route: prep
 	cp $(OUT).prep.kicad_pro $(OUT).routed.kicad_pro 2>/dev/null || true
-	$(TRACEMAKER) route $(OUT).prep.kicad_pcb -o $(OUT).routed.kicad_pcb --time $(ROUTE_TIME) 2>&1 | grep -E "^routed|unrouted|<- best" | head -20
+	( ulimit -v $(MEM_KB); $(TRACEMAKER) route $(OUT).prep.kicad_pcb -o $(OUT).routed.kicad_pcb --time $(ROUTE_TIME) $(ROUTE_FLAGS) 2>&1 | grep -E "^routed|unrouted|<- best|bad_alloc" | head -20 )
 
 drc:
 	$(KICAD_CLI) pcb drc --format json -o build/drc.json $(OUT).routed.kicad_pcb >/dev/null 2>&1 || true

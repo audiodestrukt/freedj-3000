@@ -87,18 +87,42 @@ for c in buttons:
         trace(f"RL_{n}.pin2", "net.V3V3")
         pool.append((f"LED_{n}", c["x"] + dx, c["y"] + dy))
 
+switch_xy = [(c["x"], c["y"]) for c in buttons]
+
+# ── keep-outs: the display cutout, the fader slot and the board edge ──────────
+D = L["display"]
+DISP = (D["x"] - 6, D["y"] - 6, D["x"] + D["width"] + 6, D["y"] + D["height"] + 6)
+FADER_C = next(c for c in controls if c["kind"] == "fader")
+FSLOT = (FADER_C["x"] - 10, FADER_C["y"] - FADER_C["slot_mm"][1] / 2 - 12, FADER_C["x"] + 10, FADER_C["y"] + FADER_C["slot_mm"][1] / 2 + 12)
+EDGE = MARGIN + 8
+
+
+def in_rect(x, y, r):
+    return r[0] <= x <= r[2] and r[1] <= y <= r[3]
+
+
+def free_spot(cx, cy):
+    """Nudge a part centre out of the cutouts, off the edge and off every switch."""
+    for r in (DISP, FSLOT):
+        if in_rect(cx, cy, r):
+            # leave through the nearest horizontal edge of the keep-out
+            cy = r[3] + 2 if (cy - r[1]) > (r[3] - cy) else r[1] - 2
+    cx = min(max(cx, EDGE), FACE_W - EDGE)
+    cy = min(max(cy, EDGE), FACE_H - EDGE)
+    for _ in range(8):
+        if all(math.hypot(cx - sx, cy - sy) > 13 for sx, sy in switch_xy):
+            break
+        cy += 8
+    return cx, cy
+
+
 # ── expanders: eight pins each, hard-wired addresses 0x20 + i ─────────────────
 n_chips = math.ceil(len(pool) / 8)
-switch_xy = [(c["x"], c["y"]) for c in buttons]
 for i in range(n_chips):
     group = pool[i * 8:(i + 1) * 8]
     cx = sum(g[1] for g in group) / len(group)
     cy = sum(g[2] for g in group) / len(group) + 14.0   # below the row of buttons it serves
-    # keep the chip body clear of any switch footprint
-    for _ in range(6):
-        if all(math.hypot(cx - sx, cy - sy) > 13 for sx, sy in switch_xy):
-            break
-        cy += 8
+    cx, cy = free_spot(cx, cy)
     px, py = P(cx, cy)
     u = f"U_EXP{i}"
     emit(f'<PCF8574T_3_518 name="{u}" pcbX={{{px}}} pcbY={{{py}}} />')
@@ -140,7 +164,7 @@ trace("U_HUB.GP7", "net.BR_A"); trace("U_HUB.GP8", "net.BR_B"); trace("U_HUB.GP1
 trace("U_HUB.GP26", "net.FADER")
 # bus pull-ups beside the hub
 for k, (name, net, val) in enumerate((("R_SDA", "SDA", "4.7k"), ("R_SCL", "SCL", "4.7k"), ("R_INT", "PANEL_INT", "10k"), ("R_JT", "JOG_TOUCH", "10k"))):
-    rx, ry = P(hub["x"] + 14, hub["y"] - 8 + 3 * k)
+    rx, ry = P(hub["x"] + 15, hub["y"] - 5 + 3.5 * k)
     emit(f'<resistor name="{name}" resistance="{val}" footprint="0603" pcbX={{{rx}}} pcbY={{{ry}}} />')
     trace(f"{name}.pin1", f"net.{net}"); trace(f"{name}.pin2", "net.V3V3")
 
