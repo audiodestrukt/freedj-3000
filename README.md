@@ -143,6 +143,21 @@ make run TRACK=/path/to/track.mp3
 `make` on its own lists every target. The underlying commands are plain cargo —
 `make build` is `cargo build --release -p opendeck-app` and nothing more.
 
+### Windows
+
+Prebuilt: the [Releases page](https://github.com/audiodestrukt/freedj-3000/releases)
+has `OpenDeck-<version>-windows-x64.zip` (unzip, run `opendeck.exe track.mp3`;
+details in the bundled `README-WINDOWS.txt`). It is built by
+`.github/workflows/windows.yml` on every `win-v*` tag:
+
+```bash
+git tag win-v0.3.0 && git push origin win-v0.3.0
+```
+
+Building locally needs only rustup and the Visual Studio Build Tools
+("Desktop development with C++" — MSVC compiles the vendored Rubber Band and
+MiniBPM); no other system libraries. Then `cargo build --release -p opendeck-app`.
+
 ### Controls (MVP)
 
 | Key | Action |

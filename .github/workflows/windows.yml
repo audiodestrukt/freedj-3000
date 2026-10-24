@@ -1,0 +1,118 @@
+name: Windows build
+
+# Builds the desktop binary for Windows x64 and publishes it.
+#
+#   git tag win-v0.3.0 && git push origin win-v0.3.0   →  GitHub Release with the zip
+#   Actions tab → "Windows build" → Run workflow        →  zip as a run artifact only
+#
+# Public repo, so Windows runner minutes are free. No system libraries are
+# needed on Windows: cpal uses WASAPI, wgpu uses DX12/Vulkan, midir uses WinMM,
+# and crates/timestretch/build.rs compiles the vendored Rubber Band with MSVC
+# when pkg-config finds no system copy (which it never does here).
+on:
+  push:
+    tags:
+      - 'win-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # softprops/action-gh-release creates the release on a tag
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # win-v0.3.0 → 0.3.0; a manual run gets 0.0.0-<sha>. Baked into the
+      # binary through OPENDECK_VERSION (see crates/app/build.rs + screen.rs).
+      - name: Compute version
+        id: ver
+        shell: bash
+        run: |
+          REF="${{ github.ref_name }}"
+          if [[ "$REF" == win-v* ]]; then
+            VERSION="${REF#win-v}"
+          else
+            VERSION="0.0.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $VERSION"
+
+      # rust-toolchain.toml pins the channel; `rustup show` materialises it for
+      # the x86_64-pc-windows-msvc host (the Linux targets it also lists are
+      # just extra std downloads here).
+      - name: Set up Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build opendeck.exe
+        env:
+          OPENDECK_VERSION: ${{ steps.ver.outputs.version }}
+        run: cargo build --release -p opendeck-app --bin opendeck
+
+      # The binary must at least start and resolve its DLLs on a bare runner
+      # (no audio device, no GPU needed for this path).
+      - name: Smoke test
+        run: target\release\opendeck.exe --version
+
+      # Informational: the Linux CI is the gate; this shows what differs on
+      # Windows without blocking a release over a platform-specific test.
+      - name: Test workspace (informational)
+        continue-on-error: true
+        run: cargo test --workspace --release -- --skip timestretch_realtime_factor
+
+      - name: Package
+        id: pkg
+        shell: bash
+        run: |
+          NAME="OpenDeck-${{ steps.ver.outputs.version }}-windows-x64"
+          D="dist/$NAME"
+          mkdir -p "$D/surfaces"
+          cp target/release/opendeck.exe "$D/"
+          cp README.md CHANGELOG.md "$D/"
+          # Controller mapping examples (see README "Controller input").
+          cp crates/app/surfaces/dj2go.toml docs/hardware/surfaces/generic-midi.toml "$D/surfaces/"
+          # Demo track: an original production by the author, also bundled in the iOS app.
+          cp amplificate.mp3 "$D/"
+          cat > "$D/README-WINDOWS.txt" <<'TXT'
+          OpenDeck for Windows (x64)
+
+          Run:      opendeck.exe amplificate.mp3
+                    opendeck.exe "C:\path\to\track.mp3"
+                    opendeck.exe                 (empty deck; B opens the browser)
+          Version:  opendeck.exe --version
+          Controls: see README.md, "Controls (MVP)".
+
+          Settings, tag list and grids live in %LOCALAPPDATA%\opendeck.
+          Pro DJ Link needs the PC on the same wired network as the decks
+          (ports UDP 50000-50002; allow opendeck.exe through Windows Firewall
+          when asked). The binary is not code-signed, so SmartScreen shows
+          "Windows protected your PC" the first time: More info → Run anyway.
+          TXT
+          (cd dist && 7z a -tzip "$NAME.zip" "$NAME" >/dev/null)
+          ls -l dist/*.zip
+          echo "zip=dist/$NAME.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenDeck-${{ steps.ver.outputs.version }}-windows-x64
+          path: ${{ steps.pkg.outputs.zip }}
+          if-no-files-found: error
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/win-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OpenDeck ${{ steps.ver.outputs.version }} (Windows)
+          files: ${{ steps.pkg.outputs.zip }}
+          generate_release_notes: true

@@ -108,6 +108,13 @@ pub fn app_data_dir() -> PathBuf {
             if old.is_file() && !new.exists() { let _ = std::fs::rename(&old, &new); }
         }
         dir
+    } else if cfg!(windows) {
+        // Windows sets no HOME; the per-user app-data root is %LOCALAPPDATA%
+        // (…\AppData\Local), derived from %USERPROFILE% when it is missing.
+        std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+            .or_else(|| std::env::var_os("USERPROFILE").map(|u| PathBuf::from(u).join("AppData").join("Local")))
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("opendeck")
     } else {
         std::env::var_os("XDG_DATA_HOME").map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local").join("share"))

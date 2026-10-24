@@ -2446,6 +2446,7 @@ pub fn desktop_main() -> Result<()> {
                 Some("B") | Some("b") => 1,
                 _ => bail!("--deck needs A or B"),
             },
+            "--version" | "-V" => { println!("opendeck {}", screen::APP_VERSION); return Ok(()); }
             "--link-send" => link_send = true,
             "--link-receive-only" => link_send = false,
             "--controllers" => controllers = Some(args.next().context("--controllers needs a path to a controllers.toml")?.into()),
