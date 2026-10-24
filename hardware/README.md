@@ -11,6 +11,7 @@ dimensions → operations → a watertight, single-body STL — using the
 | File | Part | Status |
 |---|---|---|
 | `cad/jog_wheel.py` | Jog platter: dished top + center recess, ribbed grip skirt, encoder hub with shaft bore + radial grub-screw | v1, prints |
+| `control-board/` | Control hub PCB: RP2350A, USB-C (class-compliant USB MIDI), jog encoder in, fader ADC, browse encoder, I2C panel bus for PCF8574 modules ([design](../docs/design/control-board.md)) | schematic complete, placement + autoroute iterating, not fabricated |
 
 ## Build
 
@@ -37,3 +38,22 @@ is verified watertight + single-body before it's considered done.
   clamps the wheel to the shaft.
 - The top-plate switch / center display from the design doc are **not** modeled
   yet — the center recess is where a label or future center display goes.
+
+## control-board — PCB
+
+Authored in [tscircuit](https://tscircuit.com) (`index.circuit.tsx`: real JLCPCB
+footprints under `imports/`, placement in code, routing disabled), exported to
+KiCad, routed by [TraceMaker](https://github.com/DingoOz/TraceMaker) and judged
+by `kicad-cli pcb drc`.  The design and the toolchain decision are in
+[`docs/design/control-board.md`](../docs/design/control-board.md).
+
+```sh
+cd hardware/control-board && npm ci          # tscircuit (bun on PATH)
+make check                                   # schematic connectivity only
+make all                                     # export -> prep (JLC rules, GND pour) -> TraceMaker -> DRC
+```
+
+`make all` needs `tracemaker` on PATH (release tarball, Linux x86_64, glibc ≥ 2.38),
+KiCad 9/10's `kicad-cli`, and the system `python3` with the `pcbnew` module for
+`prep_board.py` (from the `pcb-layout` skill).  Outputs land in `build/`:
+`control-board.routed.kicad_pcb` is what you open in KiCad to finish the tail.
