@@ -40,11 +40,18 @@ fn main() {
     }
 
     // 2. Vendored source.
-    // No canonicalize(): on Windows it yields a `\\?\` verbatim path, which
-    // cl.exe refuses to open ("Cannot open source file: '\\RubberBandSingle.cpp'").
-    // CARGO_MANIFEST_DIR is already absolute; the `..` components are fine.
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..").join("third_party").join("rubberband");
-    assert!(root.is_dir(), "third_party/rubberband missing ({}) — see crates/timestretch/build.rs", root.display());
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../third_party/rubberband")
+        .canonicalize()
+        .expect("third_party/rubberband missing — see crates/timestretch/build.rs");
+    // On Windows, canonicalize returns a `\\?\` verbatim path that cl.exe
+    // mishandles when it is both an -I include and the source file argument,
+    // reducing the source arg to `\\<name>`. Strip the prefix.
+    #[cfg(windows)]
+    let root = {
+        let s = root.to_string_lossy();
+        PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s).to_string())
+    };
     let single = root.join("single/RubberBandSingle.cpp");
     assert!(single.exists(), "{} missing", single.display());
 
@@ -67,6 +74,13 @@ fn main() {
         // vendored tree.
         .warnings(false)
         .flag_if_supported("-ffast-math");
+    // On Windows, src/common/Thread.h pulls in <windows.h>, whose min/max
+    // macros collide with std::min / std::numeric_limits::max() throughout
+    // the Rubber Band sources. NOMINMAX suppresses the macros.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        build.define("NOMINMAX", None);
+        build.define("WIN32_LEAN_AND_MEAN", None);
+    }
     build.compile("rubberband");   // → librubberband.a, matching #[link(name = "rubberband")]
 
     if apple {
