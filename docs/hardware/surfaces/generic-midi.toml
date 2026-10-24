@@ -1,0 +1,45 @@
+# A template for any class-compliant USB MIDI controller.
+#
+# Find the numbers: run with RUST_LOG=opendeck_app::surface=debug and press
+# things — every message is logged as `midi rx [name]: [90, 3B, 7F]` (status,
+# number, value in hex).  90/80 = note on/off, B0 = control change; the low
+# nibble of the status byte is the channel.  The log also lists the port
+# names it can see when the one named here is not found.
+
+[[surface]]
+name = "my-controller"
+
+[surface.midi]
+port = "PART OF THE PORT NAME"
+
+[[surface.button]]
+note = 0x3B
+action = "play_pause"
+
+[[surface.button]]
+note = 0x33
+action = "cue"
+
+[[surface.button]]
+cc = 0x20              # some controllers send buttons as CC; ≥ 64 is "down"
+action = "sync"
+
+[[surface.encoder]]
+cc = 0x19
+action = "jog"
+cc_mode = "twos_complement"   # or "offset64", "sign_bit" — whichever makes both directions work
+scale = 1.0
+
+[[surface.encoder]]
+cc = 0x1A
+action = "browse"
+
+[[surface.fader]]
+cc = 0x0D
+action = "tempo"
+invert = true          # flip if moving the fader down makes the track slower
+
+[[surface.led]]
+note = 0x3B            # most controllers light a button's LED with the same note
+shows = "playing"
+blink_on = "paused"

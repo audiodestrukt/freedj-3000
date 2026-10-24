@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Control surfaces from a file.** `controllers.toml` describes every
+  controller attached to the deck — USB MIDI controllers and PCF8574 I2C
+  button boards on a Raspberry Pi, any number of each — with buttons,
+  encoders, faders and LEDs bound to deck actions, a SHIFT layer, per-deck
+  tables, and LED feedback (PLAY/CUE lamps that behave as the XDJ's do).
+  The DJ2Go adapter became the first built-in preset in that format. Guide
+  with wiring and the field reference: `docs/hardware/control-surfaces.md`;
+  examples in `docs/hardware/surfaces/`. `--controllers PATH` /
+  `OPENDECK_CONTROLLERS` point at a file elsewhere.
 - **CDJ-3000 tester kit** (`docs/testing/cdj-3000-interop.md`): a
   dependency-free `tools/link_capture.py` that records every Pro DJ Link
   packet on the wire with its bytes, a `replay_capture` example in the link

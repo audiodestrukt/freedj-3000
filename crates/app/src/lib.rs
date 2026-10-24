@@ -13,7 +13,7 @@ pub mod chrome;
 mod cpumeter;
 mod grids;
 mod input;
-mod midi;
+mod surface;
 mod prodj;
 mod renderer;
 mod screen;
@@ -121,6 +121,8 @@ struct DeckApp {
     events:            Vec<Event>,
     /// Off-thread sources (MIDI, later HID/serial) send here; drained per frame.
     event_rx:          mpsc::Receiver<Event>,
+    /// Deck state mirrored to control-surface LEDs; refreshed every frame.
+    indicators:        Arc<surface::Indicators>,
     /// A network load in progress: the fetch thread's result channel and the
     /// name being loaded.  The deck keeps running until the bytes arrive.
     fetch_rx:          Option<mpsc::Receiver<Result<Prepared>>>,
@@ -215,6 +217,23 @@ struct UiFlags {
     loop_active: bool, loop_start: u64, loop_end: u64, loop_beats: f32,
     tempo_range: f32, quantize: bool,
     slip_shadow: Option<u64>,
+}
+
+/// The LED-feedback view of the deck (`surface::Indicators`).
+fn surface_bits(f: &UiFlags, playing: bool, cued: bool) -> u32 {
+    use surface::bit::*;
+    let mut b = 0;
+    if playing       { b |= PLAYING; }
+    if cued          { b |= CUED; }
+    if f.sync        { b |= SYNC; }
+    if f.master      { b |= MASTER; }
+    if f.loop_active { b |= LOOP; }
+    if f.slip        { b |= SLIP; }
+    if f.key_lock    { b |= KEY_LOCK; }
+    if f.jog_vinyl   { b |= VINYL; }
+    if f.linked      { b |= LINKED; }
+    for (i, c) in f.hot_cues.iter().enumerate() { if c.is_some() { b |= HOT_CUE0 << i; } }
+    b
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -320,6 +339,7 @@ impl DeckApp {
         link_grid:    Arc<arc_swap::ArcSwap<Option<BeatGrid>>>,
         link_send:    Arc<AtomicBool>,
         event_rx:     mpsc::Receiver<Event>,
+        indicators:   Arc<surface::Indicators>,
         settings:     settings::Settings,
     ) -> Self {
         let browser = Browser::new(browse_root.as_deref().unwrap_or(&path), std::sync::Arc::clone(&link));
@@ -411,6 +431,7 @@ impl DeckApp {
             swipe_done:        false,
             events:            Vec::new(),
             event_rx,
+            indicators,
             fetch_rx: None,
             loading: None,
             play_on_load: false,
@@ -1840,6 +1861,7 @@ impl DeckApp {
             tempo_range: self.settings.tempo_range, quantize: self.settings.quantize,
             slip_shadow,
         };
+        self.indicators.store(surface_bits(&flags, playing, self.transport.cued));
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         snap.cols_visible = ZOOM_LEVELS[self.zoom_level];
         if self.screen_mode == ScreenMode::Info {
@@ -2382,6 +2404,10 @@ pub struct Config {
     /// Start the startup track playing at once (the desktop dev loop); off,
     /// the deck boots paused at the cue, as a CDJ sits after a load (iOS).
     pub autoplay:     bool,
+    /// `--controllers PATH` / OPENDECK_CONTROLLERS: the controller file to
+    /// merge over the built-in presets; `None` = the data dir's
+    /// `controllers.toml` if present.
+    pub controllers:  Option<PathBuf>,
 }
 
 fn init_logging() {
@@ -2411,6 +2437,7 @@ pub fn desktop_main() -> Result<()> {
     // WORKSTREAMS B2). Receive-only still follows a master's tempo. Opt into
     // full send with `--link-send` (or OPENDECK_LINK_SEND=1).
     let mut link_send = std::env::var("OPENDECK_LINK_SEND").map(|v| v == "1").unwrap_or(false);
+    let mut controllers: Option<PathBuf> = std::env::var_os("OPENDECK_CONTROLLERS").map(PathBuf::from);
     while let Some(a) = args.next() {
         match a.as_str() {
             "--player" => player = Some(args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6 (5-6 only on an all-CDJ-3000 network)")?),
@@ -2421,6 +2448,7 @@ pub fn desktop_main() -> Result<()> {
             },
             "--link-send" => link_send = true,
             "--link-receive-only" => link_send = false,
+            "--controllers" => controllers = Some(args.next().context("--controllers needs a path to a controllers.toml")?.into()),
             "--faceplate" => std::env::set_var("OPENDECK_FACEPLATE", "1"),
             "--portrait"  => std::env::set_var("OPENDECK_PORTRAIT", "1"),  // iPad 13" portrait chrome
             _ => path = Some(a.into()),
@@ -2435,7 +2463,7 @@ pub fn desktop_main() -> Result<()> {
 
     // Dev: OPENDECK_AUTOPLAY=0 boots paused at the cue, as the iOS app does.
     let autoplay = std::env::var("OPENDECK_AUTOPLAY").map(|v| v != "0").unwrap_or(true);
-    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root: None, autoplay })
+    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root: None, autoplay, controllers })
 }
 
 /// Start a deck and run the UI event loop.  Platform-agnostic: every entry point
@@ -2568,17 +2596,19 @@ pub fn run(cfg: Config) -> Result<()> {
         grid:        Arc::clone(&link_grid),
     });
 
-    // ── 5. Connect MIDI controller (optional — app runs fine without it) ──────────
-    // ── 5. Input bus: MIDI (DJ2Go) forwards controls into this channel ────────
+    // ── 5. Input bus: control surfaces (MIDI, I2C) forward controls into this
+    //       channel; deck state goes back to their LEDs through `indicators`.
     let (event_tx, event_rx) = mpsc::channel::<Event>();
-    log::info!("controller: deck {} (MIDI channel {deck_channel})", if deck_channel == 0 { "A/left" } else { "B/right" });
-    let _midi = midi::MidiHandle::connect(event_tx, deck_channel == 1);
+    let indicators = Arc::new(surface::Indicators::default());
+    let deck = if deck_channel == 0 { surface::config::Deck::A } else { surface::config::Deck::B };
+    log::info!("controller: deck {deck:?}");
+    surface::start(surface::load(cfg.controllers.as_deref()), deck, event_tx, Arc::clone(&indicators));
 
     // ── 6. Run the UI event loop ──────────────────────────────────────────────
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, settings);
+    let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
     // Park the startup track at its cue (AUTO CUE's first sound, or the
     // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
     if app.transport.cue_point > 0 { let c = app.transport.cue_point; app.seek_to(c); }
@@ -2785,7 +2815,7 @@ pub extern "C" fn freedj_ios_main() {
         Some(t) => log::info!("track: {}", t.display()),
         None => log::info!("no audio in Documents — booting to an empty deck; add tracks via the Files app"),
     }
-    if let Err(e) = run(Config { track, player, default_player, deck_channel: 0, link_send: true, browse_root: Some(docs), autoplay: false }) {
+    if let Err(e) = run(Config { track, player, default_player, deck_channel: 0, link_send: true, browse_root: Some(docs), autoplay: false, controllers: None }) {
         log::error!("freedj_ios_main: {e:#}");
     }
 }

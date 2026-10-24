@@ -65,7 +65,7 @@ sampler features are the roadmap.
 | Pro DJ Link media: serve tracks to other decks (metadata, grid, waveforms, art) | ✅ OpenDeck→OpenDeck proven; XDJ acceptance test pending |
 | iPad / iPhone app (OpenDeck DJ) | ✅ On the App Store |
 | Raspberry Pi 5 | ✅ 60 fps, ~0.6 of one core playing |
-| MIDI controller input | ✅ Working (development) |
+| Control surfaces: any USB MIDI controller, PCF8574 I2C boards on the Pi, mapped in `controllers.toml` with LED feedback | ✅ MIDI on a DJ2Go; I2C path built and unit-tested, first board pending ([docs/hardware/control-surfaces.md](docs/hardware/control-surfaces.md)) |
 | Sampler-deck: auto one-shots, quantized triggers, cue sequencing | 📋 Roadmap ([#24](https://github.com/audiodestrukt/freedj-3000/issues/24)) |
 | Hardware control surface (RP2350) | 📋 Roadmap |
 | CDJ-3000-generation media transfer | 📋 Not started (the 3000 moves files differently) |

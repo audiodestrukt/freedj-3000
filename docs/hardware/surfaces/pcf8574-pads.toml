@@ -1,0 +1,56 @@
+# A second PCF8574 at 0x21 as eight hot-cue pads (A–H).
+#
+# Tap a pad: play from that hot cue (held = plays while held, as on the deck).
+# SHIFT (on the transport board, or any button here with action = "shift")
+# + pad: delete that hot cue.  Setting one is the deck's own gesture (the
+# screen, or an empty pad on the deck).  A pad LED would need more pins:
+# put LEDs on a third expander with `shows = "hot_cue_0"` … `"hot_cue_7"`.
+#
+# Both boards live in one controllers.toml — just keep both [[surface]] tables.
+
+[[surface]]
+name = "pads"
+
+[surface.i2c]
+address = 0x21         # A0 to 3V3, A1 and A2 to GND
+poll_hz = 250
+
+[[surface.button]]
+pin = 0
+action = "hot_cue"
+slot = 0
+
+[[surface.button]]
+pin = 1
+action = "hot_cue"
+slot = 1
+
+[[surface.button]]
+pin = 2
+action = "hot_cue"
+slot = 2
+
+[[surface.button]]
+pin = 3
+action = "hot_cue"
+slot = 3
+
+[[surface.button]]
+pin = 4
+action = "hot_cue"
+slot = 4
+
+[[surface.button]]
+pin = 5
+action = "hot_cue"
+slot = 5
+
+[[surface.button]]
+pin = 6
+action = "hot_cue"
+slot = 6
+
+[[surface.button]]
+pin = 7
+action = "hot_cue"
+slot = 7

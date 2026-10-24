@@ -1,0 +1,112 @@
+# Numark DJ2Go — USB MIDI, built-in preset.
+#
+# Both of its decks are on MIDI channel 0 and are told apart by note/CC
+# number, so each control is tagged with the deck it belongs to; the app
+# listens to the table for the deck it runs as (--deck A|B).  BACK / ENTER /
+# the browse knob are shared.  LOAD, BACK and ENTER send only a Note Off, so
+# they are `note_off` buttons.  Reference: docs/reference/dj2go-midi-map.md.
+#
+# Copy this into your controllers.toml under the same name to change it.
+
+[[surface]]
+name = "dj2go"
+
+[surface.midi]
+port = "DJ2Go"
+
+# ── Deck A (left) ────────────────────────────────────────────────────────────
+[[surface.button]]
+note = 0x3B
+action = "play_pause"
+deck = "A"
+
+[[surface.button]]
+note = 0x33
+action = "cue"
+deck = "A"
+
+[[surface.button]]
+note = 0x40
+action = "sync"
+deck = "A"
+
+[[surface.button]]
+note = 0x44
+action = "loop_in"
+deck = "A"
+
+[[surface.button]]
+note = 0x43
+action = "loop_out"
+deck = "A"
+
+[[surface.button]]
+note_off = 0x4B
+action = "load"
+deck = "A"
+
+[[surface.encoder]]
+cc = 0x19
+action = "jog"
+deck = "A"
+
+[[surface.fader]]
+cc = 0x0D
+action = "tempo"
+invert = true
+deck = "A"
+
+# ── Deck B (right) ───────────────────────────────────────────────────────────
+[[surface.button]]
+note = 0x42
+action = "play_pause"
+deck = "B"
+
+[[surface.button]]
+note = 0x3C
+action = "cue"
+deck = "B"
+
+[[surface.button]]
+note = 0x47
+action = "sync"
+deck = "B"
+
+[[surface.button]]
+note = 0x46
+action = "loop_in"
+deck = "B"
+
+[[surface.button]]
+note = 0x45
+action = "loop_out"
+deck = "B"
+
+[[surface.button]]
+note_off = 0x34
+action = "load"
+deck = "B"
+
+[[surface.encoder]]
+cc = 0x18
+action = "jog"
+deck = "B"
+
+[[surface.fader]]
+cc = 0x0E
+action = "tempo"
+invert = true
+deck = "B"
+
+# ── Shared ───────────────────────────────────────────────────────────────────
+[[surface.encoder]]
+cc = 0x1A
+action = "browse"
+
+[[surface.button]]
+note_off = 0x59
+action = "back"
+
+[[surface.button]]
+note_off = 0x5A
+action = "load"

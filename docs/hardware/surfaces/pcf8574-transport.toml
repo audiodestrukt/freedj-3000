@@ -1,0 +1,67 @@
+# One PCF8574 as a transport board: four buttons, a browse knob, two lamps.
+#
+#   pin 0  PLAY/PAUSE button        pin 4  browse encoder A
+#   pin 1  CUE button               pin 5  browse encoder B
+#   pin 2  SYNC button              pin 6  PLAY lamp  (steady playing, blinks paused — as the XDJ)
+#   pin 3  SHIFT button             pin 7  CUE lamp   (steady at the cue, blinks when CUE would set one)
+#
+# Buttons and the encoder go pin → GND (the chip's own pull-ups do the rest).
+# Lamps: 3V3 → 1 kΩ → LED anode, cathode → pin (the chip sinks it).
+# Hold SHIFT: PLAY/PAUSE becomes MASTER, SYNC becomes KEY LOCK, the knob zooms.
+#
+# Install as ~/.local/share/opendeck/controllers.toml (or --controllers PATH).
+
+[[surface]]
+name = "transport-board"
+
+[surface.i2c]
+bus = "/dev/i2c-1"
+address = 0x20         # A0–A2 all to GND (PCF8574A: 0x38)
+poll_hz = 1000         # the encoder wants this; 200 is plenty for buttons alone
+
+[[surface.button]]
+pin = 0
+action = "play_pause"
+
+[[surface.button]]
+pin = 0
+action = "master"
+shift = true
+
+[[surface.button]]
+pin = 1
+action = "cue"
+
+[[surface.button]]
+pin = 2
+action = "sync"
+
+[[surface.button]]
+pin = 2
+action = "key_lock"
+shift = true
+
+[[surface.button]]
+pin = 3
+action = "shift"
+
+[[surface.encoder]]
+pins = [4, 5]
+action = "browse"
+steps_per_detent = 4   # EC11-style: 4 transitions per click; try 2 if it double-steps
+
+[[surface.encoder]]
+pins = [4, 5]
+action = "zoom"
+step = 1
+shift = true
+
+[[surface.led]]
+pin = 6
+shows = "playing"
+blink_on = "paused"
+
+[[surface.led]]
+pin = 7
+shows = "cue"
+blink_on = "cue_settable"

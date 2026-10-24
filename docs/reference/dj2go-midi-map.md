@@ -47,4 +47,8 @@ split the controller:
 ./opendeck track2.mp3 --player 2 --deck B
 ```
 
+The mapping as OpenDeck reads it is the built-in preset
+`crates/app/surfaces/dj2go.toml`; copy it into your `controllers.toml` under
+the same name to change it (see `docs/hardware/control-surfaces.md`).
+
 Source: <https://github.com/mixxxdj/mixxx> `res/controllers/Numark DJ2Go.midi.xml`
