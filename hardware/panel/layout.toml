@@ -1,0 +1,261 @@
+# ADK-1000 panel — every physical control, in millimetres from the top-left
+# corner of the face (x to the right, y DOWN, as on a drawing).  gen.py turns
+# this into the tscircuit board (index.circuit.tsx); the printed faceplate CAD
+# reads the same file, so copper and plastic cannot disagree.
+#
+# PROVENANCE.  `status = "photo"` positions are the faceplate skin's fractions
+# (crates/app/src/screen.rs faceplate_layout, measured on a labelled grid over
+# the deck photo, 2026-08-27) scaled to the face size below.  They are good to
+# a few millimetres and must be verified with a caliper before fabrication.
+# `status = "measured"` means a caliper number from the real unit.
+# `status = "guess"` means the control exists on the XDJ but its position is
+# not measured yet; gen.py still places it so the board is complete, and the
+# silkscreen marks it "VERIFY".
+
+[face]
+width_mm  = 305.7      # XDJ-1000MK2 published width; verify
+height_mm = 387.5      # from the photo aspect (860 x 1090) at that width; the published depth is 378.8
+status    = "photo"
+# The board is the face minus a margin for the enclosure lip.
+board_margin_mm = 4.0
+
+[display]
+# The 7" 1024x600 panel; its active area and the cutout for the module.
+x = 76.4
+y = 29.1
+width = 148.3
+height = 83.3
+status = "photo"
+cutout_margin_mm = 1.0
+
+[hub]
+# RP2350-Zero module (castellated, USB-C on its short edge).  Sits at the rear
+# edge so the USB-C faces out the back of the enclosure.
+x = 230.0
+y = 12.0
+rotation = 90
+status = "guess"
+
+# ───────────────────────── buttons ─────────────────────────
+# kind = "button": a 6x6 tact switch at (x, y) with a printed cap of cap_mm,
+# and an LED next to it when `led` is set (colour as on the XDJ).
+# led_offset_mm: where the LED sits relative to the switch centre (default
+# 6 mm to the right).
+
+[[control]]
+name = "play"
+kind = "button"
+x = 21.4
+y = 343.7
+cap_mm = 35
+led = "green"
+status = "photo"
+
+[[control]]
+name = "cue"
+kind = "button"
+x = 23.5
+y = 298.8
+cap_mm = 35
+led = "orange"
+status = "photo"
+
+[[control]]
+name = "loop_in"
+kind = "button"
+x = 22.9
+y = 142.4
+cap_mm = [21, 17]
+led = "orange"
+status = "photo"
+
+[[control]]
+name = "loop_out"
+kind = "button"
+x = 47.4
+y = 142.4
+cap_mm = [18, 17]
+led = "orange"
+status = "photo"
+
+[[control]]
+name = "reloop"
+kind = "button"
+x = 78.0
+y = 143.4
+cap_mm = 15
+led = "orange"
+status = "photo"
+
+[[control]]
+name = "back"
+kind = "button"
+x = 250.4
+y = 42.6
+cap_mm = [13, 12]
+status = "photo"
+
+[[control]]
+name = "tag_track"
+kind = "button"
+x = 264.6
+y = 42.6
+cap_mm = [13, 12]
+status = "photo"
+
+[[control]]
+name = "jog_mode"      # VINYL
+kind = "button"
+x = 282.9
+y = 169.9
+cap_mm = [14, 9]
+led = "orange"
+status = "photo"
+
+[[control]]
+name = "master_tempo"
+kind = "button"
+x = 282.8
+y = 218.9
+cap_mm = 11
+led = "orange"
+status = "photo"
+
+# Known to exist on the XDJ-1000MK2 face but not measured yet.  Positions are
+# placeholders near where they sit on the unit; the silkscreen says VERIFY.
+[[control]]
+name = "sync"
+kind = "button"
+x = 110.0
+y = 143.0
+cap_mm = 15
+led = "orange"
+status = "guess"
+
+[[control]]
+name = "master"
+kind = "button"
+x = 135.0
+y = 143.0
+cap_mm = 15
+led = "red"
+status = "guess"
+
+[[control]]
+name = "tempo_range"
+kind = "button"
+x = 282.8
+y = 200.0
+cap_mm = 11
+status = "guess"
+
+[[control]]
+name = "track_search_back"
+kind = "button"
+x = 22.0
+y = 190.0
+cap_mm = [14, 9]
+status = "guess"
+
+[[control]]
+name = "track_search_fwd"
+kind = "button"
+x = 40.0
+y = 190.0
+cap_mm = [14, 9]
+status = "guess"
+
+[[control]]
+name = "search_back"
+kind = "button"
+x = 22.0
+y = 205.0
+cap_mm = [14, 9]
+status = "guess"
+
+[[control]]
+name = "search_fwd"
+kind = "button"
+x = 40.0
+y = 205.0
+cap_mm = [14, 9]
+status = "guess"
+
+[[control]]
+name = "time_mode"
+kind = "button"
+x = 60.0
+y = 50.0
+cap_mm = [13, 9]
+status = "guess"
+
+[[control]]
+name = "auto_cue"
+kind = "button"
+x = 60.0
+y = 65.0
+cap_mm = [13, 9]
+status = "guess"
+
+[[control]]
+name = "shortcut"
+kind = "button"
+x = 60.0
+y = 95.0
+cap_mm = [13, 9]
+status = "guess"
+
+[[control]]
+name = "usb_stop"
+kind = "button"
+x = 235.0
+y = 95.0
+cap_mm = [13, 9]
+led = "orange"
+status = "guess"
+
+# ───────────────────────── encoders, fader, jog ─────────────────────────
+
+[[control]]
+name = "browse"
+kind = "encoder"      # EC11 with push
+x = 258.3
+y = 79.4
+knob_mm = 40
+status = "photo"
+
+[[control]]
+name = "jog_touch"    # the top-plate switch: a tact switch under the top disc
+kind = "button"
+x = 152.9
+y = 230.0
+cap_mm = 0
+status = "photo"
+
+[[control]]
+name = "jog"
+kind = "jog"          # MT6701 under the platter shaft + bearing mount holes
+x = 152.9
+y = 250.0
+platter_mm = 206      # matches hardware/cad/jog_wheel.py OUTER_D — verify
+bearing_bolt_circle_mm = 30
+bearing_bolt_mm = 3.2
+status = "photo"
+
+[[control]]
+name = "fader"
+kind = "fader"        # 100 mm slide pot, slot cut in the board
+x = 279.0
+y = 301.3             # slot centre
+travel_mm = 100
+slot_mm = [3, 104]
+status = "photo"
+
+# Pi 5 mounting holes (58 x 49 mm pattern), behind the display, so the
+# computer bolts to the panel board.
+[pi]
+# Under the jog, bottom-left quadrant: the Pi bolts to the BACK of the panel
+# board; the platter clears the standoff heads on the front.
+x = 60.0
+y = 285.0
+status = "guess"

@@ -192,7 +192,7 @@ export default () => (
     {/* reset / boot */}
     <trace from="U1.RUN" to="R1.pin1" /><trace from="R1.pin2" to="net.V3V3" />
     <trace from="U1.RUN" to="C19.pin1" /><trace from="C19.pin2" to="net.GND" />
-    <trace from="U1.RUN" to="SW_RST.pin1" /><trace from="SW_RST.pin2" to="net.GND" />
+    <trace from="U1.RUN" to="SW_RST.pin1" /><trace from="SW_RST.pin2" to="U1.RUN" /><trace from="SW_RST.pin3" to="net.GND" /><trace from="SW_RST.pin4" to="net.GND" />
 
     {/* QSPI flash; BOOTSEL = hold CS low through 1k at power-up */}
     <trace from="U1.QSPI_SD1" to="U2.pin2" /><trace from="U1.QSPI_SD2" to="U2.pin3" />
@@ -201,8 +201,8 @@ export default () => (
     <trace from="U2.VCC" to="net.V3V3" /><trace from="U2.GND" to="net.GND" />
     <trace from="C11.pin1" to="net.V3V3" /><trace from="C11.pin2" to="net.GND" />
     <trace from="U2.CS" to="R2.pin1" /><trace from="R2.pin2" to="net.V3V3" />
-    <trace from="U2.CS" to="R9.pin1" /><trace from="R9.pin2" to="SW_BOOT.pin1" />
-    <trace from="SW_BOOT.pin2" to="net.GND" />
+    <trace from="U2.CS" to="R9.pin1" /><trace from="R9.pin2" to="SW_BOOT.pin1" /><trace from="SW_BOOT.pin2" to="R9.pin2" />
+    <trace from="SW_BOOT.pin3" to="net.GND" /><trace from="SW_BOOT.pin4" to="net.GND" />
 
     {/* I2C0 panel bus: GPIO0 SDA, GPIO1 SCL, GPIO2 INT */}
     <trace from="U1.GPIO0" to="net.SDA" /><trace from="U1.GPIO1" to="net.SCL" /><trace from="U1.GPIO2" to="net.PANEL_INT" />
