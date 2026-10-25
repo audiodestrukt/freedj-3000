@@ -13,6 +13,7 @@ pub mod chrome;
 mod cpumeter;
 mod grids;
 mod input;
+mod media;
 mod surface;
 mod prodj;
 mod renderer;
@@ -1813,6 +1814,7 @@ impl DeckApp {
             self.apply(ev);
         }
         self.poll_fetch();
+        self.browser.poll_media();   // USB inserted / removed → source rows
         // Jog nudge snap-back: once the wheel has been still past the window,
         // return to the pitch-fader speed.
         if let Some(until) = self.jog_until {

@@ -120,6 +120,33 @@ sysroot the reliable path.
   are visible; then RT priority on `audio-proc`. Run the audio group at higher
   priority (`ulimit -r`, a `@audio` limits.conf entry) as a stopgap.
 
+## USB sticks (rekordbox or plain)
+
+The browser lists every removable mount as a `USB: <label>` row at its top
+level, re-scanning once a second, so a stick inserted while the deck runs
+shows up without a restart. A stick carrying `PIONEER/rekordbox/export.pdb`
+is marked `rekordbox` and opens to a PLAYLIST / TRACK menu read from the
+export (grids and cues come from its ANLZ files); any other stick browses as
+folders. Pulling the stick drops the browser back to the root; the loaded
+track keeps playing, because LOAD decodes the whole file into memory. The USB
+source key jumps straight onto the stick when exactly one is mounted.
+
+What OpenDeck does **not** do is mount the stick. Scan roots are `/media`,
+`/media/$USER`, `/run/media/$USER` and `/mnt`, which is where udisks2 and the
+desktop automounters put things. On a headless Pi install one:
+
+```bash
+sudo apt install udisks2 udiskie
+# as the user that runs opendeck (a user service, or in the session startup):
+udiskie --no-notify --no-tray &
+```
+
+udiskie mounts a stick at `/media/<user>/<LABEL>` (or `/run/media/<user>/…`,
+depending on the udisks2 build) and unmounts it cleanly when pulled. A custom
+mount script can put sticks anywhere: point `OPENDECK_MEDIA_DIRS` (colon-
+separated) at the parent folder(s), and every subdirectory there is taken as
+a mount.
+
 ## First-run checklist
 
 1. `make run` — does a window open and the waveform scroll smoothly?

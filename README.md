@@ -176,6 +176,14 @@ MiniBPM); no other system libraries. Then `cargo build --release -p opendeck-app
 | in browser: `↑`/`↓` · `Enter` · `Backspace` | Move selection · open folder / **load track** · up a level |
 | `Q` / `Esc` | Quit (`Esc` closes the browser first) |
 
+**USB sticks.** Mounted removable media appear as `USB: <label>` rows at the
+top of the browser (re-scanned once a second, so hot-plug works). A rekordbox
+stick is detected by its `PIONEER/rekordbox/export.pdb` and browses as
+PLAYLIST / TRACK with rekordbox's grids and cues; anything else browses as
+folders. Pulling the stick is safe: the loaded track is already in memory.
+On a headless Pi something still has to mount the stick (udiskie), see
+`docs/reference/raspberry-pi.md`.
+
 ### Touch screen (mouse for now)
 
 egui treats mouse and touch as the same pointer, so the mouse stands in for

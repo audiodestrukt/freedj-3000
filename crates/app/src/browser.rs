@@ -17,6 +17,8 @@ use crate::prodj::LinkState;
 use opendeck_dbserver::{Client as DbClient, MenuItem, Slot};
 use opendeck_nfs::Nfs;
 use opendeck_rekordbox::{read_export, read_export_from, RbExport};
+use crate::media::{self, Mount};
+use std::time::{Duration, Instant};
 
 // What the decoder actually plays (symphonia: no Opus decoder exists).
 const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg"];
@@ -87,10 +89,15 @@ enum Loc {
     Fs(PathBuf),
     /// The LINK source: a list of discovered players.
     Link,
+    /// A rekordbox export's category menu (PLAYLIST / TRACK), what a player
+    /// shows first for a USB; a stick with no playlists still lists its tracks.
+    RbRoot,
     /// A folder in the current rekordbox library's playlist tree (0 = root).
     RbTree(u32),
     /// The tracks of a rekordbox playlist.
     RbPlaylist(u32),
+    /// Every track in the export (the TRACK category).
+    RbAllTracks,
     /// A dbserver source's category menu (PLAYLIST / ARTIST / ALBUM / TRACK /
     /// FILENAME …), the first thing a player shows for a linked source.
     DbRoot,
@@ -130,6 +137,9 @@ pub struct Browser {
     /// Open dbserver session to a peer: its address, the client, and the slot
     /// we browse (USB on a player, Collection on rekordbox).
     db:        Option<(Ipv4Addr, DbClient, Slot)>,
+    /// Removable media seen at the last scan (USB rows at the top level).
+    media:     Vec<Mount>,
+    media_at:  Option<Instant>,
     /// Name of the dbserver folder/playlist/artist/album being shown (set on
     /// descend), and the source's own label ("3 USB: OPENDECK") for the root.
     db_title:  String,
@@ -159,6 +169,8 @@ impl Browser {
             rb: None,
             rb_source: None,
             db: None,
+            media: media::mounts(),
+            media_at: Some(Instant::now()),
             db_title: String::new(),
             db_label: String::new(),
             link,
@@ -174,10 +186,12 @@ impl Browser {
         match self.stack.last() {
             Some(Loc::Fs(p)) => p.file_name().and_then(|n| n.to_str()).unwrap_or("/").to_string(),
             Some(Loc::Link)  => "LINK".to_string(),
-            Some(Loc::RbTree(0)) => match &self.rb_source {
+            Some(Loc::RbRoot) => match &self.rb_source {
                 Some(RbSource::Link(ip)) => format!("LINK  {ip}"),
                 _ => "REKORDBOX".to_string(),
             },
+            Some(Loc::RbTree(0)) => "PLAYLIST".to_string(),
+            Some(Loc::RbAllTracks) => "TRACK".to_string(),
             Some(Loc::RbTree(id)) | Some(Loc::RbPlaylist(id)) => self.rb.as_ref()
                 .and_then(|e| e.playlists.iter().find(|n| n.id == *id))
                 .map(|n| n.name.clone()).unwrap_or_else(|| "rekordbox".to_string()),
@@ -198,8 +212,10 @@ impl Browser {
         let entries = match self.stack.last().cloned() {
             Some(Loc::Fs(dir))        => self.fs_entries(&dir),
             Some(Loc::Link)           => self.link_entries(),
+            Some(Loc::RbRoot)         => self.rb_root_entries(),
             Some(Loc::RbTree(node))   => self.rb_tree_entries(node),
             Some(Loc::RbPlaylist(id)) => self.rb_playlist_entries(id),
+            Some(Loc::RbAllTracks)    => self.rb_track_entries(|e| e.tracks.iter().collect()),
             Some(Loc::DbRoot)         => self.db_root_entries(),
             Some(Loc::DbFolder(id))   => self.db_folder_entries(id),
             Some(Loc::DbPlaylist(id)) => self.db_track_entries(|c, s| c.playlist(s, id, false)),
@@ -226,18 +242,28 @@ impl Browser {
         if at_top {
             out.push(Entry { name: "LINK".into(), is_dir: true, artist: None, bpm: None,
                 kind: EntryKind::Descend(Loc::Link) });
-            if dir.join("PIONEER/rekordbox/export.pdb").is_file() {
-                let need = !matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir);
-                if self.rb.is_none() || need {
-                    match read_export(dir) {
-                        Ok(exp) => { self.rb = Some(Arc::new(exp)); self.rb_source = Some(RbSource::Local(dir.to_path_buf())); }
-                        Err(e)  => log::warn!("rekordbox export at {}: {e:#}", dir.display()),
-                    }
+            // Every removable mount is a source row, like the XDJ's USB slot:
+            // "USB: CDJ1" (the volume label), marked when it is a rekordbox stick.
+            for m in &self.media {
+                if m.path == *dir { continue; }   // already browsing it as the root
+                let name = if m.rekordbox { format!("USB: {}   rekordbox", m.label) } else { format!("USB: {}", m.label) };
+                out.push(Entry { name, is_dir: true, artist: None, bpm: None,
+                    kind: EntryKind::Descend(Loc::Fs(m.path.clone())) });
+            }
+        }
+        // A rekordbox export at this folder (the local root, or a stick entered
+        // from its USB row) adds the playlist tree as a "rekordbox" row.
+        if media::has_rekordbox(dir) {
+            let need = !matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir);
+            if self.rb.is_none() || need {
+                match read_export(dir) {
+                    Ok(exp) => { self.rb = Some(Arc::new(exp)); self.rb_source = Some(RbSource::Local(dir.to_path_buf())); }
+                    Err(e)  => log::warn!("rekordbox export at {}: {e:#}", dir.display()),
                 }
-                if matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir) {
-                    out.push(Entry { name: "rekordbox".into(), is_dir: true, artist: None, bpm: None,
-                        kind: EntryKind::Descend(Loc::RbTree(0)) });
-                }
+            }
+            if matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir) {
+                out.push(Entry { name: "rekordbox".into(), is_dir: true, artist: None, bpm: None,
+                    kind: EntryKind::Descend(Loc::RbRoot) });
             }
         }
 
@@ -387,10 +413,29 @@ impl Browser {
         }).collect()
     }
 
+    /// The export's category menu: PLAYLIST only when the stick has any, then
+    /// TRACK (everything, by title) so an unsorted stick is still browsable.
+    fn rb_root_entries(&self) -> Vec<Entry> {
+        let Some(exp) = self.rb.as_ref() else { return Vec::new() };
+        let mut out = Vec::new();
+        let cat = |name: &str, loc: Loc| Entry { name: name.into(), is_dir: true, artist: None, bpm: None, kind: EntryKind::Descend(loc) };
+        if !exp.playlists.is_empty() { out.push(cat("PLAYLIST", Loc::RbTree(0))); }
+        out.push(cat(&format!("TRACK   {}", exp.tracks.len()), Loc::RbAllTracks));
+        out
+    }
+
     fn rb_playlist_entries(&self, id: u32) -> Vec<Entry> {
+        self.rb_track_entries(|e| e.playlist_tracks(id))
+    }
+
+    fn rb_track_entries<'a>(&'a self, pick: impl FnOnce(&'a RbExport) -> Vec<&'a opendeck_rekordbox::RbTrack>) -> Vec<Entry> {
         let Some(exp) = self.rb.as_ref() else { return Vec::new() };
         let src = self.rb_source.clone();
-        exp.playlist_tracks(id).into_iter().filter_map(|t| {
+        let mut tracks = pick(exp);
+        if matches!(self.stack.last(), Some(Loc::RbAllTracks)) {
+            tracks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
+        }
+        tracks.into_iter().filter_map(|t| {
             let load = match &src {
                 Some(RbSource::Local(root)) => Load::Local { path: t.path_on(root), analyze: t.analyze_on(root) },
                 Some(RbSource::Link(ip))    => Load::Link { ip: *ip, rel_path: t.rel_path.clone(), analyze_rel: t.analyze_rel.clone() },
@@ -481,12 +526,51 @@ impl Browser {
         self.rebuild();
     }
 
-    /// The FILE source key: back to the local root folder.
+    /// The USB source key: onto the stick when exactly one is mounted (its
+    /// rekordbox tree is the first row), else back to the local root folder.
     pub fn go_root(&mut self) {
         self.stack.truncate(1);
+        if let [m] = self.media.as_slice() {
+            if !matches!(self.stack.first(), Some(Loc::Fs(r)) if *r == m.path) {
+                self.stack.push(Loc::Fs(m.path.clone()));
+            }
+        }
         self.selected = 0;
         self.rebuild();
     }
+
+    /// Re-scan removable media at most once a second.  A new stick shows up
+    /// as a USB row; a removed one drops out, and if we were browsing it the
+    /// browser falls back to the root.  Returns true when the list changed.
+    pub fn poll_media(&mut self) -> bool {
+        if self.media_at.is_some_and(|t| t.elapsed() < Duration::from_secs(1)) { return false; }
+        self.media_at = Some(Instant::now());
+        let now = media::mounts();
+        if now == self.media { return false; }
+        for gone in self.media.iter().filter(|m| !now.contains(m)) {
+            log::info!("media removed: {}", gone.path.display());
+            if self.stack.iter().any(|l| matches!(l, Loc::Fs(p) if p.starts_with(&gone.path)))
+                || self.stack.iter().any(|l| matches!(l, Loc::RbRoot | Loc::RbTree(_) | Loc::RbPlaylist(_) | Loc::RbAllTracks))
+                    && matches!(&self.rb_source, Some(RbSource::Local(r)) if r.starts_with(&gone.path))
+            {
+                self.stack.truncate(1);
+                self.selected = 0;
+            }
+            if matches!(&self.rb_source, Some(RbSource::Local(r)) if r.starts_with(&gone.path)) {
+                self.rb = None;
+                self.rb_source = None;
+            }
+        }
+        for new in now.iter().filter(|m| !self.media.contains(m)) {
+            log::info!("media inserted: {}{}", new.path.display(), if new.rekordbox { " (rekordbox)" } else { "" });
+        }
+        self.media = now;
+        if matches!(self.stack.last(), Some(Loc::Fs(_))) { self.rebuild(); }
+        true
+    }
+
+    #[cfg(test)]
+    fn force_media_rescan(&mut self) -> bool { self.media_at = None; self.poll_media() }
 
     /// Whether the browser is on the LINK side (the player list, or a linked
     /// player's library) — lights the LINK source key rather than FILE.
@@ -517,6 +601,57 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // A rekordbox stick appears as a USB row, its playlist tree opens from
+    // the "rekordbox" row, and pulling the stick drops the browser back to
+    // the root.  The "stick" is the rekordcrate demo export copied under a
+    // fake media root that OPENDECK_MEDIA_DIRS points at (process-wide env:
+    // this is the only test that sets it).
+    #[test]
+    fn usb_stick_is_detected_entered_and_survives_removal() {
+        let (root, stick) = crate::media::tests::fake_media_root("browser-usb");
+        std::env::set_var("OPENDECK_MEDIA_DIRS", root.path());
+        let link = crate::prodj::LinkState::new(1);
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-home");
+        let mut b = Browser::new(home.path(), link);
+
+        let usb = b.entries().iter().position(|e| e.name.starts_with("USB: CDJ1")).expect("USB row");
+        assert!(b.entries()[usb].name.contains("rekordbox"), "row marks the export: {}", b.entries()[usb].name);
+        assert!(b.entries().iter().all(|e| e.name != "rekordbox"), "no rekordbox row at the home folder");
+
+        b.selected = usb;
+        assert!(matches!(b.enter(), Enter::Folder));
+        assert_eq!(b.title(), "CDJ1");
+        let rb = b.entries().iter().position(|e| e.name == "rekordbox").expect("rekordbox row on the stick");
+        b.selected = rb;
+        assert!(matches!(b.enter(), Enter::Folder));
+        assert_eq!(b.title(), "REKORDBOX");
+        // The demo export has no playlists: the menu is just TRACK, which lists both tracks.
+        assert!(b.entries().iter().all(|e| e.name != "PLAYLIST"));
+        let tr = b.entries().iter().position(|e| e.name.starts_with("TRACK")).expect("TRACK category");
+        b.selected = tr;
+        assert!(matches!(b.enter(), Enter::Folder));
+        assert_eq!(b.title(), "TRACK");
+        let names: Vec<&str> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Demo Track 1", "Demo Track 2"]);
+        let load = b.entries()[0].load().expect("track row loads");
+        assert!(matches!(load, Load::Local { path, analyze: Some(a) }
+            if path.starts_with(&stick) && a.starts_with(&stick) && a.ends_with("ANLZ0000.DAT")),
+            "paths resolve on the stick with its ANLZ grid");
+
+        // The USB source key lands on the stick when it is the only one.
+        b.go_root();
+        assert!(matches!(b.stack.last(), Some(Loc::Fs(p)) if *p == stick));
+
+        // Pull the stick: the row vanishes and the browser is back at home.
+        std::fs::remove_dir_all(&stick).unwrap();
+        assert!(b.force_media_rescan(), "change noticed");
+        assert_eq!(b.stack.len(), 1);
+        assert!(b.entries().iter().all(|e| !e.name.starts_with("USB:")), "no USB row left");
+        assert!(b.rb.is_none(), "export dropped with the stick");
+        std::env::remove_var("OPENDECK_MEDIA_DIRS");
+    }
+
     // Gated on a serving peer: OPENDECK_TEST_LINK=127.0.0.1 (e.g. `opendeck-serve`
     // running locally) or an XDJ / rekordbox address.  Browses LINK → the peer →
     // ALL TRACKS → first track, then reads that track's audio the way the deck
