@@ -1,0 +1,15 @@
+# OpenDeck appliance: one instance per USB filesystem (opendeck-usb-mount@sda1).
+# Started by 99-opendeck-usb.rules; BindsTo the device so removal runs ExecStop.
+[Unit]
+Description=OpenDeck: mount USB media /dev/%I
+Documentation=https://github.com/audiodestrukt/freedj-3000/tree/main/deploy/pi/usb-automount
+BindsTo=dev-%i.device
+After=dev-%i.device
+DefaultDependencies=no
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=-/etc/default/opendeck-usb
+ExecStart=/usr/local/bin/opendeck-usb-mount add %i
+ExecStop=/usr/local/bin/opendeck-usb-mount remove %i

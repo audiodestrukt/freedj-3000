@@ -5,7 +5,8 @@
 //! track keeps playing: it was fully decoded into memory at LOAD, as on a CDJ).
 //!
 //! Scan roots:
-//! - Linux: `/media`, `/media/$USER`, `/run/media/$USER` (udisks2 / desktop
+//! - Linux: `/media/usb` (the appliance automount, deploy/pi/usb-automount),
+//!   `/media`, `/media/$USER`, `/run/media/$USER` (udisks2 / desktop
 //!   automounters), `/mnt`.  A child counts only when it is a mount point
 //!   (its device id differs from the root's), so stray folders are ignored.
 //! - macOS: `/Volumes`, same mount-point rule (the boot volume is skipped).
@@ -39,6 +40,7 @@ pub fn mounts() -> Vec<Mount> {
     #[cfg(target_os = "linux")]
     {
         roots.push((PathBuf::from("/media"), false));
+        roots.push((PathBuf::from("/media/usb"), false));   // deploy/pi/usb-automount
         if let Ok(user) = std::env::var("USER") {
             roots.push((PathBuf::from("/media").join(&user), false));
             roots.push((PathBuf::from("/run/media").join(&user), false));

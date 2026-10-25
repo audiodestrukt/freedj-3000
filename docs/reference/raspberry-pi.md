@@ -131,21 +131,22 @@ folders. Pulling the stick drops the browser back to the root; the loaded
 track keeps playing, because LOAD decodes the whole file into memory. The USB
 source key jumps straight onto the stick when exactly one is mounted.
 
-What OpenDeck does **not** do is mount the stick. Scan roots are `/media`,
-`/media/$USER`, `/run/media/$USER` and `/mnt`, which is where udisks2 and the
-desktop automounters put things. On a headless Pi install one:
+What OpenDeck does **not** do is mount the stick. On an appliance install
+(Raspberry Pi OS Lite, no desktop) use the shipped automount: a udev rule plus
+a systemd template unit that mounts each USB filesystem at `/media/usb/<LABEL>`
+on insert, read-only, and unmounts it when pulled:
 
 ```bash
-sudo apt install udisks2 udiskie
-# as the user that runs opendeck (a user service, or in the session startup):
-udiskie --no-notify --no-tray &
+sudo deploy/pi/usb-automount/install.sh
+journalctl -t opendeck-usb -f
 ```
 
-udiskie mounts a stick at `/media/<user>/<LABEL>` (or `/run/media/<user>/…`,
-depending on the udisks2 build) and unmounts it cleanly when pulled. A custom
-mount script can put sticks anywhere: point `OPENDECK_MEDIA_DIRS` (colon-
-separated) at the parent folder(s), and every subdirectory there is taken as
-a mount.
+Details and the read-only / filesystem notes: `deploy/pi/usb-automount/README.md`.
+Scan roots are `/media/usb`, `/media`, `/media/$USER`, `/run/media/$USER` and
+`/mnt`, so a desktop image's own automounter (udisks2 under `/media/<user>`)
+works too without installing anything; do not run both. A custom mount script
+can put sticks anywhere: point `OPENDECK_MEDIA_DIRS` (colon-separated) at the
+parent folder(s), and every subdirectory there is taken as a mount.
 
 ## First-run checklist
 

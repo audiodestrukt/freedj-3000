@@ -181,8 +181,9 @@ top of the browser (re-scanned once a second, so hot-plug works). A rekordbox
 stick is detected by its `PIONEER/rekordbox/export.pdb` and browses as
 PLAYLIST / TRACK with rekordbox's grids and cues; anything else browses as
 folders. Pulling the stick is safe: the loaded track is already in memory.
-On a headless Pi something still has to mount the stick (udiskie), see
-`docs/reference/raspberry-pi.md`.
+On a headless Pi install the appliance automount once
+(`sudo deploy/pi/usb-automount/install.sh`, udev + systemd, read-only mounts
+under `/media/usb`), see `docs/reference/raspberry-pi.md`.
 
 ### Touch screen (mouse for now)
 

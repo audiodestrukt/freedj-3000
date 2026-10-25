@@ -1,0 +1,7 @@
+# OpenDeck appliance: mount USB storage the moment it is plugged in, with no
+# desktop session.  Each filesystem on a USB-attached block device pulls in
+# opendeck-usb-mount@<dev>.service; that unit is bound to the device, so
+# systemd stops it (ExecStop = unmount) when the stick is pulled.
+#
+# Only ID_BUS=usb: the Pi's own SD card (mmcblk*) and NVMe are never touched.
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", ENV{ID_FS_USAGE}=="filesystem", TAG+="systemd", ENV{SYSTEMD_WANTS}+="opendeck-usb-mount@%k.service"

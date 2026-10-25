@@ -1,0 +1,71 @@
+#!/bin/sh
+# opendeck-usb-mount add|remove <kernel device name, e.g. sda1>
+#
+# Mounts a USB filesystem at $OPENDECK_MEDIA_ROOT/<LABEL> (label sanitised to
+# [A-Za-z0-9._-], falling back to the device name; "-<dev>" appended on a
+# clash), read-only unless OPENDECK_USB_RW=1, world-readable, noexec/nosuid/
+# nodev.  `remove` unmounts whatever is mounted from that device, lazily, so it
+# works after the stick is already gone.  Driven by opendeck-usb-mount@.service.
+set -eu
+
+ACTION=${1:?add|remove}
+NAME=${2:?device name}
+DEV="/dev/$NAME"
+ROOT=${OPENDECK_MEDIA_ROOT:-/media/usb}
+RW=${OPENDECK_USB_RW:-0}
+DRY=${OPENDECK_USB_DRYRUN:-0}
+
+log() { if [ "$DRY" = 1 ]; then echo "$*"; else logger -t opendeck-usb "$*"; fi; }
+run() { if [ "$DRY" = 1 ]; then echo "+ $*"; else "$@"; fi; }
+
+# Filesystem-safe directory name from a volume label.
+sanitise() { printf '%s' "$1" | tr -c 'A-Za-z0-9._-' '_' | sed 's/^_*//; s/_*$//' | cut -c1-64; }
+
+case "$ACTION" in
+add)
+    LABEL=''; TYPE=''
+    if [ "$DRY" = 1 ]; then
+        LABEL=${OPENDECK_USB_LABEL-}; TYPE=${OPENDECK_USB_TYPE-vfat}
+    else
+        LABEL=$(blkid -o value -s LABEL "$DEV" 2>/dev/null || true)
+        TYPE=$(blkid -o value -s TYPE "$DEV" 2>/dev/null || true)
+    fi
+    if [ -z "$TYPE" ]; then log "$DEV: no filesystem type, not mounting"; exit 0; fi
+    if [ "$DRY" != 1 ] && findmnt -rn -S "$DEV" >/dev/null 2>&1; then
+        log "$DEV already mounted at $(findmnt -rn -S "$DEV" -o TARGET | head -1), leaving it"; exit 0
+    fi
+    dir=$(sanitise "${LABEL:-$NAME}"); [ -n "$dir" ] || dir=$NAME
+    mp="$ROOT/$dir"
+    if [ "$DRY" != 1 ] && mountpoint -q "$mp"; then mp="$ROOT/$dir-$NAME"; fi
+
+    if [ "$RW" = 1 ]; then opts="rw"; else opts="ro"; fi
+    opts="$opts,nosuid,nodev,noexec"
+    case "$TYPE" in
+        vfat)        opts="$opts,umask=022,utf8=1,shortname=mixed" ;;
+        exfat)       opts="$opts,umask=022" ;;   # kernel exfat (5.7+); exfat-fuse also accepts umask
+        ntfs|ntfs3)  opts="$opts,umask=022"; TYPE=ntfs3 ;;
+        hfsplus)     opts="$opts,umask=022" ;;   # rekordbox for Mac sticks; needs the hfsplus module
+        *)           ;;                           # ext4 etc.: permissions as on the stick
+    esac
+
+    run mkdir -p "$mp"
+    if run mount -t "$TYPE" -o "$opts" "$DEV" "$mp"; then
+        log "mounted $DEV ($TYPE, label '${LABEL:-}') at $mp ($opts)"
+    else
+        log "mount of $DEV ($TYPE) at $mp FAILED"
+        rmdir "$mp" 2>/dev/null || true
+        exit 1
+    fi
+    ;;
+remove)
+    # The device node may already be gone; /proc/self/mounts still names it.
+    for mp in $(awk -v d="$DEV" '$1 == d { print $2 }' /proc/self/mounts); do
+        mp=$(printf '%b' "$mp")          # undo \040 escapes
+        run umount -l "$mp" || true
+        run rmdir "$mp" 2>/dev/null || true
+        log "unmounted $DEV from $mp"
+    done
+    ;;
+*)
+    echo "usage: $0 add|remove <dev>" >&2; exit 2 ;;
+esac

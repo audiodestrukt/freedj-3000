@@ -1,0 +1,9 @@
+# /etc/default/opendeck-usb — settings for opendeck-usb-mount (appliance automount).
+
+# Where sticks appear: $OPENDECK_MEDIA_ROOT/<LABEL>.  OpenDeck scans /media/usb.
+OPENDECK_MEDIA_ROOT=/media/usb
+
+# Sticks mount READ-ONLY by default: a DJ pulls the stick whenever they like
+# and a read-only mount can never leave a dirty FAT behind.  OpenDeck writes
+# nothing to a stick today.  Set to 1 to mount read-write.
+OPENDECK_USB_RW=0
