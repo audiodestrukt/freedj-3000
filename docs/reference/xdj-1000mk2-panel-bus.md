@@ -82,6 +82,31 @@ panel-CPU input, exactly as on the CDJ-3000.
 Power the PNLB needs from an interposer: **V+3R3**, **V+5R2** (LEDs), and for
 the jog VFD **V+12FL** and V+5R2FL (through CN8004 to JFLB).
 
+## Connectors and cables (from the overall wiring diagram + parts list)
+
+| Link | Cable | Board-side connectors |
+|---|---|---|
+| LCDB ↔ PNLB, both links | **2× DDD1787**: 20-way FFC, **1.0 mm pitch**, 40 mm long, *reverse face* (contacts on opposite sides at the two ends) | LCDB CN2601/CN2602 = DKN1663-A, **vertical**; PNLB **CN8001/CN8002 = VKN1280-A, horizontal** |
+| PNLB ↔ JFLB (jog + VFD) | **DDD1681**: 16-way FFC, 1.0 mm pitch, 80 mm, *same face* | PNLB CN8004 = VKN1276-A horizontal; JFLB CN9202 = VKN1247-A vertical |
+| MAIN ↔ LCDB | DDD1675, 60-way FFC (reverse face) | MAIN CN1103 / LCDB CN2001 = CKS6543 |
+| PNLB ↔ KSWB (PLAY/CUE) | 7-way pre-made jumper harness D20PDY0720E, 200 mm | Molex 52147-0710 (CN8501) / 51048-0700 holder (JH8004); confirm pitch with calipers, Molex 52147 family |
+| PNLB ↔ SLDB (fader) | 4-way jumper D20PDD0410E, 100 mm | Molex 51048-0400 both ends |
+| JFLB ↔ JOGB (jog sensor) | 4-way jumper D20PYY0405E, 50 mm | Molex 52151-0410 (CN9301) / 51048-0400 (JH9201) |
+
+So the panel link is **generic 1.0 mm-pitch 20-way FFC**, nothing proprietary:
+the VKN/DKN numbers are Pioneer's own numbers for ordinary 1.0 mm ZIF sockets.
+
+**Interposer / sniffer.** Replace one DDD1787 with a longer 20-way 1.0 mm FFC
+(100–150 mm) through a 1.0 mm 20-pin FFC breakout (two ZIF sockets in series
+with a 0.1" header: an off-the-shelf part), and the logic analyser clips on
+the header. With the stock main board unplugged, the same breakout is where
+the Pi connects, so one board serves both steps. For our own board: two
+20-way 1.0 mm **dual-contact** ZIF sockets (contacts top and bottom, so cable
+face does not matter) for CN8001/CN8002, plus a 16-way 1.0 mm socket if the
+jog VFD link is taken over. Buy both *same-face* and *reverse-face* 20-way
+cables: which one mates CN8001's horizontal socket depends on which side its
+contacts are on, and the schematic does not say.
+
 ## Route A: speak to the panel CPU (recommended)
 
 Unplug the two FFCs between LCDB and PNLB and plug in an interposer board
