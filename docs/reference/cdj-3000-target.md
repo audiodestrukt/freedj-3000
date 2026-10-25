@@ -192,10 +192,12 @@ Checked 2026-10-23 from public data only. Pioneer's GPL/LGPL source page
 lists every Linux-based player (CDJ-3000, 3000X, 1500X, XDJ-RX/RX2/RX3,
 XDJ-XZ, XDJ-RR, XDJ-AZ, XDJ-AN, DJS-1000, TORAIZ SP-16, XDJ-AERO) and does
 not list the XDJ-1000MK2, the XDJ-1000 or the CDJ-2000NXS2. The
-XDJ-1000MK2 parts list (RRV4661, main assembly) names the silicon: IC301
-`D810K013DZKB456`, a TI DaVinci DM814x-class SoC by its device marking (a
-single Cortex-A8 with a C674x DSP and a PowerVR SGX530; confirm against the
-service manual's block diagram), two Winbond W971GG6SB DDR2 parts (256 MB),
+XDJ-1000MK2 parts list (RRV4661, main assembly) names the silicon. Corrected
+2026-10-25 from the service schematic (see `xdj-1000mk2-panel-bus.md`): the
+**main CPU is a Renesas SH7724** (`R8A77240D500BG2`, one SH-4A core, 500 MHz,
+no GPU); IC301 `D810K013DZKB456` is the **TI DSP coprocessor** next to it
+(C674x-class: McASP audio, SPI/HPI boot, held in reset and booted by the
+SH7724, so not an application processor), two Winbond W971GG6SB DDR2 parts (256 MB),
 two ESMT M12L2561616A SDR parts, an AK4452 DAC, and a 25 MHz crystal for
 the Ethernet PHY.
 
