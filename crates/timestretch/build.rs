@@ -112,6 +112,7 @@ fn build_bungee() {
     c.file(root.join("pffft/pffft.c"))
         .file(root.join("pffft/fftpack.c"))
         .include(root.join("pffft"))
+        .define("_USE_MATH_DEFINES", None) // M_PI under MSVC's <math.h>
         .opt_level(3)
         .warnings(false)
         .flag_if_supported("-ffast-math")

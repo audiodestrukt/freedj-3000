@@ -383,7 +383,7 @@ impl AudioHandle {
             .context("failed to build output stream")?;
 
         stream.play().context("failed to start audio stream")?;
-        log::info!("audio playback started (R3 timestretch pipeline)");
+        log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
 
         Ok(Self {
             samples,
