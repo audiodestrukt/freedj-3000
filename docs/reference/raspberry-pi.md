@@ -159,6 +159,13 @@ parent folder(s), and every subdirectory there is taken as a mount.
    still works; freedj follows the master's tempo. (Leave Link **send** off —
    it is the default and the sender is still being hardened.)
 
+## Smaller boards
+
+The Pi Zero 2 W is out: its VideoCore IV stops at OpenGL ES 2.0 and wgpu
+refuses it, RAM is tight, and only the Bungee stretcher would fit its CPU.
+Measurements and the estimate: `pi-zero-2-feasibility.md`. Pi 4 with a
+cooler is the floor.
+
 ## What not to expect yet
 
 - No RP2350 control surface — the DJ2Go / keyboard / mouse are the inputs.
