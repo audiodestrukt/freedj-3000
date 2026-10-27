@@ -88,10 +88,21 @@ the jog VFD **V+12FL** and V+5R2FL (through CN8004 to JFLB).
 |---|---|---|
 | LCDB ↔ PNLB, both links | **2× DDD1787**: 20-way FFC, **1.0 mm pitch**, 40 mm long, *reverse face* (contacts on opposite sides at the two ends) | LCDB CN2601/CN2602 = DKN1663-A, **vertical**; PNLB **CN8001/CN8002 = VKN1280-A, horizontal** |
 | PNLB ↔ JFLB (jog + VFD) | **DDD1681**: 16-way FFC, 1.0 mm pitch, 80 mm, *same face* | PNLB CN8004 = VKN1276-A horizontal; JFLB CN9202 = VKN1247-A vertical |
-| MAIN ↔ LCDB | DDD1675, 60-way FFC (reverse face) | MAIN CN1103 / LCDB CN2001 = CKS6543 |
+| MAIN ↔ LCDB | DDD1675, **60-way FFC, 0.5 mm pitch**, 140 mm, reverse face. **This is the cable you unplug to split the top half from the bottom half**: it carries the LCD's parallel RGB bus (R/G/B data, DCLK, backlight) *and* the panel link (pins 36–45, below). Not a tap point: 0.5 mm 60-way breakouts are rare and extending the pixel bus is asking for display trouble | MAIN CN1103 / LCDB CN2001 = CKS6543 |
 | PNLB ↔ KSWB (PLAY/CUE) | 7-way pre-made jumper harness D20PDY0720E, 200 mm | Molex 52147-0710 (CN8501) / 51048-0700 holder (JH8004); confirm pitch with calipers, Molex 52147 family |
 | PNLB ↔ SLDB (fader) | 4-way jumper D20PDD0410E, 100 mm | Molex 51048-0400 both ends |
 | JFLB ↔ JOGB (jog sensor) | 4-way jumper D20PYY0405E, 50 mm | Molex 52151-0410 (CN9301) / 51048-0400 (JH9201) |
+
+Panel-link pins on the 60-way (MAIN CN1103 = LCDB CN2001), for reference
+only: 36 PWR_SW, 37 EUP_CONT, 38 PNL_RST, 39 GND, 40 PNL_RXD, 41 PNL_TXD,
+42 PNL_BUSY, 43 PNL_CNVSS, 44 GND, 45 PNL_SCK. The signals then pass through
+the LCDB unchanged to CN2602 and the 20-way DDD1787 into PNLB CN8002.
+
+**Where the 20-way cables are.** Both DDD1787s live *inside the top
+assembly*: 40 mm jumpers between the LCD board (behind the LCD) and the
+panel board (behind the faceplate). Splitting the halves only exposes the
+60-way; reach the 20-ways from the underside of the top half, where the LCDB
+sits over the PNLB (there may be a shield plate over them).
 
 So the panel link is **generic 1.0 mm-pitch 20-way FFC**, nothing proprietary:
 the VKN/DKN numbers are Pioneer's own numbers for ordinary 1.0 mm ZIF sockets.
