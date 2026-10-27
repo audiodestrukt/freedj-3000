@@ -28,8 +28,26 @@ So: build **one engine** with a varispeed path, and these fall out of it.
 ## What exists today
 
 - `crates/timestretch/`: `TimestretechStage` (Rubber Band R3, constant pitch,
-  the real engine) and a stubbed `ResampleStage` (varispeed — `process()` is a
-  passthrough with `TODO: run rubato`).
+  the real engine), `BungeeStage` (the same push contract over Bungee, selected
+  with `OPENDECK_STRETCH=bungee`; see below) and a stubbed `ResampleStage`
+  (varispeed — `process()` is a passthrough with `TODO: run rubato`).
+
+### Bungee as the varispeed-era engine (added 2026-10-27)
+
+[Bungee](https://github.com/kupix/bungee) (MPL-2.0, vendored in
+`third_party/bungee`) is a granular/pull stretcher: the caller names the
+**input position, speed and pitch of every grain** (~100 grains/s), and
+**zero and negative speeds are native**. That is exactly the read model this
+engine wants — brake, reverse and scratch are just positions handed to the
+stretcher — and it costs about a sixth of R3 (`make perf` prints both).
+Today's `BungeeStage` is a push adapter (`crates/timestretch/csrc/bungee_shim.cpp`)
+that keeps a short input history and runs grains half a window behind the
+newest input, so it plugs into the forward-only pipeline unchanged. When the
+engine below is built, the natural step is to drive Bungee's granular API
+from the heard-position clock directly (no history buffer, no adapter) and
+let it do varispeed too (pitch = speed, with `resampleMode`), with Rubber
+Band kept for the master-tempo-on steady case if it still wins the listening
+test (`cargo run --example stretch_ab`).
 - `crates/app/src/audio.rs`: the processor thread reads the source at `proc_pos`,
   feeds `BLOCK_FRAMES` to the stretcher at `speed`, pushes to the `rtrb` ring;
   the cpal callback drains the ring. `key_lock` never reaches the DSP.

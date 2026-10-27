@@ -5,11 +5,116 @@
 //!
 //! - `TimestretechStage`:  speed change with constant pitch (key-lock).
 //!                         Wraps Rubber Band Library R3 engine via C FFI.
+//! - `BungeeStage`:        the same contract over Bungee (feature `bungee`,
+//!                         on by default): an adaptive phase vocoder that is
+//!                         much cheaper than R3.  `Stretcher::from_env` picks
+//!                         one at runtime from `OPENDECK_STRETCH`.
 
 mod rubberband_sys;
+#[cfg(feature = "bungee")]
+mod bungee_sys;
 
 use opendeck_types::PipelineStage;
 use rubberband_sys as rb;
+
+// ── Engine selection ──────────────────────────────────────────────────────────
+
+/// Which key-lock engine the deck runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Engine {
+    /// Rubber Band R3 ("Finer"): the reference quality, ~0.7 of a Pi 4 core.
+    RubberBand,
+    /// Bungee Basic: adaptive phase vocoder, a fraction of R3's cost.
+    Bungee,
+}
+
+impl Engine {
+    /// `OPENDECK_STRETCH=rubberband|rb|r3` or `bungee`; default Rubber Band.
+    /// Unknown values and a build without the `bungee` feature fall back to
+    /// Rubber Band with a warning.
+    pub fn from_env() -> Engine {
+        match std::env::var("OPENDECK_STRETCH").ok().as_deref().map(|v| v.trim().to_ascii_lowercase()) {
+            None => Engine::RubberBand,
+            Some(v) => match v.as_str() {
+                "rubberband" | "rb" | "r3" | "" => Engine::RubberBand,
+                "bungee" => {
+                    if cfg!(feature = "bungee") {
+                        Engine::Bungee
+                    } else {
+                        log::warn!("OPENDECK_STRETCH=bungee but this build has no bungee feature; using Rubber Band");
+                        Engine::RubberBand
+                    }
+                }
+                other => {
+                    log::warn!("OPENDECK_STRETCH={other:?} unknown (rubberband|bungee); using Rubber Band");
+                    Engine::RubberBand
+                }
+            },
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self { Engine::RubberBand => "Rubber Band R3", Engine::Bungee => "Bungee" }
+    }
+}
+
+/// A key-lock stage of either engine.
+pub enum Stretcher {
+    RubberBand(TimestretechStage),
+    #[cfg(feature = "bungee")]
+    Bungee(BungeeStage),
+}
+
+impl Stretcher {
+    pub fn new(engine: Engine, sample_rate: u32, channels: u8) -> Self {
+        match engine {
+            Engine::RubberBand => Stretcher::RubberBand(TimestretechStage::new(sample_rate, channels)),
+            #[cfg(feature = "bungee")]
+            Engine::Bungee => Stretcher::Bungee(BungeeStage::new(sample_rate, channels)),
+            #[cfg(not(feature = "bungee"))]
+            Engine::Bungee => Stretcher::RubberBand(TimestretechStage::new(sample_rate, channels)),
+        }
+    }
+
+    /// The engine named by `OPENDECK_STRETCH` (see `Engine::from_env`).
+    pub fn from_env(sample_rate: u32, channels: u8) -> Self {
+        let engine = Engine::from_env();
+        log::info!("key-lock engine: {}", engine.name());
+        Self::new(engine, sample_rate, channels)
+    }
+
+    pub fn engine(&self) -> Engine {
+        match self {
+            Stretcher::RubberBand(_) => Engine::RubberBand,
+            #[cfg(feature = "bungee")]
+            Stretcher::Bungee(_) => Engine::Bungee,
+        }
+    }
+
+    fn inner(&mut self) -> &mut dyn PipelineStage {
+        match self {
+            Stretcher::RubberBand(s) => s,
+            #[cfg(feature = "bungee")]
+            Stretcher::Bungee(s) => s,
+        }
+    }
+
+    fn inner_ref(&self) -> &dyn PipelineStage {
+        match self {
+            Stretcher::RubberBand(s) => s,
+            #[cfg(feature = "bungee")]
+            Stretcher::Bungee(s) => s,
+        }
+    }
+}
+
+impl PipelineStage for Stretcher {
+    fn process(&mut self, input: &[f32], output: &mut Vec<f32>) { self.inner().process(input, output) }
+    fn set_speed(&mut self, speed: f32) { self.inner().set_speed(speed) }
+    fn set_pitch_semitones(&mut self, semitones: f32) { self.inner().set_pitch_semitones(semitones) }
+    fn latency_frames(&self) -> usize { self.inner_ref().latency_frames() }
+    fn reset(&mut self) { self.inner().reset() }
+}
 
 // ── ResampleStage (no key-lock) ───────────────────────────────────────────────
 
@@ -226,6 +331,136 @@ impl PipelineStage for TimestretechStage {
     }
 }
 
+// ── BungeeStage (key-lock via Bungee Basic) ───────────────────────────────────
+
+/// Key-lock through Bungee's granular API behind a push adapter
+/// (`csrc/bungee_shim.cpp`).  Same contract as `TimestretechStage`: feed
+/// interleaved frames, collect whatever comes out; `latency_frames()` of
+/// input must go in after a reset before anything comes out, and the deck
+/// pre-rolls through that exactly as it does for Rubber Band.
+#[cfg(feature = "bungee")]
+pub struct BungeeStage {
+    handle:          BungeeHandle,
+    channels:        usize,
+    speed:           f32,
+    pitch_semitones: f32,
+    pitch_scale:     f64,
+    in_bufs:         Vec<Vec<f32>>,
+    in_ptrs:         Vec<*const f32>,
+    out_bufs:        Vec<Vec<f32>>,
+    out_ptrs:        Vec<*mut f32>,
+}
+
+#[cfg(feature = "bungee")]
+struct BungeeHandle(*mut std::os::raw::c_void);
+
+// SAFETY: as for RbHandle — one owner, all access through `&mut self`.
+#[cfg(feature = "bungee")]
+unsafe impl Send for BungeeHandle {}
+#[cfg(feature = "bungee")]
+unsafe impl Send for BungeeStage {}
+
+#[cfg(feature = "bungee")]
+impl Drop for BungeeHandle {
+    fn drop(&mut self) { unsafe { bungee_sys::od_bungee_destroy(self.0) } }
+}
+
+#[cfg(feature = "bungee")]
+impl BungeeStage {
+    /// Slowest speed the output buffers are sized for without reallocating
+    /// (the deck's tempo range is ±100% at most, i.e. 0.5×; vinyl-mode
+    /// crawl goes lower, and then the buffer simply grows once).
+    const MIN_SPEED_PREALLOC: f32 = 0.25;
+
+    pub fn new(sample_rate: u32, channels: u8) -> Self {
+        let ch = channels as usize;
+        let p = unsafe { bungee_sys::od_bungee_create(sample_rate as i32, ch as i32, BLOCK_FRAMES as i32) };
+        assert!(!p.is_null(), "od_bungee_create returned null");
+        let version = unsafe { std::ffi::CStr::from_ptr(bungee_sys::od_bungee_version()) }.to_string_lossy().into_owned();
+        let out_cap = (BLOCK_FRAMES as f32 / Self::MIN_SPEED_PREALLOC).ceil() as usize + 1;
+        let in_bufs:  Vec<Vec<f32>> = vec![vec![0.0f32; BLOCK_FRAMES]; ch];
+        let out_bufs: Vec<Vec<f32>> = vec![vec![0.0f32; out_cap]; ch];
+        let in_ptrs  = in_bufs.iter().map(|v| v.as_ptr()).collect();
+        let out_ptrs = out_bufs.iter().map(|v| v.as_ptr() as *mut f32).collect();
+        let stage = Self {
+            handle: BungeeHandle(p), channels: ch, speed: 1.0, pitch_semitones: 0.0, pitch_scale: 1.0,
+            in_bufs, in_ptrs, out_bufs, out_ptrs,
+        };
+        log::info!("Bungee {version} initialised — latency: {} frames", stage.latency_frames());
+        stage
+    }
+
+    fn push_block(&mut self, frames: &[f32], output: &mut Vec<f32>) {
+        let n = frames.len() / self.channels;
+        debug_assert!(n <= BLOCK_FRAMES);
+        if n == 0 { return; }
+        for ch in 0..self.channels {
+            for i in 0..n {
+                self.in_bufs[ch][i] = frames[i * self.channels + ch];
+            }
+            self.in_ptrs[ch] = self.in_bufs[ch].as_ptr();
+        }
+        // Steady state yields n / speed frames; the first push after a reset
+        // can carry up to half a block more (the owed fraction), so leave room.
+        let need = (n as f64 / self.speed as f64).ceil() as usize + 2;
+        for ch in 0..self.channels {
+            if self.out_bufs[ch].len() < need { self.out_bufs[ch].resize(need, 0.0); }
+            self.out_ptrs[ch] = self.out_bufs[ch].as_mut_ptr();
+        }
+        let got = unsafe {
+            bungee_sys::od_bungee_process(
+                self.handle.0,
+                self.in_ptrs.as_ptr(),
+                self.out_ptrs.as_ptr(),
+                n as i32,
+                self.speed as f64,
+                self.pitch_scale,
+                need as i32,
+            )
+        }.max(0) as usize;
+        let prev_len = output.len();
+        output.resize(prev_len + got * self.channels, 0.0);
+        for i in 0..got {
+            for ch in 0..self.channels {
+                output[prev_len + i * self.channels + ch] = self.out_bufs[ch][i];
+            }
+        }
+    }
+}
+
+#[cfg(feature = "bungee")]
+impl PipelineStage for BungeeStage {
+    fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        let stride = BLOCK_FRAMES * self.channels;
+        let mut offset = 0;
+        while offset < input.len() {
+            let end = (offset + stride).min(input.len());
+            self.push_block(&input[offset..end], output);
+            offset = end;
+        }
+    }
+
+    fn set_speed(&mut self, speed: f32) {
+        // Stream is forward-only; clamp away from zero so `in / speed` stays finite.
+        self.speed = speed.max(1e-3);
+    }
+
+    fn set_pitch_semitones(&mut self, semitones: f32) {
+        if (semitones - self.pitch_semitones).abs() > 1e-4 {
+            self.pitch_semitones = semitones;
+            self.pitch_scale = 2f64.powf(semitones as f64 / 12.0);
+        }
+    }
+
+    fn latency_frames(&self) -> usize {
+        unsafe { bungee_sys::od_bungee_latency(self.handle.0) }.max(0.0).round() as usize
+    }
+
+    fn reset(&mut self) {
+        unsafe { bungee_sys::od_bungee_reset(self.handle.0) }
+    }
+}
+
 // ── Performance regression guard ──────────────────────────────────────────────
 #[cfg(test)]
 mod perf {
@@ -260,7 +495,7 @@ mod perf {
     }
 
     /// Process `input` through the stage in BLOCK-frame chunks; return wall time.
-    fn run(stage: &mut TimestretechStage, input: &[f32]) -> std::time::Duration {
+    fn run(stage: &mut dyn PipelineStage, input: &[f32]) -> std::time::Duration {
         let mut scratch = Vec::with_capacity(BLOCK * CH * 8);
         let t0 = Instant::now();
         for chunk in input.chunks(BLOCK * CH) {
@@ -354,6 +589,77 @@ mod perf {
                 "timestretch not real-time @ {speed:.2}x: RTF {rtf:.3} ≥ {rc:.2} \
                  — either an un-optimised build or hardware slower than the Pi 5 target",
             );
+        }
+    }
+
+    /// Bungee's cost next to R3's, same signal, same chunking.  Printed by
+    /// `make perf`; asserted only against the real-time floor (it is the
+    /// cheap engine, so the ceilings are the R3 ones).
+    #[cfg(feature = "bungee")]
+    #[test]
+    fn bungee_realtime_factor() {
+        let secs = 8.0f32;
+        let audio = signal(secs);
+        calibrate();
+        let calib = calibrate().as_secs_f64();
+        for (speed, rtf_ceil) in [(1.0f32, 0.80f64), (0.5, 1.10), (2.0, 0.60)] {
+            let mut stage = BungeeStage::new(SR, CH as u8);
+            stage.set_speed(speed);
+            run(&mut stage, &signal(1.0));
+            let elapsed = run(&mut stage, &audio).as_secs_f64();
+            let rtf = elapsed / secs as f64;
+            println!(
+                "bungee @ {:.2}x  norm(bungee/fft) = {:.3}   RTF = {:.4} (ceil {:.2})   bungee {:.0}ms calib {:.0}ms",
+                speed, elapsed / calib, rtf, rtf_ceil, elapsed * 1000.0, calib * 1000.0,
+            );
+            assert!(rtf < rtf_ceil, "bungee not real-time @ {speed:.2}x: RTF {rtf:.3}");
+        }
+    }
+
+    /// Bungee renders `in / speed` frames per push and real audio, not silence.
+    #[cfg(feature = "bungee")]
+    #[test]
+    fn bungee_frame_accounting_and_signal() {
+        for speed in [0.5f32, 0.92, 1.0, 1.08, 2.0] {
+            let mut stage = BungeeStage::new(SR, CH as u8);
+            stage.set_speed(speed);
+            let input = signal(2.0);
+            let mut out = Vec::new();
+            for chunk in input.chunks(BLOCK * CH) {
+                stage.process(chunk, &mut out);
+            }
+            let in_frames = input.len() / CH;
+            let out_frames = out.len() / CH;
+            let latency = stage.latency_frames();
+            let expect = (in_frames - latency) as f32 / speed;
+            assert!(
+                (out_frames as f32 - expect).abs() < 0.01 * expect + 2.0,
+                "@{speed}x: {out_frames} frames out, expected ~{expect} (latency {latency})",
+            );
+            // Skip the lead-in (the stretcher starts from muted history), then
+            // the output must carry energy comparable to the input.
+            let tail = &out[out.len() / 2..];
+            let rms = (tail.iter().map(|x| x * x).sum::<f32>() / tail.len() as f32).sqrt();
+            let in_rms = (input.iter().map(|x| x * x).sum::<f32>() / input.len() as f32).sqrt();
+            assert!(rms > 0.3 * in_rms, "@{speed}x: output rms {rms} vs input {in_rms}");
+            let peak = tail.iter().fold(0f32, |m, x| m.max(x.abs()));
+            assert!(peak < 2.0, "@{speed}x: peak {peak}, output blew up");
+            // After a reset nothing comes out until the latency is covered —
+            // then the first frames are the seek point at full level, not a
+            // fade-in (a CUE press must hit the transient).
+            stage.reset();
+            let latency = stage.latency_frames();
+            let mut after = Vec::new();
+            stage.process(&input[..BLOCK * CH], &mut after);
+            assert!(after.is_empty(), "@{speed}x: output right after reset");
+            let mut fed = BLOCK;
+            while fed < latency + 4 * BLOCK {
+                stage.process(&input[fed * CH..(fed + BLOCK) * CH], &mut after);
+                fed += BLOCK;
+            }
+            let head = &after[..256 * CH];
+            let head_rms = (head.iter().map(|x| x * x).sum::<f32>() / head.len() as f32).sqrt();
+            assert!(head_rms > 0.5 * in_rms, "@{speed}x: weak start after reset, rms {head_rms} vs input {in_rms}");
         }
     }
 }

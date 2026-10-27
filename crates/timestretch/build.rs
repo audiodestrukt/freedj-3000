@@ -23,6 +23,9 @@
 use std::path::PathBuf;
 
 fn main() {
+    if std::env::var_os("CARGO_FEATURE_BUNGEE").is_some() {
+        build_bungee();
+    }
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
     let apple = matches!(target_os.as_str(), "ios" | "macos" | "tvos" | "watchos" | "visionos");
 
@@ -88,4 +91,57 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=Accelerate");
     }
     // cc emits the C++ standard library link flag itself (-lc++ / -lstdc++).
+}
+
+/// Bungee (third_party/bungee, MPL-2.0): pffft as C, Bungee's sources plus
+/// our C shim as C++20, into one static library `opendeck_bungee`.  Always
+/// vendored: no distro ships it and it is small (~0.3 s to compile).
+fn build_bungee() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../third_party/bungee");
+    #[cfg(windows)]
+    let root = {
+        let s = root.canonicalize().unwrap().to_string_lossy().to_string();
+        PathBuf::from(s.strip_prefix(r"\\?\").unwrap_or(&s).to_string())
+    };
+    assert!(root.join("bungee/Bungee.h").exists(), "third_party/bungee missing — see third_party/bungee/VENDORED.md");
+    let shim = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("csrc/bungee_shim.cpp");
+    println!("cargo:rerun-if-changed={}", root.display());
+    println!("cargo:rerun-if-changed={}", shim.display());
+
+    let mut c = cc::Build::new();
+    c.file(root.join("pffft/pffft.c"))
+        .file(root.join("pffft/fftpack.c"))
+        .include(root.join("pffft"))
+        .opt_level(3)
+        .warnings(false)
+        .flag_if_supported("-ffast-math")
+        .flag_if_supported("-fno-finite-math-only")
+        .flag_if_supported("-fno-exceptions");
+    c.compile("opendeck_pffft");
+
+    let mut cpp = cc::Build::new();
+    cpp.cpp(true)
+        .std("c++20")
+        .include(&root)
+        .include(root.join("eigen"))
+        .include(root.join("pffft"))
+        .define("BUNGEE_SELF_TEST", "0")
+        .define("eigen_assert", "BUNGEE_ASSERT1")
+        .define("EIGEN_DONT_PARALLELIZE", "1")
+        .define("BUNGEE_VERSION", "\"vendored\"")
+        .opt_level(3)
+        .warnings(false)
+        .flag_if_supported("-fwrapv")
+        .file(&shim);
+    for ent in std::fs::read_dir(root.join("src")).expect("third_party/bungee/src") {
+        let path = ent.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) == Some("cpp") {
+            cpp.file(path);
+        }
+    }
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        cpp.define("NOMINMAX", None);
+        cpp.define("WIN32_LEAN_AND_MEAN", None);
+    }
+    cpp.compile("opendeck_bungee");
 }

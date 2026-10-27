@@ -9,6 +9,12 @@ license.workspace = true
 pkg-config = "0.3"
 cc         = "1"     # compiles third_party/rubberband when there's no system lib
 
+[features]
+default = ["bungee"]
+# Build the vendored Bungee stretcher as a second key-lock engine
+# (OPENDECK_STRETCH=bungee).  Off: Rubber Band only.
+bungee  = []
+
 [dependencies]
 opendeck-types = { workspace = true }
 rubato         = { workspace = true }

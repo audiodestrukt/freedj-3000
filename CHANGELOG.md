@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Bungee as a second key-lock engine.** `OPENDECK_STRETCH=bungee` runs
+  master tempo through Bungee (vendored, MPL-2.0) instead of Rubber Band R3:
+  an adaptive phase vocoder at about a sixth of R3's CPU cost, with native
+  reverse and zero-speed support for the coming varispeed engine. Rubber
+  Band stays the default. `cargo run --example stretch_ab` renders a track
+  through both for a blind listening test; `make perf` prints both engines'
+  real-time factors.
 - **Control surfaces from a file.** `controllers.toml` describes every
   controller attached to the deck — USB MIDI controllers and PCF8574 I2C
   button boards on a Raspberry Pi, any number of each — with buttons,

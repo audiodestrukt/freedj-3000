@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use opendeck_decode::{SymphoniaDecoder, TrackTags};
-use opendeck_timestretch::TimestretechStage;
+use opendeck_timestretch::Stretcher;
 use opendeck_types::{Decoder, PipelineStage};
 use std::{
     path::Path,
@@ -523,7 +523,7 @@ fn processor_loop(
     mut producer: rtrb::Producer<f32>,
     stats:      Arc<AudioStats>,
 ) {
-    let mut stretcher = TimestretechStage::new(sample_rate, file_ch as u8);
+    let mut stretcher = Stretcher::from_env(sample_rate, file_ch as u8);
 
     // ── Pre-roll: push silence to warm up the RubberBand engine ──────────────
     // The R3 engine needs latency_frames of input before it produces output.

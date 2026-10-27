@@ -217,6 +217,19 @@ Deck B controls drive the second beat grid (for ProDJ Link sync comparison):
 
 The full DJ2Go mapping is `docs/reference/dj2go-midi-map.md` (from Mixxx, hardware-confirmed): Play, Cue, Sync (drives real Link SYNC), Loop In/Out, pitch fader, jog, plus the shared browse knob and Load. `--deck A` (default) or `--deck B` selects which side of the controller drives this instance — two freedj instances split one DJ2Go. To map a different controller, run with `RUST_LOG=opendeck::midi=debug`; every message is logged.
 
+### Key-lock engine
+
+Master tempo runs through Rubber Band R3 by default: the best-sounding
+open-source stretcher, and the single biggest CPU cost on a Pi 4 (about 0.7
+of a core). `OPENDECK_STRETCH=bungee` switches to [Bungee](https://github.com/kupix/bungee)
+(vendored, MPL-2.0), an adaptive phase vocoder at roughly a sixth of the
+cost. Compare them on your own tracks, master tempo on, blind:
+
+```bash
+cargo run --release -p opendeck-app --example stretch_ab -- track.mp3 /tmp/ab 0.92,1.08
+make perf        # both engines' real-time factors on this machine
+```
+
 ### ProDJ Link
 
 FreeDJ-3000 is a Link peer: it announces itself on UDP 50000 every 1.5 s and
