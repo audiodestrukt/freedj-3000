@@ -30,3 +30,6 @@ project.xcworkspace/
 hardware/cad/build/
 # Blender auto-save backups
 *.blend1
+
+# Logic-analyser captures of our own hardware (large; decide later what to keep)
+/captures/
