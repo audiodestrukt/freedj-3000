@@ -7,10 +7,15 @@
 //!                         Wraps Rubber Band Library R3 engine via C FFI.
 //! - `BungeeStage`:        the same contract over Bungee (feature `bungee`,
 //!                         on by default): an adaptive phase vocoder that is
-//!                         much cheaper than R3.  `Stretcher::from_env` picks
+//!                         much cheaper than R3.
+//! - `WsolaStage`:         time-domain WSOLA (`wsola.rs`), pure Rust, a few
+//!                         percent of a core: for boards that cannot afford
+//!                         either of the above.  `Stretcher::from_env` picks
 //!                         one at runtime from `OPENDECK_STRETCH`.
 
 mod rubberband_sys;
+mod wsola;
+pub use wsola::WsolaStage;
 #[cfg(feature = "bungee")]
 mod bungee_sys;
 
@@ -26,10 +31,12 @@ pub enum Engine {
     RubberBand,
     /// Bungee Basic: adaptive phase vocoder, a fraction of R3's cost.
     Bungee,
+    /// WSOLA: time-domain, the SoundTouch family; cheapest, lowest quality.
+    Wsola,
 }
 
 impl Engine {
-    /// `OPENDECK_STRETCH=rubberband|rb|r3` or `bungee`; default Rubber Band.
+    /// `OPENDECK_STRETCH=rubberband|rb|r3`, `bungee` or `wsola`; default Rubber Band.
     /// Unknown values and a build without the `bungee` feature fall back to
     /// Rubber Band with a warning.
     pub fn from_env() -> Engine {
@@ -45,8 +52,9 @@ impl Engine {
                         Engine::RubberBand
                     }
                 }
+                "wsola" | "soundtouch" => Engine::Wsola,
                 other => {
-                    log::warn!("OPENDECK_STRETCH={other:?} unknown (rubberband|bungee); using Rubber Band");
+                    log::warn!("OPENDECK_STRETCH={other:?} unknown (rubberband|bungee|wsola); using Rubber Band");
                     Engine::RubberBand
                 }
             },
@@ -54,7 +62,7 @@ impl Engine {
     }
 
     pub fn name(self) -> &'static str {
-        match self { Engine::RubberBand => "Rubber Band R3", Engine::Bungee => "Bungee" }
+        match self { Engine::RubberBand => "Rubber Band R3", Engine::Bungee => "Bungee", Engine::Wsola => "WSOLA" }
     }
 }
 
@@ -63,6 +71,7 @@ pub enum Stretcher {
     RubberBand(TimestretechStage),
     #[cfg(feature = "bungee")]
     Bungee(BungeeStage),
+    Wsola(WsolaStage),
 }
 
 impl Stretcher {
@@ -73,6 +82,7 @@ impl Stretcher {
             Engine::Bungee => Stretcher::Bungee(BungeeStage::new(sample_rate, channels)),
             #[cfg(not(feature = "bungee"))]
             Engine::Bungee => Stretcher::RubberBand(TimestretechStage::new(sample_rate, channels)),
+            Engine::Wsola => Stretcher::Wsola(WsolaStage::new(sample_rate, channels)),
         }
     }
 
@@ -88,6 +98,7 @@ impl Stretcher {
             Stretcher::RubberBand(_) => Engine::RubberBand,
             #[cfg(feature = "bungee")]
             Stretcher::Bungee(_) => Engine::Bungee,
+            Stretcher::Wsola(_) => Engine::Wsola,
         }
     }
 
@@ -96,6 +107,7 @@ impl Stretcher {
             Stretcher::RubberBand(s) => s,
             #[cfg(feature = "bungee")]
             Stretcher::Bungee(s) => s,
+            Stretcher::Wsola(s) => s,
         }
     }
 
@@ -104,6 +116,7 @@ impl Stretcher {
             Stretcher::RubberBand(s) => s,
             #[cfg(feature = "bungee")]
             Stretcher::Bungee(s) => s,
+            Stretcher::Wsola(s) => s,
         }
     }
 }
@@ -616,12 +629,52 @@ mod perf {
         }
     }
 
+    /// WSOLA: the cheap engine.  Printed alongside the others under
+    /// `make perf`; asserted against a tight real-time floor since being
+    /// cheap is its whole point.
+    #[test]
+    fn wsola_realtime_factor() {
+        let secs = 8.0f32;
+        let audio = signal(secs);
+        calibrate();
+        let calib = calibrate().as_secs_f64();
+        for (speed, rtf_ceil) in [(1.0f32, 0.10f64), (0.5, 0.15), (2.0, 0.10), (0.92, 0.15)] {
+            let mut stage = WsolaStage::new(SR, CH as u8);
+            stage.set_speed(speed);
+            run(&mut stage, &signal(1.0));
+            let elapsed = run(&mut stage, &audio).as_secs_f64();
+            let rtf = elapsed / secs as f64;
+            println!(
+                "wsola @ {:.2}x  norm(wsola/fft) = {:.3}   RTF = {:.4} (ceil {:.2})   wsola {:.1}ms calib {:.0}ms",
+                speed, elapsed / calib, rtf, rtf_ceil, elapsed * 1000.0, calib * 1000.0,
+            );
+            assert!(rtf < rtf_ceil, "wsola not cheap @ {speed:.2}x: RTF {rtf:.3}");
+        }
+    }
+
+    /// WSOLA keeps the same frame contract as the other engines.
+    #[test]
+    fn wsola_frame_accounting_and_signal() {
+        for speed in [0.5f32, 0.92, 1.0, 1.08, 2.0] {
+            let mut stage = WsolaStage::new(SR, CH as u8);
+            frame_accounting_and_signal(&mut stage, speed);
+        }
+    }
+
     /// Bungee renders `in / speed` frames per push and real audio, not silence.
     #[cfg(feature = "bungee")]
     #[test]
     fn bungee_frame_accounting_and_signal() {
         for speed in [0.5f32, 0.92, 1.0, 1.08, 2.0] {
             let mut stage = BungeeStage::new(SR, CH as u8);
+            frame_accounting_and_signal(&mut stage, speed);
+        }
+    }
+
+    /// `in / speed` frames per push, real audio, and after a reset nothing
+    /// until the latency is covered — then full level from the seek point.
+    fn frame_accounting_and_signal(stage: &mut dyn PipelineStage, speed: f32) {
+        {
             stage.set_speed(speed);
             let input = signal(2.0);
             let mut out = Vec::new();

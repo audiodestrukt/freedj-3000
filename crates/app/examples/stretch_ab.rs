@@ -1,4 +1,4 @@
-//! Offline A/B of the key-lock engines: render a track through Rubber Band
+//! Offline A/B of the key-lock engines: render a track through Rubber Band,
 //! R3 and Bungee at a set of speeds, master tempo on, to WAV files for a
 //! blind listening test.
 //!
@@ -36,7 +36,7 @@ fn main() {
     println!("{}: {:.1}s at {}Hz {}ch", track.display(), secs, sr, ch);
 
     const BLOCK: usize = 512;
-    for engine in [Engine::RubberBand, Engine::Bungee] {
+    for engine in [Engine::RubberBand, Engine::Bungee, Engine::Wsola] {
         for &speed in &speeds {
             let mut stage = Stretcher::new(engine, sr, ch as u8);
             stage.set_speed(speed);
@@ -50,7 +50,7 @@ fn main() {
                 stage.process(chunk, &mut rendered);
             }
             let dt = t0.elapsed().as_secs_f64();
-            let name = format!("{stem}-{}-{speed:.2}.wav", match engine { Engine::RubberBand => "r3", Engine::Bungee => "bungee" });
+            let name = format!("{stem}-{}-{speed:.2}.wav", match engine { Engine::RubberBand => "r3", Engine::Bungee => "bungee", Engine::Wsola => "wsola" });
             write_wav(&out.join(&name), &rendered, sr, ch);
             println!(
                 "  {name:40} {:7.1}s audio  render {dt:6.2}s  RTF {:.3}  latency {latency} frames ({:.0} ms)",

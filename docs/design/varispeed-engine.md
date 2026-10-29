@@ -161,3 +161,18 @@ not reproduced on desktop), so changes here are high-risk:
 - **Brake feel** — `brake_env` shape (linear vs exponential): a real turntable
   decays roughly exponentially. Start linear, make the curve a constant if it
   sounds wrong.
+
+### WSOLA as the low-power engine (added 2026-10-29)
+
+`crates/timestretch/src/wsola.rs` (`OPENDECK_STRETCH=wsola`) is the third
+engine: SoundTouch-style WSOLA — 40 ms sequence, 15 ms seek, 8 ms overlap,
+correlation search on a mono downmix (coarse step 4, then fine), linear
+crossfade — with pitch as a Hermite resample after the stretch.  Desktop
+cost normalised against the FFT calibration: 0.07 at 0.92× (Bungee 0.40,
+R3 2.5), 0.004 at 1.0× (a copy).  With Master Tempo off the deck sets
+pitch = speed, the stretch ratio is 1, the search is skipped and the stage
+is the varispeed read this document asks for — so the resample path exists
+now, inside this engine; lifting it out as the `ResampleStage` for every
+engine is the remaining step.  Output is metered to `pushed / speed` after
+`latency_frames()` (seek + sequence, 55 ms) so the position accounting is
+the same as the other two.

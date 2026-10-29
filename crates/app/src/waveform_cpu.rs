@@ -1,3 +1,4 @@
+#![cfg_attr(not(feature = "renderer-sdl"), allow(dead_code))]
 //! CPU port of the waveform shader (`renderer::WAVEFORM_WGSL`), for render
 //! backends without a GPU the shader can run on.  Same `WaveformParams`, same
 //! packed columns, same per-pixel decisions in the same order, so the SDL

@@ -92,6 +92,7 @@ pub trait Renderer {
     /// Waveform columns visible across the enlarged waveform (zoom).
     fn set_cols_visible(&mut self, cols: f32);
     /// The surface size in pixels, as the backend last configured it.
+    #[allow(dead_code)]   // the SDL loop's resize path; unused without the feature
     fn surface_size(&self) -> (u32, u32);
 }
 

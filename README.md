@@ -223,11 +223,15 @@ Master tempo runs through Rubber Band R3 by default: the best-sounding
 open-source stretcher, and the single biggest CPU cost on a Pi 4 (about 0.7
 of a core). `OPENDECK_STRETCH=bungee` switches to [Bungee](https://github.com/kupix/bungee)
 (vendored, MPL-2.0), an adaptive phase vocoder at roughly a sixth of the
-cost. Compare them on your own tracks, master tempo on, blind:
+cost. `OPENDECK_STRETCH=wsola` is the engine for boards that cannot afford
+either: a time-domain WSOLA (the SoundTouch family old Mixxx used), pure
+Rust, a sixth of Bungee again, with that family's sound at large ratios.
+With master tempo off it is a plain varispeed read. Compare them on your
+own tracks, master tempo on, blind:
 
 ```bash
 cargo run --release -p opendeck-app --example stretch_ab -- track.mp3 /tmp/ab 0.92,1.08
-make perf        # both engines' real-time factors on this machine
+make perf        # all three engines' real-time factors on this machine
 ```
 
 ### Render backend
