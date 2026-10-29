@@ -162,17 +162,21 @@ enum Column {
     Field { bar: Option<Bar>, bg: Rgba, tick: Option<(bool, f32)> },   // tick: (is_down, len px)
 }
 
-/// Rasterise `kind`'s rect into `out` (RGBA8, `rect.w * 4` bytes per row).
-pub fn draw(lut: &Lut, p: &WaveformParams, cols: &[u32], kind: Kind, rect: PxRect, out: &mut Vec<u8>) {
+/// Rasterise `kind`'s rect into `out`: one RGBA8 pixel per u32 (R in the
+/// low byte, i.e. the byte order SDL's ABGR8888 wants), `rect.w` per row.
+pub fn draw(lut: &Lut, p: &WaveformParams, cols: &[u32], kind: Kind, rect: PxRect, out: &mut Vec<u32>) {
     let (w, h) = (rect.w as usize, rect.h as usize);
     out.clear();
-    out.resize(w * h * 4, 0);
+    out.resize(w * h, 0);
     let pal = Palette::new(lut);
     match kind {
         Kind::Wave     => draw_wave(lut, &pal, p, cols, rect, out),
         Kind::Overview => draw_overview(lut, &pal, p, cols, rect, out),
     }
 }
+
+#[inline(always)]
+fn pack(c: Rgba) -> u32 { u32::from_ne_bytes(c) }
 
 /// The parameters the overview depends on, so a backend can skip the raster
 /// when nothing it shows has moved (the playhead crosses a pixel every few
@@ -205,12 +209,8 @@ fn in_loop(p: &WaveformParams, col: f32) -> bool {
     p.loop_end_col > p.loop_start_col && col >= p.loop_start_col && col < p.loop_end_col
 }
 
-#[inline(always)]
-fn fill_col(out: &mut [u8], w: usize, x: usize, rows: std::ops::Range<usize>, c: Rgba) {
-    for y in rows { let i = (y * w + x) * 4; out[i..i + 4].copy_from_slice(&c); }
-}
 
-fn draw_wave(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxRect, out: &mut [u8]) {
+fn draw_wave(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxRect, out: &mut [u32]) {
     let r = p.wave_rect;
     let (w, h) = (rect.w as usize, rect.h as usize);
     let strip = p.beat2_period_cols > 0.0;
@@ -219,24 +219,14 @@ fn draw_wave(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxR
     let cue_per_px = p.cols_visible / r[2];
     let cols_per_px = p.cols_visible / r[2];
     let num_cols = p.num_cols as i64;
-    // Row geometry is the same for every column: distance from the centre
-    // line and the "edge" test for beat ticks, by row.
-    let dist_of_row: Vec<f32> = (0..h).map(|y| {
-        let qy = rect.y as f32 + y as f32 + 0.5;
-        ((qy - r[1]) / wave_h - 0.5).abs() * 2.0
-    }).collect();
-    let y_of_row: Vec<f32> = (0..h).map(|y| rect.y as f32 + y as f32 + 0.5 - r[1]).collect();
 
-    for x in 0..w {
+    // ── Columns first: everything that does not depend on the row ──────────
+    let columns: Vec<Column> = (0..w).map(|x| {
         let qx = rect.x as f32 + x as f32 + 0.5;
         let sx = (qx - r[0]) / r[2];
-        // Playhead line at the horizontal centre — red, full height.
-        if (qx - (r[0] + r[2] * 0.5)).abs() < 1.5 && !strip {
-            fill_col(out, w, x, 0..h, pal.playhead);
-            continue;
-        }
         let col_f = (p.playhead_col - half) + sx * p.cols_visible;
-        let column = if (qx - (r[0] + r[2] * 0.5)).abs() < 1.5 {
+        // Playhead line at the horizontal centre — red, full height.
+        if (qx - (r[0] + r[2] * 0.5)).abs() < 1.5 {
             Column::Solid(pal.playhead)
         } else if (col_f - p.cue_col).abs() < cue_per_px {
             Column::Solid(pal.cue)
@@ -265,54 +255,49 @@ fn draw_wave(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxR
                 } else { None };
                 Column::Field { bar: Some(Bar::new(c, p)), bg, tick }
             }
-        };
-        // External-deck beat strip along the bottom edge (disabled today —
-        // beat2_period_cols is 0 — but kept in step with the shader, where it
-        // is tested before everything else in the column).
-        let strip_px = |qy: f32| -> Option<Rgba> {
-            if !(strip && qy > r[1] + r[3] - B2_STRIP_PX) { return None; }
+        }
+    }).collect();
+
+    // ── Then rows, writing each row sequentially (one cache line per 8 px,
+    //    not one per pixel as a column walk would cost) ──────────────────────
+    for y in 0..h {
+        let qy   = rect.y as f32 + y as f32 + 0.5;
+        let yy   = qy - r[1];
+        let dist = (yy / wave_h - 0.5).abs() * 2.0;
+        let row  = &mut out[y * w..(y + 1) * w];
+        if strip && qy > r[1] + r[3] - B2_STRIP_PX {
+            // External-deck beat strip along the bottom edge (disabled today —
+            // beat2_period_cols is 0 — but kept in step with the shader, where
+            // it is tested before everything else in the column).
             let pixels_per_beat = p.beat2_period_cols * r[2] / p.cols_visible;
             let phase_px = p.beat2_phase_beats * pixels_per_beat;
-            let beat_x = (((qx - r[0]) + phase_px) % pixels_per_beat + pixels_per_beat) % pixels_per_beat;
-            Some(if beat_x < 3.0 || beat_x > pixels_per_beat - 3.0 { pal.cyan } else { pal.strip_bg })
-        };
-        match column {
-            Column::Solid(c) => {
-                if !strip { fill_col(out, w, x, 0..h, c); continue; }
-                for y in 0..h {
-                    let qy = rect.y as f32 + y as f32 + 0.5;
-                    let i = (y * w + x) * 4;
-                    out[i..i + 4].copy_from_slice(&strip_px(qy).unwrap_or(c));
-                }
+            for (x, px) in row.iter_mut().enumerate() {
+                let qx = rect.x as f32 + x as f32 + 0.5;
+                let beat_x = (((qx - r[0]) + phase_px) % pixels_per_beat + pixels_per_beat) % pixels_per_beat;
+                *px = pack(if beat_x < 3.0 || beat_x > pixels_per_beat - 3.0 { pal.cyan } else { pal.strip_bg });
             }
-            Column::Field { bar, bg, tick } => {
-                let tick_px = |yy: f32| -> Option<Rgba> {
-                    match tick {
-                        Some((is_down, len)) if yy < len || yy > wave_h - len => Some(if is_down { pal.down_hi } else { pal.tick_hi }),
-                        _ => None,
-                    }
-                };
-                for y in 0..h {
-                    let i = (y * w + x) * 4;
-                    let px: Rgba = match strip_px(rect.y as f32 + y as f32 + 0.5) {
-                        Some(c) => c,
-                        None => match bar.as_ref().and_then(|b| b.at(l, pal, dist_of_row[y])) {
-                            Some(c) => c,
-                            None => tick_px(y_of_row[y]).unwrap_or(bg),
-                        },
-                    };
-                    out[i..i + 4].copy_from_slice(&px);
-                }
-            }
+            continue;
+        }
+        for (px, column) in row.iter_mut().zip(&columns) {
+            *px = pack(match column {
+                Column::Solid(c) => *c,
+                Column::Field { bar, bg, tick } => match bar.as_ref().and_then(|b| b.at(l, pal, dist)) {
+                    Some(c) => c,
+                    None => match tick {
+                        Some((is_down, len)) if yy < *len || yy > wave_h - *len => if *is_down { pal.down_hi } else { pal.tick_hi },
+                        _ => *bg,
+                    },
+                },
+            });
         }
     }
 }
 
-fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxRect, out: &mut [u8]) {
+fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxRect, out: &mut [u32]) {
     let r = p.over_rect;
     let (w, h) = (rect.w as usize, rect.h as usize);
     if p.num_cols <= 0.0 || cols.is_empty() {
-        for x in 0..w { fill_col(out, w, x, 0..h, pal.ground); }
+        out.fill(pack(pal.ground));
         return;
     }
     let num_cols = p.num_cols as usize;
@@ -321,24 +306,22 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
     let cols_per_px = p.num_cols / r[2];
     let n = ((cols_per_px as u32) + 1).min(64) as usize;
     let dim = p.dim_played > 0.5;
-    let dist_of_row: Vec<f32> = (0..h).map(|y| {
-        let qy = rect.y as f32 + y as f32 + 0.5;
-        ((qy - r[1]) / r[3] - 0.5).abs() * 2.0
-    }).collect();
 
-    for x in 0..w {
+    // Per column: a solid marker, or (bar, field, played) for the rows.
+    enum Over { Solid(Rgba), Body { bar: Bar, field: Rgba, played: bool } }
+    let columns: Vec<Over> = (0..w).map(|x| {
         let qx = rect.x as f32 + x as f32 + 0.5;
         let sx = (qx - r[0]) / r[2];
-        if (qx - ph_x).abs() < 1.0 { fill_col(out, w, x, 0..h, pal.white); continue; }
-        if (qx - cue_x).abs() < 1.5 { fill_col(out, w, x, 0..h, pal.cue); continue; }
+        if (qx - ph_x).abs() < 1.0 { return Over::Solid(pal.white); }
+        if (qx - cue_x).abs() < 1.5 { return Over::Solid(pal.cue); }
         if p.loop_end_col > p.loop_start_col {
             let ls_x = r[0] + p.loop_start_col / p.num_cols * r[2];
             let le_x = r[0] + p.loop_end_col   / p.num_cols * r[2];
-            if (qx - ls_x).abs() < 1.5 || (qx - le_x).abs() < 1.5 { fill_col(out, w, x, 0..h, pal.loop_line); continue; }
+            if (qx - ls_x).abs() < 1.5 || (qx - le_x).abs() < 1.5 { return Over::Solid(pal.loop_line); }
         }
         if p.slip_col >= 0.0 {
             let sl_x = r[0] + p.slip_col / p.num_cols * r[2];
-            if (qx - sl_x).abs() < 1.5 { fill_col(out, w, x, 0..h, pal.slip); continue; }
+            if (qx - sl_x).abs() < 1.5 { return Over::Solid(pal.slip); }
         }
         let col_here = sx * p.num_cols;
         let field = if in_loop(p, col_here) { pal.loop_bg } else { pal.ground };
@@ -350,16 +333,22 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
             let u = unpack(cols[idx]);
             for k in 0..4 { c[k] = c[k].max(u[k]); }
         }
-        let bar = Bar::new(c, p);
-        let played = qx < ph_x && dim;
-        for y in 0..h {
-            let px = match bar.at(l, pal, dist_of_row[y]) {
-                Some(c) if played => dim_bar(c),
-                Some(c) => c,
-                None => field,
-            };
-            let i = (y * w + x) * 4;
-            out[i..i + 4].copy_from_slice(&px);
+        Over::Body { bar: Bar::new(c, p), field, played: qx < ph_x && dim }
+    }).collect();
+
+    for y in 0..h {
+        let qy = rect.y as f32 + y as f32 + 0.5;
+        let dist = ((qy - r[1]) / r[3] - 0.5).abs() * 2.0;
+        let row = &mut out[y * w..(y + 1) * w];
+        for (px, column) in row.iter_mut().zip(&columns) {
+            *px = pack(match column {
+                Over::Solid(c) => *c,
+                Over::Body { bar, field, played } => match bar.at(l, pal, dist) {
+                    Some(c) if *played => dim_bar(c),
+                    Some(c) => c,
+                    None => *field,
+                },
+            });
         }
     }
 }
@@ -385,9 +374,7 @@ mod tests {
         }
     }
 
-    fn px(out: &[u8], w: usize, x: usize, y: usize) -> [u8; 4] {
-        let i = (y * w + x) * 4; [out[i], out[i + 1], out[i + 2], out[i + 3]]
-    }
+    fn px(out: &[u32], w: usize, x: usize, y: usize) -> [u8; 4] { out[y * w + x].to_ne_bytes() }
 
     #[test]
     fn playhead_cue_and_bars_land_where_the_shader_puts_them() {
@@ -418,7 +405,7 @@ mod tests {
         let w = rect.w as usize;
         assert_eq!(px(&out, w, 500, 5), pal.white);        // playhead at the middle
         assert_ne!(px(&out, w, 300, 30), pal.ground);      // body at the centre row
-        assert_eq!(out.len(), 1000 * 60 * 4);
+        assert_eq!(out.len(), 1000 * 60);
     }
 
     #[test]

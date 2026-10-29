@@ -295,7 +295,7 @@ pub struct SdlRenderer {
     over_tex:   Option<(Texture, u32, u32)>,
     /// What the overview texture currently shows; unchanged = no re-raster.
     over_key:   Option<OverviewKey>,
-    pix:        Vec<u8>,
+    pix:        Vec<u32>,
     lut:        Lut,
 
     capture:    Option<std::path::PathBuf>,
@@ -388,7 +388,7 @@ impl SdlRenderer {
             waveform_cpu::draw(&self.lut, p, &self.cols, kind, px, &mut self.pix);
             crate::perf_accum("wave_cpu", t.elapsed());
             let t = Instant::now();
-            tex.update(None, &self.pix, px.w as usize * 4).map_err(|e| anyhow!("waveform upload: {e}"))?;
+            tex.update(None, bytemuck::cast_slice(&self.pix), px.w as usize * 4).map_err(|e| anyhow!("waveform upload: {e}"))?;
             crate::perf_accum("wave_upload", t.elapsed());
         }
         self.canvas.copy(tex, None, Rect::new(px.x, px.y, px.w, px.h)).map_err(|e| anyhow!("waveform blit: {e}"))?;

@@ -46,6 +46,34 @@ const BLOCK_FRAMES: usize = 512;
 /// small enough that the pitch fader response feels instant.
 const RING_BUFFER_SAMPLES: usize = 8_192;
 
+/// Ring length in samples: the default above (~93 ms of stereo 44.1 k), or
+/// OPENDECK_RING_MS at the device rate — more decode-ahead for a board whose
+/// scheduler cannot wake the processor in time (a single-core Pi).  The ring
+/// is flushed on every seek, so a longer one does not delay CUE.
+fn ring_samples(device_sr: u32, device_ch: usize) -> usize {
+    match std::env::var("OPENDECK_RING_MS").ok().and_then(|v| v.parse::<f64>().ok()) {
+        Some(ms) if ms > 0.0 => ((ms / 1000.0 * device_sr as f64) as usize * device_ch).max(BACK_PRESSURE_SLOTS * 2),
+        _ => RING_BUFFER_SAMPLES,
+    }
+}
+
+/// Best-effort SCHED_FIFO for an audio thread (Linux).  Needs an rtprio
+/// limit (`deploy/pi/rt-audio`); without one it logs once and carries on at
+/// normal priority.  OPENDECK_RT=0 opts out.
+#[cfg(target_os = "linux")]
+fn try_realtime(name: &str, prio: i32) {
+    if std::env::var("OPENDECK_RT").as_deref() == Ok("0") { return; }
+    let param = libc::sched_param { sched_priority: prio };
+    let rc = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) };
+    if rc == 0 {
+        log::info!("{name}: SCHED_FIFO priority {prio}");
+    } else {
+        log::info!("{name}: real-time priority not permitted (rtprio limit 0?) — see deploy/pi/rt-audio; running at normal priority");
+    }
+}
+#[cfg(not(target_os = "linux"))]
+fn try_realtime(_name: &str, _prio: i32) {}
+
 /// Minimum free slots required before processing another block.
 ///
 /// At the minimum supported speed (0.25×) RubberBand outputs 4× input frames:
@@ -264,7 +292,9 @@ impl AudioHandle {
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
 
         // ── 4. Ring buffer ─────────────────────────────────────────────────────
-        let (producer, consumer) = rtrb::RingBuffer::<f32>::new(RING_BUFFER_SAMPLES);
+        let ring_len = ring_samples(device_sr, device_ch);
+        if ring_len != RING_BUFFER_SAMPLES { log::info!("audio ring: {} samples ({:.0} ms)", ring_len, ring_len as f64 / device_ch as f64 / device_sr as f64 * 1000.0); }
+        let (producer, consumer) = rtrb::RingBuffer::<f32>::new(ring_len);
         let stats = Arc::new(AudioStats::default());
 
         // ── 5. Processor thread ────────────────────────────────────────────────
@@ -301,6 +331,7 @@ impl AudioHandle {
                     file_ch,
                     device_ch,
                     producer,
+                    ring_len,
                     proc_stats,
                 );
             })
@@ -426,10 +457,14 @@ fn build_stream(device: &cpal::Device, p: &StreamParts) -> Result<cpal::Stream> 
     const STOP_FADE_S: f32 = 0.003;
     let fade_step = 1.0 / (p.device_sr as f32 * STOP_FADE_S).max(1.0);   // per frame
     let mut gain: f32 = 1.0;
+    let mut rt_asked = false;
     let stream = device
         .build_output_stream::<f32, _, _>(
             &p.config,
             move |out: &mut [f32], _info| {
+                // The device thread is cpal's; ask for RT priority from inside
+                // it, once (a syscall, no allocation).
+                if !rt_asked { rt_asked = true; try_realtime("cpal output", 30); }
                 // Only ever contended for the instant a replacement stream
                 // takes over; silence is the right answer then.
                 let Ok(mut consumer) = consumer.try_lock() else { out.fill(0.0); return; };
@@ -616,8 +651,10 @@ fn processor_loop(
     file_ch:    usize,
     device_ch:  usize,
     mut producer: rtrb::Producer<f32>,
+    ring_len:   usize,
     stats:      Arc<AudioStats>,
 ) {
+    try_realtime("audio-proc", 20);
     let mut stretcher = Stretcher::from_env(sample_rate, file_ch as u8);
 
     // ── Pre-roll: push silence to warm up the RubberBand engine ──────────────
@@ -721,7 +758,7 @@ fn processor_loop(
         // Buffer has room — sleep proportionally so we don't spin hot.
         // At 1× speed, one BLOCK_FRAMES = ~11.6ms of audio, so sleeping
         // (buffer_fill_ratio × 8ms) keeps us well ahead without wasting CPU.
-        let fill_ratio = 1.0 - (free as f32 / RING_BUFFER_SAMPLES as f32);
+        let fill_ratio = 1.0 - (free as f32 / ring_len as f32);
         let yield_ms   = (fill_ratio * 8.0) as u64;
         if yield_ms > 0 {
             thread::sleep(Duration::from_millis(yield_ms));
@@ -734,7 +771,7 @@ fn processor_loop(
         // reach the end (otherwise in_flight freezes ~93 ms short and the deck
         // never registers end-of-track).
         if proc_pos >= samples.len() as u64 {
-            let ring_out_frames = (RING_BUFFER_SAMPLES - producer.slots()) / device_ch;
+            let ring_out_frames = (ring_len - producer.slots()) / device_ch;
             in_flight.store(ring_out_frames as u64 * file_ch as u64, Ordering::Relaxed);
             thread::sleep(Duration::from_millis(5));
             continue;
