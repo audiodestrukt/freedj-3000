@@ -173,3 +173,25 @@ ARM11 core is ~0.65 Bungee + ~0.3 render at 5 fps.  A Zero 2 W has four
 cores at ~3× each, so the same binary (aarch64 build) should put audio on
 one core and rendering on another at the 15 fps idle figure or better —
 that measurement is the next one to take.
+
+### Then with the WSOLA engine (`OPENDECK_STRETCH=wsola`), same day
+
+Bungee was the floor on the frame budget, not the renderer, so a third
+engine went in: a time-domain WSOLA (`crates/timestretch/src/wsola.rs`, the
+SoundTouch family old Mixxx used).  Same run, key-lock on, pitch −6 %:
+
+| | Bungee | WSOLA |
+|---|---|---|
+| audio-proc share of the core | 58–65 % | **3.6 %** |
+| Frame while playing | 190–240 ms (5 fps) | **90 ms (10–11 fps)** |
+| Audio underrun, 60 s track | 4.6 s | **none** |
+| Sound | phase vocoder | WSOLA: transients can double at large ratios |
+
+That is the Zero W playing a key-locked track with clean audio and a
+screen that moves, at normal thread priority, on the original single ARM11
+core.  The desktop numbers for the three engines (normalised against the
+FFT calibration, `make perf`): R3 2.5, Bungee 0.40, WSOLA 0.07 at 0.92×;
+the 527 s test track at 0.92× renders in 25.7 s / 2.9 s / 0.48 s.  Which
+one a board should default to is a listening decision —
+`cargo run --release -p opendeck-app --example stretch_ab -- track.mp3 out/ 0.92,1.08`
+renders all three for a blind A/B.
