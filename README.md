@@ -230,6 +230,15 @@ cargo run --release -p opendeck-app --example stretch_ab -- track.mp3 /tmp/ab 0.
 make perf        # both engines' real-time factors on this machine
 ```
 
+### Render backend
+
+wgpu (Vulkan / Metal / GL) draws the deck on the desktop, the Pi 4/5 and
+iOS.  Boards whose GPU stops at OpenGL ES 2.0 (Pi Zero / Zero 2 W / Pi 3) or
+a bare KMSDRM appliance use the SDL2 backend instead: build with
+`--features renderer-sdl` and run with `OPENDECK_RENDERER=sdl`.  Same screen,
+pixel-for-pixel on the waveforms (`tools/render-parity.sh`); see
+`docs/reference/raspberry-pi.md`.
+
 ### ProDJ Link
 
 FreeDJ-3000 is a Link peer: it announces itself on UDP 50000 every 1.5 s and

@@ -129,3 +129,47 @@ is the only route for either board. Beyond it the Zero W would also need the
 audio thread at RT priority and analysis throttled to a background core it
 does not have; the Zero 2 W has three spare cores for exactly that, and each is
 roughly three times faster than this one.
+
+## With the SDL render backend (#47), 2026-10-29
+
+Same Pi Zero W, same 60 s track, `OPENDECK_RENDERER=sdl` (feature
+`renderer-sdl`, `deploy/pi/cross/build.sh armv6`), under the labwc desktop
+with SDL's Wayland driver.  SDL picked its `opengl` renderer, which on this
+board is Mesa's **vc4 driver on the real VideoCore IV** — the first time
+anything has drawn the deck through that GPU.  The egui meshes go through
+`SDL_RenderGeometry`; the two waveforms are rasterised on the CPU
+(`waveform_cpu.rs`) into streaming textures.  Measured with the per-phase
+frame instrument (`RUST_LOG=opendeck=debug`), after four rounds of tuning:
+
+| | wgpu + llvmpipe (above) | SDL, first cut | SDL, tuned |
+|---|---|---|---|
+| Frame while playing | 45 s | 220–270 ms (4 fps) | 190–240 ms (**5 fps**) |
+| Frame with audio idle | — | 72 ms | **64 ms (15.6 fps)** |
+| Waveform raster, idle | — | 46 ms | 35 ms |
+| egui layout + tessellate + draw, idle | — | 13 ms | 13 ms |
+| present (vsync) | — | 4.5 ms | 4.5 ms |
+| Audio underrun, 60 s track | 57 s | 18 s | **4.6 s, 4.1 of it during the start-up analysis** |
+| Picture | corrupt | correct | correct (parity with wgpu: `tools/render-parity.sh`) |
+
+What the tuning was, in order of effect: the render thread nices itself
+(+10) so the audio threads pre-empt it; the Link sender stops ticking at
+1 ms in receive-only mode (it was 9 % of the core); the overview is only
+re-rasterised when a marker crosses a pixel; the enlarged waveform is
+rasterised row-major into u32 pixels (the column walk missed the ARM11's
+16 KB D-cache on every store); `OPENDECK_RING_MS=250` decodes further ahead.
+Found on the way and fixed for every platform: an ALSA xrun left cpal
+reporting POLLERR forever (390k log lines, silent deck) — the stream is now
+rebuilt by a supervisor thread.
+
+Where the frame goes now: Bungee takes 60–65 % of the core at 1.0×, so the
+render loop gets a third of it and a 64 ms frame stretches to ~200 ms.  The
+screen is usable — the waveform scrolls, the counters tick, CUE/PLAY respond
+— but at 5 fps it is a slideshow next to the 60 fps desktop.  The remaining
+levers are RT priority for the audio threads (`deploy/pi/rt-audio`, needs
+the limits file installed), skipping the analysis when the Link cache has
+the grid (it already does; the waveform build itself is the 9 s), and a
+cheaper waveform raster still.  None of them changes the arithmetic: one
+ARM11 core is ~0.65 Bungee + ~0.3 render at 5 fps.  A Zero 2 W has four
+cores at ~3× each, so the same binary (aarch64 build) should put audio on
+one core and rendering on another at the 15 fps idle figure or better —
+that measurement is the next one to take.

@@ -168,14 +168,32 @@ parent folder(s), and every subdirectory there is taken as a mount.
    still works; freedj follows the master's tempo. (Leave Link **send** off —
    it is the default and the sender is still being hardened.)
 
+## Render backends
+
+`OPENDECK_RENDERER=sdl` (builds with `--features renderer-sdl`, which the
+Pi cross-builds enable) draws through SDL2's 2D renderer instead of wgpu:
+the egui meshes via `SDL_RenderGeometry`, the waveforms rasterised on the
+CPU.  It is for the boards wgpu cannot drive — the VideoCore IV (Zero, Zero
+2 W, Pi 3: OpenGL ES 2.0 only) and bare KMSDRM — and renders the same frame
+(`tools/render-parity.sh` diffs the two).  SDL's own env picks its driver:
+`SDL_VIDEODRIVER=wayland|x11|kmsdrm`, `SDL_RENDER_DRIVER=opengles2|software`.
+Knobs: `OPENDECK_MAX_FPS`, `OPENDECK_RENDER_NICE` (default +10 so the audio
+threads win the core), `OPENDECK_FULLSCREEN=1`.  Pi 4/5 keep wgpu/Vulkan.
+
+On one core the audio threads also need real-time priority:
+`deploy/pi/rt-audio/README.md` (a limits.d file; the threads ask for
+`SCHED_FIFO` at start and say in the log whether they got it) and
+`OPENDECK_RING_MS` to decode further ahead.
+
 ## Smaller boards
 
 The Pi Zero 2 W is out: its VideoCore IV stops at OpenGL ES 2.0 and wgpu
 refuses it, RAM is tight, and only the Bungee stretcher would fit its CPU.
-Measurements and the estimate: `pi-zero-2-feasibility.md`, which also has a
-real run on an original Pi Zero W (it plays; software GL manages one frame
-every 45 s). Pi 4 with a cooler is the floor until the SDL renderer (#47)
-exists.
+Measurements and the estimate: `pi-zero-2-feasibility.md`, which also has
+real runs on an original Pi Zero W: software GL managed one frame every
+45 s; the SDL backend on the vc4 GPU runs the deck at 5 fps while playing
+(15 fps idle) with audio nearly clean. Pi 4 with a cooler is the floor for a
+60 fps deck; the Zero 2 W is the next board to measure with the SDL build.
 
 ## What not to expect yet
 
