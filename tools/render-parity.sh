@@ -21,7 +21,7 @@ cap() {   # cap <name> [env...]
     rm -rf "$xdg"
 }
 cap wgpu OPENDECK_RENDERER=wgpu
-cap sdl  OPENDECK_RENDERER=sdl
+cap sdl  OPENDECK_RENDERER=sdl OPENDECK_WAVE_SCROLL=smooth   # the pixel-scroll cache quantises the playhead; parity measures the raster
 python3 - "$OUT" <<'PY'
 import sys; from PIL import Image; import numpy as np
 out=sys.argv[1]

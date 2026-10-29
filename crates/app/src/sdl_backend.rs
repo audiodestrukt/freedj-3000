@@ -25,7 +25,7 @@
 
 use crate::renderer::{display_gain, ColorMode, Renderer, Viewports, WaveformParams};
 use crate::snapshot::DeckSnapshot;
-use crate::waveform_cpu::{self, Kind, Lut, OverviewKey, PxRect};
+use crate::waveform_cpu::{self, Kind, Lut, OverviewKey, PxRect, WaveCache};
 use crate::{DeckApp, Host};
 use anyhow::{anyhow, Context, Result};
 use opendeck_analysis::WaveformCache;
@@ -295,6 +295,9 @@ pub struct SdlRenderer {
     over_tex:   Option<(Texture, u32, u32)>,
     /// What the overview texture currently shows; unchanged = no re-raster.
     over_key:   Option<OverviewKey>,
+    /// Whole-pixel scroll cache for the enlarged waveform (`OPENDECK_WAVE_SCROLL`
+    /// = pixel, the default here; `smooth` re-rasterises every frame).
+    wave_cache: Option<WaveCache>,
     pix:        Vec<u32>,
     lut:        Lut,
 
@@ -321,6 +324,10 @@ impl SdlRenderer {
             wave_tex: None,
             over_tex: None,
             over_key: None,
+            wave_cache: match std::env::var("OPENDECK_WAVE_SCROLL").ok().as_deref() {
+                Some("smooth") => None,
+                _ => Some(WaveCache::default()),
+            },
             pix: Vec::new(),
             lut: Lut::new(),
             capture: None,
@@ -385,7 +392,10 @@ impl SdlRenderer {
         let (tex, _, _) = slot.as_mut().expect("just created");
         if redraw {
             let t = Instant::now();
-            waveform_cpu::draw(&self.lut, p, &self.cols, kind, px, &mut self.pix);
+            match (kind, self.wave_cache.as_mut()) {
+                (Kind::Wave, Some(cache)) => waveform_cpu::draw_wave_cached(&self.lut, p, &self.cols, px, cache, &mut self.pix),
+                _ => waveform_cpu::draw(&self.lut, p, &self.cols, kind, px, &mut self.pix),
+            }
             crate::perf_accum("wave_cpu", t.elapsed());
             let t = Instant::now();
             tex.update(None, bytemuck::cast_slice(&self.pix), px.w as usize * 4).map_err(|e| anyhow!("waveform upload: {e}"))?;
@@ -432,7 +442,8 @@ impl Renderer for SdlRenderer {
         self.num_cols = self.cols.len() as u32;
         let (peak, gain) = display_gain(&self.cols);
         self.amp_gain = gain;
-        self.over_key = None;   // new columns: the overview must be drawn again
+        self.over_key = None;   // new columns: both waveforms must be drawn again
+        if let Some(c) = self.wave_cache.as_mut() { c.invalidate(); }
         log::info!("waveform reloaded: {} columns, peak {:.2} → gain {:.2}", self.num_cols, peak, gain);
     }
 

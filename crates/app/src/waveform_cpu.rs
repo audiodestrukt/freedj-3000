@@ -211,85 +211,206 @@ fn in_loop(p: &WaveformParams, col: f32) -> bool {
 }
 
 
-fn draw_wave(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxRect, out: &mut [u32]) {
+/// Per-column geometry of the enlarged waveform shared by the full and the
+/// incremental raster.
+struct WaveGeom { half: f32, cue_per_px: f32, cols_per_px: f32, wave_h: f32, num_cols: i64 }
+
+impl WaveGeom {
+    fn new(p: &WaveformParams) -> Self {
+        let r = p.wave_rect;
+        let strip = p.beat2_period_cols > 0.0;
+        Self {
+            half: p.cols_visible * 0.5,
+            cue_per_px: p.cols_visible / r[2],
+            cols_per_px: p.cols_visible / r[2],
+            wave_h: r[3] - if strip { B2_STRIP_PX } else { 0.0 },
+            num_cols: p.num_cols as i64,
+        }
+    }
+}
+
+/// What pixel column `x` of the rect is.  `with_playhead` = false leaves the
+/// red centre line out (the incremental cache overlays it at copy time).
+fn classify(pal: &Palette, p: &WaveformParams, g: &WaveGeom, cols: &[u32], rect: PxRect, x: usize, with_playhead: bool) -> Column {
+    let r = p.wave_rect;
+    let qx = rect.x as f32 + x as f32 + 0.5;
+    let sx = (qx - r[0]) / r[2];
+    let col_f = (p.playhead_col - g.half) + sx * p.cols_visible;
+    if with_playhead && (qx - (r[0] + r[2] * 0.5)).abs() < 1.5 {
+        Column::Solid(pal.playhead)
+    } else if (col_f - p.cue_col).abs() < g.cue_per_px {
+        Column::Solid(pal.cue)
+    } else if p.loop_end_col > p.loop_start_col
+        && ((col_f - p.loop_start_col).abs() < g.cue_per_px || (col_f - p.loop_end_col).abs() < g.cue_per_px) {
+        Column::Solid(pal.loop_line)
+    } else if p.slip_col >= 0.0 && (col_f - p.slip_col).abs() < g.cue_per_px {
+        Column::Solid(pal.slip)
+    } else {
+        let bg = if in_loop(p, col_f) { pal.loop_bg } else { pal.ground };
+        if col_f < 0.0 || col_f >= p.num_cols || g.num_cols <= 0 || cols.is_empty() {
+            Column::Field { bar: None, bg, tick: None }
+        } else {
+            let col_lo = col_f as usize;
+            let col_hi = (col_lo + 1).min((g.num_cols - 1) as usize);
+            let c = mix4(unpack(cols[col_lo.min(cols.len() - 1)]), unpack(cols[col_hi.min(cols.len() - 1)]), col_f - col_lo as f32);
+            let tick = if p.beat_period_cols > 0.0 {
+                let rel      = col_f - p.beat_anchor_col;
+                let beat_pos = ((rel % p.beat_period_cols) + p.beat_period_cols) % p.beat_period_cols;
+                let beat_num = (rel / p.beat_period_cols).floor();
+                let bpb      = p.beats_per_bar;
+                let adjusted = ((beat_num + p.downbeat_offset) % bpb + bpb) % bpb;
+                let is_down  = adjusted < 0.5;
+                let tick_w   = if is_down { 2.5 } else { 1.5 } * g.cols_per_px;
+                (beat_pos < tick_w).then(|| (is_down, if is_down { 0.10 } else { 0.055 } * g.wave_h))
+            } else { None };
+            Column::Field { bar: Some(Bar::new(c, p)), bg, tick }
+        }
+    }
+}
+
+/// Fill pixel columns `x0..x0+columns.len()` of every row from their
+/// classification.  `out` is the whole rect, `rect.w` pixels per row.
+fn fill_columns(l: &Lut, pal: &Palette, p: &WaveformParams, g: &WaveGeom, rect: PxRect, columns: &[Column], x0: usize, out: &mut [u32]) {
     let r = p.wave_rect;
     let (w, h) = (rect.w as usize, rect.h as usize);
     let strip = p.beat2_period_cols > 0.0;
-    let wave_h = r[3] - if strip { B2_STRIP_PX } else { 0.0 };
-    let half = p.cols_visible * 0.5;
-    let cue_per_px = p.cols_visible / r[2];
-    let cols_per_px = p.cols_visible / r[2];
-    let num_cols = p.num_cols as i64;
-
-    // ── Columns first: everything that does not depend on the row ──────────
-    let columns: Vec<Column> = (0..w).map(|x| {
-        let qx = rect.x as f32 + x as f32 + 0.5;
-        let sx = (qx - r[0]) / r[2];
-        let col_f = (p.playhead_col - half) + sx * p.cols_visible;
-        // Playhead line at the horizontal centre — red, full height.
-        if (qx - (r[0] + r[2] * 0.5)).abs() < 1.5 {
-            Column::Solid(pal.playhead)
-        } else if (col_f - p.cue_col).abs() < cue_per_px {
-            Column::Solid(pal.cue)
-        } else if p.loop_end_col > p.loop_start_col
-            && ((col_f - p.loop_start_col).abs() < cue_per_px || (col_f - p.loop_end_col).abs() < cue_per_px) {
-            Column::Solid(pal.loop_line)
-        } else if p.slip_col >= 0.0 && (col_f - p.slip_col).abs() < cue_per_px {
-            Column::Solid(pal.slip)
-        } else {
-            let bg = if in_loop(p, col_f) { pal.loop_bg } else { pal.ground };
-            if col_f < 0.0 || col_f >= p.num_cols || num_cols <= 0 || cols.is_empty() {
-                Column::Field { bar: None, bg, tick: None }
-            } else {
-                let col_lo = col_f as usize;
-                let col_hi = (col_lo + 1).min((num_cols - 1) as usize);
-                let c = mix4(unpack(cols[col_lo.min(cols.len() - 1)]), unpack(cols[col_hi.min(cols.len() - 1)]), col_f - col_lo as f32);
-                let tick = if p.beat_period_cols > 0.0 {
-                    let rel      = col_f - p.beat_anchor_col;
-                    let beat_pos = ((rel % p.beat_period_cols) + p.beat_period_cols) % p.beat_period_cols;
-                    let beat_num = (rel / p.beat_period_cols).floor();
-                    let bpb      = p.beats_per_bar;
-                    let adjusted = ((beat_num + p.downbeat_offset) % bpb + bpb) % bpb;
-                    let is_down  = adjusted < 0.5;
-                    let tick_w   = if is_down { 2.5 } else { 1.5 } * cols_per_px;
-                    (beat_pos < tick_w).then(|| (is_down, if is_down { 0.10 } else { 0.055 } * wave_h))
-                } else { None };
-                Column::Field { bar: Some(Bar::new(c, p)), bg, tick }
-            }
-        }
-    }).collect();
-
-    // ── Then rows, writing each row sequentially (one cache line per 8 px,
-    //    not one per pixel as a column walk would cost) ──────────────────────
     for y in 0..h {
         let qy   = rect.y as f32 + y as f32 + 0.5;
         let yy   = qy - r[1];
-        let dist = (yy / wave_h - 0.5).abs() * 2.0;
-        let row  = &mut out[y * w..(y + 1) * w];
+        let dist = (yy / g.wave_h - 0.5).abs() * 2.0;
+        let row  = &mut out[y * w + x0..y * w + x0 + columns.len()];
         if strip && qy > r[1] + r[3] - B2_STRIP_PX {
             // External-deck beat strip along the bottom edge (disabled today —
             // beat2_period_cols is 0 — but kept in step with the shader, where
             // it is tested before everything else in the column).
             let pixels_per_beat = p.beat2_period_cols * r[2] / p.cols_visible;
             let phase_px = p.beat2_phase_beats * pixels_per_beat;
-            for (x, px) in row.iter_mut().enumerate() {
-                let qx = rect.x as f32 + x as f32 + 0.5;
+            for (i, px) in row.iter_mut().enumerate() {
+                let qx = rect.x as f32 + (x0 + i) as f32 + 0.5;
                 let beat_x = (((qx - r[0]) + phase_px) % pixels_per_beat + pixels_per_beat) % pixels_per_beat;
                 *px = pack(if beat_x < 3.0 || beat_x > pixels_per_beat - 3.0 { pal.cyan } else { pal.strip_bg });
             }
             continue;
         }
-        for (px, column) in row.iter_mut().zip(&columns) {
+        for (px, column) in row.iter_mut().zip(columns) {
             *px = pack(match column {
                 Column::Solid(c) => *c,
                 Column::Field { bar, bg, tick } => match bar.as_ref().and_then(|b| b.at(l, pal, dist)) {
                     Some(c) => c,
                     None => match tick {
-                        Some((is_down, len)) if yy < *len || yy > wave_h - *len => if *is_down { pal.down_hi } else { pal.tick_hi },
+                        Some((is_down, len)) if yy < *len || yy > g.wave_h - *len => if *is_down { pal.down_hi } else { pal.tick_hi },
                         _ => *bg,
                     },
                 },
             });
+        }
+    }
+}
+
+fn draw_wave(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxRect, out: &mut [u32]) {
+    let g = WaveGeom::new(p);
+    let w = rect.w as usize;
+    // Columns first (everything that does not depend on the row), then rows,
+    // writing each row sequentially: one cache line per 8 px, not one per
+    // pixel as a column walk would cost.
+    let columns: Vec<Column> = (0..w).map(|x| classify(pal, p, &g, cols, rect, x, true)).collect();
+    fill_columns(l, pal, p, &g, rect, &columns, 0, out);
+}
+
+// ── Incremental (whole-pixel scroll) raster ───────────────────────────────────
+
+/// Everything the enlarged waveform depends on except the playhead.  A
+/// change means the cached field is stale.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct WaveKey {
+    rect: PxRect, wave_rect: [i32; 4],
+    cols_visible: f32, num_cols: f32, amp_gain: f32, color_mode: u32,
+    beat: (f32, f32, f32, f32), beat2: (f32, f32),
+    cue_col: f32, loop_cols: (f32, f32), slip_col: f32,
+    cols_ptr: usize, cols_len: usize,
+}
+
+impl WaveKey {
+    fn new(p: &WaveformParams, rect: PxRect, cols: &[u32]) -> Self {
+        Self {
+            rect, wave_rect: p.wave_rect.map(|v| (v * 4.0) as i32),
+            cols_visible: p.cols_visible, num_cols: p.num_cols, amp_gain: p.amp_gain, color_mode: p.color_mode as u32,
+            beat: (p.beat_anchor_col, p.beat_period_cols, p.downbeat_offset, p.beats_per_bar),
+            beat2: (p.beat2_phase_beats, p.beat2_period_cols),
+            cue_col: p.cue_col, loop_cols: (p.loop_start_col, p.loop_end_col), slip_col: p.slip_col,
+            cols_ptr: cols.as_ptr() as usize, cols_len: cols.len(),
+        }
+    }
+}
+
+/// The cached field (no playhead) of the enlarged waveform at a playhead
+/// quantised to whole pixels, so a frame is a row shift plus the columns
+/// that scrolled in.  Trades the shader's sub-pixel scroll for ~10× less
+/// CPU: a one-core board's choice.
+#[derive(Default)]
+pub struct WaveCache {
+    key: Option<WaveKey>,
+    /// Quantised playhead, in pixels (playhead_col / cols_per_px).
+    q:   i64,
+    pix: Vec<u32>,
+}
+
+impl WaveCache {
+    pub fn invalidate(&mut self) { self.key = None; }
+}
+
+/// Draw the enlarged waveform through the cache into `out`.  The playhead
+/// is quantised to `cols_per_px` (one pixel of scroll); the rest of the
+/// frame matches `draw(.., Kind::Wave, ..)` at that quantised playhead.
+pub fn draw_wave_cached(lut: &Lut, p: &WaveformParams, cols: &[u32], rect: PxRect, cache: &mut WaveCache, out: &mut Vec<u32>) {
+    let (w, h) = (rect.w as usize, rect.h as usize);
+    let pal = Palette::new(lut);
+    let g = WaveGeom::new(p);
+    // Quantise: the column at pixel x only depends on (playhead - half) +
+    // x*cols_per_px, so moving the playhead by k*cols_per_px moves the
+    // picture by exactly k pixels.
+    let q = (p.playhead_col / g.cols_per_px).round() as i64;
+    let pq = WaveformParams { playhead_col: q as f32 * g.cols_per_px, ..*p };
+    let key = WaveKey::new(&pq, rect, cols);
+    let strip = p.beat2_period_cols > 0.0;   // the strip is wall-clock driven: no caching
+    let fresh = cache.key != Some(key) || cache.pix.len() != w * h || strip;
+    if fresh {
+        cache.pix.clear();
+        cache.pix.resize(w * h, 0);
+        let columns: Vec<Column> = (0..w).map(|x| classify(&pal, &pq, &g, cols, rect, x, false)).collect();
+        fill_columns(lut, &pal, &pq, &g, rect, &columns, 0, &mut cache.pix);
+        cache.key = Some(key);
+        cache.q = q;
+    } else {
+        let d = q - cache.q;   // pixels the picture moved left
+        if d != 0 {
+            let dd = d.unsigned_abs() as usize;
+            if dd >= w {
+                let columns: Vec<Column> = (0..w).map(|x| classify(&pal, &pq, &g, cols, rect, x, false)).collect();
+                fill_columns(lut, &pal, &pq, &g, rect, &columns, 0, &mut cache.pix);
+            } else if d > 0 {
+                for y in 0..h { cache.pix[y * w..(y + 1) * w].copy_within(dd.., 0); }
+                let columns: Vec<Column> = (w - dd..w).map(|x| classify(&pal, &pq, &g, cols, rect, x, false)).collect();
+                fill_columns(lut, &pal, &pq, &g, rect, &columns, w - dd, &mut cache.pix);
+            } else {
+                for y in 0..h { cache.pix[y * w..(y + 1) * w].copy_within(..w - dd, dd); }
+                let columns: Vec<Column> = (0..dd).map(|x| classify(&pal, &pq, &g, cols, rect, x, false)).collect();
+                fill_columns(lut, &pal, &pq, &g, rect, &columns, 0, &mut cache.pix);
+            }
+            cache.q = q;
+        }
+    }
+    // Copy out with the playhead line on top (the shader draws it first in
+    // every column it covers, over everything but the strip).
+    out.clear();
+    out.extend_from_slice(&cache.pix);
+    let r = p.wave_rect;
+    let centre = r[0] + r[2] * 0.5;
+    let ph = pack(pal.playhead);
+    for x in 0..w {
+        let qx = rect.x as f32 + x as f32 + 0.5;
+        if (qx - centre).abs() < 1.5 {
+            for y in 0..h { out[y * w + x] = ph; }
         }
     }
 }
@@ -418,6 +539,35 @@ mod tests {
         assert_eq!(a, OverviewKey::new(&p, rect));
         p.playhead_col += 5.0;                     // a pixel: new key
         assert_ne!(a, OverviewKey::new(&p, rect));
+    }
+
+    #[test]
+    fn incremental_scroll_matches_a_full_raster() {
+        let lut = Lut::new();
+        let cols: Vec<u32> = (0..4000u32).map(|i| u32::from_le_bytes([(i % 251) as u8, (i * 7 % 199) as u8, (i * 3 % 173) as u8, 150 + (i % 100) as u8])).collect();
+        let mut p = params(4000, [100.0, 50.0, 600.0, 185.0], [0.0; 4]);
+        p.cue_col = 1210.0;
+        let rect = PxRect::from_f32(p.wave_rect).unwrap();
+        let mut cache = WaveCache::default();
+        let (mut inc, mut full) = (Vec::new(), Vec::new());
+        // Scroll forward in uneven steps, then back, then jump.
+        for step in [0.0f32, 0.4, 1.3, 2.9, 0.7, 5.0, -3.2, 40.0, 900.0, -1.0] {
+            p.playhead_col += step;
+            draw_wave_cached(&lut, &p, &cols, rect, &mut cache, &mut inc);
+            let g = WaveGeom::new(&p);
+            let q = (p.playhead_col / g.cols_per_px).round();
+            let pq = WaveformParams { playhead_col: q * g.cols_per_px, ..p };
+            draw(&lut, &pq, &cols, Kind::Wave, rect, &mut full);
+            assert_eq!(inc, full, "step {step}: incremental raster differs from the full one");
+        }
+        // A zoom change invalidates and still matches.
+        p.cols_visible = 300.0;
+        draw_wave_cached(&lut, &p, &cols, rect, &mut cache, &mut inc);
+        let g = WaveGeom::new(&p);
+        let q = (p.playhead_col / g.cols_per_px).round();
+        let pq = WaveformParams { playhead_col: q * g.cols_per_px, ..p };
+        draw(&lut, &pq, &cols, Kind::Wave, rect, &mut full);
+        assert_eq!(inc, full, "after zoom change");
     }
 
     #[test]
