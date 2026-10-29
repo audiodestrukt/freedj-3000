@@ -25,7 +25,7 @@
 
 use crate::renderer::{display_gain, ColorMode, Renderer, Viewports, WaveformParams};
 use crate::snapshot::DeckSnapshot;
-use crate::waveform_cpu::{self, Kind, PxRect};
+use crate::waveform_cpu::{self, Kind, Lut, OverviewKey, PxRect};
 use crate::{DeckApp, Host};
 use anyhow::{anyhow, Context, Result};
 use opendeck_analysis::WaveformCache;
@@ -78,6 +78,27 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
     let ppp = if lw > 0 { pw as f32 / lw as f32 } else { 1.0 };
     log::info!("window {}x{} px, scale {:.2}", pw, ph, ppp);
     let pump = sdl.event_pump().map_err(|e| anyhow!("SDL event pump: {e}"))?;
+
+    // On a one-core board the render loop and the audio threads share the
+    // CPU; a frame here is tens of milliseconds of work, and the audio ring
+    // starves when it waits behind one.  Lowering this thread's priority
+    // (raising its nice value needs no privilege) lets audio-proc and the
+    // device callback pre-empt rendering.  OPENDECK_RENDER_NICE overrides
+    // (0 = leave it alone).
+    #[cfg(target_os = "linux")]
+    {
+        let nice: i32 = std::env::var("OPENDECK_RENDER_NICE").ok().and_then(|v| v.parse().ok()).unwrap_or(10);
+        if nice != 0 {
+            let tid = unsafe { libc::syscall(libc::SYS_gettid) } as libc::id_t;
+            if unsafe { libc::setpriority(libc::PRIO_PROCESS, tid, nice) } == 0 {
+                log::info!("render thread nice {nice}");
+            }
+        }
+    }
+    // OPENDECK_MAX_FPS caps the loop below the display rate — on a slow board
+    // a frame budget the CPU can meet beats chasing vsync and missing it.
+    let max_fps: Option<f32> = std::env::var("OPENDECK_MAX_FPS").ok().and_then(|v| v.parse().ok()).filter(|f: &f32| *f > 0.0);
+    if let Some(f) = max_fps { log::info!("frame rate capped at {f} fps"); }
     app.host     = Some(Host::Sdl(SdlHost { pump, events: Vec::new(), modifiers: egui::Modifiers::default(),
                                             size_px: (pw, ph), ppp, start: Instant::now(), focused: true }));
     app.renderer = Some(Box::new(renderer));
@@ -122,6 +143,7 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
         // present() already paced us; without vsync, hold the frame interval.
         let period = match (app.full_rate, app.idle_fps) {
             (false, Some(fps)) => Some(Duration::from_secs_f32(1.0 / fps)),
+            _ if max_fps.is_some() => max_fps.map(|f| Duration::from_secs_f32(1.0 / f)),
             _ if !vsync        => Some(app.refresh_interval),
             _                  => None,
         };
@@ -271,7 +293,10 @@ pub struct SdlRenderer {
     cols_visible: f32,
     wave_tex:   Option<(Texture, u32, u32)>,
     over_tex:   Option<(Texture, u32, u32)>,
+    /// What the overview texture currently shows; unchanged = no re-raster.
+    over_key:   Option<OverviewKey>,
     pix:        Vec<u8>,
+    lut:        Lut,
 
     capture:    Option<std::path::PathBuf>,
 }
@@ -295,7 +320,9 @@ impl SdlRenderer {
             cols_visible: crate::input::ZOOM_LEVELS[crate::input::ZOOM_DEFAULT],
             wave_tex: None,
             over_tex: None,
+            over_key: None,
             pix: Vec::new(),
+            lut: Lut::new(),
             capture: None,
         })
     }
@@ -342,10 +369,28 @@ impl SdlRenderer {
             let tex = self.tc.create_texture_streaming(PixelFormatEnum::ABGR8888, px.w, px.h)
                 .map_err(|e| anyhow!("waveform texture {}x{}: {e}", px.w, px.h))?;
             *slot = Some((tex, px.w, px.h));
+            if kind == Kind::Overview { self.over_key = None; }
         }
-        waveform_cpu::draw(p, &self.cols, kind, px, &mut self.pix);
+        // The overview only changes when a marker crosses a pixel; the
+        // enlarged waveform scrolls every frame.
+        let redraw = match kind {
+            Kind::Wave => true,
+            Kind::Overview => {
+                let key = OverviewKey::new(p, px);
+                let changed = self.over_key != Some(key);
+                if changed { self.over_key = Some(key); }
+                changed
+            }
+        };
         let (tex, _, _) = slot.as_mut().expect("just created");
-        tex.update(None, &self.pix, px.w as usize * 4).map_err(|e| anyhow!("waveform upload: {e}"))?;
+        if redraw {
+            let t = Instant::now();
+            waveform_cpu::draw(&self.lut, p, &self.cols, kind, px, &mut self.pix);
+            crate::perf_accum("wave_cpu", t.elapsed());
+            let t = Instant::now();
+            tex.update(None, &self.pix, px.w as usize * 4).map_err(|e| anyhow!("waveform upload: {e}"))?;
+            crate::perf_accum("wave_upload", t.elapsed());
+        }
         self.canvas.copy(tex, None, Rect::new(px.x, px.y, px.w, px.h)).map_err(|e| anyhow!("waveform blit: {e}"))?;
         Ok(())
     }
@@ -387,6 +432,7 @@ impl Renderer for SdlRenderer {
         self.num_cols = self.cols.len() as u32;
         let (peak, gain) = display_gain(&self.cols);
         self.amp_gain = gain;
+        self.over_key = None;   // new columns: the overview must be drawn again
         log::info!("waveform reloaded: {} columns, peak {:.2} → gain {:.2}", self.num_cols, peak, gain);
     }
 

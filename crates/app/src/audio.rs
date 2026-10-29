@@ -28,7 +28,7 @@ use std::{
     path::Path,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        Arc,
+        Arc, Mutex,
     },
     thread,
     time::Duration,
@@ -129,7 +129,9 @@ pub struct AudioHandle {
     /// Tags of the track decoded at open (the startup track); the deck copies
     /// these and replaces them on each browser LOAD.
     pub tags:        TrackTags,
-    _stream:     cpal::Stream,
+    _stream:     StreamOwner,
+    /// Tells the audio-dev supervisor (Linux) to stop when the deck is dropped.
+    _stream_shutdown: Arc<AtomicBool>,
     _processor:  thread::JoinHandle<()>,
 }
 
@@ -262,7 +264,7 @@ impl AudioHandle {
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
 
         // ── 4. Ring buffer ─────────────────────────────────────────────────────
-        let (producer, mut consumer) = rtrb::RingBuffer::<f32>::new(RING_BUFFER_SAMPLES);
+        let (producer, consumer) = rtrb::RingBuffer::<f32>::new(RING_BUFFER_SAMPLES);
         let stats = Arc::new(AudioStats::default());
 
         // ── 5. Processor thread ────────────────────────────────────────────────
@@ -306,83 +308,57 @@ impl AudioHandle {
         let proc_thread = processor.thread().clone();
 
         // ── 6. cpal stream (RT callback, no allocation) ────────────────────────
-        let cpal_playing    = Arc::clone(&playing);
-        let cpal_stats      = Arc::clone(&stats);
-        // Stop fade: cutting to silence mid-waveform is a step, and a step is
-        // the click heard on every CUE release / pause.  On stop the callback
-        // keeps playing what the ring already holds while a gain ramps to
-        // zero over STOP_FADE_S (below anything audible as a fade), THEN goes
-        // silent and honours any pending flush.  Start is untouched — no
-        // fade-in — so cue latency stays exactly as it is.
-        const STOP_FADE_S: f32 = 0.003;
-        let fade_step = 1.0 / (device_sr as f32 * STOP_FADE_S).max(1.0);   // per frame
-        let mut gain: f32 = 1.0;
-        let stream = device
-            .build_output_stream::<f32, _, _>(
-                &stream_config,
-                move |out: &mut [f32], _info| {
-                    if !cpal_playing.load(Ordering::Relaxed) {
-                        if gain > 0.0 {
-                            // Fading out: ring audio × a falling gain, frame by
-                            // frame.  A flush requested meanwhile waits until
-                            // the fade is done (the ring holds ~90 ms, plenty).
-                            for frame in out.chunks_mut(device_ch) {
-                                let g = gain * gain;   // squared ramp: lands with zero slope
-                                for sample in frame.iter_mut() {
-                                    *sample = consumer.pop().unwrap_or(0.0) * g;
-                                }
-                                gain = (gain - fade_step).max(0.0);
-                                if gain == 0.0 { break; }
+        // The device stream is owned by a supervisor thread on Linux so it can
+        // be rebuilt when ALSA gives up: after an xrun on a direct hw device
+        // (a loaded single-core Pi, an HDMI sink) cpal reports POLLERR from
+        // every poll and never recovers, leaving the deck silent.  The ring
+        // consumer lives behind a lock only the live callback ever takes
+        // (uncontended, try_lock, never blocks the RT path) so the next
+        // stream's callback can pick it up where the dead one left off.
+        let consumer = Arc::new(Mutex::new(consumer));
+        let failed   = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let parts = StreamParts {
+            config: stream_config, device_ch, device_sr,
+            consumer: Arc::clone(&consumer), playing: Arc::clone(&playing), stats: Arc::clone(&stats),
+            drain_flag: Arc::clone(&drain_flag), failed: Arc::clone(&failed),
+        };
+        #[cfg(target_os = "linux")]
+        let stream = {
+            let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
+            let sd = Arc::clone(&shutdown);
+            let supervisor = thread::Builder::new().name("audio-dev".into()).spawn(move || {
+                let mut stream = match build_stream(&device, &parts) {
+                    Ok(st) => { let _ = tx.send(Ok(())); st }
+                    Err(e) => { let _ = tx.send(Err(e)); return; }
+                };
+                while !sd.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(100));
+                    if !parts.failed.load(Ordering::Relaxed) { continue; }
+                    log::warn!("audio stream failed — rebuilding the device stream");
+                    drop(stream);
+                    let mut wait = Duration::from_millis(100);
+                    stream = loop {
+                        match build_stream(&device, &parts) {
+                            Ok(st) => break st,
+                            Err(e) => {
+                                log::warn!("audio stream rebuild failed ({e:#}); retrying in {} ms", wait.as_millis());
+                                thread::sleep(wait);
+                                wait = (wait * 2).min(Duration::from_secs(2));
+                                if sd.load(Ordering::Relaxed) { return; }
                             }
-                            if gain > 0.0 { return; }
-                            // Fell to zero inside this buffer: the rest is
-                            // silence and the flush can proceed.
                         }
-                        if drain_flag.swap(false, Ordering::AcqRel) {
-                            while consumer.pop().is_ok() {}
-                        }
-                        out.fill(0.0);
-                        return;
-                    }
-                    gain = 1.0;   // playing: no fade-in, and a restart mid-fade snaps up
+                    };
+                    parts.failed.store(false, Ordering::Relaxed);
+                    log::info!("audio stream rebuilt");
+                }
+            }).context("failed to spawn audio-dev thread")?;
+            rx.recv().context("audio-dev thread died")??;
+            StreamOwner::Thread(Some(supervisor))
+        };
+        #[cfg(not(target_os = "linux"))]
+        let stream = StreamOwner::Inline(build_stream(&device, &parts)?);
 
-                    // On seek, flush stale buffered audio.  This same buffer will
-                    // then fill with silence until the producer re-primes from the
-                    // new position — expected, so attribute it to seek priming,
-                    // not to starvation.
-                    let draining = drain_flag.swap(false, Ordering::AcqRel);
-                    if draining {
-                        while consumer.pop().is_ok() {}
-                    }
-
-                    // Fill from the ring; count any sample we had to invent as
-                    // silence.  No allocation, and the atomics are touched only
-                    // when silence actually happens, so the clean path stays a
-                    // bare pop().
-                    let mut underran = 0u64;
-                    for sample in out.iter_mut() {
-                        match consumer.pop() {
-                            Ok(s)  => *sample = s,
-                            Err(_) => { *sample = 0.0; underran += 1; }
-                        }
-                    }
-                    if underran > 0 {
-                        if draining {
-                            // Expected re-prime gap right after a seek/cue flush.
-                            cpal_stats.seek_priming_samples.fetch_add(underran, Ordering::Relaxed);
-                        } else {
-                            // Genuine starvation — the core failed to keep up.
-                            cpal_stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
-                            cpal_stats.underrun_events.fetch_add(1, Ordering::Relaxed);
-                        }
-                    }
-                },
-                |err| log::error!("audio stream error: {err}"),
-                None,
-            )
-            .context("failed to build output stream")?;
-
-        stream.play().context("failed to start audio stream")?;
         log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
 
         Ok(Self {
@@ -403,9 +379,128 @@ impl AudioHandle {
             channels: file_ch as u8,
             tags,
             _stream: stream,
+            _stream_shutdown: shutdown,
             _processor: processor,
         })
     }
+}
+
+impl Drop for AudioHandle {
+    fn drop(&mut self) { self._stream_shutdown.store(true, Ordering::Relaxed); }
+}
+
+/// Everything a device stream's callback needs, so one can be built again
+/// after the previous one died.
+struct StreamParts {
+    config:     cpal::StreamConfig,
+    device_ch:  usize,
+    device_sr:  u32,
+    consumer:   Arc<Mutex<rtrb::Consumer<f32>>>,
+    playing:    Arc<AtomicBool>,
+    stats:      Arc<AudioStats>,
+    drain_flag: Arc<AtomicBool>,
+    failed:     Arc<AtomicBool>,
+}
+
+/// Who holds the cpal stream: the supervisor thread (Linux) or the handle.
+enum StreamOwner {
+    #[allow(dead_code)]
+    Thread(Option<thread::JoinHandle<()>>),
+    #[allow(dead_code)]
+    Inline(cpal::Stream),
+}
+
+fn build_stream(device: &cpal::Device, p: &StreamParts) -> Result<cpal::Stream> {
+    let cpal_playing = Arc::clone(&p.playing);
+    let cpal_stats   = Arc::clone(&p.stats);
+    let consumer     = Arc::clone(&p.consumer);
+    let drain_flag   = Arc::clone(&p.drain_flag);
+    let failed       = Arc::clone(&p.failed);
+    let device_ch    = p.device_ch;
+    // Stop fade: cutting to silence mid-waveform is a step, and a step is
+    // the click heard on every CUE release / pause.  On stop the callback
+    // keeps playing what the ring already holds while a gain ramps to
+    // zero over STOP_FADE_S (below anything audible as a fade), THEN goes
+    // silent and honours any pending flush.  Start is untouched — no
+    // fade-in — so cue latency stays exactly as it is.
+    const STOP_FADE_S: f32 = 0.003;
+    let fade_step = 1.0 / (p.device_sr as f32 * STOP_FADE_S).max(1.0);   // per frame
+    let mut gain: f32 = 1.0;
+    let stream = device
+        .build_output_stream::<f32, _, _>(
+            &p.config,
+            move |out: &mut [f32], _info| {
+                // Only ever contended for the instant a replacement stream
+                // takes over; silence is the right answer then.
+                let Ok(mut consumer) = consumer.try_lock() else { out.fill(0.0); return; };
+                if !cpal_playing.load(Ordering::Relaxed) {
+                    if gain > 0.0 {
+                        // Fading out: ring audio × a falling gain, frame by
+                        // frame.  A flush requested meanwhile waits until
+                        // the fade is done (the ring holds ~90 ms, plenty).
+                        for frame in out.chunks_mut(device_ch) {
+                            let g = gain * gain;   // squared ramp: lands with zero slope
+                            for sample in frame.iter_mut() {
+                                *sample = consumer.pop().unwrap_or(0.0) * g;
+                            }
+                            gain = (gain - fade_step).max(0.0);
+                            if gain == 0.0 { break; }
+                        }
+                        if gain > 0.0 { return; }
+                        // Fell to zero inside this buffer: the rest is
+                        // silence and the flush can proceed.
+                    }
+                    if drain_flag.swap(false, Ordering::AcqRel) {
+                        while consumer.pop().is_ok() {}
+                    }
+                    out.fill(0.0);
+                    return;
+                }
+                gain = 1.0;   // playing: no fade-in, and a restart mid-fade snaps up
+
+                // On seek, flush stale buffered audio.  This same buffer will
+                // then fill with silence until the producer re-primes from the
+                // new position — expected, so attribute it to seek priming,
+                // not to starvation.
+                let draining = drain_flag.swap(false, Ordering::AcqRel);
+                if draining {
+                    while consumer.pop().is_ok() {}
+                }
+
+                // Fill from the ring; count any sample we had to invent as
+                // silence.  No allocation, and the atomics are touched only
+                // when silence actually happens, so the clean path stays a
+                // bare pop().
+                let mut underran = 0u64;
+                for sample in out.iter_mut() {
+                    match consumer.pop() {
+                        Ok(s)  => *sample = s,
+                        Err(_) => { *sample = 0.0; underran += 1; }
+                    }
+                }
+                if underran > 0 {
+                    if draining {
+                        // Expected re-prime gap right after a seek/cue flush.
+                        cpal_stats.seek_priming_samples.fetch_add(underran, Ordering::Relaxed);
+                    } else {
+                        // Genuine starvation — the core failed to keep up.
+                        cpal_stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
+                        cpal_stats.underrun_events.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            },
+            move |err| {
+                // Once per failure: cpal repeats the error on every poll of a
+                // dead ALSA stream, which would flood the log.
+                if !failed.swap(true, Ordering::Relaxed) {
+                    log::error!("audio stream error: {err}");
+                }
+            },
+            None,
+        )
+        .context("failed to build output stream")?;
+    stream.play().context("failed to start audio stream")?;
+    Ok(stream)
 }
 
 // ── Processor loop ────────────────────────────────────────────────────────────
