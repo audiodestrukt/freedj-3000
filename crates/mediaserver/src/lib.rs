@@ -221,8 +221,12 @@ const CACHE_VERSION: u16 = 1;
 fn cache_key(path: &Path) -> Option<String> {
     let md = std::fs::metadata(path).ok()?;
     let mtime = md.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    // The same file reached by a relative and an absolute path (the startup
+    // argument vs a browser LOAD) must hit the same entry: on a Pi Zero a
+    // miss is half a minute of re-analysis.
+    let canonical = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-    for b in path.to_string_lossy().bytes().chain(md.len().to_le_bytes()).chain(mtime.to_le_bytes()) {
+    for b in canonical.to_string_lossy().bytes().chain(md.len().to_le_bytes()).chain(mtime.to_le_bytes()) {
         h ^= b as u64; h = h.wrapping_mul(0x0100_0000_01b3);
     }
     Some(format!("{h:016x}.v{CACHE_VERSION}"))
