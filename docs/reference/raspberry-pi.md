@@ -178,7 +178,15 @@ CPU.  It is for the boards wgpu cannot drive — the VideoCore IV (Zero, Zero
 (`tools/render-parity.sh` diffs the two).  SDL's own env picks its driver:
 `SDL_VIDEODRIVER=wayland|x11|kmsdrm`, `SDL_RENDER_DRIVER=opengles2|software`.
 Knobs: `OPENDECK_MAX_FPS`, `OPENDECK_RENDER_NICE` (default +10 so the audio
-threads win the core), `OPENDECK_FULLSCREEN=1`.  Pi 4/5 keep wgpu/Vulkan.
+threads win the core), `OPENDECK_FULLSCREEN=1` (true fullscreen: the mode
+closest to the design size, letterboxed 1:1), `OPENDECK_WAVE_SCROLL=smooth`
+(sub-pixel waveform scroll instead of the whole-pixel GPU scroll).  Pi 4/5
+keep wgpu/Vulkan.
+
+No compositor is the fast path on a small board (a Pi Zero W went from
+18 fps under labwc to 49 fps): stop the desktop (`sudo systemctl stop
+lightdm`) and run with `SDL_VIDEODRIVER=kmsdrm OPENDECK_RENDERER=sdl
+OPENDECK_FULLSCREEN=1 OPENDECK_STRETCH=wsola`.
 
 On one core the audio threads also need real-time priority:
 `deploy/pi/rt-audio/README.md` (a limits.d file; the threads ask for

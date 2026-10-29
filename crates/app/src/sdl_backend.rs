@@ -50,17 +50,35 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
     let (win_w, win_h) = app.initial_window_size();
     let mut wb = video.window("freedj-3000", win_w, win_h);
     wb.position_centered().allow_highdpi();
-    // OPENDECK_FULLSCREEN=1: the appliance case (KMSDRM has no windows anyway).
-    if std::env::var("OPENDECK_FULLSCREEN").as_deref() == Ok("1") { wb.fullscreen_desktop(); }
+    // OPENDECK_FULLSCREEN=1: the appliance case.  A true fullscreen window
+    // makes SDL pick the display mode closest to the design size (a 1024x600
+    // panel gets its own mode; a 1080p monitor gets 1024x768), so the deck
+    // draws 1:1 and is letterboxed, instead of being scaled up and blurred.
+    if std::env::var("OPENDECK_FULLSCREEN").as_deref() == Ok("1") { wb.fullscreen(); }
     let window = wb.build().context("SDL window")?;
 
     // Vsync paces the loop: present() blocks until the flip, so one frame per
     // refresh with no timer.  OPENDECK_PRESENT=immediate turns it off (then
     // the FRAME_INTERVAL timer below paces instead), as on the wgpu path.
     let vsync = !matches!(std::env::var("OPENDECK_PRESENT").ok().as_deref(), Some("immediate"));
+    let fullscreen = std::env::var("OPENDECK_FULLSCREEN").as_deref() == Ok("1");
     let mut cb = window.into_canvas();
     if vsync { cb = cb.present_vsync(); }
-    let canvas = cb.build().context("SDL renderer")?;
+    let mut canvas = cb.build().context("SDL renderer")?;
+    // Fullscreen on a panel that is not 1024x600 (or whatever OPENDECK_WINDOW
+    // asked for): keep rendering at the design size and let the GPU scale
+    // it, letterboxed — a 1080p HDMI monitor costs the same CPU as the 7"
+    // panel.  SDL maps pointer and touch into logical units too.
+    if fullscreen {
+        let (ow, oh) = canvas.output_size().unwrap_or((0, 0));
+        // Integer scale where the mode allows it (1:1 on the closest mode),
+        // linear only when the output is not a multiple of the design size.
+        let integer = ow % win_w == 0 && (ow / win_w) * win_h <= oh;
+        sdl2::hint::set("SDL_RENDER_SCALE_QUALITY", if integer { "nearest" } else { "linear" });
+        canvas.set_logical_size(win_w, win_h).map_err(|e| anyhow!("SDL logical size: {e}"))?;
+        log::info!("fullscreen: {ow}x{oh} output, rendering at {win_w}x{win_h} logical ({} scale, letterboxed)",
+                   if integer { format!("{}x integer", ow / win_w) } else { "linear".into() });
+    }
     let info = canvas.info();
     log::info!("SDL renderer: {} (video driver {}), vsync {}", info.name, video.current_video_driver(), vsync);
     log::info!("present mode: {}", if vsync { "vsync" } else { "immediate (timer-paced)" });
@@ -320,7 +338,7 @@ pub struct SdlRenderer {
 
 impl SdlRenderer {
     pub fn new(mut canvas: Canvas<Window>, waveform: &WaveformCache) -> Result<Self> {
-        let size = canvas.output_size().map_err(|e| anyhow!("SDL output size: {e}"))?;
+        let size = Self::drawable_size(&canvas)?;
         canvas.set_blend_mode(BlendMode::Blend);
         let tc = canvas.texture_creator();
         let cols: Vec<u32> = waveform.columns.iter().map(|c| u32::from_le_bytes(*c)).collect();
@@ -347,6 +365,14 @@ impl SdlRenderer {
             lut: Lut::new(),
             capture: None,
         })
+    }
+
+    /// What we draw into: the logical size when one is set (fullscreen on a
+    /// panel of another size), else the output in pixels.
+    fn drawable_size(canvas: &Canvas<Window>) -> Result<(u32, u32)> {
+        let logical = canvas.logical_size();
+        if logical.0 > 0 && logical.1 > 0 { return Ok(logical); }
+        canvas.output_size().map_err(|e| anyhow!("SDL output size: {e}"))
     }
 
     /// Create or update an egui texture from an atlas delta.  Premultiplied
@@ -499,7 +525,8 @@ impl SdlRenderer {
     }
 
     fn write_capture(&mut self, path: &std::path::Path) -> Result<()> {
-        let (w, h) = self.size;
+        // The real output (with a logical size, the scaled, letterboxed frame).
+        let (w, h) = self.canvas.output_size().map_err(|e| anyhow!("SDL output size: {e}"))?;
         let rgba = self.canvas.read_pixels(None, PixelFormatEnum::ABGR8888).map_err(|e| anyhow!("read pixels: {e}"))?;
         let f = std::fs::File::create(path)?;
         let mut enc = png::Encoder::new(std::io::BufWriter::new(f), w, h);
@@ -543,7 +570,7 @@ impl Renderer for SdlRenderer {
     /// The canvas tracks the window itself; this just refreshes the cached
     /// pixel size (the arguments are ignored, the canvas is the truth).
     fn resize(&mut self, _width: u32, _height: u32) {
-        if let Ok(sz) = self.canvas.output_size() { self.size = sz; }
+        if let Ok(sz) = Self::drawable_size(&self.canvas) { self.size = sz; }
     }
 
     fn request_capture(&mut self, path: std::path::PathBuf) { self.capture = Some(path); }

@@ -222,3 +222,25 @@ question answered with a number: no compositor would take the playing
 frame to ~44 ms (≈22 fps) and allow a native 1024×600 mode.  The rest:
 egui layout + tessellate + draw 16 ms, present (vsync) 8 ms, waveform
 upload 3 ms, GL copies / clear / driver ~17 ms.
+
+### Then without the compositor: SDL on KMSDRM, same day
+
+`sudo systemctl stop lightdm`, then `SDL_VIDEODRIVER=kmsdrm` (the deck owns
+the display; `OPENDECK_FULLSCREEN=1` asks SDL for the mode closest to the
+design size and letterboxes at 1:1 — a 1024x600 panel gets its own mode,
+this 1080p monitor got 1024x768).  Same Zero W, WSOLA, −6 %:
+
+| | Wayland (labwc) | KMSDRM, 1024x600 window | KMSDRM fullscreen, 1:1 on 1024x768 | KMSDRM fullscreen, scaled to 1080p |
+|---|---|---|---|---|
+| Playing | 17.9 fps | 41.9 fps | **49 fps** | 30 fps (and soft: 1.8× linear upscale) |
+| Idle | 26 fps | 52 fps | — | 44 fps |
+| Frame spikes | hundreds | 0 | 0 | ~30 |
+| Underruns | none | none | none | none |
+
+The compositor was costing more than the 12 ms visible in one slot: on one
+core labwc's own share, its wakeups and the extra buffer handoff were about
+half the frame.  Without it the original Pi Zero W runs the deck at 49 fps
+with clean key-locked audio, which closes the question this document
+opened: the board is not the limit, the software stack was.  This is also
+the appliance configuration (#47's "bare KMSDRM" item): a systemd unit that
+starts the deck on the console with these variables is all that is left.
