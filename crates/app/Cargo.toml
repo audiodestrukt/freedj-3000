@@ -49,3 +49,11 @@ serde             = { workspace = true }
 serde_json        = "1"     # TAG LIST persistence
 toml              = "0.8"   # controllers.toml (surface mappings)
 libc              = "0.2"   # CPU meter: /proc on Linux, Mach thread_info on Apple
+sdl2              = { version = "0.38", optional = true, features = ["unsafe_textures"] }
+
+[features]
+default = []
+# Second render backend: SDL2 window + SDL_RenderGeometry egui painter + CPU
+# waveform rasteriser, for boards wgpu cannot drive (VideoCore IV, KMSDRM).
+# Selected at run time with OPENDECK_RENDERER=sdl.
+renderer-sdl = ["dep:sdl2"]

@@ -18,6 +18,9 @@ mod surface;
 mod prodj;
 mod renderer;
 mod screen;
+#[cfg(feature = "renderer-sdl")]
+mod sdl_backend;
+mod waveform_cpu;
 mod settings;
 mod snapshot;
 mod taglist;
@@ -26,7 +29,7 @@ use anyhow::{bail, Context, Result};
 use audio::AudioHandle;
 use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_types::{BeatAnalyzer, BeatGrid};
-use renderer::Renderer;
+use renderer::{Renderer, WgpuRenderer};
 use input::{ControlEvent, Event, PerformMode, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
 use browser::{Browser, Enter, Load};
 use snapshot::DeckSnapshot;
@@ -55,6 +58,65 @@ const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 /// Which middle-band mode the deck screen is showing.  PERFORM comes later.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum ScreenMode { Playback, Browse, Info, Perform, TagList, Menu }
+
+/// The window and input side of a render backend.  winit + egui-winit on the
+/// wgpu path; the SDL backend brings its own window, event pump and egui
+/// input translation.  `render_frame` asks this for the frame's geometry and
+/// input and never touches a window type directly.
+enum Host {
+    Winit { window: Arc<Window>, egui_state: egui_winit::State },
+    #[cfg(feature = "renderer-sdl")]
+    Sdl(sdl_backend::SdlHost),
+}
+
+impl Host {
+    fn scale_factor(&self) -> f32 {
+        match self {
+            Host::Winit { window, .. } => window.scale_factor() as f32,
+            #[cfg(feature = "renderer-sdl")]
+            Host::Sdl(h) => h.scale_factor(),
+        }
+    }
+    /// The drawable's size in pixels.
+    fn size_px(&self) -> (u32, u32) {
+        match self {
+            Host::Winit { window, .. } => { let s = window_px(window); (s.width, s.height) }
+            #[cfg(feature = "renderer-sdl")]
+            Host::Sdl(h) => h.size_px(),
+        }
+    }
+    fn take_egui_input(&mut self) -> egui::RawInput {
+        match self {
+            Host::Winit { window, egui_state } => egui_state.take_egui_input(window.as_ref()),
+            #[cfg(feature = "renderer-sdl")]
+            Host::Sdl(h) => h.take_egui_input(),
+        }
+    }
+    fn handle_platform_output(&mut self, out: egui::PlatformOutput) {
+        match self {
+            Host::Winit { window, egui_state } => egui_state.handle_platform_output(window.as_ref(), out),
+            #[cfg(feature = "renderer-sdl")]
+            Host::Sdl(_) => {}
+        }
+    }
+    /// Ask for another frame.  The SDL loop renders continuously, so it is a
+    /// no-op there.
+    fn request_redraw(&self) {
+        match self {
+            Host::Winit { window, .. } => window.request_redraw(),
+            #[cfg(feature = "renderer-sdl")]
+            Host::Sdl(_) => {}
+        }
+    }
+    /// Safe-area insets in points (left, top, right, bottom).
+    fn insets(&self, ppp: f32, win: egui::Rect) -> (f32, f32, f32, f32) {
+        match self {
+            Host::Winit { window, .. } => phone_insets(window, ppp, win),
+            #[cfg(feature = "renderer-sdl")]
+            Host::Sdl(_) => screen::PHONE_INSETS,
+        }
+    }
+}
 
 struct DeckApp {
     // Provided before event loop starts.
@@ -161,11 +223,10 @@ struct DeckApp {
     slip_anchor:       Option<(f64, u64)>,
     exit_after_capture: bool,
 
-    // Created on first `resumed`.
-    window:      Option<Arc<Window>>,
-    renderer:    Option<Renderer>,
+    // Created on first `resumed` (winit) or by the SDL loop.
+    host:        Option<Host>,
+    renderer:    Option<Box<dyn Renderer>>,
     egui_ctx:    egui::Context,
-    egui_state:  Option<egui_winit::State>,
     /// Procedurally shaded faceplate sprites (jog, buttons), baked per size.
     chrome:         chrome::ChromeCache,
 
@@ -449,10 +510,9 @@ impl DeckApp {
             loop_beats:        0.0,
             slip_anchor:       None,
             exit_after_capture: false,
-            window:      None,
+            host:        None,
             renderer:    None,
             egui_ctx:    egui::Context::default(),
-            egui_state:  None,
             chrome:         chrome::ChromeCache::default(),
             last_render: Instant::now(),
             last_frame_total: Duration::ZERO,
@@ -916,15 +976,16 @@ impl DeckApp {
             Event::Ui(UiEvent::CycleColor) => {
                 if let Some(r) = &mut self.renderer {
                     use renderer::ColorMode::*;
-                    r.color_mode = match r.color_mode { Rgb => ThreeBand, ThreeBand => Blue, Blue => Rgb };
-                    log::info!("waveform colour → {:?}", r.color_mode);
+                    let next = match r.color_mode() { Rgb => ThreeBand, ThreeBand => Blue, Blue => Rgb };
+                    r.set_color_mode(next);
+                    log::info!("waveform colour → {:?}", next);
                 }
             }
             Event::Ui(UiEvent::ZoomStep(d)) => {
                 let n = ZOOM_LEVELS.len() as i32;
                 // Positive = zoom in = fewer columns visible.
                 self.zoom_level = (self.zoom_level as i32 - d).clamp(0, n - 1) as usize;
-                if let Some(r) = &mut self.renderer { r.cols_visible = ZOOM_LEVELS[self.zoom_level]; }
+                if let Some(r) = &mut self.renderer { r.set_cols_visible(ZOOM_LEVELS[self.zoom_level]); }
                 log::info!("zoom {} cols", ZOOM_LEVELS[self.zoom_level]);
             }
             Event::Ui(UiEvent::ZoomGridMode) => { self.zoom_grid_mode = !self.zoom_grid_mode; }
@@ -1446,6 +1507,107 @@ impl DeckApp {
         Ok(())
     }
 
+    /// A key from either window backend, by physical position; true = quit.
+    /// CUE is momentary: both edges arrive (playback mode), OS key-repeat is
+    /// ignored.  Enter still means Load in the browser.
+    fn key_input(&mut self, code: KeyCode, pressed: bool, repeat: bool) -> bool {
+        use KeyCode::*;
+        // CUE is momentary: handle both edges (playback mode), ignore the
+        // OS key-repeat.  Enter still means Load in the browser.
+        if self.screen_mode == ScreenMode::Playback && matches!(code, Enter | NumpadEnter) {
+            if !repeat {
+                self.events.push(Event::Deck(ControlEvent::Cue { pressed }));
+                self.request_redraw();
+            }
+            return false;
+        }
+        // Everything else acts on key-down only.
+        if !pressed { return false; }
+        // Phone preview: Tab flips SCREEN / CONTROLS (the swipe on device).
+        if self.phone && code == Tab {
+            self.phone_controls = !self.phone_controls;
+            self.request_redraw();
+            return false;
+        }
+        // In a list screen (BROWSE / TAG LIST) the keys navigate the
+        // list, not the transport.  G = TAG TRACK / REMOVE.
+        if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu) {
+            let here = match self.screen_mode {
+                ScreenMode::Browse => TopScreen::Browse, ScreenMode::TagList => TopScreen::TagList, _ => TopScreen::Menu,
+            };
+            let ev = match code {
+                ArrowDown           => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: 1 })),
+                ArrowUp             => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: -1 })),
+                Enter | NumpadEnter => Some(Event::Deck(ControlEvent::Load)),
+                Backspace           => Some(Event::Deck(ControlEvent::Back)),
+                KeyG                => Some(Event::Ui(UiEvent::TagTrack)),
+                KeyB | Escape       => Some(Event::Ui(UiEvent::Screen(here))),   // toggle off
+                _ => None,
+            };
+            if let Some(ev) = ev {
+                self.events.push(ev);
+                self.request_redraw();
+            }
+            return false;
+        }
+        let playing = self.audio.playing.load(Ordering::Relaxed);
+        let total   = self.audio.len().max(1) as f32;
+        let frac    = self.audio.position.load(Ordering::Relaxed) as f32 / total;
+        let ten_s   = (self.audio.sample_rate as f32 * self.audio.channels as f32 * 10.0) / total;
+        let range   = self.settings.tempo_range;
+        let fader   = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)), range);
+        let step    = 0.01 / (2.0 * range);   // ±1% per press, as the DJ2Go buttons
+        let ev = match code {
+            Space      => Some(Event::Deck(if playing { ControlEvent::Pause } else { ControlEvent::Play })),
+            ArrowRight => Some(Event::Deck(ControlEvent::NeedleSearch { position: (frac + ten_s).min(1.0) })),
+            ArrowLeft  => Some(Event::Deck(ControlEvent::NeedleSearch { position: (frac - ten_s).max(0.0) })),
+            Equal | NumpadAdd      => Some(Event::Deck(ControlEvent::TempoFader { position: fader + step })),
+            Minus | NumpadSubtract => Some(Event::Deck(ControlEvent::TempoFader { position: fader - step })),
+            Digit0 | Numpad0       => Some(Event::Deck(ControlEvent::TempoFader { position: 0.5 })),
+            KeyK => Some(Event::Deck(ControlEvent::KeyLockToggle)),
+            KeyV => Some(Event::Deck(ControlEvent::JogModeToggle)),
+            // Memory points: N sets one at the cue, [ / ] CALL ◀ / ▶, Delete removes.
+            KeyN         => Some(Event::Deck(ControlEvent::MemoryCueSet)),
+            BracketLeft  => Some(Event::Deck(ControlEvent::MemoryCueCall { next: false })),
+            BracketRight => Some(Event::Deck(ControlEvent::MemoryCueCall { next: true })),
+            Delete       => Some(Event::Deck(ControlEvent::MemoryCueDelete)),
+            KeyS => Some(Event::Deck(ControlEvent::SlipToggle)),
+            KeyY => Some(Event::Deck(ControlEvent::SyncToggle)),
+            KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
+            KeyT => Some(Event::Ui(UiEvent::TimeMode)),
+            KeyB => Some(Event::Ui(UiEvent::Screen(TopScreen::Browse))),
+            Comma  => Some(Event::Deck(ControlEvent::JogDelta { delta: -4, velocity_rpm: 0.0 })),
+            Period => Some(Event::Deck(ControlEvent::JogDelta { delta:  4, velocity_rpm: 0.0 })),
+            KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
+            KeyA => Some(Event::Ui(UiEvent::ZoomGridMode)),   // GRID ADJUST (knob = arrows)
+            KeyC => Some(Event::Ui(UiEvent::CycleColor)),
+            KeyZ => Some(Event::Ui(UiEvent::ZoomStep(1))),
+            KeyX => Some(Event::Ui(UiEvent::ZoomStep(-1))),
+            Escape | KeyQ => return true,
+            _ => None,
+        };
+        if let Some(ev) = ev {
+            self.events.push(ev);
+            self.request_redraw();
+        }
+        false
+    }
+
+    fn request_redraw(&self) { if let Some(h) = &self.host { h.request_redraw(); } }
+
+    /// Screen-only is the 7" panel; the faceplate window matches the deck
+    /// photo's aspect (the image is aspect-fit inside it).  Dev:
+    /// OPENDECK_WINDOW=WxH overrides (App Store screenshots want the iPad 13"
+    /// panel's exact 2064x2752).
+    fn initial_window_size(&self) -> (u32, u32) {
+        let (win_w, win_h) = if self.phone { (932u32, 430u32) }        // iPhone 6.9" landscape, points
+                             else if self.portrait { (966u32, 1288u32) }   // iPad 13" portrait (0.75)
+                             else if self.faceplate { (860u32, 1090u32) } else { (1024u32, 600u32) };
+        std::env::var("OPENDECK_WINDOW").ok()
+            .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
+            .unwrap_or((win_w, win_h))
+    }
+
     fn render_frame(&mut self) {
         // While occluded (iOS background) don't touch the GPU: the surface is
         // invalid and any acquire/present risks the background scene-update
@@ -1513,11 +1675,7 @@ impl DeckApp {
         }
 
         let slip_shadow = self.slip_shadow().map(|v| v as u64);
-        let (egui_state, window) = match (self.egui_state.as_mut(), self.window.as_ref()) {
-            (Some(s), Some(w)) => (s, w),
-            _ => return,
-        };
-        if self.renderer.is_none() { return; }
+        if self.host.is_none() || self.renderer.is_none() { return; }
 
         let raw_pos      = self.audio.position.load(Ordering::Relaxed);
         let in_flight    = self.audio.in_flight.load(Ordering::Relaxed);
@@ -1717,10 +1875,11 @@ impl DeckApp {
         perf_accum("make_snapshot", _t_snap.elapsed());
 
         // Screen layout in logical points; the shader gets its two rects in pixels.
-        let ppp  = window.scale_factor() as f32;
-        let size = window_px(window);
+        let host = self.host.as_mut().expect("checked above");
+        let ppp  = host.scale_factor();
+        let (size_w, size_h) = host.size_px();
         let win  = egui::Rect::from_min_size(egui::Pos2::ZERO,
-                       egui::Vec2::new(size.width as f32 / ppp, size.height as f32 / ppp));
+                       egui::Vec2::new(size_w as f32 / ppp, size_h as f32 / ppp));
         // Faceplate renders the screen into a sub-rect of the deck body; with
         // --faceplate off we fill the whole window, screen-only.
         // The faceplate's control fractions are measured off the deck photo, so
@@ -1732,7 +1891,7 @@ impl DeckApp {
         // A phone (or a phone-sized window) gets the two-page layout instead
         // of any faceplate: the LCD page or the controls page.
         let phone = self.phone || (cfg!(target_os = "ios") && win.width().min(win.height()) < 600.0);
-        let insets = phone_insets(window, ppp, win);
+        let insets = host.insets(ppp, win);
         let phone_layout = phone.then(|| if self.phone_controls {
             let (f, strip) = screen::phone_controls_layout(win, insets);
             screen::PhoneLayout::Controls(f, strip)
@@ -1772,7 +1931,7 @@ impl DeckApp {
         let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(over_rect), dim_played: self.remain_mode };
 
         // Build egui overlay.
-        let mut raw = egui_state.take_egui_input(window.as_ref());
+        let mut raw = host.take_egui_input();
         // egui-winit sizes its screen rect from `inner_size`, which on iOS is
         // the safe area; hit-testing must cover the whole view like the layout.
         if cfg!(target_os = "ios") { raw.screen_rect = Some(win); }
@@ -1828,15 +1987,11 @@ impl DeckApp {
 
         let platform_output = std::mem::take(&mut output.platform_output);
         let slip_shadow = self.slip_shadow().map(|v| v as u64);
-        let (renderer, egui_state, window) = match (
-            self.renderer.as_mut(),
-            self.egui_state.as_mut(),
-            self.window.as_ref(),
-        ) {
-            (Some(r), Some(s), Some(w)) => (r, s, w),
+        let (renderer, host) = match (self.renderer.as_mut(), self.host.as_mut()) {
+            (Some(r), Some(h)) => (r, h),
             _ => return,
         };
-        egui_state.handle_platform_output(window.as_ref(), platform_output);
+        host.handle_platform_output(platform_output);
         let flags = UiFlags {
             key_lock: self.key_lock, jog_vinyl: self.settings.jog_vinyl, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
@@ -2037,20 +2192,11 @@ fn first_sound(samples: &[f32], ch: usize, level_db: f32) -> u64 {
 
 impl ApplicationHandler for DeckApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.window.is_some() {
+        if self.host.is_some() {
             return; // already initialised (e.g. Android resume)
         }
 
-        // Screen-only is the 7" panel; the faceplate window matches the deck
-        // photo's aspect (the image is aspect-fit inside it).
-        let (win_w, win_h) = if self.phone { (932u32, 430u32) }        // iPhone 6.9" landscape, points
-                             else if self.portrait { (966u32, 1288u32) }   // iPad 13" portrait (0.75)
-                             else if self.faceplate { (860u32, 1090u32) } else { (1024u32, 600u32) };
-        // Dev: OPENDECK_WINDOW=WxH overrides the window size (App Store
-        // screenshots want the iPad 13" panel's exact 2064x2752).
-        let (win_w, win_h) = std::env::var("OPENDECK_WINDOW").ok()
-            .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
-            .unwrap_or((win_w, win_h));
+        let (win_w, win_h) = self.initial_window_size();
         let mut attrs = WindowAttributes::default().with_title("freedj-3000");
         // Only ask for a size where a window manager can grant one.  On iOS the
         // requested size is applied to the UIWindow, so asking for 860x1090 got
@@ -2099,7 +2245,7 @@ impl ApplicationHandler for DeckApp {
         }
 
         let renderer =
-            pollster::block_on(Renderer::new(Arc::clone(&window), &self.waveform))
+            pollster::block_on(WgpuRenderer::new(Arc::clone(&window), &self.waveform))
                 .expect("failed to create renderer");
 
         let egui_state = egui_winit::State::new(
@@ -2111,9 +2257,8 @@ impl ApplicationHandler for DeckApp {
             None,
         );
 
-        self.window     = Some(Arc::clone(&window));
-        self.renderer   = Some(renderer);
-        self.egui_state = Some(egui_state);
+        self.host     = Some(Host::Winit { window: Arc::clone(&window), egui_state });
+        self.renderer = Some(Box::new(renderer));
 
         // Kick off the first redraw.
         window.request_redraw();
@@ -2138,8 +2283,8 @@ impl ApplicationHandler for DeckApp {
         event:       WindowEvent,
     ) {
         // Forward all events to egui first.
-        if let (Some(state), Some(window)) = (&mut self.egui_state, &self.window) {
-            let resp = state.on_window_event(window.as_ref(), &event);
+        if let Some(Host::Winit { window, egui_state }) = &mut self.host {
+            let resp = egui_state.on_window_event(window.as_ref(), &event);
             // egui-winit answers "repaint" to RedrawRequested itself; honouring
             // that here would request the next frame from inside every frame
             // and defeat the idle pacing below.  The frame loop owns that.
@@ -2155,85 +2300,7 @@ impl ApplicationHandler for DeckApp {
                 event: KeyEvent { physical_key: PhysicalKey::Code(code), state, repeat, .. },
                 ..
             } => {
-                use KeyCode::*;
-                // CUE is momentary: handle both edges (playback mode), ignore the
-                // OS key-repeat.  Enter still means Load in the browser.
-                if self.screen_mode == ScreenMode::Playback && matches!(code, Enter | NumpadEnter) {
-                    if !repeat {
-                        self.events.push(Event::Deck(ControlEvent::Cue { pressed: state == ElementState::Pressed }));
-                        if let Some(w) = &self.window { w.request_redraw(); }
-                    }
-                    return;
-                }
-                // Everything else acts on key-down only.
-                if state != ElementState::Pressed { return; }
-                // Phone preview: Tab flips SCREEN / CONTROLS (the swipe on device).
-                if self.phone && code == Tab {
-                    self.phone_controls = !self.phone_controls;
-                    if let Some(w) = &self.window { w.request_redraw(); }
-                    return;
-                }
-                // In a list screen (BROWSE / TAG LIST) the keys navigate the
-                // list, not the transport.  G = TAG TRACK / REMOVE.
-                if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu) {
-                    let here = match self.screen_mode {
-                        ScreenMode::Browse => TopScreen::Browse, ScreenMode::TagList => TopScreen::TagList, _ => TopScreen::Menu,
-                    };
-                    let ev = match code {
-                        ArrowDown           => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: 1 })),
-                        ArrowUp             => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: -1 })),
-                        Enter | NumpadEnter => Some(Event::Deck(ControlEvent::Load)),
-                        Backspace           => Some(Event::Deck(ControlEvent::Back)),
-                        KeyG                => Some(Event::Ui(UiEvent::TagTrack)),
-                        KeyB | Escape       => Some(Event::Ui(UiEvent::Screen(here))),   // toggle off
-                        _ => None,
-                    };
-                    if let Some(ev) = ev {
-                        self.events.push(ev);
-                        if let Some(w) = &self.window { w.request_redraw(); }
-                    }
-                    return;
-                }
-                let playing = self.audio.playing.load(Ordering::Relaxed);
-                let total   = self.audio.len().max(1) as f32;
-                let frac    = self.audio.position.load(Ordering::Relaxed) as f32 / total;
-                let ten_s   = (self.audio.sample_rate as f32 * self.audio.channels as f32 * 10.0) / total;
-                let range   = self.settings.tempo_range;
-                let fader   = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)), range);
-                let step    = 0.01 / (2.0 * range);   // ±1% per press, as the DJ2Go buttons
-                let ev = match code {
-                    Space      => Some(Event::Deck(if playing { ControlEvent::Pause } else { ControlEvent::Play })),
-                    ArrowRight => Some(Event::Deck(ControlEvent::NeedleSearch { position: (frac + ten_s).min(1.0) })),
-                    ArrowLeft  => Some(Event::Deck(ControlEvent::NeedleSearch { position: (frac - ten_s).max(0.0) })),
-                    Equal | NumpadAdd      => Some(Event::Deck(ControlEvent::TempoFader { position: fader + step })),
-                    Minus | NumpadSubtract => Some(Event::Deck(ControlEvent::TempoFader { position: fader - step })),
-                    Digit0 | Numpad0       => Some(Event::Deck(ControlEvent::TempoFader { position: 0.5 })),
-                    KeyK => Some(Event::Deck(ControlEvent::KeyLockToggle)),
-                    KeyV => Some(Event::Deck(ControlEvent::JogModeToggle)),
-                    // Memory points: N sets one at the cue, [ / ] CALL ◀ / ▶, Delete removes.
-                    KeyN         => Some(Event::Deck(ControlEvent::MemoryCueSet)),
-                    BracketLeft  => Some(Event::Deck(ControlEvent::MemoryCueCall { next: false })),
-                    BracketRight => Some(Event::Deck(ControlEvent::MemoryCueCall { next: true })),
-                    Delete       => Some(Event::Deck(ControlEvent::MemoryCueDelete)),
-                    KeyS => Some(Event::Deck(ControlEvent::SlipToggle)),
-                    KeyY => Some(Event::Deck(ControlEvent::SyncToggle)),
-                    KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
-                    KeyT => Some(Event::Ui(UiEvent::TimeMode)),
-                    KeyB => Some(Event::Ui(UiEvent::Screen(TopScreen::Browse))),
-                    Comma  => Some(Event::Deck(ControlEvent::JogDelta { delta: -4, velocity_rpm: 0.0 })),
-                    Period => Some(Event::Deck(ControlEvent::JogDelta { delta:  4, velocity_rpm: 0.0 })),
-                    KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
-                    KeyA => Some(Event::Ui(UiEvent::ZoomGridMode)),   // GRID ADJUST (knob = arrows)
-                    KeyC => Some(Event::Ui(UiEvent::CycleColor)),
-                    KeyZ => Some(Event::Ui(UiEvent::ZoomStep(1))),
-                    KeyX => Some(Event::Ui(UiEvent::ZoomStep(-1))),
-                    Escape | KeyQ => { event_loop.exit(); None }
-                    _ => None,
-                };
-                if let Some(ev) = ev {
-                    self.events.push(ev);
-                    if let Some(w) = &self.window { w.request_redraw(); }
-                }
+                if self.key_input(code, state == ElementState::Pressed, repeat) { event_loop.exit(); }
             }
 
             WindowEvent::Resized(size) => {
@@ -2260,10 +2327,10 @@ impl ApplicationHandler for DeckApp {
                     log::info!("occluded (background): pausing render");
                 } else {
                     log::info!("un-occluded (foreground): reconfiguring surface, resuming");
-                    if let (Some(r), Some(w)) = (&mut self.renderer, &self.window) {
-                        let sz = window_px(w);
-                        r.resize(sz.width, sz.height);   // reconfigure at current size
-                        w.request_redraw();
+                    if let (Some(r), Some(h)) = (&mut self.renderer, &self.host) {
+                        let (w, hh) = h.size_px();
+                        r.resize(w, hh);   // reconfigure at current size
+                        h.request_redraw();
                     }
                 }
             }
@@ -2288,9 +2355,7 @@ impl ApplicationHandler for DeckApp {
                 // it.  Idle-paced (nothing moving), the next frame is scheduled
                 // by the timer in about_to_wait instead.
                 if !self.occluded && self.full_rate {
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
+                    self.request_redraw();
                 }
             }
 
@@ -2316,7 +2381,7 @@ impl ApplicationHandler for DeckApp {
                 let now    = Instant::now();
                 let due    = self.last_render + period;
                 let next = if now >= due {
-                    if let Some(w) = &self.window { w.request_redraw(); }
+                    self.request_redraw();
                     now + period
                 } else { due };
                 event_loop.set_control_flow(ControlFlow::WaitUntil(next));
@@ -2342,9 +2407,9 @@ impl ApplicationHandler for DeckApp {
         // with Mailbox the extra present is non-blocking and re-locks to the
         // callback as soon as the compositor resumes.
         let net = self.refresh_interval.saturating_mul(2);
-        if self.window.is_some() && Instant::now() >= self.last_render + net {
+        if self.host.is_some() && Instant::now() >= self.last_render + net {
             self.render_frame();                 // updates last_render
-            if let Some(w) = &self.window { w.request_redraw(); }
+            self.request_redraw();
         }
         event_loop.set_control_flow(ControlFlow::WaitUntil(self.last_render + net));
     }
@@ -2608,9 +2673,6 @@ pub fn run(cfg: Config) -> Result<()> {
     surface::start(surface::load(cfg.controllers.as_deref()), deck, event_tx, Arc::clone(&indicators));
 
     // ── 6. Run the UI event loop ──────────────────────────────────────────────
-    let event_loop = EventLoop::new().context("failed to create event loop")?;
-    event_loop.set_control_flow(ControlFlow::Wait);
-
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
     // Park the startup track at its cue (AUTO CUE's first sound, or the
     // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
@@ -2632,6 +2694,15 @@ pub fn run(cfg: Config) -> Result<()> {
             app.set_loop(start, start + len, *beats as f32);   // …then arm, which anchors the shadow
         }
     }
+    // OPENDECK_RENDERER=sdl|wgpu picks the backend; wgpu + winit is the default.
+    let want_sdl = std::env::var("OPENDECK_RENDERER").map(|v| v.eq_ignore_ascii_case("sdl")).unwrap_or(false);
+    #[cfg(feature = "renderer-sdl")]
+    if want_sdl { return sdl_backend::run(&mut app); }
+    #[cfg(not(feature = "renderer-sdl"))]
+    if want_sdl { log::warn!("OPENDECK_RENDERER=sdl but this build has no SDL backend (cargo feature renderer-sdl); using wgpu"); }
+
+    let event_loop = EventLoop::new().context("failed to create event loop")?;
+    event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())

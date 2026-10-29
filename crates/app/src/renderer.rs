@@ -1,8 +1,12 @@
-//! wgpu + egui renderer for the MVP waveform display.
+//! The render backends behind one trait.
 //!
-//! Two render passes per frame:
-//!   Pass 1 — custom waveform shader (fullscreen quad, scrolling storage buffer)
-//!   Pass 2 — egui overlay (time counter, play state, instructions)
+//! `WgpuRenderer` (this file) is the desktop / Pi 4-5 / iOS path: two passes
+//! per frame, a custom waveform shader (fullscreen quad over a storage buffer
+//! of columns) and the egui overlay.  `sdl_backend::SdlRenderer` (feature
+//! `renderer-sdl`) draws the same frame through SDL2's 2D renderer for boards
+//! wgpu cannot drive — the waveform rasterised on the CPU by `waveform_cpu`,
+//! which is a port of the WGSL at the bottom of this file and shares its
+//! `WaveformParams`.  The deck above sees only `Renderer`.
 
 use anyhow::{Context, Result};
 use opendeck_analysis::WaveformCache;
@@ -13,51 +17,52 @@ use winit::window::Window;
 
 // ── Uniform struct ────────────────────────────────────────────────────────────
 
-/// Sent to the waveform shader every frame.
+/// Sent to the waveform shader every frame — and, field for field, what the
+/// CPU rasteriser reads, so both backends draw from one description.
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct WaveformParams {
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct WaveformParams {
     /// Index of the column at the horizontal centre of the screen (float).
-    playhead_col:     f32,
+    pub playhead_col:     f32,
     /// How many columns are visible across the full screen width.
-    cols_visible:     f32,
+    pub cols_visible:     f32,
     /// Total number of valid columns in the buffer.
-    num_cols:         f32,
+    pub num_cols:         f32,
     /// Surface width in pixels.
-    screen_w:         f32,
+    pub screen_w:         f32,
     /// Surface height in pixels.
-    screen_h:         f32,
+    pub screen_h:         f32,
     /// Beat grid: column index of anchor beat (0 if no grid).
-    beat_anchor_col:  f32,
+    pub beat_anchor_col:  f32,
     /// Beat grid: columns per beat (0 if no grid).
-    beat_period_cols: f32,
+    pub beat_period_cols: f32,
     /// Which beat within the bar beat 0 falls on (0 = beat 0 is a downbeat).
-    downbeat_offset:  f32,
+    pub downbeat_offset:  f32,
     /// Beats per bar (4 for 4/4).
-    beats_per_bar:    f32,
+    pub beats_per_bar:    f32,
     /// Second beat grid: fractional beat phase 0.0–1.0 (wall-clock time).
-    beat2_phase_beats: f32,
+    pub beat2_phase_beats: f32,
     /// Second beat grid: columns per beat (0 if disabled).
-    beat2_period_cols: f32,
+    pub beat2_period_cols: f32,
     /// Waveform colour mode: 0 = RGB, 1 = 3 BAND, 2 = BLUE.
-    color_mode:       f32,
+    pub color_mode:       f32,
     /// Enlarged-waveform rect in physical pixels: x, y, w, h.
-    wave_rect:        [f32; 4],
+    pub wave_rect:        [f32; 4],
     /// Overview-waveform rect in physical pixels: x, y, w, h.
-    over_rect:        [f32; 4],
+    pub over_rect:        [f32; 4],
     /// Multiplier that brings the track's loudest column to its display height.
-    amp_gain:         f32,
+    pub amp_gain:         f32,
     /// 1.0 = dim the played part of the overview (REMAIN mode).
-    dim_played:       f32,
+    pub dim_played:       f32,
     /// Start-cue column (source position), orange marker.
-    cue_col:          f32,
+    pub cue_col:          f32,
     /// Active loop as columns; end <= start means no loop.  The looped span
     /// gets a tinted background and amber in/out lines on both waveforms.
-    loop_start_col:   f32,
-    loop_end_col:     f32,
+    pub loop_start_col:   f32,
+    pub loop_end_col:     f32,
     /// SLIP shadow playhead column; < 0 = none.  Violet marker on both waveforms.
-    slip_col:         f32,
-    _pad:             [f32; 2],
+    pub slip_col:         f32,
+    pub _pad:             [f32; 2],
 }
 
 /// Where the shader draws its two waveforms, in physical pixels.
@@ -73,9 +78,79 @@ pub struct Viewports {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ColorMode { Rgb = 0, ThreeBand = 1, Blue = 2 }
 
-// ── Renderer ──────────────────────────────────────────────────────────────────
+/// What the deck needs from a render backend.  Everything above this trait —
+/// the snapshot, the layouts, screen.rs — is backend-neutral.
+pub trait Renderer {
+    /// A freshly analysed track replaces the waveform columns.
+    fn set_waveform(&mut self, waveform: &WaveformCache);
+    fn resize(&mut self, width: u32, height: u32);
+    /// Write the next rendered frame to `path` as a PNG.
+    fn request_capture(&mut self, path: std::path::PathBuf);
+    fn render(&mut self, snap: &DeckSnapshot, vp: &Viewports, egui_ctx: &egui::Context, full_output: egui::FullOutput);
+    fn color_mode(&self) -> ColorMode;
+    fn set_color_mode(&mut self, mode: ColorMode);
+    /// Waveform columns visible across the enlarged waveform (zoom).
+    fn set_cols_visible(&mut self, cols: f32);
+    /// The surface size in pixels, as the backend last configured it.
+    fn surface_size(&self) -> (u32, u32);
+}
 
-pub struct Renderer {
+/// Display gain for a set of packed columns: brings the track's loudest column
+/// to its display height, as a CDJ normalises quiet masters.
+pub fn display_gain(columns: &[u32]) -> (f32, f32) {
+    let peak = columns.iter().map(|v| (v >> 24) & 0xFF).max().unwrap_or(255) as f32 / 255.0;
+    (peak, (0.62 / peak.max(0.05)).min(6.0))
+}
+
+impl WaveformParams {
+    /// The per-frame parameters from the deck snapshot and the layout rects.
+    pub fn from_frame(snap: &DeckSnapshot, vp: &Viewports, cols_visible: f32, color_mode: ColorMode,
+                      amp_gain: f32, num_cols: u32, screen_w: u32, screen_h: u32) -> Self {
+        let hop_size = opendeck_analysis::waveform::HOP_SIZE as f32;
+        let channels = snap.channels as f32;
+        let playhead_col = snap.position as f32 / channels / hop_size;
+        let (beat_anchor_col, beat_period_cols, downbeat_offset, beats_per_bar) = snap.beat_grid
+            .map(|g| {
+                let anchor = g.anchor_sample as f32 / hop_size;
+                let period = (snap.sample_rate as f32 * 60.0 / g.bpm as f32) / hop_size;
+                (anchor, period, g.downbeat_offset as f32, 4.0f32)
+            })
+            .unwrap_or((0.0, 0.0, 0.0, 4.0));
+        // The cyan B2 beat strip under the waveform is not an XDJ-1000 element;
+        // it was a bring-up aid for external-sync testing.  Disabled for
+        // faithful reproduction — the external deck now lives only in the
+        // phase meter.  Set to the commented expression to bring it back.
+        //   (snap.sample_rate as f32 * 60.0 / snap.beat2_bpm) / hop_size * fader_speed
+        let beat2_period_cols = 0.0;
+        Self {
+            playhead_col,
+            cols_visible,
+            num_cols:          num_cols as f32,
+            screen_w:          screen_w as f32,
+            screen_h:          screen_h as f32,
+            beat_anchor_col,
+            beat_period_cols,
+            downbeat_offset,
+            beats_per_bar,
+            beat2_phase_beats: snap.beat2_phase_beats,
+            beat2_period_cols,
+            color_mode:        color_mode as u32 as f32,
+            wave_rect:         vp.wave,
+            over_rect:         vp.overview,
+            amp_gain,
+            dim_played:        if vp.dim_played { 1.0 } else { 0.0 },
+            cue_col:           snap.cue_point as f32 / channels / hop_size,
+            loop_start_col:    if snap.loop_active { snap.loop_start as f32 / channels / hop_size } else { 0.0 },
+            loop_end_col:      if snap.loop_active { snap.loop_end   as f32 / channels / hop_size } else { 0.0 },
+            slip_col:          snap.slip_shadow.map_or(-1.0, |v| v as f32 / channels / hop_size),
+            _pad:              [0.0; 2],
+        }
+    }
+}
+
+// ── wgpu renderer ─────────────────────────────────────────────────────────────
+
+pub struct WgpuRenderer {
     surface:        wgpu::Surface<'static>,
     surface_config: wgpu::SurfaceConfiguration,
     device:         wgpu::Device,
@@ -98,9 +173,8 @@ pub struct Renderer {
     /// Kept so `render` can call `pre_present_notify` before each present.
     window:         Arc<Window>,
 
-    pub color_mode: ColorMode,
-    /// Waveform columns visible across the enlarged waveform (zoom).
-    pub cols_visible: f32,
+    color_mode:     ColorMode,
+    cols_visible:   f32,
     /// Normalises bar height to the track's peak so quiet masters still fill
     /// the display, as they do on a CDJ.
     amp_gain:       f32,
@@ -108,7 +182,7 @@ pub struct Renderer {
     capture:        Option<std::path::PathBuf>,
 }
 
-impl Renderer {
+impl WgpuRenderer {
     pub async fn new(window: Arc<Window>, waveform: &WaveformCache) -> Result<Self> {
         let size = crate::window_px(&window);
 
@@ -231,8 +305,7 @@ impl Renderer {
         if waveform_data.is_empty() { waveform_data.push(0); }
 
         // Peak amplitude byte across the track sets the display gain.
-        let peak = waveform_data.iter().map(|v| (v >> 24) & 0xFF).max().unwrap_or(255) as f32 / 255.0;
-        let amp_gain = (0.62 / peak.max(0.05)).min(6.0);
+        let (peak, amp_gain) = display_gain(&waveform_data);
         log::info!("waveform peak {:.2} → display gain {:.2}", peak, amp_gain);
 
         let waveform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -379,16 +452,24 @@ impl Renderer {
         })
     }
 
+}
+
+impl Renderer for WgpuRenderer {
+    fn color_mode(&self) -> ColorMode { self.color_mode }
+    fn set_color_mode(&mut self, mode: ColorMode) { self.color_mode = mode; }
+    fn set_cols_visible(&mut self, cols: f32) { self.cols_visible = cols; }
+    fn surface_size(&self) -> (u32, u32) { (self.surface_config.width, self.surface_config.height) }
+
     /// Replace the waveform on the GPU with a freshly-analysed track: rebuild
     /// the storage buffer, recompute the display gain, and rebind.  Called by
     /// the deck when the browser loads a new track.  The params/pipeline are
     /// untouched — only binding 0 (the waveform data) changes.
-    pub fn set_waveform(&mut self, waveform: &WaveformCache) {
+    fn set_waveform(&mut self, waveform: &WaveformCache) {
         let num_cols = waveform.len() as u32;
         let mut data: Vec<u32> = waveform.columns.iter().map(|c| u32::from_le_bytes(*c)).collect();
         if data.is_empty() { data.push(0); }   // wgpu rejects a zero-sized storage buffer
-        let peak = data.iter().map(|v| (v >> 24) & 0xFF).max().unwrap_or(255) as f32 / 255.0;
-        self.amp_gain = (0.62 / peak.max(0.05)).min(6.0);
+        let (peak, gain) = display_gain(&data);
+        self.amp_gain = gain;
         self.num_cols = num_cols;
         log::info!("waveform reloaded: {} columns, peak {:.2} → gain {:.2}", num_cols, peak, self.amp_gain);
 
@@ -407,7 +488,7 @@ impl Renderer {
         });
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) {
+    fn resize(&mut self, width: u32, height: u32) {
         if width == 0 || height == 0 {
             return;
         }
@@ -421,71 +502,24 @@ impl Renderer {
         self.egui_screen.size_in_pixels = [width, height];
     }
 
-    /// Write the next rendered frame to `path` as a PNG.
-    pub fn request_capture(&mut self, path: std::path::PathBuf) {
+    fn request_capture(&mut self, path: std::path::PathBuf) {
         self.capture = Some(path);
     }
 
-    pub fn render(
+    fn render(
         &mut self,
         snap:        &DeckSnapshot,
         vp:          &Viewports,
         egui_ctx:    &egui::Context,
         full_output: egui::FullOutput,
     ) {
-        let playhead_sample   = snap.position;
-        let sample_rate       = snap.sample_rate;
-        let channels          = snap.channels;
-        let beat_grid         = snap.beat_grid;
-        let beat2_bpm         = snap.beat2_bpm;
-        let beat2_phase_beats = snap.beat2_phase_beats;
         let pixels_per_point = full_output.pixels_per_point;
         let egui_shapes      = full_output.shapes;
         let textures_delta   = full_output.textures_delta;
 
         // ── Update waveform scroll params ─────────────────────────────────────
-        let hop_size     = opendeck_analysis::waveform::HOP_SIZE as f32;
-        let playhead_col = playhead_sample as f32 / channels as f32 / hop_size;
-
-        let (beat_anchor_col, beat_period_cols, downbeat_offset, beats_per_bar) = beat_grid
-            .map(|g| {
-                let anchor = g.anchor_sample as f32 / hop_size;
-                let period = (sample_rate as f32 * 60.0 / g.bpm as f32) / hop_size;
-                (anchor, period, g.downbeat_offset as f32, 4.0f32)
-            })
-            .unwrap_or((0.0, 0.0, 0.0, 4.0));
-
-        // The cyan B2 beat strip under the waveform is not an XDJ-1000 element;
-        // it was a bring-up aid for external-sync testing.  Disabled for
-        // faithful reproduction — the external deck now lives only in the
-        // phase meter.  Set to the commented expression to bring it back.
-        //   (sample_rate as f32 * 60.0 / beat2_bpm) / hop_size * fader_speed
-        let _ = (beat2_bpm, beat2_phase_beats);
-        let beat2_period_cols = 0.0;
-
-        let params = WaveformParams {
-            playhead_col,
-            cols_visible:      self.cols_visible,
-            num_cols:          self.num_cols as f32,
-            screen_w:          self.surface_config.width  as f32,
-            screen_h:          self.surface_config.height as f32,
-            beat_anchor_col,
-            beat_period_cols,
-            downbeat_offset,
-            beats_per_bar,
-            beat2_phase_beats,
-            beat2_period_cols,
-            color_mode:        self.color_mode as u32 as f32,
-            wave_rect:         vp.wave,
-            over_rect:         vp.overview,
-            amp_gain:          self.amp_gain,
-            dim_played:        if vp.dim_played { 1.0 } else { 0.0 },
-            cue_col:           snap.cue_point as f32 / channels as f32 / hop_size,
-            loop_start_col:    if snap.loop_active { snap.loop_start as f32 / channels as f32 / hop_size } else { 0.0 },
-            loop_end_col:      if snap.loop_active { snap.loop_end   as f32 / channels as f32 / hop_size } else { 0.0 },
-            slip_col:          snap.slip_shadow.map_or(-1.0, |v| v as f32 / channels as f32 / hop_size),
-            _pad:              [0.0; 2],
-        };
+        let params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
+                                                self.num_cols, self.surface_config.width, self.surface_config.height);
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
         // ── Get surface texture ───────────────────────────────────────────────
@@ -654,7 +688,7 @@ impl Renderer {
 
 // ── WGSL shader ───────────────────────────────────────────────────────────────
 
-const WAVEFORM_WGSL: &str = r#"
+pub(crate) const WAVEFORM_WGSL: &str = r#"
 // Waveform display shader — draws the enlarged waveform and the overview
 // waveform into two rects; everything outside them is ground for egui.
 //

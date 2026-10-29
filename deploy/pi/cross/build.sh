@@ -2,6 +2,8 @@
 # Cross-compile the release binary for a Pi inside a throwaway container.
 #
 #   build.sh [aarch64|armv6] [extra cargo args]
+# Both builds enable the SDL render backend (OPENDECK_RENDERER=sdl), the only
+# one the VideoCore IV boards can use; wgpu stays in for the Pi 4/5.
 #     aarch64  64-bit Pi OS (Pi 3/4/5, Zero 2 W)        — default
 #     armv6    32-bit Pi OS on a Pi Zero W / Pi 1; needs target/pi-sysroot
 #              from sysroot-from-pi.sh first
@@ -24,6 +26,6 @@ run() { docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp \
           -v "$PWD":/work \
           -v "$HOME/.cargo/registry":/cargo-home/registry -v "$HOME/.cargo/git":/cargo-home/git \
           "$IMG" "$@"; }
-run cargo build --release -p opendeck-app --target "$TARGET" "$@"
+run cargo build --release -p opendeck-app --features renderer-sdl --target "$TARGET" "$@"
 run "$STRIP" -o "target/$TARGET/release/opendeck-stripped" "target/$TARGET/release/opendeck"
 ls -la "target/$TARGET/release/opendeck" "target/$TARGET/release/opendeck-stripped"
