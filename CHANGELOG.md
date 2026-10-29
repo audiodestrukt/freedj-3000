@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- SDL backend: the enlarged waveform scrolls in whole pixels through two GPU render targets (shift by copy, upload only the new columns); `OPENDECK_WAVE_SCROLL=smooth` keeps the sub-pixel scroll. Pi Zero W: 17.9 fps playing / 26 fps idle.
 - `OPENDECK_STRETCH=wsola`: a time-domain WSOLA key-lock engine (pure Rust, `crates/timestretch/src/wsola.rs`), about a sixth of Bungee's cost, for one-core boards; Master Tempo off becomes a Hermite varispeed read.
 - SDL2 render backend (`--features renderer-sdl`, `OPENDECK_RENDERER=sdl`): egui over `SDL_RenderGeometry`, waveforms rasterised on the CPU; for boards wgpu cannot drive (VideoCore IV, KMSDRM). Parity with wgpu checked by `tools/render-parity.sh`. Measured on a Pi Zero W: 5 fps playing, 15 fps idle (#47).
 - Audio: the ALSA stream is rebuilt when cpal reports it dead (an xrun on a loaded board left the deck silent); audio threads ask for `SCHED_FIFO` (`deploy/pi/rt-audio`); `OPENDECK_RING_MS` lengthens the decode-ahead ring.

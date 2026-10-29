@@ -268,17 +268,18 @@ fn classify(pal: &Palette, p: &WaveformParams, g: &WaveGeom, cols: &[u32], rect:
     }
 }
 
-/// Fill pixel columns `x0..x0+columns.len()` of every row from their
-/// classification.  `out` is the whole rect, `rect.w` pixels per row.
-fn fill_columns(l: &Lut, pal: &Palette, p: &WaveformParams, g: &WaveGeom, rect: PxRect, columns: &[Column], x0: usize, out: &mut [u32]) {
+/// Fill the rect's pixel columns `x0..x0+columns.len()` of every row from
+/// their classification, into `out` with `stride` pixels per row at
+/// `out_x` (so a strip buffer can take a few columns with its own stride).
+fn fill_columns(l: &Lut, pal: &Palette, p: &WaveformParams, g: &WaveGeom, rect: PxRect, columns: &[Column], x0: usize, stride: usize, out_x: usize, out: &mut [u32]) {
     let r = p.wave_rect;
-    let (w, h) = (rect.w as usize, rect.h as usize);
+    let h = rect.h as usize;
     let strip = p.beat2_period_cols > 0.0;
     for y in 0..h {
         let qy   = rect.y as f32 + y as f32 + 0.5;
         let yy   = qy - r[1];
         let dist = (yy / g.wave_h - 0.5).abs() * 2.0;
-        let row  = &mut out[y * w + x0..y * w + x0 + columns.len()];
+        let row  = &mut out[y * stride + out_x..y * stride + out_x + columns.len()];
         if strip && qy > r[1] + r[3] - B2_STRIP_PX {
             // External-deck beat strip along the bottom edge (disabled today —
             // beat2_period_cols is 0 — but kept in step with the shader, where
@@ -314,7 +315,7 @@ fn draw_wave(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxR
     // writing each row sequentially: one cache line per 8 px, not one per
     // pixel as a column walk would cost.
     let columns: Vec<Column> = (0..w).map(|x| classify(pal, p, &g, cols, rect, x, true)).collect();
-    fill_columns(l, pal, p, &g, rect, &columns, 0, out);
+    fill_columns(l, pal, p, &g, rect, &columns, 0, w, 0, out);
 }
 
 // ── Incremental (whole-pixel scroll) raster ───────────────────────────────────
@@ -325,7 +326,10 @@ fn draw_wave(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxR
 pub struct WaveKey {
     rect: PxRect, wave_rect: [i32; 4],
     cols_visible: f32, num_cols: f32, amp_gain: f32, color_mode: u32,
-    beat: (f32, f32, f32, f32), beat2: (f32, f32),
+    beat: (f32, f32, f32, f32),
+    // The external-deck strip's phase ticks every frame; it only matters when
+    // the strip is on, and then the cache is bypassed anyway.
+    beat2_period: f32,
     cue_col: f32, loop_cols: (f32, f32), slip_col: f32,
     cols_ptr: usize, cols_len: usize,
 }
@@ -336,7 +340,7 @@ impl WaveKey {
             rect, wave_rect: p.wave_rect.map(|v| (v * 4.0) as i32),
             cols_visible: p.cols_visible, num_cols: p.num_cols, amp_gain: p.amp_gain, color_mode: p.color_mode as u32,
             beat: (p.beat_anchor_col, p.beat_period_cols, p.downbeat_offset, p.beats_per_bar),
-            beat2: (p.beat2_phase_beats, p.beat2_period_cols),
+            beat2_period: p.beat2_period_cols,
             cue_col: p.cue_col, loop_cols: (p.loop_start_col, p.loop_end_col), slip_col: p.slip_col,
             cols_ptr: cols.as_ptr() as usize, cols_len: cols.len(),
         }
@@ -352,17 +356,70 @@ pub struct WaveCache {
     key: Option<WaveKey>,
     /// Quantised playhead, in pixels (playhead_col / cols_per_px).
     q:   i64,
-    pix: Vec<u32>,
+    /// The field, `rect.w` pixels per row, no playhead.  Only kept current
+    /// when the backend scrolls on the CPU (`keep_field`).
+    pub pix: Vec<u32>,
+    /// With `keep_field` off: the columns that entered this frame, row-major,
+    /// `|d|` pixels per row — all the CPU rasterises per scrolled frame.
+    pub strip: Vec<u32>,
 }
 
 impl WaveCache {
     pub fn invalidate(&mut self) { self.key = None; }
 }
 
+/// What `update_wave_cache` did to the cached field this frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaveUpdate {
+    /// Nothing moved: the field is as last frame.
+    Unchanged,
+    /// Rebuilt from scratch (first frame, zoom/track/marker change, big jump).
+    Full,
+    /// Scrolled by `d` pixels (positive = picture moved left): only the last
+    /// `d` columns (or the first `-d`) are new.
+    Shifted(i64),
+}
+
+/// The playhead colour (sRGB bytes), for a backend drawing it as a rect.
+pub fn playhead_rgb(lut: &Lut) -> [u8; 4] { Palette::new(lut).playhead }
+
+/// Pixel columns of `rect` the playhead line covers (the shader's
+/// `|q.x - centre| < 1.5`).
+pub fn playhead_columns(p: &WaveformParams, rect: PxRect) -> std::ops::Range<usize> {
+    let r = p.wave_rect;
+    let centre = r[0] + r[2] * 0.5;
+    let (mut lo, mut hi) = (usize::MAX, 0usize);
+    for x in 0..rect.w as usize {
+        let qx = rect.x as f32 + x as f32 + 0.5;
+        if (qx - centre).abs() < 1.5 { lo = lo.min(x); hi = x + 1; }
+    }
+    if lo == usize::MAX { 0..0 } else { lo..hi }
+}
+
 /// Draw the enlarged waveform through the cache into `out`.  The playhead
 /// is quantised to `cols_per_px` (one pixel of scroll); the rest of the
 /// frame matches `draw(.., Kind::Wave, ..)` at that quantised playhead.
-pub fn draw_wave_cached(lut: &Lut, p: &WaveformParams, cols: &[u32], rect: PxRect, cache: &mut WaveCache, out: &mut Vec<u32>) {
+/// Returns false when the picture is the same as last time (nothing moved),
+/// so the caller can keep its texture and skip the upload.
+pub fn draw_wave_cached(lut: &Lut, p: &WaveformParams, cols: &[u32], rect: PxRect, cache: &mut WaveCache, out: &mut Vec<u32>) -> bool {
+    let (w, h) = (rect.w as usize, rect.h as usize);
+    if update_wave_cache(lut, p, cols, rect, cache, true) == WaveUpdate::Unchanged && out.len() == w * h { return false; }
+    // Copy out with the playhead line on top (the shader draws it first in
+    // every column it covers, over everything but the strip).
+    out.clear();
+    out.extend_from_slice(&cache.pix);
+    let ph = pack(playhead_rgb(lut));
+    for x in playhead_columns(p, rect) {
+        for y in 0..h { out[y * w + x] = ph; }
+    }
+    true
+}
+
+/// Bring the cache up to date for this frame's playhead and say how the
+/// picture changed.  `keep_field` shifts `pix` on the CPU (for a backend
+/// that uploads the whole field); off, a scroll only rasterises the new
+/// columns into `strip` and the backend shifts its texture on the GPU.
+pub fn update_wave_cache(lut: &Lut, p: &WaveformParams, cols: &[u32], rect: PxRect, cache: &mut WaveCache, keep_field: bool) -> WaveUpdate {
     let (w, h) = (rect.w as usize, rect.h as usize);
     let pal = Palette::new(lut);
     let g = WaveGeom::new(p);
@@ -374,11 +431,12 @@ pub fn draw_wave_cached(lut: &Lut, p: &WaveformParams, cols: &[u32], rect: PxRec
     let key = WaveKey::new(&pq, rect, cols);
     let strip = p.beat2_period_cols > 0.0;   // the strip is wall-clock driven: no caching
     let fresh = cache.key != Some(key) || cache.pix.len() != w * h || strip;
+    let mut update = if fresh { WaveUpdate::Full } else { WaveUpdate::Unchanged };
     if fresh {
         cache.pix.clear();
         cache.pix.resize(w * h, 0);
         let columns: Vec<Column> = (0..w).map(|x| classify(&pal, &pq, &g, cols, rect, x, false)).collect();
-        fill_columns(lut, &pal, &pq, &g, rect, &columns, 0, &mut cache.pix);
+        fill_columns(lut, &pal, &pq, &g, rect, &columns, 0, w, 0, &mut cache.pix);
         cache.key = Some(key);
         cache.q = q;
     } else {
@@ -387,32 +445,26 @@ pub fn draw_wave_cached(lut: &Lut, p: &WaveformParams, cols: &[u32], rect: PxRec
             let dd = d.unsigned_abs() as usize;
             if dd >= w {
                 let columns: Vec<Column> = (0..w).map(|x| classify(&pal, &pq, &g, cols, rect, x, false)).collect();
-                fill_columns(lut, &pal, &pq, &g, rect, &columns, 0, &mut cache.pix);
-            } else if d > 0 {
-                for y in 0..h { cache.pix[y * w..(y + 1) * w].copy_within(dd.., 0); }
-                let columns: Vec<Column> = (w - dd..w).map(|x| classify(&pal, &pq, &g, cols, rect, x, false)).collect();
-                fill_columns(lut, &pal, &pq, &g, rect, &columns, w - dd, &mut cache.pix);
+                fill_columns(lut, &pal, &pq, &g, rect, &columns, 0, w, 0, &mut cache.pix);
+                update = WaveUpdate::Full;
             } else {
-                for y in 0..h { cache.pix[y * w..(y + 1) * w].copy_within(..w - dd, dd); }
-                let columns: Vec<Column> = (0..dd).map(|x| classify(&pal, &pq, &g, cols, rect, x, false)).collect();
-                fill_columns(lut, &pal, &pq, &g, rect, &columns, 0, &mut cache.pix);
+                let x0 = if d > 0 { w - dd } else { 0 };
+                let columns: Vec<Column> = (x0..x0 + dd).map(|x| classify(&pal, &pq, &g, cols, rect, x, false)).collect();
+                if keep_field {
+                    if d > 0 { for y in 0..h { cache.pix[y * w..(y + 1) * w].copy_within(dd.., 0); } }
+                    else     { for y in 0..h { cache.pix[y * w..(y + 1) * w].copy_within(..w - dd, dd); } }
+                    fill_columns(lut, &pal, &pq, &g, rect, &columns, x0, w, x0, &mut cache.pix);
+                } else {
+                    cache.strip.clear();
+                    cache.strip.resize(dd * h, 0);
+                    fill_columns(lut, &pal, &pq, &g, rect, &columns, x0, dd, 0, &mut cache.strip);
+                }
             }
             cache.q = q;
+            if update == WaveUpdate::Unchanged { update = WaveUpdate::Shifted(d); }
         }
     }
-    // Copy out with the playhead line on top (the shader draws it first in
-    // every column it covers, over everything but the strip).
-    out.clear();
-    out.extend_from_slice(&cache.pix);
-    let r = p.wave_rect;
-    let centre = r[0] + r[2] * 0.5;
-    let ph = pack(pal.playhead);
-    for x in 0..w {
-        let qx = rect.x as f32 + x as f32 + 0.5;
-        if (qx - centre).abs() < 1.5 {
-            for y in 0..h { out[y * w + x] = ph; }
-        }
-    }
+    update
 }
 
 fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect: PxRect, out: &mut [u32]) {

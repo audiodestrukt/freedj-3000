@@ -195,3 +195,30 @@ the 527 s test track at 0.92× renders in 25.7 s / 2.9 s / 0.48 s.  Which
 one a board should default to is a listening decision —
 `cargo run --release -p opendeck-app --example stretch_ab -- track.mp3 out/ 0.92,1.08`
 renders all three for a blind A/B.
+
+### Whole-pixel scroll + GPU-side shift, same day
+
+The enlarged waveform was re-rasterised every frame (31 ms of the 64 ms idle
+frame, the bilinear sub-pixel scroll means every column changes).  The SDL
+backend now quantises the playhead to whole pixels, keeps the field in two
+GPU render targets, copies last frame's across by the pixel delta and
+uploads only the columns that entered (about 5 per frame at this hop size);
+the red playhead is a filled rect on top.  `OPENDECK_WAVE_SCROLL=smooth`
+restores the shader's sub-pixel scroll (what `render-parity.sh` compares).
+
+| Zero W, WSOLA, −6 % | before | after |
+|---|---|---|
+| Frame while playing | 90 ms (10–11 fps) | 56 ms (**17.9 fps**) |
+| Frame with audio idle | 64 ms (15.6 fps) | 38 ms (**26 fps**) |
+| Waveform CPU, playing | 31 ms | 0.3 ms of CPU |
+| Waveform upload | 4–8 ms | 3 ms |
+| Audio underruns | none | none |
+
+Where the playing frame goes now (56 ms): ~12 ms is not ours at all — the
+render thread is parked right after `present` while labwc composites the
+new buffer at nice 0 (thread CPU time 0.3 ms against 12 ms wall in that
+slot; `top` shows labwc at 12–20 % of the core).  That is the KMSDRM
+question answered with a number: no compositor would take the playing
+frame to ~44 ms (≈22 fps) and allow a native 1024×600 mode.  The rest:
+egui layout + tessellate + draw 16 ms, present (vsync) 8 ms, waveform
+upload 3 ms, GL copies / clear / driver ~17 ms.

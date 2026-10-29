@@ -25,7 +25,7 @@
 
 use crate::renderer::{display_gain, ColorMode, Renderer, Viewports, WaveformParams};
 use crate::snapshot::DeckSnapshot;
-use crate::waveform_cpu::{self, Kind, Lut, OverviewKey, PxRect, WaveCache};
+use crate::waveform_cpu::{self, Kind, Lut, OverviewKey, PxRect, WaveCache, WaveUpdate};
 use crate::{DeckApp, Host};
 use anyhow::{anyhow, Context, Result};
 use opendeck_analysis::WaveformCache;
@@ -155,6 +155,16 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
     }
     Ok(())
 }
+
+/// This thread's CPU time, to tell work from waiting in the instrument.
+#[cfg(target_os = "linux")]
+fn thread_cpu_ns() -> u64 {
+    let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+    unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
+}
+#[cfg(not(target_os = "linux"))]
+fn thread_cpu_ns() -> u64 { 0 }
 
 /// SDL scancode → winit physical key, for the keys the deck binds.  Only the
 /// shortcut set is mapped; anything else is ignored, as it is on winit.
@@ -298,6 +308,10 @@ pub struct SdlRenderer {
     /// Whole-pixel scroll cache for the enlarged waveform (`OPENDECK_WAVE_SCROLL`
     /// = pixel, the default here; `smooth` re-rasterises every frame).
     wave_cache: Option<WaveCache>,
+    /// GPU scroll: two render targets the field ping-pongs between (the
+    /// previous one copied across by the pixel delta, the new columns
+    /// uploaded as a strip), when the renderer supports targets.
+    wave_tgt:   Option<([Texture; 2], Texture, u32, u32, usize)>,   // targets, strip, w, h, current
     pix:        Vec<u32>,
     lut:        Lut,
 
@@ -328,6 +342,7 @@ impl SdlRenderer {
                 Some("smooth") => None,
                 _ => Some(WaveCache::default()),
             },
+            wave_tgt: None,
             pix: Vec::new(),
             lut: Lut::new(),
             capture: None,
@@ -369,6 +384,9 @@ impl SdlRenderer {
     /// Rasterise one waveform rect into its streaming texture and blit it.
     fn draw_waveform(&mut self, p: &WaveformParams, kind: Kind, rect: [f32; 4]) -> Result<()> {
         let Some(px) = PxRect::from_f32(rect) else { return Ok(()) };
+        if kind == Kind::Wave && self.wave_cache.is_some() && self.canvas.render_target_supported() {
+            return self.draw_wave_gpu_scroll(p, px);
+        }
         let slot = match kind { Kind::Wave => &mut self.wave_tex, Kind::Overview => &mut self.over_tex };
         let fresh = !matches!(slot, Some((_, w, h)) if *w == px.w && *h == px.h);
         if fresh {
@@ -392,16 +410,91 @@ impl SdlRenderer {
         let (tex, _, _) = slot.as_mut().expect("just created");
         if redraw {
             let t = Instant::now();
-            match (kind, self.wave_cache.as_mut()) {
+            let changed = match (kind, self.wave_cache.as_mut()) {
                 (Kind::Wave, Some(cache)) => waveform_cpu::draw_wave_cached(&self.lut, p, &self.cols, px, cache, &mut self.pix),
-                _ => waveform_cpu::draw(&self.lut, p, &self.cols, kind, px, &mut self.pix),
-            }
+                _ => { waveform_cpu::draw(&self.lut, p, &self.cols, kind, px, &mut self.pix); true }
+            };
             crate::perf_accum("wave_cpu", t.elapsed());
-            let t = Instant::now();
-            tex.update(None, bytemuck::cast_slice(&self.pix), px.w as usize * 4).map_err(|e| anyhow!("waveform upload: {e}"))?;
-            crate::perf_accum("wave_upload", t.elapsed());
+            // A frame where nothing scrolled keeps last frame's texture.
+            if changed || fresh {
+                let t = Instant::now();
+                tex.update(None, bytemuck::cast_slice(&self.pix), px.w as usize * 4).map_err(|e| anyhow!("waveform upload: {e}"))?;
+                crate::perf_accum("wave_upload", t.elapsed());
+            }
         }
         self.canvas.copy(tex, None, Rect::new(px.x, px.y, px.w, px.h)).map_err(|e| anyhow!("waveform blit: {e}"))?;
+        Ok(())
+    }
+
+    /// The enlarged waveform with the scroll done on the GPU: the cached
+    /// field decides how the picture moved; a shift is a texture-to-texture
+    /// copy of last frame's target offset by the delta plus an upload of only
+    /// the columns that entered; the playhead is a filled rect on top.  The
+    /// CPU never touches the whole field once it is built.
+    fn draw_wave_gpu_scroll(&mut self, p: &WaveformParams, px: PxRect) -> Result<()> {
+        let (w, h) = (px.w, px.h);
+        let fresh_tex = !matches!(&self.wave_tgt, Some((_, _, tw, th, _)) if *tw == w && *th == h);
+        if fresh_tex {
+            if let Some((t, strip, _, _, _)) = self.wave_tgt.take() {
+                for x in t { unsafe { x.destroy(); } }
+                unsafe { strip.destroy(); }
+            }
+            let mk = || self.tc.create_texture_target(PixelFormatEnum::ABGR8888, w, h).map_err(|e| anyhow!("waveform target {w}x{h}: {e}"));
+            let (a, b) = (mk()?, mk()?);
+            let strip = self.tc.create_texture_streaming(PixelFormatEnum::ABGR8888, w, h).map_err(|e| anyhow!("waveform strip: {e}"))?;
+            self.wave_tgt = Some(([a, b], strip, w, h, 0));
+            if let Some(c) = self.wave_cache.as_mut() { c.invalidate(); }
+        }
+        let t = Instant::now();
+        let c0 = thread_cpu_ns();
+        let cache = self.wave_cache.as_mut().expect("checked by caller");
+        let update = waveform_cpu::update_wave_cache(&self.lut, p, &self.cols, px, cache, false);
+        // Wall vs this thread's CPU time: on a one-core board the gap is the
+        // compositor and the audio threads taking their turn right after
+        // present, not the raster (measured 12 ms vs 0.3 ms on a Zero W).
+        crate::perf_accum("wave_cpu", t.elapsed());
+        crate::perf_accum("wave_cpu_thread", Duration::from_nanos(thread_cpu_ns().saturating_sub(c0)));
+        let (targets, strip, _, _, cur) = self.wave_tgt.as_mut().expect("just created");
+        let t = Instant::now();
+        match update {
+            WaveUpdate::Unchanged => {}
+            WaveUpdate::Full => {
+                targets[*cur].update(None, bytemuck::cast_slice(&cache.pix), w as usize * 4)
+                    .map_err(|e| anyhow!("waveform upload: {e}"))?;
+            }
+            WaveUpdate::Shifted(d) => {
+                let dd = d.unsigned_abs() as u32;
+                // The strip of new columns, row-major, `dd` pixels wide — the
+                // only pixels the CPU rasterised this frame.
+                strip.update(Rect::new(0, 0, dd, h), bytemuck::cast_slice(&cache.strip), dd as usize * 4)
+                    .map_err(|e| anyhow!("waveform strip upload: {e}"))?;
+                let next = 1 - *cur;
+                let (keep_src, keep_dst, new_dst) = if d > 0 {
+                    (Rect::new(dd as i32, 0, w - dd, h), Rect::new(0, 0, w - dd, h), Rect::new((w - dd) as i32, 0, dd, h))
+                } else {
+                    (Rect::new(0, 0, w - dd, h), Rect::new(dd as i32, 0, w - dd, h), Rect::new(0, 0, dd, h))
+                };
+                let (prev, nxt) = if next == 1 { let (a, b) = targets.split_at_mut(1); (&a[0], &mut b[0]) } else { let (a, b) = targets.split_at_mut(1); (&b[0], &mut a[0]) };
+                let strip_ref: &Texture = strip;
+                let mut err = None;
+                self.canvas.with_texture_canvas(nxt, |c| {
+                    if let Err(e) = c.copy(prev, keep_src, keep_dst) { err = Some(e); }
+                    if let Err(e) = c.copy(strip_ref, Rect::new(0, 0, dd, h), new_dst) { err = Some(e); }
+                }).map_err(|e| anyhow!("waveform target: {e}"))?;
+                if let Some(e) = err { return Err(anyhow!("waveform scroll: {e}")); }
+                *cur = next;
+            }
+        }
+        crate::perf_accum("wave_upload", t.elapsed());
+        self.canvas.copy(&targets[*cur], None, Rect::new(px.x, px.y, w, h)).map_err(|e| anyhow!("waveform blit: {e}"))?;
+        // Playhead: the shader paints it over every column it covers.
+        let cols = waveform_cpu::playhead_columns(p, px);
+        if !cols.is_empty() {
+            let [r, g, b, _] = waveform_cpu::playhead_rgb(&self.lut);
+            self.canvas.set_draw_color(Color::RGB(r, g, b));
+            self.canvas.fill_rect(Rect::new(px.x + cols.start as i32, px.y, (cols.end - cols.start) as u32, h))
+                .map_err(|e| anyhow!("playhead: {e}"))?;
+        }
         Ok(())
     }
 
@@ -522,5 +615,9 @@ impl Drop for SdlRenderer {
         for (_, (t, _)) in self.textures.drain() { unsafe { t.destroy(); } }
         if let Some((t, _, _)) = self.wave_tex.take() { unsafe { t.destroy(); } }
         if let Some((t, _, _)) = self.over_tex.take() { unsafe { t.destroy(); } }
+        if let Some((t, strip, _, _, _)) = self.wave_tgt.take() {
+            for x in t { unsafe { x.destroy(); } }
+            unsafe { strip.destroy(); }
+        }
     }
 }
