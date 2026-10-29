@@ -13,7 +13,7 @@ rsync -aL --info=progress2 \
   --include='*/' \
   --include='libc.so*' --include='libc_nonshared.a' --include='libm.so*' --include='libm-*.a' \
   --include='libpthread*' --include='libdl.so*' --include='librt.so*' --include='libutil.so*' \
-  --include='libgcc_s.so*' --include='libstdc++.so*' --include='libasound.so*' \
+  --include='libgcc_s.so*' --include='libstdc++.so*' --include='libasound.so*' --include='libatomic.so*' \
   --include='ld-linux-armhf.so*' --include='*crt*.o' --include='libmvec.so*' --include='libresolv.so*' \
   --exclude='*' \
   "$host:/usr/lib/arm-linux-gnueabihf/" "$dest/usr/lib/arm-linux-gnueabihf/"

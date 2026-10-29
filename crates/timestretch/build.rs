@@ -91,6 +91,11 @@ fn main() {
         println!("cargo:rustc-link-lib=framework=Accelerate");
     }
     // cc emits the C++ standard library link flag itself (-lc++ / -lstdc++).
+    // 32-bit ARM (Pi Zero W / Pi 1, ARMv6) has no native 64-bit atomics, so
+    // Rubber Band's std::atomic<double> needs libatomic's helpers.
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("arm") {
+        println!("cargo:rustc-link-lib=atomic");
+    }
 }
 
 /// Bungee (third_party/bungee, MPL-2.0): pffft as C, Bungee's sources plus

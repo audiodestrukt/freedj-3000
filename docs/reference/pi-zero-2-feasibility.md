@@ -91,3 +91,41 @@ cooling stays the floor and the Pi 5 the comfortable choice. A Zero-footprint
 board with a Mali GPU (Radxa Zero 3W: RK3566, Mali-G52, Panfrost does
 Vulkan and ES 3.2, up to 8 GB) is the untested alternative if the form
 factor is the point.
+
+## Measured on the board below it: Pi Zero W (original), 2026-10-28
+
+The board that turned up on the bench was a **Pi Zero W Rev 1.1**, not a
+Zero 2 W: one ARM1176 (ARMv6, VFPv2, no NEON) at 1 GHz, 426 MB, VideoCore IV,
+32-bit Raspberry Pi OS (Trixie) with the labwc desktop. It is a tier below
+the Zero 2 W, so these are a floor, not the Zero 2 W's numbers. Built with
+`deploy/pi/cross/build.sh armv6` (sysroot lifted from the Pi; 15.8 MB
+stripped; needs `-latomic` for Rubber Band's 64-bit atomics), run under the
+desktop with `LIBGL_ALWAYS_SOFTWARE=1 WGPU_BACKEND=gl OPENDECK_STRETCH=bungee`
+on a 60 s excerpt of amplificate.mp3.
+
+| What | Zero W | Desktop, for scale |
+|---|---|---|
+| Decode 60 s MP3 | 3.8 s | ~0.1 s |
+| Waveform + MiniBPM, 60 s | 25.9 s (9.5 s with the grid cached) | ~0.2 s |
+| RSS, 60 s track loaded | 124 MB | — |
+| Audio thread (Bungee, 1.0×) | ~40 % of the one core | 0.40 normalised |
+| GPU | wgpu refuses VideoCore IV (ES 2.0); llvmpipe (LLVM 19) via GL comes up | Vulkan |
+| First frame | 103–128 s (LLVM JIT compiling the shaders) | — |
+| Steady state | **45 s per frame**, render thread 95 % of the core | 16.7 ms |
+| Output | wrong: panels filled white, cyan diagonal streaks, text as outlines | — |
+| Audio underruns | 17 s of silence during analysis; 57 s of the ~100 s once rendering started | none |
+
+So on this board the app starts, decodes, analyses and plays, and the
+rendering path is dead three ways at once: wgpu cannot use the GPU, software
+GL is three orders of magnitude too slow, and llvmpipe on ARMv6 without NEON
+produces corrupt frames (diagonal streaks are the fingerprint of a row-pitch
+mismatch; not investigated, it would not matter at this speed). The audio
+failures are a consequence of the single core: the analysis thread and the
+render thread starve the audio thread, which has no RT priority (#13).
+
+What this says about the Zero 2 W: the GPU verdict in §1 stands, so the
+[SDL render backend (#47)](https://github.com/audiodestrukt/freedj-3000/issues/47)
+is the only route for either board. Beyond it the Zero W would also need the
+audio thread at RT priority and analysis throttled to a background core it
+does not have; the Zero 2 W has three spare cores for exactly that, and each is
+roughly three times faster than this one.

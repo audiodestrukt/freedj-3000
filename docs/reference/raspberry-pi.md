@@ -78,10 +78,19 @@ make build          # first build is slow on a Pi; subsequent ones are fine
 make run TRACK=techno.mp3
 ```
 
-Cross-compiling from the x86 box is much faster once set up (the aarch64 target
-is already added); worth doing if you iterate a lot, but not needed for a first
-run. `cross` or a sysroot both work; the C deps (`librubberband`, ALSA) make a
-sysroot the reliable path.
+Cross-compiling from the x86 box is much faster, and on anything with 512 MB
+it is the only option:
+
+```bash
+deploy/pi/cross/build.sh            # aarch64: Pi 3/4/5, Zero 2 W (64-bit OS)
+deploy/pi/cross/sysroot-from-pi.sh piw && deploy/pi/cross/build.sh armv6   # Pi Zero W / Pi 1
+scp target/aarch64-unknown-linux-gnu/release/opendeck-stripped pi:opendeck
+```
+
+Both run in a Debian container (docker) and link only ALSA from the system;
+Rubber Band and Bungee are vendored. The ARMv6 variant takes its start files
+and libraries from a sysroot copied off the Pi, because Debian's armhf cross
+packages are ARMv7.
 
 ## Graphics — the main unknown
 
@@ -163,8 +172,10 @@ parent folder(s), and every subdirectory there is taken as a mount.
 
 The Pi Zero 2 W is out: its VideoCore IV stops at OpenGL ES 2.0 and wgpu
 refuses it, RAM is tight, and only the Bungee stretcher would fit its CPU.
-Measurements and the estimate: `pi-zero-2-feasibility.md`. Pi 4 with a
-cooler is the floor.
+Measurements and the estimate: `pi-zero-2-feasibility.md`, which also has a
+real run on an original Pi Zero W (it plays; software GL manages one frame
+every 45 s). Pi 4 with a cooler is the floor until the SDL renderer (#47)
+exists.
 
 ## What not to expect yet
 
