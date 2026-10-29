@@ -1,0 +1,29 @@
+# Cross-build OpenDeck for the ARMv6 Raspberry Pi Zero W / Pi 1 (32-bit
+# Raspberry Pi OS).  Debian's armhf cross packages target ARMv7, so the
+# compiler is Debian's but every library and crt object is linked from a
+# sysroot copied off the Pi itself (deploy/pi/cross/sysroot-from-pi.sh).
+#
+#   deploy/pi/cross/build.sh armv6      # → target/arm-unknown-linux-gnueabihf/release/opendeck
+FROM rust:1-trixie
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends g++-arm-linux-gnueabihf pkg-config \
+ && rm -rf /var/lib/apt/lists/*
+RUN rustup toolchain install stable --profile minimal --component rustfmt,clippy \
+ && rustup target add --toolchain stable arm-unknown-linux-gnueabihf \
+ && chmod -R a+rwX /usr/local/rustup
+# Compiler wrappers: ARMv6 + VFPv2 hard-float, ARM (not Thumb) code, the Pi's
+# sysroot for headers and libraries, and the Pi's gcc dir for crt*/libgcc.
+COPY armv6-cc.sh /usr/local/bin/armv6-gcc
+RUN sed 's/arm-linux-gnueabihf-gcc/arm-linux-gnueabihf-g++/' /usr/local/bin/armv6-gcc > /usr/local/bin/armv6-g++ \
+ && chmod +x /usr/local/bin/armv6-gcc /usr/local/bin/armv6-g++
+ENV SYSROOT=/work/target/pi-sysroot \
+    CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER=armv6-gcc \
+    CC_arm_unknown_linux_gnueabihf=armv6-gcc \
+    CXX_arm_unknown_linux_gnueabihf=armv6-g++ \
+    AR_arm_unknown_linux_gnueabihf=arm-linux-gnueabihf-ar \
+    PKG_CONFIG_ALLOW_CROSS=1 \
+    PKG_CONFIG_SYSROOT_DIR_arm_unknown_linux_gnueabihf=/work/target/pi-sysroot \
+    PKG_CONFIG_LIBDIR_arm_unknown_linux_gnueabihf=/work/target/pi-sysroot/usr/lib/arm-linux-gnueabihf/pkgconfig \
+    CARGO_HOME=/cargo-home \
+    RUSTUP_AUTO_INSTALL=0
+WORKDIR /work
