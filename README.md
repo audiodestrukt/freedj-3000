@@ -143,6 +143,31 @@ make run TRACK=/path/to/track.mp3
 `make` on its own lists every target. The underlying commands are plain cargo —
 `make build` is `cargo build --release -p opendeck-app` and nothing more.
 
+### Linux (prebuilt)
+
+The [Releases page](https://github.com/audiodestrukt/freedj-3000/releases)
+has `OpenDeck-<version>-linux-x86_64.tar.gz` and `…-linux-aarch64.tar.gz`
+(Pi 3 / 4 / 5 / Zero 2 W on a 64-bit OS). Unpack, `./opendeck track.mp3`;
+details in the bundled `README-LINUX.txt`. The binaries link only ALSA and
+SDL2 from the system (Rubber Band and Bungee are built in) against glibc
+2.36, so they run on Debian 12, Ubuntu 22.04, Raspberry Pi OS Bookworm or
+newer:
+
+```bash
+sudo apt install libasound2 libsdl2-2.0-0 mesa-vulkan-drivers
+```
+
+Built by `.github/workflows/linux.yml` on every `linux-v*` tag (a manual run
+from the Actions tab leaves the tarballs as run artifacts):
+
+```bash
+git tag linux-v0.3.0 && git push origin linux-v0.3.0
+```
+
+The 32-bit Pi Zero W / Pi 1 build needs a sysroot copied off the Pi, so it
+stays local: `deploy/pi/cross/build.sh armv6` (see
+`docs/reference/raspberry-pi.md`).
+
 ### Windows
 
 Prebuilt: the [Releases page](https://github.com/audiodestrukt/freedj-3000/releases)

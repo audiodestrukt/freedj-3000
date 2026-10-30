@@ -61,6 +61,14 @@ eventual appliance mode) is a second step — see "Graphics" below.
 
 ## Build
 
+No build needed for a 64-bit Pi OS: the
+[Releases page](https://github.com/audiodestrukt/freedj-3000/releases) has
+`OpenDeck-<version>-linux-aarch64.tar.gz` (Pi 3 / 4 / 5 / Zero 2 W) from
+`.github/workflows/linux.yml`, which runs the same `deploy/pi/cross` recipe
+as below. `sudo apt install libasound2 libsdl2-2.0-0 mesa-vulkan-drivers`,
+unpack, run. The Zero W / Pi 1 (ARMv6) are not on the release page: that
+build links against a sysroot copied off the Pi (`build.sh armv6` below).
+
 Native on the Pi is simplest to start (slower compile, no cross toolchain):
 
 If `apt update` fails on a `bookworm-testing` Release file, comment that line

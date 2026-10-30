@@ -33,3 +33,4 @@ hardware/cad/build/
 
 # Logic-analyser captures of our own hardware (large; decide later what to keep)
 /captures/
+dist/

@@ -1,0 +1,156 @@
+name: Linux build
+
+# Builds the desktop binary for Linux (x86_64 and aarch64) and publishes it,
+# the same way windows.yml does for Windows.
+#
+#   git tag linux-v0.3.0 && git push origin linux-v0.3.0   →  GitHub Release with both tarballs
+#   Actions tab → "Linux build" → Run workflow            →  tarballs as run artifacts only
+#
+# Both binaries enable the SDL render backend next to wgpu, link only ALSA and
+# SDL2 from the system, and build the vendored Rubber Band + Bungee (no
+# librubberband-dev installed, so pkg-config misses and build.rs vendors).
+# They are built against glibc 2.36 (Debian Bookworm) so they run on Debian 12,
+# Ubuntu 22.04, Raspberry Pi OS Bookworm and anything newer.
+#   x86_64   native, inside the rust:1-bookworm image
+#   aarch64  the deploy/pi/cross recipe (Pi 3 / 4 / 5 / Zero 2 W, 64-bit OS)
+# The ARMv6 Pi Zero W build needs a sysroot copied off a real Pi, so it stays
+# a local build (deploy/pi/cross/build.sh armv6).
+on:
+  push:
+    tags:
+      - 'linux-v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write   # softprops/action-gh-release creates the release on a tag
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # linux-v0.3.0 → 0.3.0; a manual run gets 0.0.0-<sha>. Baked into the
+  # binary through OPENDECK_VERSION (see crates/app/build.rs + screen.rs).
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Compute version
+        id: ver
+        run: |
+          REF="${{ github.ref_name }}"
+          if [[ "$REF" == linux-v* ]]; then
+            VERSION="${REF#linux-v}"
+          else
+            VERSION="0.0.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $VERSION"
+
+  x86_64:
+    needs: version
+    runs-on: ubuntu-latest
+    container: rust:1-bookworm
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # g++ for the vendored Rubber Band / Bungee / MiniBPM; ALSA for cpal;
+      # SDL2 for the renderer-sdl feature. wgpu/winit load Vulkan, Wayland and
+      # X11 at run time, so nothing else is linked.
+      - name: Install system dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            g++ libasound2-dev libsdl2-dev pkg-config file
+
+      # rust-toolchain.toml pins `stable` + components; the image ships a
+      # version-named toolchain, so this materialises the pinned one.
+      - name: Set up Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build opendeck
+        env:
+          OPENDECK_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cargo build --release -p opendeck-app --bin opendeck --features renderer-sdl
+          strip target/release/opendeck
+
+      # Must start, resolve its shared libraries and report the baked version
+      # on a bare machine (no audio device, no GPU on this path).
+      - name: Smoke test
+        run: |
+          ./target/release/opendeck --version | tee /tmp/v
+          grep -q "opendeck ${{ needs.version.outputs.version }}" /tmp/v
+          echo "direct shared-library dependencies:"
+          objdump -p target/release/opendeck | grep NEEDED
+
+      - name: Package
+        id: pkg
+        run: deploy/linux/package.sh x86_64 "${{ needs.version.outputs.version }}" target/release/opendeck
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenDeck-${{ needs.version.outputs.version }}-linux-x86_64
+          path: ${{ steps.pkg.outputs.tarball }}
+          if-no-files-found: error
+
+  aarch64:
+    needs: version
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The same container recipe used from the dev box: builds the cross
+      # image (Debian's aarch64 g++, arm64 ALSA + SDL2 via multiarch), then
+      # cargo inside it with the host's cargo cache bind-mounted. Output is
+      # target/aarch64-unknown-linux-gnu/release/opendeck-stripped.
+      - name: Cross-build (docker)
+        env:
+          OPENDECK_VERSION: ${{ needs.version.outputs.version }}
+        run: deploy/pi/cross/build.sh aarch64
+
+      - name: Check the binary
+        run: |
+          file target/aarch64-unknown-linux-gnu/release/opendeck-stripped | tee /tmp/f
+          grep -q "ARM aarch64" /tmp/f
+          echo "direct shared-library dependencies:"
+          objdump -p target/aarch64-unknown-linux-gnu/release/opendeck-stripped | grep NEEDED
+
+      - name: Package
+        id: pkg
+        run: deploy/linux/package.sh aarch64 "${{ needs.version.outputs.version }}" target/aarch64-unknown-linux-gnu/release/opendeck-stripped
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenDeck-${{ needs.version.outputs.version }}-linux-aarch64
+          path: ${{ steps.pkg.outputs.tarball }}
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/linux-v')
+    needs: [version, x86_64, aarch64]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download tarballs
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OpenDeck ${{ needs.version.outputs.version }} (Linux)
+          files: dist/*.tar.gz
+          generate_release_notes: true

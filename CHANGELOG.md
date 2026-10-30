@@ -5,6 +5,7 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Linux release builds: `.github/workflows/linux.yml` publishes `OpenDeck-<version>-linux-{x86_64,aarch64}.tar.gz` on a `linux-v*` tag (vendored Rubber Band + Bungee, SDL backend included, glibc 2.36); `deploy/linux/package.sh` builds the tarball locally.
 - SDL backend on KMSDRM (no compositor): `OPENDECK_FULLSCREEN=1` picks the closest display mode and letterboxes 1:1. Pi Zero W: 49 fps playing with WSOLA, no underruns.
 - SDL backend: the enlarged waveform scrolls in whole pixels through two GPU render targets (shift by copy, upload only the new columns); `OPENDECK_WAVE_SCROLL=smooth` keeps the sub-pixel scroll. Pi Zero W: 17.9 fps playing / 26 fps idle.
 - `OPENDECK_STRETCH=wsola`: a time-domain WSOLA key-lock engine (pure Rust, `crates/timestretch/src/wsola.rs`), about a sixth of Bungee's cost, for one-core boards; Master Tempo off becomes a Hermite varispeed read.

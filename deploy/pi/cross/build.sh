@@ -23,6 +23,7 @@ esac
 docker image inspect "$IMG" >/dev/null 2>&1 || docker build -t "$IMG" -f "deploy/pi/cross/$DF" deploy/pi/cross
 mkdir -p ~/.cargo/registry ~/.cargo/git
 run() { docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp \
+          ${OPENDECK_VERSION:+-e OPENDECK_VERSION="$OPENDECK_VERSION"} \
           -v "$PWD":/work \
           -v "$HOME/.cargo/registry":/cargo-home/registry -v "$HOME/.cargo/git":/cargo-home/git \
           "$IMG" "$@"; }
