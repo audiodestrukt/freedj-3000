@@ -3,5 +3,6 @@ mod status_template;
 pub mod ableton;
 pub mod lanhid;
 pub mod lanhid_auth;
+pub mod lanhid_status;
 
 pub use prodj::ProDjLink;
