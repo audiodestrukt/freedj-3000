@@ -168,12 +168,36 @@ probe advances 0x14 → 0x15 → `ESTABLISHED` and the 0x20 input stream — the
 full acceptance test, locally, with no hardware. Supplying that real identity
 is the one step left to the operator.
 
+## Drive the app from the deck (end to end)
+
+The `crates/app/src/surface/lanhid.rs` surface closes the loop: it owns the
+deck socket, runs the handshake, decodes 0x20 → `CdjControl` → `ControlEvent`
+on the same `Event` bus the MIDI/I2C surfaces use (`DeckApp::apply`), and
+streams a 0x21 status report back as its keepalive. The `map()` function (the
+CdjControl → ControlEvent table: jog→JogDelta, tempo→TempoFader, pads→hot
+cues/beat loops, PLAY/CUE/VINYL/etc.) is pure and unit-tested.
+
+It is enabled out of band (no controllers.toml change):
+
+```
+OPENDECK_CDJ_HID=/tmp/cdj3k-emu-1000/instance-1/usb-link.sock \
+OPENDECK_CDJ_HID_ID=/path/to/cdj_hid_identity.conf \
+cargo run -p opendeck-app -- amplificate.mp3
+```
+
+With the real identity in the conf the handshake establishes and turning the
+emulator (or a real CDJ's) jog scrubs the loaded waveform; buttons and pads
+map as the table says. The identity conf is the operator's to supply (it
+authenticates as the posed vendor); it is never in the repo.
+
 ## Still to build
 
 - Display commands (0x22–0x30): titles, RGB waveforms, beat grid, hot cues,
   and the fragmentation/reassembly they share with the tunnel (brief page 6).
+  The status (0x21) feedback is sent already; these richer screen payloads are
+  not yet.
 - The UDP socket layer: discovery, per-player sessions, tunnel (de)fragment,
   keepalive cadence; and the iOS interface binding (IP_BOUND_IF, the wired
-  link-local address) the brief's page 2 describes.
-- A surface transport in `crates/app/src/surface` mapping `CdjControl` →
-  `ControlEvent`, beside the MIDI and I2C surfaces, and feeding `Status` back.
+  link-local address) the brief's page 2 describes. The `lanhid` surface
+  currently speaks the Unix/USB-B socket; `map()` is transport-agnostic and
+  carries straight over to the UDP tunnel.

@@ -15,6 +15,7 @@
 
 pub mod config;
 pub mod i2c;
+pub mod lanhid;
 pub mod map;
 pub mod midi;
 
@@ -131,6 +132,9 @@ pub fn default_path() -> PathBuf { crate::taglist::app_data_dir().join("controll
 /// Bring every surface up.  MIDI surfaces are (re)connected as their ports
 /// appear; each I2C board gets its own polling thread.  Returns at once.
 pub fn start(file: SurfaceFile, deck: Deck, tx: Sender<Event>, ind: Arc<Indicators>) {
+    // A CDJ/XDJ in CONTROL MODE over HID-via-LINK, if OPENDECK_CDJ_HID is set.
+    lanhid::spawn_from_env(tx.clone());
+
     let mut midis = Vec::new();
     for s in file.surface {
         if s.i2c.is_some() {
