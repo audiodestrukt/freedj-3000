@@ -252,8 +252,13 @@ impl Handshake {
         }
 
         match (self.state, stage) {
-            // Stage 1: CDJ announced itself. Answer with our challenge.
-            (State::WaitHello, 0x11) => {
+            // Once in, ignore everything (the deck keeps announcing 0x11).
+            (State::Established, _) => Step::Waiting,
+            // Stage 1: CDJ announced itself. Answer with our challenge. The
+            // deck re-announces 0x11 even while we wait for its 0x13 proof, so
+            // a 0x11 in ANY (pre-Established) state re-arms and re-sends 0x12
+            // rather than being treated as an out-of-order failure.
+            (_, 0x11) => {
                 let mut t = self.mfr_product_tlvs();
                 t.extend(tlv(0x03, &nibble_expand(&self.seed_a)));
                 self.state = State::WaitProof;
@@ -298,7 +303,6 @@ impl Handshake {
                 self.state = State::Established;
                 Step::Established
             }
-            (State::Established, _) => Step::Waiting,
             _ => self.fail("unexpected stage for state"),
         }
     }
@@ -403,6 +407,26 @@ mod tests {
         };
         let s13 = cdj_reply_0x13(&real, &s12, [1, 2, 3, 4]);
         assert_eq!(hs.on_frame(&s13), Step::Failed("CDJ proof mismatch"));
+    }
+
+    #[test]
+    fn repeated_0x11_rearms_not_fails() {
+        // The deck re-announces 0x11 while we wait for its 0x13; a stray 0x11
+        // in WaitProof must re-send 0x12, not fail, and the handshake must
+        // still complete when the 0x13 finally arrives.
+        let id = fake_identity();
+        let mut hs = Handshake::new(id.clone(), [1, 2, 3, 4, 5, 6, 7, 8]);
+        let hello = frame(0x11, &tlv(0x01, &[3, 22]));
+        assert!(matches!(hs.on_frame(&hello), Step::Send(_))); // -> WaitProof
+        // stray re-announce: re-arm, re-send 0x12 (was: Failed).
+        let Step::Send(s12) = hs.on_frame(&hello) else {
+            panic!("repeated 0x11 should re-send 0x12")
+        };
+        assert_eq!(s12[6], 0x12);
+        let s13 = cdj_reply_0x13(&id, &s12, [0xDE, 0xAD, 0xBE, 0xEF]);
+        let Step::Send(s14) = hs.on_frame(&s13) else { panic!("expected 0x14") };
+        assert_eq!(s14[6], 0x14);
+        assert_eq!(hs.on_frame(&frame(0x15, &[])), Step::Established);
     }
 
     #[test]

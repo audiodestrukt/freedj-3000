@@ -73,7 +73,13 @@ fn main() -> std::io::Result<()> {
     let mut dec = InputDecoder::new();
     let mut established = false;
     let mut reached_11 = false;
+    let mut highest_stage = 0u8;
     let mut input_reports = 0u64;
+
+    // First 16 bytes of a frame as hex, for logging the deck's stage frames.
+    fn hex8(p: &[u8]) -> String {
+        p.iter().take(16).map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
+    }
     let mut last_keepalive = Instant::now();
     let mut next_hello = Instant::now();
 
@@ -128,9 +134,19 @@ fn main() -> std::io::Result<()> {
                         if stage == 0x11 {
                             reached_11 = true;
                         }
+                        // Record which stages the deck actually emits — a 0x13
+                        // (or higher) proves the firmware runs the real
+                        // handshake responder, not just a 0x11 announce loop.
+                        if stage > highest_stage {
+                            highest_stage = stage;
+                            eprintln!(
+                                "deck stage 0x{stage:02x} (first): {}",
+                                hex8(&payload)
+                            );
+                        }
                         match hs.on_frame(&payload) {
                             Step::Send(frame) => {
-                                eprintln!("handshake: got stage 0x{stage:02x}, replying");
+                                eprintln!("  -> got stage 0x{stage:02x}, replying 0x{:02x}", frame[6]);
                                 send(&mut stream, 1, &frame)?;
                             }
                             Step::Established => {
@@ -139,7 +155,9 @@ fn main() -> std::io::Result<()> {
                                 last_keepalive = Instant::now();
                             }
                             Step::Waiting => {}
-                            Step::Failed(why) => eprintln!("handshake failed: {why}"),
+                            Step::Failed(why) => {
+                                eprintln!("  -> stage 0x{stage:02x} rejected: {why}")
+                            }
                         }
                     } else if payload.len() >= 2 && payload[1] == 0x20 {
                         input_reports += 1;
@@ -155,6 +173,7 @@ fn main() -> std::io::Result<()> {
 
     eprintln!("---");
     eprintln!("saw stage 0x11:        {reached_11}");
+    eprintln!("highest deck stage:    0x{highest_stage:02x}");
     eprintln!("handshake established: {established}");
     eprintln!("0x20 input reports:    {input_reports}");
     Ok(())

@@ -98,8 +98,9 @@ MIDI table, so one `[[surface]]` MIDI preset should serve both units.
 
 The HID input report (jog position to ~9728 steps per turn, 1000-step tempo
 fader, needle search, every button) is reachable only behind the handshake.
-The emulator cannot teach it to us: its bridge skips the handshake by forcing
-the PC-mode flag, and the deck then sits at stage 1 forever. Two routes:
+The deck sits at stage 1 (re-announcing 0x11) until the host answers — but it
+*does* run the full responder (see the probe result below), so the emulator
+can teach us the whole exchange. Two routes:
 
 - **MIDI now.** 7-bit jog speed and tempo, no handshake, works on the
   emulator today and on the XDJ-1000MK2 over a USB cable. The map above is
@@ -148,10 +149,24 @@ cargo run -p opendeck-link --example cdj_hid_probe -- --id /path/to/cdj_hid_iden
 ```
 
 It talks the emulator's USB-B PC Link socket (whole 64-byte frames, no tunnel
-fragmentation), runs the handshake, and prints whether it reached stage 0x11,
-whether it authenticated, and any decoded 0x20 input. Note the emulator forces
-PC mode by patching a flag, so whether its firmware runs the handshake
-responder at all is the open question this probe answers.
+fragmentation), runs the handshake, and prints the highest deck stage reached,
+whether it authenticated, and any decoded 0x20 input.
+
+**Result (2026-11-04): the emulator runs the real handshake responder.** Probed
+with a *fake* identity, the deck answered our stage-0x12 challenge with a
+well-formed stage 0x13 —
+
+```
+00 f0 01 00 01 00 13 2a 01 0b 50 69 6f 6e 65 65 ...   ("Pionee[r DJ]" + seed E + proof)
+```
+
+— so it is **not** stuck at stage 1, and PC-mode forcing does not bypass the
+exchange (correcting the earlier assumption). The fake secret fails the proof
+check (`CDJ proof mismatch`), exactly as it must. With the real PioneerDJ
+`secret_const` + CDJ-3000 `device_id` in the conf, the proof verifies and the
+probe advances 0x14 → 0x15 → `ESTABLISHED` and the 0x20 input stream — the
+full acceptance test, locally, with no hardware. Supplying that real identity
+is the one step left to the operator.
 
 ## Still to build
 
