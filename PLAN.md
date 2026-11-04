@@ -643,6 +643,47 @@ The fragment shader does almost nothing — the waveform color data is pre-baked
 - [ ] Loop roll, beat jump
 - [ ] Full waveform color (frequency-mapped, like CDJ-3000)
 - [ ] Performance mode UI (large waveforms, pad performance modes)
+- [ ] **CDJ HID in:** a CDJ-3000 on USB-B drives OpenDeck (see [Pioneer HID mode](#pioneer-hid-mode))
+- [ ] **CDJ HID out:** OpenDeck shows up as a CDJ-3000 to rekordbox / Serato / Traktor (see [Pioneer HID mode](#pioneer-hid-mode))
+
+### Pioneer HID mode
+
+Two directions, same protocol. Map it first, from the cdj3k emulator.
+
+**1. HID in: a CDJ-3000 controls OpenDeck.** The CDJ in PC/CONTROL MODE
+(CDJ) is a USB HID + USB MIDI composite device: VID/PID `0x2B73/0x002F`,
+64-byte reports both ways (CDJ-3000X: `0x2B73/0x004E`, 256 in / 1024 out).
+Read it through hidraw like the S2 MK2, map jog / tempo / buttons onto the
+same control events, and send the lamp/display reports back. That gives full
+jog resolution, which MIDI mode doesn't.
+
+**2. HID out: OpenDeck acts as a CDJ for DJ software.** Present as the CDJ's
+USB gadget (Linux `configfs` f_hid + f_midi on the Pi 5's USB-C in device
+mode), so rekordbox / Serato / Traktor / djay treat OpenDeck's controls as a
+CDJ-3000. Needs the host → deck half of the protocol (what the app sends to
+set lamps, screen and waveform data) and whatever handshake the apps do on
+connect. The emulator notes that rekordbox is blocked by its own HID probing
+over PC Link, so start with djay or Traktor. Check the trademark and
+USB-ID angle before shipping a device that claims Pioneer's VID.
+
+**Mapping the protocol with the emulator** (`thirdparty/cdj3k-emu`,
+docs/pc-link.md):
+- The deck's reports come out of QEMU's `cdj3k.usb-link` virtio-serial
+  socket (`/tmp/cdj3k-emu-<uid>/instance-<n>/usb-link.sock`). Frames are
+  `type(1) | len(2, BE) | payload`: 1 HID, 2 MIDI, 3 HELLO, 4 IDENTITY. The
+  host sends an empty HELLO (resend every 300 ms) and gets IDENTITY back.
+- On Linux the emulator has no PC Link backend (macOS only), so nothing
+  connects to that socket. Connect a tap directly. Turn on Developer Mode
+  (control API on TCP 4400+slot), then `sh systemctl start
+  cdj3k-pc-link-bridge` through it. The bridge forces PC mode on the
+  CDJ-3000 (EP122).
+- Drive the deck with the control API (`press`, `tempo`, `jog`, `rotary`)
+  while the tap prints each report with the changed bytes highlighted. That
+  gives the deck → host map. For host → deck, send HID frames back and watch
+  `lamps` / `lcd`. Write the result up as `docs/cdj-hid.md`.
+- `tools/cdj_hidtap.py` is the tap (HELLO/IDENTITY handshake, prints
+  reports with diffs, `--send HEX` writes one host → deck report). It hasn't
+  been run yet.
 
 ### Phase 3: Hardware v1 Prototype (2–3 months)
 - [ ] PCB design: MCU board, DAC/output board, power board
