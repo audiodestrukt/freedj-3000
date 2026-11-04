@@ -113,3 +113,52 @@ the PC-mode flag, and the deck then sits at stage 1 forever. Two routes:
 
 Not yet known either way: the type-0x21 output report (LEDs, time, BPM) and
 the actual input report rate; both need the handshake first.
+
+## Network variant: HID via LINK (the iPhone path)
+
+The CDJ-3000 / DJM-A9 integration brief (2026-11-01, supplied by Dan)
+documents the network control path — the one the Instagram demo and rekordbox
+for iOS use, and the one CDJHidProtocol issue #13 asked for. The host (freedj,
+e.g. on the iPhone) advertises a mixer role on the wired LAN; each CDJ tunnels
+its HID input reports to the host over UDP 50001 and the host tunnels status
+and display reports back. Same `Qspt1WmJOL` magic and ports as Pro DJ Link.
+
+Implemented so far, in `crates/link`, all unit-tested, no network I/O yet:
+
+| Module | What |
+|---|---|
+| `lanhid` | tunnel framing, discovery (announce / number inquiry), and the input-report (0x20) decoder → neutral `CdjControl` events |
+| `lanhid_auth` | the session handshake, stages 0x11–0x15 (FNV-1a challenge-response) |
+| `lanhid_status` | the 0x21 status report that drives the CDJ's own screen/lamps |
+
+**The handshake secret is not in the repo.** A CDJ in CONTROL MODE only emits
+input reports after the host passes a challenge-response that proves it is a
+specific piece of DJ software: a per-manufacturer constant and a per-model
+device ID. Those values are the posed vendor's, carry licensing/trademark
+weight, and are handled like the App Store signing key — read at runtime from
+`cdj_hid_identity.conf`, which `.gitignore` excludes. `cdj_hid_identity.conf.
+example` documents the format; the values come from a vendor-approved identity
+or the public CDJ HID analysis (github.com/Swiftb0y/CDJHidProtocol).
+
+**Validate the handshake against the emulator.** With the bridge running
+(see the recipe above), drop a filled-in conf somewhere outside the repo and:
+
+```
+cargo run -p opendeck-link --example cdj_hid_probe -- --id /path/to/cdj_hid_identity.conf
+```
+
+It talks the emulator's USB-B PC Link socket (whole 64-byte frames, no tunnel
+fragmentation), runs the handshake, and prints whether it reached stage 0x11,
+whether it authenticated, and any decoded 0x20 input. Note the emulator forces
+PC mode by patching a flag, so whether its firmware runs the handshake
+responder at all is the open question this probe answers.
+
+## Still to build
+
+- Display commands (0x22–0x30): titles, RGB waveforms, beat grid, hot cues,
+  and the fragmentation/reassembly they share with the tunnel (brief page 6).
+- The UDP socket layer: discovery, per-player sessions, tunnel (de)fragment,
+  keepalive cadence; and the iOS interface binding (IP_BOUND_IF, the wired
+  link-local address) the brief's page 2 describes.
+- A surface transport in `crates/app/src/surface` mapping `CdjControl` →
+  `ControlEvent`, beside the MIDI and I2C surfaces, and feeding `Status` back.
