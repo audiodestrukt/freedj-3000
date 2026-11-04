@@ -1,0 +1,18 @@
+# CDJ HID-over-LINK host identity (see crates/link/src/lanhid_auth.rs)
+#
+# The handshake makes freedj authenticate to a CDJ in CONTROL MODE by posing
+# as a piece of DJ software. The four values below ARE that software's
+# identity and its shared secret; they are deliberately NOT in the source.
+# Copy this file to a location your build reads and fill it in from either:
+#   - your own vendor-approved identity (for a shipping product), or
+#   - the public CDJ HID analysis (github.com/Swiftb0y/CDJHidProtocol), which
+#     lists the manufacturer constants and per-model device IDs.
+#
+# Keep the real file OUT of version control (.gitignore already excludes
+# cdj_hid_identity.conf). secret_const is 8 hex chars (4 bytes); device_id is
+# 20 hex chars (10 bytes), for the model you pose against.
+
+manufacturer = YourApp
+product      = yourproduct
+secret_const = 00000000
+device_id    = 0000000000000000000000

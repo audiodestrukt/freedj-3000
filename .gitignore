@@ -34,3 +34,6 @@ hardware/cad/build/
 # Logic-analyser captures of our own hardware (large; decide later what to keep)
 /captures/
 dist/
+
+# CDJ HID host identity (secret; never commit the real one)
+cdj_hid_identity.conf
