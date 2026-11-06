@@ -93,3 +93,11 @@ pub fn fader_to_speed(position: f32, range: f32) -> f32 {
 pub fn speed_to_fader(speed: f32, range: f32) -> f32 {
     (0.5 - (speed - 1.0) / (2.0 * range)).clamp(0.0, 1.0)
 }
+
+/// Audio time one **canonical** jog tick scrubs the playhead (deck paused, or
+/// VINYL while playing); the tempo-nudge law scales off the same tick. Each
+/// jog source normalises its device's native resolution to this tick (the
+/// MIDI surface via its `scale`, the CDJ HID surface via its ticks/rev), so a
+/// single feel serves every controller. Tune this to change scrub feel
+/// everywhere at once.
+pub const JOG_SECS_PER_TICK: f64 = 0.020;

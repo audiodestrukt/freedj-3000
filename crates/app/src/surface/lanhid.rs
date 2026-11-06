@@ -19,25 +19,64 @@
 //! The identity (posed-vendor secret + device ID) is loaded at runtime from
 //! that conf, never compiled in — see `lanhid_auth`.
 
-use crate::input::{ControlEvent as CE, Event};
+use crate::input::{ControlEvent as CE, Event, JOG_SECS_PER_TICK};
 use opendeck_link::lanhid::{CdjButton, CdjControl};
 
 /// Tempo-fader raw span reported by the deck (0x15 field is about ±1000).
 const TEMPO_RAW_SPAN: f32 = 1000.0;
 
+/// Jog ticks the CDJ-3000 reports per platter revolution (brief, page 4:
+/// "9,728 ticks/revolution").
+const CDJ_JOG_TICKS_PER_REV: f64 = 9728.0;
+/// How much audio a full platter revolution should scrub when paused — the
+/// CDJ jog's feel, independent of the deck's dense native resolution.
+const CDJ_JOG_REV_SECONDS: f64 = 1.8;
+
+/// Rescales the CDJ's dense native jog ticks to the deck engine's canonical
+/// jog tick ([`JOG_SECS_PER_TICK`]), carrying the sub-tick remainder so slow
+/// turns aren't lost to rounding. One instance per session (it holds state).
+pub struct JogScaler {
+    /// Native-tick → canonical-tick factor.
+    factor: f64,
+    /// Fractional canonical ticks not yet emitted.
+    carry: f64,
+}
+
+impl JogScaler {
+    /// The CDJ scaler: a revolution of native ticks becomes
+    /// `CDJ_JOG_REV_SECONDS / JOG_SECS_PER_TICK` canonical ticks.
+    pub fn cdj() -> Self {
+        let canon_per_rev = CDJ_JOG_REV_SECONDS / JOG_SECS_PER_TICK;
+        JogScaler { factor: canon_per_rev / CDJ_JOG_TICKS_PER_REV, carry: 0.0 }
+    }
+
+    /// Feed native ticks; return whole canonical ticks, keeping the remainder.
+    pub fn step(&mut self, native: i32) -> i32 {
+        let v = self.carry + native as f64 * self.factor;
+        let whole = v.trunc();
+        self.carry = v - whole;
+        whole as i32
+    }
+}
+
 /// Map one decoded CDJ control to a deck [`Event`], or `None` when the control
 /// has no deck action (a pure modifier, or a press we only act on one edge of).
 ///
 /// Pure and side-effect free so it can be unit-tested without a socket.
-pub fn map(c: &CdjControl) -> Option<Event> {
+pub fn map(c: &CdjControl, jog: &mut JogScaler) -> Option<Event> {
     let deck = |e: CE| Some(Event::Deck(e));
     match *c {
         // ── analog ──────────────────────────────────────────────────────
         // The jog's tick delta scrubs (paused / VINYL) or nudges (CDJ mode);
-        // the app decides which in `apply`. The firmware motion field is not
-        // calibrated to true rpm, so velocity is left 0 until a velocity-based
-        // scratch needs it — only `delta` drives the playhead today.
-        CdjControl::Jog { delta, .. } => deck(CE::JogDelta { delta, velocity_rpm: 0.0 }),
+        // the app decides which in `apply`. The deck's dense native ticks are
+        // normalised to the engine's canonical jog tick so the CDJ platter
+        // feels right at the same `JOG_SECS_PER_TICK` the other surfaces use.
+        // The firmware motion field is not calibrated to true rpm, so velocity
+        // is left 0 until a velocity-based scratch needs it.
+        CdjControl::Jog { delta, .. } => match jog.step(delta) {
+            0 => None,
+            d => deck(CE::JogDelta { delta: d, velocity_rpm: 0.0 }),
+        },
         CdjControl::Tempo { raw } => {
             // Deck geometry: fader bottom (fastest) = position 0, top = 1.
             // raw > 0 is toward the bottom, so position = 0.5 − raw/2span.
@@ -96,7 +135,7 @@ pub fn spawn_from_env(_tx: std::sync::mpsc::Sender<Event>) {}
 
 #[cfg(unix)]
 mod imp {
-    use super::{map, Event};
+    use super::{map, Event, JogScaler};
     use opendeck_link::lanhid::InputDecoder;
     use opendeck_link::lanhid_auth::{Handshake, Identity, Step};
     use opendeck_link::lanhid_status::{self, Status};
@@ -160,6 +199,7 @@ mod imp {
         // seed E supplies the per-session entropy.
         let mut hs = Handshake::new(identity.clone(), [0x5A; 8]);
         let mut dec = InputDecoder::new();
+        let mut jog = JogScaler::cdj();
         let mut established = false;
         let mut buf = Vec::new();
         let mut tmp = [0u8; 4096];
@@ -218,7 +258,7 @@ mod imp {
                     }
                 } else if established && payload[1] == 0x20 {
                     for c in dec.decode(&payload) {
-                        if let Some(ev) = map(&c) {
+                        if let Some(ev) = map(&c, &mut jog) {
                             let _ = tx.send(ev);
                         }
                     }
@@ -234,18 +274,48 @@ mod tests {
     use crate::input::ControlEvent as CE;
 
     fn deck(c: CdjControl) -> Option<CE> {
-        match map(&c) {
+        match map(&c, &mut JogScaler::cdj()) {
             Some(Event::Deck(e)) => Some(e),
             _ => None,
         }
     }
 
     #[test]
-    fn jog_delta_passes_through() {
-        assert!(matches!(
-            deck(CdjControl::Jog { delta: 37, motion: 5, position: 100 }),
-            Some(CE::JogDelta { delta: 37, .. })
-        ));
+    fn jog_is_normalised_not_passed_through() {
+        // A single dense native delta scales down to the canonical tick; the
+        // factor is well under 1, so a small delta carries to nothing yet.
+        assert!(deck(CdjControl::Jog { delta: 37, motion: 5, position: 100 }).is_none());
+        // A larger delta crosses a whole canonical tick.
+        let big = match deck(CdjControl::Jog { delta: 300, motion: 0, position: 0 }) {
+            Some(CE::JogDelta { delta, .. }) => delta,
+            other => panic!("{other:?}"),
+        };
+        assert!(big >= 1 && big <= 4, "300 native ticks → {big} canonical");
+    }
+
+    #[test]
+    fn jog_calibration_one_rev_is_rev_seconds() {
+        // One platter revolution (9728 native ticks), fed in realistic chunks,
+        // must accumulate to CDJ_JOG_REV_SECONDS / JOG_SECS_PER_TICK canonical
+        // ticks — i.e. a revolution scrubs CDJ_JOG_REV_SECONDS of audio.
+        let mut jog = JogScaler::cdj();
+        let mut total = 0i64;
+        let mut fed = 0;
+        while fed < 9728 {
+            let n = 100.min(9728 - fed);
+            if let Some(Event::Deck(CE::JogDelta { delta, .. })) =
+                map(&CdjControl::Jog { delta: n, motion: 0, position: 0 }, &mut jog)
+            {
+                total += delta as i64;
+            }
+            fed += n;
+        }
+        let expected = (CDJ_JOG_REV_SECONDS / JOG_SECS_PER_TICK).round() as i64; // = 90
+        // Within one tick: the accumulator leaves the final sub-tick pending
+        // (it emits on the next movement), so a lone revolution yields 89–90.
+        assert!((total - expected).abs() <= 1, "one rev → {total} canonical ticks");
+        // And that many canonical ticks is ~CDJ_JOG_REV_SECONDS of audio.
+        assert!((total as f64 * JOG_SECS_PER_TICK - CDJ_JOG_REV_SECONDS).abs() < 0.05);
     }
 
     #[test]

@@ -603,9 +603,8 @@ impl DeckApp {
                     // playhead through the track (no scrub-audio yet — position
                     // + waveform only; a playing deck keeps playing from wherever
                     // the wheel leaves it).
-                    const VINYL_SECS_PER_TICK: f64 = 0.020;
                     let sr_ch = self.audio.sample_rate as f64 * self.audio.channels as f64;
-                    let step  = (sr_ch * VINYL_SECS_PER_TICK) as i64;
+                    let step  = (sr_ch * crate::input::JOG_SECS_PER_TICK) as i64;
                     let cur   = self.audio.position.load(Ordering::Relaxed) as i64;
                     let new   = (cur + delta as i64 * step).clamp(0, self.audio.len() as i64) as u64;
                     self.seek_to(new);
