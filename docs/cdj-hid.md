@@ -152,21 +152,23 @@ It talks the emulator's USB-B PC Link socket (whole 64-byte frames, no tunnel
 fragmentation), runs the handshake, and prints the highest deck stage reached,
 whether it authenticated, and any decoded 0x20 input.
 
-**Result (2026-11-04): the emulator runs the real handshake responder.** Probed
-with a *fake* identity, the deck answered our stage-0x12 challenge with a
-well-formed stage 0x13 —
+**Result (2026-11-06): the full handshake establishes and drives the deck,
+validated end to end on the emulator — no hardware.** With the correct
+identity the probe advances 0x11 → 0x12 → 0x13 → 0x14 → 0x15 → `ESTABLISHED`
+and the authenticated 0x20 input stream begins. Running the app with the
+`lanhid` surface (below) and turning the emulated platter via the emulator's
+own ctl API (`jog <deg> <ms> top`) scrubbed the loaded waveform: each turn
+produced `JogDelta` → a `jog vinyl` seek, forward and back.
 
-```
-00 f0 01 00 01 00 13 2a 01 0b 50 69 6f 6e 65 65 ...   ("Pionee[r DJ]" + seed E + proof)
-```
-
-— so it is **not** stuck at stage 1, and PC-mode forcing does not bypass the
-exchange (correcting the earlier assumption). The fake secret fails the proof
-check (`CDJ proof mismatch`), exactly as it must. With the real PioneerDJ
-`secret_const` + CDJ-3000 `device_id` in the conf, the proof verifies and the
-probe advances 0x14 → 0x15 → `ESTABLISHED` and the 0x20 input stream — the
-full acceptance test, locally, with no hardware. Supplying that real identity
-is the one step left to the operator.
+**Gotcha that cost a full debug cycle — the posed-vendor strings are part of
+authentication.** The deck returns a well-formed 0x13 even when the host's
+manufacturer string is wrong, but the proof only verifies when the
+manufacturer/product strings in the 0x12 are byte-exact (e.g. `PioneerDJ`, not
+`Pioneer DJ` — no space). The brief's bare `FNV1a32(A‖K)` does not mention
+that the strings factor in; empirically they do. So an identity conf must copy
+the posed vendor's strings exactly, not just the secret and device ID. The
+published `secret_const`/algorithm were correct all along once the string
+matched.
 
 ## Drive the app from the deck (end to end)
 
