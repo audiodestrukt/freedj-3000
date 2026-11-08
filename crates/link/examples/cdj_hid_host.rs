@@ -11,10 +11,17 @@
 //!
 //! With `--track`, the file is decoded and analysed the way the deck does
 //! (`WaveformBuilder`), its real duration drives the status and its waveform
-//! is sent as the 0x2C RGB overview.
+//! is sent as the 0x2C RGB overview and the 0x2E scrolling waveform.
+//!
+//! Display fragments go through a queue drained at most [`BURST`] per loop
+//! pass, so a multi-thousand-fragment waveform never starves the status.
 //!
 //! Start the emulator's bridge first (Developer Mode on):
 //!   printf 'sh systemctl start cdj3k-pc-link-bridge\n' | nc 127.0.0.1 4401
+
+/// Display fragments sent per loop pass (the loop runs every ~16 ms or sooner).
+#[cfg(unix)]
+const BURST: usize = 64;
 
 #[cfg(unix)]
 fn main() -> std::io::Result<()> {
@@ -68,15 +75,20 @@ fn main() -> std::io::Result<()> {
     let mut reached_11 = false;
 
     // The host track: a real file's waveform + length, or a 3:00 stand-in.
-    let (columns, duration_ms) = match &track {
+    let (columns, sr, duration_ms) = match &track {
         Some(p) => {
-            let (cols, ms) = analyse(p)?;
+            let (cols, sr, ms) = analyse(p)?;
             eprintln!("track: {} — {} columns, {} ms", p.display(), cols.len(), ms);
-            (cols, ms)
+            (cols, sr, ms)
         }
-        None => (Vec::new(), 180_000u32),
+        None => (Vec::new(), 44_100, 180_000u32),
     };
-    let overview = fragment(disp::CMD_OVERVIEW, &disp::overview(&columns));
+    let hop = opendeck_analysis::waveform::HOP_SIZE;
+    let mut heavy = fragment(disp::CMD_OVERVIEW, &disp::overview(&columns));
+    heavy.extend(fragment(disp::CMD_SCROLL, &disp::scroll(&columns, hop, sr)));
+    eprintln!("waveform assets: {} fragments", heavy.len());
+    let mut queue: std::collections::VecDeque<[u8; 64]> = Default::default();
+    let mut last_heavy = Instant::now() - Duration::from_secs(3600);
     let bpm_x10 = 1280u16;
     let play_start = Instant::now();
 
@@ -119,11 +131,16 @@ fn main() -> std::io::Result<()> {
             let mut frames = fragment(disp::CMD_DECK_ROWS, &disp::deck_rows(&rows));
             frames.extend(fragment(disp::CMD_TITLE, &disp::text(&title)));
             frames.extend(fragment(disp::CMD_ARTIST, &disp::text(&artist)));
-            frames.extend(overview.iter().copied());
-            for f in &frames {
-                send(&mut stream, 1, f)?;
-            }
+            queue.extend(frames);
             last_assets = Instant::now();
+        }
+        if established && last_heavy.elapsed() >= Duration::from_secs(30) {
+            queue.extend(heavy.iter().copied());
+            last_heavy = Instant::now();
+        }
+        for _ in 0..BURST {
+            let Some(f) = queue.pop_front() else { break };
+            send(&mut stream, 1, &f)?;
         }
 
         match stream.read(&mut tmp) {
@@ -170,7 +187,7 @@ fn main() -> std::io::Result<()> {
 
 /// Decode `path` and build its waveform columns exactly as a deck load does.
 #[cfg(unix)]
-fn analyse(path: &std::path::Path) -> std::io::Result<(Vec<[u8; 4]>, u32)> {
+fn analyse(path: &std::path::Path) -> std::io::Result<(Vec<[u8; 4]>, u32, u32)> {
     let io = |e: opendeck_types::DecodeError| std::io::Error::other(format!("{e:?}"));
     let mut dec = opendeck_decode::open_decoder(path).map_err(io)?;
     let sr = dec.sample_rate();
@@ -193,7 +210,7 @@ fn analyse(path: &std::path::Path) -> std::io::Result<(Vec<[u8; 4]>, u32)> {
         wb.push(&stereo);
     }
     let ms = (frames * 1000 / sr as u64) as u32;
-    Ok((wb.finish().columns, ms))
+    Ok((wb.finish().columns, sr, ms))
 }
 
 #[cfg(not(unix))]

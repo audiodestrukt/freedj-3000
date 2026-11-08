@@ -1,5 +1,6 @@
 //! Display command bodies for the CDJ HID-over-LINK transport: the 0x2A deck
-//! list, the 0x22/0x23/0x26 text fields and the 0x2C RGB overview. These are *bodies*; split them
+//! list, the 0x22/0x23/0x26 text fields, the 0x2C RGB overview and the 0x2E
+//! scrolling waveform. These are *bodies*; split them
 //! with [`crate::lanhid_frag::fragment`] before sending. Formats per the
 //! integration brief, pages 4 and 6.
 
@@ -19,6 +20,14 @@ pub const CMD_OVERVIEW: u8 = 0x2C;
 pub const OVERVIEW_COLUMNS: usize = 600;
 /// Tallest bar the overview draws; heights run 1..=this.
 pub const OVERVIEW_MAX_HEIGHT: u8 = 40;
+
+/// Scrolling (enlarged) waveform.
+pub const CMD_SCROLL: u8 = 0x2E;
+/// Points per second of track in the scrolling waveform (the brief's
+/// demonstrated timebase).
+pub const SCROLL_POINTS_PER_SEC: u32 = 150;
+/// Tallest scrolling-waveform point; heights run 0..=this.
+pub const SCROLL_MAX_HEIGHT: u8 = 31;
 
 /// The deck list always carries this many rows, empty ones included.
 pub const DECK_ROWS: usize = 11;
@@ -118,6 +127,34 @@ pub fn overview(cols: &[[u8; 4]]) -> Vec<u8> {
         body.push(height(peak));
         body.push(height(sum[3] / len));
         body.push(0);
+    }
+    body
+}
+
+/// Body for 0x2E from waveform columns `[bass, mid, high, amplitude]` that
+/// each cover `hop` frames at `sample_rate`: an LE32 point count, then one LE16
+/// per point at [`SCROLL_POINTS_PER_SEC`], packed `(R3<<13)|(G3<<10)|(B3<<7)|
+/// (height5<<2)`. A point takes the loudest column it overlaps, so transients
+/// survive the resample. Colour and height scale as in [`overview`].
+pub fn scroll(cols: &[[u8; 4]], hop: usize, sample_rate: u32) -> Vec<u8> {
+    let n = cols.len() as u64;
+    let hop = hop.max(1) as u64;
+    let sr = sample_rate.max(1) as u64;
+    let pps = SCROLL_POINTS_PER_SEC as u64;
+    // Track length in points: n columns × hop frames ÷ sr × pps.
+    let points = n * hop * pps / sr;
+    let max_amp = cols.iter().map(|c| c[3] as u32).max().unwrap_or(0).max(1);
+    let mut body = Vec::with_capacity(4 + points as usize * 2);
+    body.extend_from_slice(&(points as u32).to_le_bytes());
+    for j in 0..points {
+        // Columns overlapping [j, j+1) points.
+        let a = (j * sr / (pps * hop)).min(n - 1) as usize;
+        let b = (((j + 1) * sr).div_ceil(pps * hop)).clamp(a as u64 + 1, n) as usize;
+        let c = cols[a..b].iter().max_by_key(|c| c[3]).copied().unwrap_or([0; 4]);
+        let [r, g, bl] = full_brightness([c[0] as u32, c[1] as u32, c[2] as u32]);
+        let h = (c[3] as u32 * SCROLL_MAX_HEIGHT as u32 / max_amp) as u16;
+        let word = ((r as u16 >> 5) << 13) | ((g as u16 >> 5) << 10) | ((bl as u16 >> 5) << 7) | (h << 2);
+        body.extend_from_slice(&word.to_le_bytes());
     }
     body
 }
@@ -230,5 +267,43 @@ mod tests {
         let body = overview(&cols);
         let bin = 30_050 * 600 / 60_000;
         assert_eq!(body[1 + bin * 7 + 4], OVERVIEW_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn scroll_length_follows_the_track_at_150_per_second() {
+        // 10 s at 44.1 kHz, 512-frame hop.
+        let n = 10 * 44_100 / 512;
+        let body = scroll(&vec![[0, 0, 255, 100]; n], 512, 44_100);
+        let pts = u32::from_le_bytes(body[..4].try_into().unwrap()) as usize;
+        assert!((1495..=1500).contains(&pts), "pts={pts}");
+        assert_eq!(body.len(), 4 + pts * 2);
+    }
+
+    #[test]
+    fn scroll_word_packing() {
+        // One loud blue column, one silent: blue at full height, then nothing.
+        let cols = [[0, 0, 255, 200], [0, 0, 0, 0]];
+        let body = scroll(&cols, 44_100 / 150, 44_100); // one column per point
+        let w0 = u16::from_le_bytes([body[4], body[5]]);
+        let w1 = u16::from_le_bytes([body[6], body[7]]);
+        assert_eq!(w0, (7 << 7) | (31 << 2));
+        assert_eq!(w1, 0);
+        assert_eq!(w0 & 0b11, 0, "low two bits stay clear");
+    }
+
+    #[test]
+    fn scroll_keeps_transients_when_columns_outnumber_points() {
+        // 4 columns per point; a single loud column must still peak its point.
+        let mut cols = vec![[0, 0, 0, 1]; 400];
+        cols[201] = [255, 0, 0, 255];
+        let body = scroll(&cols, 44_100 / 600, 44_100);
+        let w = u16::from_le_bytes([body[4 + 50 * 2], body[5 + 50 * 2]]);
+        assert_eq!((w >> 2) & 31, 31);
+        assert_eq!(w >> 13, 7);
+    }
+
+    #[test]
+    fn scroll_of_nothing_is_an_empty_count() {
+        assert_eq!(scroll(&[], 512, 44_100), vec![0, 0, 0, 0]);
     }
 }

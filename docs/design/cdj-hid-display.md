@@ -308,4 +308,12 @@ Validated with `examples/cdj_hid_host.rs` and the emulator control API's
   each record is now scaled so its strongest band is 255 (hue kept, loudness
   in the height). A loudly mastered track fills most of the height; that is
   accurate.
+- **0x2E scrolling waveform verified.** amplificate.mp3 → 79 099 points →
+  2 728 fragments (2 801 with the overview), sent through a queue that sends at
+  most 64 fragments per loop pass. The 0x21 clock never stalled during the
+  transfer. The enlarged waveform draws around the playhead and scrolls with
+  the status time (about 36 px/s at the default zoom). Time check: the first
+  silent gap sits about 25.8 s into the scroll and about 25.6 s on the 0x2C
+  strip, so the 86 col/s → 150 pt/s resample is time-correct. Each point takes
+  the loudest column it overlaps, with colour handled as in 0x2C.
 
