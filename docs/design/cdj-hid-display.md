@@ -269,3 +269,34 @@ same scheduler feeds either the emulator socket or `lanhid_net`.
 
 Phases 1–3 are fully testable on the emulator today; phase 4 is what a real
 CDJ (or an iPhone-as-host build) needs.
+
+---
+
+## 10. Live findings on cdj3k-emu (2026-11-08)
+
+Validated with `examples/cdj_hid_host.rs` and the emulator control API's
+`lcd main` capture (port 4401). These settle Q1 and Q3.
+
+- **The deck must be in Control Mode first.** On the CDJ: SOURCE → DJ APP →
+  **CONTROL MODE (CDJ)** → push the rotary twice (it warns that it will drop the
+  playing local track). In normal player mode an authenticated session still
+  streams 0x20 input, but the screen ignores everything the host sends. Even a
+  correct 0x21 with `track_loaded` changed nothing. BROWSE opens the CDJ's own
+  source browser ("Please select a source."), not the host deck list.
+- **In Control Mode the native skin renders host content at once.** With the
+  0x21 stream running, plus 0x2A rows and the 0x22/0x23 text each sent as one
+  fragment, the screen showed the title, the duration and a 0–3:00 ruler,
+  elapsed time advancing (00:19 → 00:33), BPM 128.0, ±10 and PLAYER 1, with
+  CONTROL MODE in the waveform area. The fragmentation header
+  `00 CMD seqLE16 countLE16` works as the brief says (0x22 rendered correctly).
+- **Q3 answered:** the emulator does render host-driven display, so phases 1–3
+  can all be checked against `lcd main` screenshots. Real hardware is needed only
+  for the phase-4 UDP tunnel.
+- **Q1, partly answered:** the single emulated player bound to the host session
+  with **no** Browse row selection; the deck sent no Browse events. Keep sending
+  0x2A: with two CDJs, the Browse pick is still how each player chooses its
+  deck (brief p.4).
+- The empty waveform field and the empty overview strip are now the target. 0x2C
+  should fill the strip under the ruler, and 0x2E the enlarged waveform.
+- The emulator also sends a stream of all-zero type-1 reports (`payload[1] =
+  0x00`) after the handshake. They are not 0x20 input and are ignored for now.
