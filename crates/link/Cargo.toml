@@ -11,3 +11,8 @@ tokio          = { workspace = true }
 socket2        = { workspace = true }
 log            = { workspace = true }
 thiserror      = { workspace = true }
+
+[dev-dependencies]
+# Examples only: cdj_hid_host decodes a track to build its waveform.
+opendeck-decode   = { workspace = true }
+opendeck-analysis = { workspace = true }

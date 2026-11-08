@@ -300,3 +300,12 @@ Validated with `examples/cdj_hid_host.rs` and the emulator control API's
   should fill the strip under the ruler, and 0x2E the enlarged waveform.
 - The emulator also sends a stream of all-zero type-1 reports (`payload[1] =
   0x00`) after the handshake. They are not 0x20 input and are ignored for now.
+- **0x2C overview verified (amplificate.mp3, 8:47).** The strip under the ruler
+  draws the real track. The CDJ mirrors each record around a centre line and
+  draws both bars: the background (here the span's peak, dimmed to half) is the
+  outer edge and the foreground (the span's mean) the inner bar. That settles
+  D2: peak/mean, not flat. Raw band energies drew as near-black maroon, so
+  each record is now scaled so its strongest band is 255 (hue kept, loudness
+  in the height). A loudly mastered track fills most of the height; that is
+  accurate.
+

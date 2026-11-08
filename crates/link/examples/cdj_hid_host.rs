@@ -6,7 +6,12 @@
 //! selection can be watched.
 //!
 //!   cargo run -p opendeck-link --example cdj_hid_host -- \
-//!       --id ~/private_keys/cdj_hid_identity.conf [--secs 20]
+//!       --id ~/private_keys/cdj_hid_identity.conf [--secs 20] \
+//!       [--track amplificate.mp3]
+//!
+//! With `--track`, the file is decoded and analysed the way the deck does
+//! (`WaveformBuilder`), its real duration drives the status and its waveform
+//! is sent as the 0x2C RGB overview.
 //!
 //! Start the emulator's bridge first (Developer Mode on):
 //!   printf 'sh systemctl start cdj3k-pc-link-bridge\n' | nc 127.0.0.1 4401
@@ -28,6 +33,7 @@ fn main() -> std::io::Result<()> {
     let mut secs = 20u64;
     let mut title = "Amplificate".to_string();
     let mut artist = "Audiodestrukt".to_string();
+    let mut track: Option<PathBuf> = None;
     let seed = [1u8, 2, 3, 4, 5, 6, 7, 8];
     let mut a = std::env::args().skip(1);
     while let Some(arg) = a.next() {
@@ -37,6 +43,7 @@ fn main() -> std::io::Result<()> {
             "--secs" => secs = a.next().and_then(|s| s.parse().ok()).unwrap_or(20),
             "--title" => title = a.next().expect("--title needs text"),
             "--artist" => artist = a.next().expect("--artist needs text"),
+            "--track" => track = a.next().map(PathBuf::from),
             other => eprintln!("ignoring unknown arg {other:?}"),
         }
     }
@@ -60,8 +67,16 @@ fn main() -> std::io::Result<()> {
     let mut established = false;
     let mut reached_11 = false;
 
-    // The simulated host track.
-    let duration_ms = 180_000u32;
+    // The host track: a real file's waveform + length, or a 3:00 stand-in.
+    let (columns, duration_ms) = match &track {
+        Some(p) => {
+            let (cols, ms) = analyse(p)?;
+            eprintln!("track: {} — {} columns, {} ms", p.display(), cols.len(), ms);
+            (cols, ms)
+        }
+        None => (Vec::new(), 180_000u32),
+    };
+    let overview = fragment(disp::CMD_OVERVIEW, &disp::overview(&columns));
     let bpm_x10 = 1280u16;
     let play_start = Instant::now();
 
@@ -104,6 +119,7 @@ fn main() -> std::io::Result<()> {
             let mut frames = fragment(disp::CMD_DECK_ROWS, &disp::deck_rows(&rows));
             frames.extend(fragment(disp::CMD_TITLE, &disp::text(&title)));
             frames.extend(fragment(disp::CMD_ARTIST, &disp::text(&artist)));
+            frames.extend(overview.iter().copied());
             for f in &frames {
                 send(&mut stream, 1, f)?;
             }
@@ -150,6 +166,34 @@ fn main() -> std::io::Result<()> {
     }
     eprintln!("--- established: {established}");
     Ok(())
+}
+
+/// Decode `path` and build its waveform columns exactly as a deck load does.
+#[cfg(unix)]
+fn analyse(path: &std::path::Path) -> std::io::Result<(Vec<[u8; 4]>, u32)> {
+    let io = |e: opendeck_types::DecodeError| std::io::Error::other(format!("{e:?}"));
+    let mut dec = opendeck_decode::open_decoder(path).map_err(io)?;
+    let sr = dec.sample_rate();
+    let ch = dec.channels().max(1) as usize;
+    let mut wb = opendeck_analysis::waveform::WaveformBuilder::new(sr);
+    let mut buf = vec![0f32; 4096 * ch];
+    let mut stereo = Vec::with_capacity(4096 * 2);
+    let mut frames = 0u64;
+    loop {
+        let n = dec.decode(&mut buf).map_err(io)?;
+        if n == 0 {
+            break;
+        }
+        frames += n as u64;
+        stereo.clear();
+        for f in buf[..n * ch].chunks(ch) {
+            stereo.push(f[0]);
+            stereo.push(f[1.min(ch - 1)]);
+        }
+        wb.push(&stereo);
+    }
+    let ms = (frames * 1000 / sr as u64) as u32;
+    Ok((wb.finish().columns, ms))
 }
 
 #[cfg(not(unix))]
