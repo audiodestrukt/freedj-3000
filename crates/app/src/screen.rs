@@ -1263,7 +1263,7 @@ fn draw_info_screen(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
 }
 
 /// Rects that tile `outer` minus two holes `a` and `b` (a above b, non-overlapping).
-fn cover(outer: Rect, a: Rect, b: Rect) -> Vec<Rect> {
+pub(crate) fn cover(outer: Rect, a: Rect, b: Rect) -> Vec<Rect> {
     let band = |y0: f32, y1: f32| Rect::from_min_max(Pos2::new(outer.min.x, y0), Pos2::new(outer.max.x, y1));
     vec![
         band(outer.min.y, a.min.y),
@@ -1276,7 +1276,7 @@ fn cover(outer: Rect, a: Rect, b: Rect) -> Vec<Rect> {
     ]
 }
 
-fn text(ui: &Ui, pos: Pos2, a: Align2, s: impl ToString, size: f32, c: Color32) {
+pub(crate) fn text(ui: &Ui, pos: Pos2, a: Align2, s: impl ToString, size: f32, c: Color32) {
     ui.painter().text(pos, a, s, FontId::proportional(size), c);
 }
 
@@ -1362,7 +1362,7 @@ fn draw_jog_center(p: &egui::Painter, center: Pos2, radius: f32, snap: &DeckSnap
 }
 
 /// A touch target.  Returns true on tap (press + release inside).
-fn tap(ui: &Ui, r: Rect, name: &str) -> (bool, bool) {
+pub(crate) fn tap(ui: &Ui, r: Rect, name: &str) -> (bool, bool) {
     let resp = ui.interact(r, Id::new(name), Sense::click());
     (resp.clicked(), resp.is_pointer_button_down_on())
 }
@@ -1396,7 +1396,7 @@ fn bracket_caption(ui: &Ui, r: Rect, s: &str, h: f32) {
     }
 }
 
-fn fmt_time(secs: f64) -> String {
+pub(crate) fn fmt_time(secs: f64) -> String {
     let m  = (secs / 60.0).floor();
     let s  = (secs - m * 60.0).floor();
     let ms = ((secs - m * 60.0 - s) * 1000.0).floor();
@@ -1653,7 +1653,7 @@ fn draw_phase(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<
 /// Bars.beats from the playhead to the next of `cues` (sorted or not), on the
 /// beat grid — the "Bars" countdown beside the phase meter.  None without a
 /// grid or with no cue ahead.
-fn bars_to_next(snap: &DeckSnapshot, cues: impl Iterator<Item = u64>) -> Option<(u32, u32)> {
+pub(crate) fn bars_to_next(snap: &DeckSnapshot, cues: impl Iterator<Item = u64>) -> Option<(u32, u32)> {
     let g = snap.beat_grid?;
     if g.bpm <= 0.0 { return None; }
     let pos = snap.position;
@@ -1811,9 +1811,16 @@ pub fn wave_drag_samples(dx: f32, cols_visible: f32, width: f32, channels: u8) -
 struct WaveGrab { grabbed: bool, dx: f32, dy: f32 }
 
 fn draw_wave_area(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
+    wave_touch(ui, snap, lay.wave, out);
+    zoom_pill(ui, snap, lay, h, out);
+}
+
+/// Touch on the enlarged waveform at `rect` (any skin): the wheel zooms, and a
+/// sideways drag jogs.
+pub(crate) fn wave_touch(ui: &Ui, snap: &DeckSnapshot, rect: Rect, out: &mut Vec<Event>) {
     // Wheel over the waveform zooms, standing in for the rotary selector.
     // Drag-only sensing so a finger registers the moment it lands.
-    let wave = ui.interact(lay.wave, Id::new("wave"), Sense::drag());
+    let wave = ui.interact(rect, Id::new("wave"), Sense::drag());
     if wave.hovered() {
         let dy = ui.input(|i| i.raw_scroll_delta.y);
         if dy.abs() > 0.0 {
@@ -1840,10 +1847,10 @@ fn draw_wave_area(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut 
             if g.dx.abs() >= GRAB_PT && g.dx.abs() > g.dy.abs() * 1.5 {
                 g.grabbed = true;
                 out.push(Event::Deck(ControlEvent::WaveTouch { touched: true }));
-                out.push(Event::Deck(ControlEvent::WaveDrag { samples: wave_drag_samples(g.dx, snap.cols_visible, lay.wave.width(), snap.channels) }));
+                out.push(Event::Deck(ControlEvent::WaveDrag { samples: wave_drag_samples(g.dx, snap.cols_visible, rect.width(), snap.channels) }));
             }
         } else if d.x != 0.0 {
-            out.push(Event::Deck(ControlEvent::WaveDrag { samples: wave_drag_samples(d.x, snap.cols_visible, lay.wave.width(), snap.channels) }));
+            out.push(Event::Deck(ControlEvent::WaveDrag { samples: wave_drag_samples(d.x, snap.cols_visible, rect.width(), snap.channels) }));
         }
     }
     if g.grabbed && (wave.drag_stopped() || multi) {
@@ -1851,7 +1858,9 @@ fn draw_wave_area(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut 
         out.push(Event::Deck(ControlEvent::WaveTouch { touched: false }));
     }
     ui.data_mut(|d| d.insert_temp(key, g));
+}
 
+fn zoom_pill(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     // ZOOM – GRID pill: one key, as on the unit — a tap anywhere on it flips
     // what the browse knob does (zoom the waveform / slide the grid).
     let z = lay.zoom;
@@ -1957,10 +1966,10 @@ fn draw_info(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
 
 // ── Bottom row ────────────────────────────────────────────────────────────────
 
-fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
-    // Needle search: press or drag anywhere on the overview jumps there.
-    // The unit does the same on the playing-address bar.
-    let ov = lay.overview;
+/// Needle search on the overview at `ov` (any skin): press or drag anywhere
+/// jumps there, as the unit does on its playing-address bar. A faint hover
+/// line shows where a tap would land.
+pub(crate) fn needle_touch(ui: &Ui, ov: Rect, out: &mut Vec<Event>) {
     let resp = ui.interact(ov, Id::new("needle"), Sense::click_and_drag());
     if resp.is_pointer_button_down_on() || resp.dragged() {
         if let Some(pos) = resp.interact_pointer_pos() {
@@ -1968,11 +1977,15 @@ fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec
             out.push(Event::Deck(ControlEvent::NeedleSearch { position: x }));
         }
     }
-    let p = ui.painter();
-    // A faint hover line shows where a tap would land.
     if let (true, Some(pos)) = (resp.hovered(), resp.hover_pos()) {
-        p.line_segment([Pos2::new(pos.x, ov.min.y), Pos2::new(pos.x, ov.max.y)], Stroke::new(1.0, FAINT));
+        ui.painter().line_segment([Pos2::new(pos.x, ov.min.y), Pos2::new(pos.x, ov.max.y)], Stroke::new(1.0, FAINT));
     }
+}
+
+fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<Event>) {
+    let ov = lay.overview;
+    needle_touch(ui, ov, out);
+    let p = ui.painter();
 
     // NEEDLE SEARCH bar under the overview.
     let n = lay.needle;

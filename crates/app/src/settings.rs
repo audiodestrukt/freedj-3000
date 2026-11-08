@@ -9,15 +9,42 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, PerfLog }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, PerfLog }
 
-pub const MENU: [(Setting, &str); 5] = [
+pub const MENU: [(Setting, &str); 6] = [
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::Player,       "PLAYER No."),
+    (Setting::Skin,         "SCREEN"),
     (Setting::PerfLog,      "PERF LOG"),
 ];
+
+/// Which unit's screens the deck shows (an OpenDeck setting, not the
+/// unit's). Both skins drive the same deck.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+pub enum Skin {
+    #[default]
+    Xdj1000Mk2,
+    Cdj3000,
+}
+
+impl Skin {
+    pub fn label(self) -> &'static str {
+        match self { Skin::Xdj1000Mk2 => "XDJ-1000MK2", Skin::Cdj3000 => "CDJ-3000" }
+    }
+
+    /// `OPENDECK_SKIN=cdj3000` / `xdj1000mk2` (case-insensitive), for
+    /// screenshots and dev runs; it is not saved.
+    pub fn from_env() -> Option<Skin> {
+        let v = std::env::var("OPENDECK_SKIN").ok()?.to_ascii_lowercase();
+        match v.as_str() {
+            "cdj3000" | "cdj-3000" | "cdj" => Some(Skin::Cdj3000),
+            "xdj1000mk2" | "xdj-1000mk2" | "xdj" => Some(Skin::Xdj1000Mk2),
+            _ => None,
+        }
+    }
+}
 
 /// The unit's AUTO CUE LEVEL choices (dB).
 pub const AUTO_CUE_LEVELS: [f32; 8] = [-36.0, -42.0, -48.0, -54.0, -60.0, -66.0, -72.0, -78.0];
@@ -46,6 +73,8 @@ pub struct Settings {
     /// production install should not grow a log in the user's folder; turn
     /// it on to investigate heat, off again when done (the file is removed).
     pub perf_log: bool,
+    /// Which unit's screens to show.
+    pub skin: Skin,
     /// Which player-number seeding this file has had (0 = written before
     /// 0.2.1, when every iOS device was seeded to 3).  Lets a later default
     /// re-seed a device once without touching a number the user chose.
@@ -57,7 +86,7 @@ const SEED: u8 = 1;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, perf_log: false, seed: 0 }
+        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, perf_log: false, skin: Skin::Xdj1000Mk2, seed: 0 }
     }
 }
 
@@ -125,6 +154,7 @@ impl Settings {
             Setting::Quantize     => c.quantize = !c.quantize,
             Setting::TempoRange   => c.tempo_range = step(&TEMPO_RANGES, c.tempo_range, dir),
             Setting::Player       => c.player = step(&[1u8, 2, 3, 4], c.player, dir),
+            Setting::Skin         => c.skin = step(&[Skin::Xdj1000Mk2, Skin::Cdj3000], c.skin, dir),
             Setting::PerfLog      => c.perf_log = !c.perf_log,
         }
         c
@@ -137,6 +167,7 @@ impl Settings {
             Setting::Quantize     => if self.quantize { "ON".into() } else { "OFF".into() },
             Setting::TempoRange   => Self::range_label(self.tempo_range),
             Setting::Player       => format!("{}   (applies at next launch)", self.player),
+            Setting::Skin         => self.skin.label().into(),
             Setting::PerfLog      => if self.perf_log { "ON   (Documents/opendeck-perf.log)".into() } else { "OFF".into() },
         }
     }
@@ -163,6 +194,8 @@ mod tests {
         let s = s.cycled(Setting::AutoCueLevel, 1); assert_eq!(s.auto_cue_level_db, -54.0);
         assert_eq!(Settings::range_label(1.0), "WIDE");
         assert_eq!(Settings::range_label(0.10), "±10");
+        let s = s.cycled(Setting::Skin, 1);        assert_eq!(s.skin, Skin::Cdj3000);
+        let s = s.cycled(Setting::Skin, 1);        assert_eq!(s.skin, Skin::Xdj1000Mk2);
     }
 
     #[test]
@@ -172,5 +205,6 @@ mod tests {
         assert!(!s.quantize);
         assert_eq!(s.tempo_range, 0.16);
         assert_eq!(s.player, 1);
+        assert_eq!(s.skin, Skin::Xdj1000Mk2);
     }
 }

@@ -18,6 +18,7 @@ mod surface;
 mod prodj;
 mod renderer;
 mod screen;
+mod cdj3000;
 #[cfg(feature = "renderer-sdl")]
 mod sdl_backend;
 mod waveform_cpu;
@@ -984,8 +985,9 @@ impl DeckApp {
                 let n = ZOOM_LEVELS.len() as i32;
                 // Positive = zoom in = fewer columns visible.
                 self.zoom_level = (self.zoom_level as i32 - d).clamp(0, n - 1) as usize;
-                if let Some(r) = &mut self.renderer { r.set_cols_visible(ZOOM_LEVELS[self.zoom_level]); }
-                log::info!("zoom {} cols", ZOOM_LEVELS[self.zoom_level]);
+                let cols = self.cols_visible();
+                if let Some(r) = &mut self.renderer { r.set_cols_visible(cols); }
+                log::info!("zoom {cols} cols");
             }
             Event::Ui(UiEvent::ZoomGridMode) => { self.zoom_grid_mode = !self.zoom_grid_mode; }
             Event::Ui(UiEvent::GridAdjust(op)) => {
@@ -1601,10 +1603,23 @@ impl DeckApp {
     fn initial_window_size(&self) -> (u32, u32) {
         let (win_w, win_h) = if self.phone { (932u32, 430u32) }        // iPhone 6.9" landscape, points
                              else if self.portrait { (966u32, 1288u32) }   // iPad 13" portrait (0.75)
-                             else if self.faceplate { (860u32, 1090u32) } else { (1024u32, 600u32) };
+                             else if self.faceplate { (860u32, 1090u32) }
+                             else if self.settings.skin == settings::Skin::Cdj3000 { (1280u32, 720u32) }
+                             else { (1024u32, 600u32) };
         std::env::var("OPENDECK_WINDOW").ok()
             .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
             .unwrap_or((win_w, win_h))
+    }
+
+    /// Columns across the enlarged waveform at the current zoom step. The
+    /// CDJ-3000's waveform spans the whole screen and its default view is
+    /// about 34 s wide (17.5 px per beat at 128 BPM on the unit), about 5× the
+    /// XDJ's, so the same steps are scaled for it.
+    fn cols_visible(&self) -> f32 { Self::cols_for(self.settings.skin, self.zoom_level) }
+
+    fn cols_for(skin: settings::Skin, zoom_level: usize) -> f32 {
+        let scale = if skin == settings::Skin::Cdj3000 { 5.0 } else { 1.0 };
+        ZOOM_LEVELS[zoom_level] * scale
     }
 
     /// Mirror the deck onto a CDJ in Control Mode (`surface::lanhid`): the
@@ -1907,7 +1922,7 @@ impl DeckApp {
         };
         let _t_snap = Instant::now();
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
-        snap.cols_visible = ZOOM_LEVELS[self.zoom_level];
+        snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
         if self.screen_mode == ScreenMode::Info {
             snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
             snap.link_peers = self.link.peers_summary();
@@ -1954,23 +1969,33 @@ impl DeckApp {
                 fit_contain(screen::FACE_ASPECT, win)
             }
         });
+        // CDJ-3000 skin: the unit's 16:9 screen, letterboxed, screen-only
+        // (no faceplate / portrait variant yet; a phone keeps the XDJ pages).
+        let cdj = self.settings.skin == settings::Skin::Cdj3000 && !phone;
+        let base = if cdj { None } else { base };
         let (screen_rect, face) = match base {
             Some(b) => {
                 let (s, f) = if self.portrait { screen::portrait_layout(b) } else { screen::faceplate_layout(b) };
                 (s, Some(f))
             }
             None if phone => (screen::phone_screen_layout(win, insets).0, None),
+            None if cdj => (fit_contain(cdj3000::ASPECT, win), None),
             None => (win, None),
         };
         let lay  = screen::layout(screen_rect);
+        let lay3k = cdj.then(|| cdj3000::layout(screen_rect));
         let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
         let perform = self.screen_mode == ScreenMode::Perform;
         // PERFORM shrinks the enlarged waveform to a strip above the pads.
         // The phone's controls page has no LCD: the shader gets empty rects.
         let none = egui::Rect::NOTHING;
-        let wave_rect = if phone && self.phone_controls { none } else if perform { screen::perform_layout(screen_rect).wave } else { lay.wave };
-        let over_rect = if phone && self.phone_controls { none } else { lay.overview };
-        let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(over_rect), dim_played: self.remain_mode };
+        let (wave_rect, over_rect) = if let Some(l) = &lay3k {
+            (l.wave, l.overview)
+        } else {
+            let wave = if phone && self.phone_controls { none } else if perform { screen::perform_layout(screen_rect).wave } else { lay.wave };
+            (wave, if phone && self.phone_controls { none } else { lay.overview })
+        };
+        let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(over_rect), dim_played: self.remain_mode, grid_ticks: lay3k.is_none() };
 
         // Build egui overlay.
         let mut raw = host.take_egui_input();
@@ -1990,7 +2015,10 @@ impl DeckApp {
         let face_ref = face.as_ref();
         let phone_ref = phone_layout.as_ref();
         let chrome = &mut self.chrome;
-        let mut output = self.egui_ctx.run(raw, |ctx| screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, phone_ref, chrome, &mut touch));
+        let mut output = self.egui_ctx.run(raw, |ctx| match &lay3k {
+            Some(l) => cdj3000::draw(ctx, &snap, l, &mut touch),
+            None => screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, phone_ref, chrome, &mut touch),
+        });
         perf_accum("egui_run", _t_run.elapsed());
         drop(snap);
 
@@ -2062,7 +2090,7 @@ impl DeckApp {
         };
         self.indicators.store(surface_bits(&flags, playing, self.transport.cued));
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
-        snap.cols_visible = ZOOM_LEVELS[self.zoom_level];
+        snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
         if self.screen_mode == ScreenMode::Info {
             snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
             snap.link_peers = self.link.peers_summary();
@@ -2080,6 +2108,7 @@ impl DeckApp {
             }
         }
         let _t_render = Instant::now();
+        renderer.set_cols_visible(snap.cols_visible);
         renderer.render(&snap, &vp, &self.egui_ctx, output);
         perf_accum("render_call", _t_render.elapsed());
         let total = frame_start.elapsed();
@@ -2589,7 +2618,10 @@ pub fn run(cfg: Config) -> Result<()> {
     // on an all-CDJ-3000 network. See docs/design/prodj-link-players.md.
     // MENU / UTILITY settings persist across launches; an explicit --player /
     // OPENDECK_PLAYER still wins over the persisted PLAYER No.
-    let settings     = settings::Settings::load(cfg.default_player);
+    let mut settings = settings::Settings::load(cfg.default_player);
+    // Dev / screenshots: OPENDECK_SKIN picks the skin for this run without
+    // changing the saved choice (a MENU change still saves everything).
+    if let Some(skin) = settings::Skin::from_env() { settings.skin = skin; }
     let player       = cfg.player.unwrap_or(settings.player).clamp(1, 6);
     let deck_channel = cfg.deck_channel;
     let link_send    = cfg.link_send;

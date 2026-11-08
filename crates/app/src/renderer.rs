@@ -72,6 +72,9 @@ pub struct Viewports {
     pub overview: [f32; 4],
     /// REMAIN mode: the played part of the overview turns off.
     pub dim_played: bool,
+    /// Draw beat-grid ticks inside the enlarged waveform (the XDJ look). The
+    /// CDJ-3000 skin draws its own tick rows above and below it instead.
+    pub grid_ticks: bool,
 }
 
 /// Waveform colour scheme, matching the CDJ `Waveform Color` setting.
@@ -117,6 +120,9 @@ impl WaveformParams {
                 (anchor, period, g.downbeat_offset as f32, 4.0f32)
             })
             .unwrap_or((0.0, 0.0, 0.0, 4.0));
+        // No in-waveform ticks: a zero period switches them off in both
+        // backends (nothing else reads it).
+        let beat_period_cols = if vp.grid_ticks { beat_period_cols } else { 0.0 };
         // The cyan B2 beat strip under the waveform is not an XDJ-1000 element;
         // it was a bring-up aid for external-sync testing.  Disabled for
         // faithful reproduction — the external deck now lives only in the
