@@ -1607,6 +1607,48 @@ impl DeckApp {
             .unwrap_or((win_w, win_h))
     }
 
+    /// Mirror the deck onto a CDJ in Control Mode (`surface::lanhid`): the
+    /// live status every frame, the track's display assets only when the
+    /// track, its grid or its cues change. Positions here are interleaved
+    /// samples; the grid is in frames; the CDJ wants milliseconds.
+    fn feed_cdj(feed: &surface::lanhid::Feed, waveform: &WaveformCache, snap: &DeckSnapshot) {
+        use std::hash::{Hash, Hasher};
+        let ch = snap.channels.max(1) as u64;
+        let sr = snap.sample_rate.max(1) as u64;
+        let ms = |s: u64| (s / ch * 1000 / sr) as u32;
+        let loaded = snap.total_samples > 0;
+        feed.publish_live(surface::lanhid::Live {
+            loaded,
+            playing: snap.playing,
+            position_ms: ms(snap.position),
+            duration_ms: ms(snap.total_samples),
+            rate: snap.fader_speed,
+            track_bpm: snap.beat_grid.map(|g| g.bpm).unwrap_or(0.0),
+            cue_ms: loaded.then(|| ms(snap.cue_point)),
+            loop_ms: snap.loop_active.then(|| (snap.loop_beats, ms(snap.loop_start), ms(snap.loop_end))),
+            tempo_range: snap.tempo_range,
+            key_lock: snap.key_lock,
+            vinyl: snap.jog_vinyl,
+            quantize: snap.quantize,
+        });
+        if !loaded { return; }
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        (snap.file, snap.title, snap.total_samples, waveform.columns.len(), snap.hot_cues).hash(&mut h);
+        if let Some(g) = snap.beat_grid {
+            (g.anchor_sample, g.bpm.to_bits(), g.downbeat_offset, g.beats.len()).hash(&mut h);
+        }
+        feed.publish_assets(h.finish(), || surface::lanhid::Assets {
+            title: snap.title.to_string(),
+            artist: snap.tags.artist.clone().unwrap_or_default(),
+            columns: waveform.columns.clone(),
+            hop: waveform.hop_size,
+            sample_rate: snap.sample_rate,
+            total_frames: snap.total_samples / ch,
+            grid: snap.beat_grid.cloned(),
+            hot_cues_ms: snap.hot_cues.map(|c| c.map(ms)),
+        });
+    }
+
     fn render_frame(&mut self) {
         // While occluded (iOS background) don't touch the GPU: the surface is
         // invalid and any acquire/present risks the background scene-update
@@ -1871,6 +1913,7 @@ impl DeckApp {
             snap.link_peers = self.link.peers_summary();
         }
         snap.loading = self.loading.as_deref();
+        if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
         perf_accum("make_snapshot", _t_snap.elapsed());
 
         // Screen layout in logical points; the shader gets its two rects in pixels.
@@ -2025,6 +2068,7 @@ impl DeckApp {
             snap.link_peers = self.link.peers_summary();
         }
         snap.loading = self.loading.as_deref();
+        if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
 
         // Dev: OPENDECK_SCREENSHOT=path captures frame 90 (or
         // OPENDECK_SCREENSHOT_FRAME=n) and exits.

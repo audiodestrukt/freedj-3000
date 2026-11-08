@@ -179,6 +179,16 @@ streams a 0x21 status report back as its keepalive. The `map()` function (the
 CdjControl → ControlEvent table: jog→JogDelta, tempo→TempoFader, pads→hot
 cues/beat loops, PLAY/CUE/VINYL/etc.) is pure and unit-tested.
 
+The other direction is the deck's own screen. While a session is up,
+`DeckApp` publishes a `lanhid::Feed` (inside `surface::Indicators`). It sends
+the live 0x21 status every frame and, when the track, grid or cues change, the
+display assets: deck rows, title/artist, hot cues, RGB overview, scrolling
+waveform and beat grid. Those go out as fragments queued behind the status at
+64 per loop pass. A change of track clears whatever is still queued. Light
+assets are re-offered every second and the waveforms every 30 s, because the
+CDJ only takes them once it is in Control Mode. Format details and live
+findings: docs/design/cdj-hid-display.md.
+
 It is enabled out of band (no controllers.toml change):
 
 ```
@@ -189,15 +199,20 @@ cargo run -p opendeck-app -- amplificate.mp3
 
 With the real identity in the conf the handshake establishes and turning the
 emulator (or a real CDJ's) jog scrubs the loaded waveform; buttons and pads
-map as the table says. The identity conf is the operator's to supply (it
+map as the table says. **To see the deck on the CDJ's screen, put the CDJ in
+Control Mode:** SOURCE → DJ APP → CONTROL MODE (CDJ), then push the rotary
+twice. (In normal player mode it still sends input but ignores the display.)
+Emulator: `press SOURCE`, `press ROTARY_PRESS` ×2 on the control API (port
+4401); `lcd main` captures the screen. The identity conf is the operator's to supply (it
 authenticates as the posed vendor); it is never in the repo.
 
 ## Still to build
 
-- Display commands (0x22–0x30): titles, RGB waveforms, beat grid, hot cues,
-  and the fragmentation/reassembly they share with the tunnel (brief page 6).
-  The status (0x21) feedback is sent already; these richer screen payloads are
-  not yet.
+- Inbound reassembly of 32-byte CDJ → host fragments (LAN only; the emulator
+  sends whole 64-byte reports). Display commands 0x22–0x30 are done and run
+  from the app (2026-11-08).
+- Hot-cue letters above the overview strip don't appear on the emulator; the
+  scroll markers and pad colours do. Check on hardware.
 - The UDP socket layer: discovery, per-player sessions, tunnel (de)fragment,
   keepalive cadence; and the iOS interface binding (IP_BOUND_IF, the wired
   link-local address) the brief's page 2 describes. The `lanhid` surface

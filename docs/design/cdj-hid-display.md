@@ -329,4 +329,12 @@ Validated with `examples/cdj_hid_host.rs` and the emulator control API's
   blue (ctl `lamps`). E–H stayed at the idle level. **Open:** no cue letters
   appear above the 0x2C overview strip, though a CDJ normally shows them. This
   may be emulator behaviour or need another field; check on hardware.
+- **In the app (2026-11-08).** `surface::lanhid::Feed` carries `Live` →
+  0x21 every 16 ms and `Assets` → light/heavy fragment sets. `DeckApp::feed_cdj`
+  converts interleaved samples to ms and rebuilds assets only when a key (file,
+  title, length, columns, cues, grid) changes. Running `opendeck
+  amplificate.mp3` against the emulator in Control Mode, the CDJ showed the deck
+  0.4 s after the handshake (2 894 fragments). Two turns of the emulated jog
+  while playing moved both freedj and the CDJ clock 3.6 s (+1.4 s of play),
+  which matches 1.8 s/rev.
 

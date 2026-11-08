@@ -35,7 +35,11 @@ pub const PRESETS: &[(&str, &str)] = &[
 /// Deck state the surfaces mirror on their LEDs.  `DeckApp` stores a fresh
 /// set of bits once per frame; transports read them at their own pace.
 #[derive(Default)]
-pub struct Indicators { bits: AtomicU32 }
+pub struct Indicators {
+    bits: AtomicU32,
+    /// Richer state for a CDJ in Control Mode: its own screen mirrors the deck.
+    pub cdj: lanhid::Feed,
+}
 
 pub mod bit {
     pub const PLAYING:  u32 = 1 << 0;
@@ -133,7 +137,7 @@ pub fn default_path() -> PathBuf { crate::taglist::app_data_dir().join("controll
 /// appear; each I2C board gets its own polling thread.  Returns at once.
 pub fn start(file: SurfaceFile, deck: Deck, tx: Sender<Event>, ind: Arc<Indicators>) {
     // A CDJ/XDJ in CONTROL MODE over HID-via-LINK, if OPENDECK_CDJ_HID is set.
-    lanhid::spawn_from_env(tx.clone());
+    lanhid::spawn_from_env(tx.clone(), Arc::clone(&ind));
 
     let mut midis = Vec::new();
     for s in file.surface {
