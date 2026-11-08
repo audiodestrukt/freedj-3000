@@ -316,4 +316,17 @@ Validated with `examples/cdj_hid_host.rs` and the emulator control API's
   silent gap sits about 25.8 s into the scroll and about 25.6 s on the 0x2C
   strip, so the 86 col/s → 150 pt/s resample is time-correct. Each point takes
   the loudest column it overlaps, with colour handled as in 0x2C.
+- **0x2F beat grid verified.** The analyser's grid (141.8 BPM for
+  amplificate.mp3) is expanded from the anchor in both directions:
+  2 207 beats → 0x2F. The CDJ draws ticks above and below the scroll, red on
+  each downbeat, and every tick lands on a kick's attack at the CDJ's zoom.
+  Status BPM now comes from the grid. **Q2/D3, partly settled:**
+  `BeatAnalyzerImpl` takes interleaved stereo and downmixes it, so its
+  `anchor_sample` is in **frames**. Still to check: whether `DeckSnapshot`
+  positions are interleaved before the app calls `grid_beats`.
+- **0x30 hot cues verified.** Four cues (palette IDs 04/12/3A/08) drew the "A"
+  marker at the predicted x in the scroll and lit pads A–D blue/green/violet/
+  blue (ctl `lamps`). E–H stayed at the idle level. **Open:** no cue letters
+  appear above the 0x2C overview strip, though a CDJ normally shows them. This
+  may be emulator behaviour or need another field; check on hardware.
 

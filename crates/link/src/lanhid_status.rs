@@ -92,7 +92,7 @@ impl Default for Status {
 }
 
 /// minutes, seconds, ms-within-second LE16 — the 4-byte time fields.
-fn time4(ms: u32) -> [u8; 4] {
+pub(crate) fn time4(ms: u32) -> [u8; 4] {
     let total_s = ms / 1000;
     let m = (total_s / 60) as u8;
     let s = (total_s % 60) as u8;

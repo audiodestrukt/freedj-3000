@@ -1,8 +1,10 @@
 //! Display command bodies for the CDJ HID-over-LINK transport: the 0x2A deck
-//! list, the 0x22/0x23/0x26 text fields, the 0x2C RGB overview and the 0x2E
-//! scrolling waveform. These are *bodies*; split them
-//! with [`crate::lanhid_frag::fragment`] before sending. Formats per the
-//! integration brief, pages 4 and 6.
+//! list, the 0x22/0x23/0x26 text fields, the 0x2C RGB overview, the 0x2E
+//! scrolling waveform, the 0x2F beat grid and the 0x30 hot cues. These are
+//! *bodies*; split them with [`crate::lanhid_frag::fragment`] before sending.
+//! Formats per the integration brief, pages 4 and 6.
+
+use opendeck_types::BeatGrid;
 
 /// Deck-list rows (command 0x2A).
 pub const CMD_DECK_ROWS: u8 = 0x2A;
@@ -28,6 +30,14 @@ pub const CMD_SCROLL: u8 = 0x2E;
 pub const SCROLL_POINTS_PER_SEC: u32 = 150;
 /// Tallest scrolling-waveform point; heights run 0..=this.
 pub const SCROLL_MAX_HEIGHT: u8 = 31;
+
+/// Beat grid.
+pub const CMD_GRID: u8 = 0x2F;
+/// Hot cues.
+pub const CMD_HOT_CUES: u8 = 0x30;
+
+/// Working CDJ-3000 cue colour IDs for pads A..H (brief p.6).
+pub const CUE_PALETTE: [u8; 8] = [0x04, 0x12, 0x3A, 0x08, 0x0C, 0x3C, 0x0E, 0x01];
 
 /// The deck list always carries this many rows, empty ones included.
 pub const DECK_ROWS: usize = 11;
@@ -155,6 +165,84 @@ pub fn scroll(cols: &[[u8; 4]], hop: usize, sample_rate: u32) -> Vec<u8> {
         let h = (c[3] as u32 * SCROLL_MAX_HEIGHT as u32 / max_amp) as u16;
         let word = ((r as u16 >> 5) << 13) | ((g as u16 >> 5) << 10) | ((bl as u16 >> 5) << 7) | (h << 2);
         body.extend_from_slice(&word.to_le_bytes());
+    }
+    body
+}
+
+/// Body for 0x2F: LE16 beat count, then per beat `{beat-in-bar 1..4, total
+/// ms LE24}`. `beats` is `(beat_in_bar, ms)` in track order; anything past
+/// the LE16 count is dropped.
+pub fn beat_grid(beats: &[(u8, u32)]) -> Vec<u8> {
+    let beats = &beats[..beats.len().min(u16::MAX as usize)];
+    let mut body = Vec::with_capacity(2 + beats.len() * 4);
+    body.extend_from_slice(&(beats.len() as u16).to_le_bytes());
+    for &(bib, ms) in beats {
+        body.push(bib.clamp(1, 4));
+        body.extend_from_slice(&ms.to_le_bytes()[..3]);
+    }
+    body
+}
+
+/// Every beat of `grid` inside a track of `total_frames`, as `(beat_in_bar,
+/// ms)` for [`beat_grid`]. Grid positions are **frames** at `sample_rate` (what
+/// the analyser produces). A variable-tempo grid lists its own beats; a
+/// constant one is extended from the anchor both ways, so beats before the
+/// anchor are included too.
+pub fn grid_beats(grid: &BeatGrid, sample_rate: u32, total_frames: u64) -> Vec<(u8, u32)> {
+    let sr = sample_rate.max(1) as f64;
+    let ms = |frame: f64| (frame * 1000.0 / sr).round() as u32;
+    let bib = |k: i64| ((k + grid.downbeat_offset as i64).rem_euclid(4) + 1) as u8;
+    if !grid.beats.is_empty() {
+        return grid
+            .beats
+            .iter()
+            .take_while(|&&f| f < total_frames)
+            .enumerate()
+            .map(|(k, &f)| (bib(k as i64), ms(f as f64)))
+            .collect();
+    }
+    if grid.bpm <= 0.0 {
+        return Vec::new();
+    }
+    let period = 60.0 * sr / grid.bpm;
+    let first = -((grid.anchor_sample as f64 / period).floor() as i64);
+    let mut out = Vec::new();
+    for k in first.. {
+        let f = grid.anchor_sample as f64 + k as f64 * period;
+        if f >= total_frames as f64 || out.len() >= u16::MAX as usize {
+            break;
+        }
+        out.push((bib(k), ms(f)));
+    }
+    out
+}
+
+/// One stored hot cue for [`hot_cues`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HotCue {
+    /// CDJ colour ID, e.g. from [`CUE_PALETTE`]. 0 = no colour (the pad and
+    /// marker go dark).
+    pub color: u8,
+    pub ms: u32,
+}
+
+/// Body for 0x30 (52 bytes): the track duration `{min, sec, ms LE16}`, then
+/// pads A..H as `{type, colour, min, sec, ms LE16}` — type 1 for a stored
+/// cue, six zeros for an empty pad. Send on every track change and cue edit,
+/// all eight pads every time (a cue-free track clears them all).
+pub fn hot_cues(duration_ms: u32, cues: &[Option<HotCue>; 8]) -> Vec<u8> {
+    use crate::lanhid_status::time4;
+    let mut body = Vec::with_capacity(52);
+    body.extend_from_slice(&time4(duration_ms));
+    for cue in cues {
+        match cue {
+            Some(c) => {
+                body.push(1);
+                body.push(c.color);
+                body.extend_from_slice(&time4(c.ms));
+            }
+            None => body.extend_from_slice(&[0; 6]),
+        }
     }
     body
 }
@@ -305,5 +393,55 @@ mod tests {
     #[test]
     fn scroll_of_nothing_is_an_empty_count() {
         assert_eq!(scroll(&[], 512, 44_100), vec![0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn beat_grid_records() {
+        let body = beat_grid(&[(1, 0), (2, 469), (3, 0x01_02_03)]);
+        assert_eq!(&body[..2], &[3, 0]);
+        assert_eq!(&body[2..6], &[1, 0, 0, 0]);
+        assert_eq!(&body[6..10], &[2, 0xD5, 0x01, 0]);
+        assert_eq!(&body[10..14], &[3, 0x03, 0x02, 0x01]);
+    }
+
+    #[test]
+    fn constant_grid_covers_the_track_including_pre_anchor_beats() {
+        // 120 BPM at 48 kHz → a beat every 24 000 frames; anchor on beat 3.
+        let mut g = BeatGrid::new_constant(60_000, 120.0);
+        g.downbeat_offset = 0;
+        let beats = grid_beats(&g, 48_000, 48_000 * 10);
+        // 10 s at 2 beats/s, first beat 12 000 frames (250 ms) in.
+        assert_eq!(beats.len(), 20);
+        assert_eq!(beats[0].1, 250);
+        assert_eq!(beats[1].1, 750);
+        // The anchor (1250 ms) is a downbeat; beats before it count back.
+        let anchor = beats.iter().position(|b| b.1 == 1250).unwrap();
+        assert_eq!(beats[anchor].0, 1);
+        assert_eq!(beats[anchor - 1].0, 4);
+        assert_eq!(beats[anchor + 1].0, 2);
+        assert!(beats.iter().all(|b| (1..=4).contains(&b.0)));
+    }
+
+    #[test]
+    fn variable_grid_uses_its_own_beats() {
+        let mut g = BeatGrid::new_constant(0, 120.0);
+        g.beats = vec![0, 22_000, 47_000, 900_000];
+        g.downbeat_offset = 1;
+        let beats = grid_beats(&g, 44_000, 100_000);
+        assert_eq!(beats, vec![(2, 0), (3, 500), (4, 1068)]);
+    }
+
+    #[test]
+    fn hot_cues_body_is_52_bytes() {
+        let mut cues = [None; 8];
+        cues[0] = Some(HotCue { color: CUE_PALETTE[0], ms: 61_250 });
+        cues[7] = Some(HotCue { color: CUE_PALETTE[7], ms: 999 });
+        let body = hot_cues(527_328, &cues);
+        assert_eq!(body.len(), 52);
+        assert_eq!(&body[..4], &[8, 47, 0x48, 0x01]); // 8:47.328
+        assert_eq!(&body[4..10], &[1, 0x04, 1, 1, 250, 0]); // A at 1:01.250
+        assert!(body[10..46].iter().all(|&b| b == 0), "B..G empty");
+        assert_eq!(&body[46..52], &[1, 0x01, 0, 0, 0xE7, 0x03]);
+        assert_eq!(hot_cues(0, &[None; 8]), vec![0u8; 52]);
     }
 }

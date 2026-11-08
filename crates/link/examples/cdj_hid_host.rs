@@ -11,7 +11,10 @@
 //!
 //! With `--track`, the file is decoded and analysed the way the deck does
 //! (`WaveformBuilder`), its real duration drives the status and its waveform
-//! is sent as the 0x2C RGB overview and the 0x2E scrolling waveform.
+//! is sent as the 0x2C RGB overview and the 0x2E scrolling waveform; its
+//! analysed grid becomes the status BPM and the 0x2F beat grid. Each
+//! `--cue <seconds>` stores the next hot cue (A, B, …), snapped to the nearest
+//! beat, and all eight pads go out as 0x30.
 //!
 //! Display fragments go through a queue drained at most [`BURST`] per loop
 //! pass, so a multi-thousand-fragment waveform never starves the status.
@@ -41,6 +44,7 @@ fn main() -> std::io::Result<()> {
     let mut title = "Amplificate".to_string();
     let mut artist = "Audiodestrukt".to_string();
     let mut track: Option<PathBuf> = None;
+    let mut cue_secs: Vec<f64> = Vec::new();
     let seed = [1u8, 2, 3, 4, 5, 6, 7, 8];
     let mut a = std::env::args().skip(1);
     while let Some(arg) = a.next() {
@@ -51,6 +55,7 @@ fn main() -> std::io::Result<()> {
             "--title" => title = a.next().expect("--title needs text"),
             "--artist" => artist = a.next().expect("--artist needs text"),
             "--track" => track = a.next().map(PathBuf::from),
+            "--cue" => cue_secs.extend(a.next().and_then(|s| s.parse::<f64>().ok())),
             other => eprintln!("ignoring unknown arg {other:?}"),
         }
     }
@@ -75,21 +80,38 @@ fn main() -> std::io::Result<()> {
     let mut reached_11 = false;
 
     // The host track: a real file's waveform + length, or a 3:00 stand-in.
-    let (columns, sr, duration_ms) = match &track {
+    let (columns, sr, frames, grid) = match &track {
         Some(p) => {
-            let (cols, sr, ms) = analyse(p)?;
-            eprintln!("track: {} — {} columns, {} ms", p.display(), cols.len(), ms);
-            (cols, sr, ms)
+            let t = analyse(p)?;
+            eprintln!(
+                "track: {} — {} columns, {} frames, grid {:?}",
+                p.display(),
+                t.0.len(),
+                t.2,
+                t.3.as_ref().map(|g| (g.bpm, g.anchor_sample))
+            );
+            t
         }
-        None => (Vec::new(), 44_100, 180_000u32),
+        None => (Vec::new(), 44_100, 44_100 * 180, None),
     };
+    let duration_ms = (frames * 1000 / sr as u64) as u32;
+    let beats = grid.as_ref().map(|g| disp::grid_beats(g, sr, frames)).unwrap_or_default();
+    let bpm_x10 = grid.as_ref().map(|g| (g.bpm * 10.0).round() as u16).unwrap_or(1280);
+    // Hot cues: pads in flag order, each snapped to the nearest beat.
+    let mut cues = [None; 8];
+    for (pad, &sec) in cue_secs.iter().take(8).enumerate() {
+        let want = (sec * 1000.0) as u32;
+        let ms = beats.iter().map(|b| b.1).min_by_key(|&b| b.abs_diff(want)).unwrap_or(want);
+        cues[pad] = Some(disp::HotCue { color: disp::CUE_PALETTE[pad], ms });
+        eprintln!("hot cue {}: {} ms", (b'A' + pad as u8) as char, ms);
+    }
     let hop = opendeck_analysis::waveform::HOP_SIZE;
     let mut heavy = fragment(disp::CMD_OVERVIEW, &disp::overview(&columns));
     heavy.extend(fragment(disp::CMD_SCROLL, &disp::scroll(&columns, hop, sr)));
+    heavy.extend(fragment(disp::CMD_GRID, &disp::beat_grid(&beats)));
     eprintln!("waveform assets: {} fragments", heavy.len());
     let mut queue: std::collections::VecDeque<[u8; 64]> = Default::default();
     let mut last_heavy = Instant::now() - Duration::from_secs(3600);
-    let bpm_x10 = 1280u16;
     let play_start = Instant::now();
 
     let mut last_status = Instant::now();
@@ -131,6 +153,7 @@ fn main() -> std::io::Result<()> {
             let mut frames = fragment(disp::CMD_DECK_ROWS, &disp::deck_rows(&rows));
             frames.extend(fragment(disp::CMD_TITLE, &disp::text(&title)));
             frames.extend(fragment(disp::CMD_ARTIST, &disp::text(&artist)));
+            frames.extend(fragment(disp::CMD_HOT_CUES, &disp::hot_cues(duration_ms, &cues)));
             queue.extend(frames);
             last_assets = Instant::now();
         }
@@ -187,12 +210,18 @@ fn main() -> std::io::Result<()> {
 
 /// Decode `path` and build its waveform columns exactly as a deck load does.
 #[cfg(unix)]
-fn analyse(path: &std::path::Path) -> std::io::Result<(Vec<[u8; 4]>, u32, u32)> {
+fn analyse(
+    path: &std::path::Path,
+) -> std::io::Result<(Vec<[u8; 4]>, u32, u64, Option<opendeck_types::BeatGrid>)> {
+    use opendeck_types::BeatAnalyzer;
     let io = |e: opendeck_types::DecodeError| std::io::Error::other(format!("{e:?}"));
     let mut dec = opendeck_decode::open_decoder(path).map_err(io)?;
     let sr = dec.sample_rate();
     let ch = dec.channels().max(1) as usize;
     let mut wb = opendeck_analysis::waveform::WaveformBuilder::new(sr);
+    // The grid comes from the leading two minutes, as the library analysis does.
+    let mut ba = opendeck_analysis::BeatAnalyzerImpl::new(sr);
+    let lead_frames = 121 * sr as u64;
     let mut buf = vec![0f32; 4096 * ch];
     let mut stereo = Vec::with_capacity(4096 * 2);
     let mut frames = 0u64;
@@ -201,16 +230,20 @@ fn analyse(path: &std::path::Path) -> std::io::Result<(Vec<[u8; 4]>, u32, u32)> 
         if n == 0 {
             break;
         }
-        frames += n as u64;
         stereo.clear();
         for f in buf[..n * ch].chunks(ch) {
             stereo.push(f[0]);
             stereo.push(f[1.min(ch - 1)]);
         }
         wb.push(&stereo);
+        if frames < lead_frames {
+            let take = ((lead_frames - frames) as usize).min(n) * 2;
+            ba.push(&stereo[..take], sr);
+        }
+        frames += n as u64;
     }
-    let ms = (frames * 1000 / sr as u64) as u32;
-    Ok((wb.finish().columns, sr, ms))
+    let grid = ba.beat_grid().map(|g| (*g).clone());
+    Ok((wb.finish().columns, sr, frames, grid))
 }
 
 #[cfg(not(unix))]
