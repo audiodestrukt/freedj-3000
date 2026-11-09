@@ -105,6 +105,9 @@ enum Loc {
     /// ARTIST / ALBUM / KEY categories: the names, then one name's tracks.
     RbNames(RbField),
     RbNamed(RbField, String),
+    /// HISTORY: the history lists, then one list's tracks in play order.
+    RbHistory,
+    RbHistoryList(u32),
     /// A dbserver source's category menu (PLAYLIST / ARTIST / ALBUM / TRACK /
     /// FILENAME …), the first thing a player shows for a linked source.
     DbRoot,
@@ -273,6 +276,10 @@ impl Browser {
             Some(Loc::RbAllTracks) => "TRACK".to_string(),
             Some(Loc::RbNames(f)) => f.label().to_string(),
             Some(Loc::RbNamed(_, n)) => if n.is_empty() { "(none)".to_string() } else { n.clone() },
+            Some(Loc::RbHistory) => "HISTORY".to_string(),
+            Some(Loc::RbHistoryList(id)) => self.rb.as_ref()
+                .and_then(|e| e.history.iter().find(|(h, _)| h == id).map(|(_, n)| n.clone()))
+                .unwrap_or_else(|| "HISTORY".to_string()),
             Some(Loc::RbTree(id)) | Some(Loc::RbPlaylist(id)) => self.rb.as_ref()
                 .and_then(|e| e.playlists.iter().find(|n| n.id == *id))
                 .map(|n| n.name.clone()).unwrap_or_else(|| "rekordbox".to_string()),
@@ -330,6 +337,8 @@ impl Browser {
             Some(Loc::RbAllTracks)    => self.rb_track_entries(|e| e.tracks.iter().collect()),
             Some(Loc::RbNames(f))     => self.rb_name_entries(f),
             Some(Loc::RbNamed(f, n))  => self.rb_track_entries(|e| e.tracks.iter().filter(|t| f.of(t) == n).collect()),
+            Some(Loc::RbHistory)      => self.rb_history_entries(),
+            Some(Loc::RbHistoryList(id)) => self.rb_track_entries(|e| e.history_tracks(id)),
             Some(Loc::DbRoot)         => self.db_root_entries(),
             Some(Loc::DbFolder(id))   => self.db_folder_entries(id),
             Some(Loc::DbPlaylist(id)) => self.db_track_entries(|c, s| c.playlist(s, id, false)),
@@ -530,8 +539,8 @@ impl Browser {
     /// The export's category menu: PLAYLIST only when the stick has any, then
     /// TRACK (everything, by title) so an unsorted stick is still browsable.
     /// A rekordbox export's categories, in the order a CDJ-3000 lists them
-    /// (it shows PLAYLIST even when there are none). HISTORY and MATCHING are
-    /// shown but not walkable yet; FOLDER is the stick's files.
+    /// (it shows PLAYLIST even when there are none). MATCHING is shown but
+    /// not walkable yet; FOLDER is the stick's files.
     fn rb_root_entries(&self) -> Vec<Entry> {
         if self.rb.is_none() { return Vec::new() }
         let mut out = Vec::new();
@@ -541,12 +550,21 @@ impl Browser {
         out.push(cat("TRACK", EntryKind::Descend(Loc::RbAllTracks)));
         out.push(cat("KEY", EntryKind::Descend(Loc::RbNames(RbField::Key))));
         out.push(cat("PLAYLIST", EntryKind::Descend(Loc::RbTree(0))));
-        out.push(cat("HISTORY", EntryKind::Unsupported));
+        out.push(cat("HISTORY", EntryKind::Descend(Loc::RbHistory)));
         out.push(cat("MATCHING", EntryKind::Unsupported));
         if let Some(RbSource::Local(root)) = &self.rb_source {
             out.push(cat("FOLDER", EntryKind::Descend(Loc::Fs(root.clone()))));
         }
         out
+    }
+
+    /// HISTORY: the player's history lists, newest first, as the unit lists them.
+    fn rb_history_entries(&self) -> Vec<Entry> {
+        let Some(exp) = self.rb.as_ref() else { return Vec::new() };
+        exp.history.iter().rev().map(|(id, name)| Entry {
+            name: name.clone(), is_dir: true, artist: None, bpm: None, key: None, art: None,
+            kind: EntryKind::Descend(Loc::RbHistoryList(*id)),
+        }).collect()
     }
 
     /// ARTIST / ALBUM / KEY: the distinct names, sorted, each opening its
@@ -572,6 +590,7 @@ impl Browser {
             (EntryKind::Descend(Loc::RbNames(a)), Loc::RbNames(b) | Loc::RbNamed(b, _)) => a == b,
             (EntryKind::Descend(Loc::RbAllTracks), Loc::RbAllTracks) => true,
             (EntryKind::Descend(Loc::RbTree(_)), Loc::RbTree(_) | Loc::RbPlaylist(_)) => true,
+            (EntryKind::Descend(Loc::RbHistory), Loc::RbHistory | Loc::RbHistoryList(_)) => true,
             (EntryKind::Descend(Loc::Fs(a)), Loc::Fs(b)) => b.starts_with(a),
             _ => false,
         }));
@@ -581,8 +600,13 @@ impl Browser {
     /// What the highlighted ARTIST / ALBUM / KEY row holds, for the CDJ-3000
     /// skin's right pane: an artist's albums, else the tracks.
     pub fn rb_preview(&self) -> Option<(&'static str, Vec<String>)> {
-        let Some(Entry { kind: EntryKind::Descend(Loc::RbNamed(f, n)), .. }) = self.selected_entry() else { return None };
         let exp = self.rb.as_ref()?;
+        let (f, n) = match self.selected_entry() {
+            Some(Entry { kind: EntryKind::Descend(Loc::RbNamed(f, n)), .. }) => (f, n),
+            Some(Entry { kind: EntryKind::Descend(Loc::RbHistoryList(id)), .. }) =>
+                return Some(("TRACK", exp.history_tracks(*id).iter().map(|t| t.title.clone()).collect())),
+            _ => return None,
+        };
         let mine = exp.tracks.iter().filter(|t| f.of(t) == n);
         if *f == RbField::Artist {
             let mut albums: Vec<String> = mine.map(|t| t.album.clone()).filter(|a| !a.is_empty()).collect();
@@ -595,6 +619,9 @@ impl Browser {
             Some(("TRACK", titles))
         }
     }
+
+    /// Whether the HISTORY lists are shown (the CDJ skin's row icon).
+    pub fn on_rb_history(&self) -> bool { matches!(self.stack.last(), Some(Loc::RbHistory)) }
 
     /// The rekordbox field a name list groups by, while one is shown.
     pub fn rb_names_field(&self) -> Option<RbField> {
@@ -819,7 +846,7 @@ impl Browser {
         for gone in self.media.iter().filter(|m| !now.contains(m)) {
             log::info!("media removed: {}", gone.path.display());
             if self.stack.iter().any(|l| matches!(l, Loc::Fs(p) if p.starts_with(&gone.path)))
-                || self.stack.iter().any(|l| matches!(l, Loc::RbRoot | Loc::RbTree(_) | Loc::RbPlaylist(_) | Loc::RbAllTracks | Loc::RbNames(_) | Loc::RbNamed(..)))
+                || self.stack.iter().any(|l| matches!(l, Loc::RbRoot | Loc::RbTree(_) | Loc::RbPlaylist(_) | Loc::RbAllTracks | Loc::RbNames(_) | Loc::RbNamed(..) | Loc::RbHistory | Loc::RbHistoryList(_)))
                     && matches!(&self.rb_source, Some(RbSource::Local(r)) if r.starts_with(&gone.path))
             {
                 self.stack.truncate(1);
@@ -980,9 +1007,13 @@ mod tests {
         b.open_rb_category(2);
         let titles: Vec<_> = b.entries().iter().map(|e| e.name.clone()).collect();
         assert_eq!(titles, vec!["Demo Track 1".to_string(), "Demo Track 2".to_string()]);
-        // HISTORY is shown but does not open.
-        let h = b.rb_categories().unwrap().0.iter().position(|c| c == "HISTORY").unwrap();
-        b.open_rb_category(h);
+        // HISTORY opens its lists (the demo export has none); MATCHING
+        // is shown but does not open.
+        let cats = b.rb_categories().unwrap().0;
+        b.open_rb_category(cats.iter().position(|c| c == "HISTORY").unwrap());
+        assert_eq!(b.title(), "HISTORY");
+        assert!(b.entries().is_empty());
+        b.open_rb_category(cats.iter().position(|c| c == "MATCHING").unwrap());
         assert_eq!(b.title(), "REKORDBOX", "stays on the categories");
     }
 

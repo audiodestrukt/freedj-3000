@@ -841,7 +841,7 @@ const PANE: Color32 = Color32::from_rgb(35, 35, 35);
 const SEL_BLUE: Color32 = Color32::from_rgb(0, 125, 225);
 
 #[derive(Clone, Copy, PartialEq)]
-enum RowIcon { Folder, Track, Person, Disc, Key, List, None }
+enum RowIcon { Folder, Track, Person, Disc, Key, List, History, None }
 
 /// One row of a list: icon, text, and an optional right-hand value.
 struct Row<'a> { icon: RowIcon, text: &'a str, value: Option<String>, tagged: bool }
@@ -988,6 +988,12 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
             RowIcon::Disc => icon(ui, Icon::Disc, Pos2::new(rr.min.x + 22.0 * u, cy), u),
             RowIcon::Key => boxed(ui, "b#", Pos2::new(rr.min.x + 22.0 * u, cy), u),
             RowIcon::List => icon(ui, Icon::List, Pos2::new(rr.min.x + 22.0 * u, cy), u),
+            RowIcon::History => {
+                let c = Pos2::new(rr.min.x + 22.0 * u, cy);
+                icon(ui, Icon::List, c, u);
+                ui.painter().circle_filled(Pos2::new(c.x + 8.0 * u, c.y + 8.0 * u), 6.0 * u, BG);
+                ui.painter().circle_stroke(Pos2::new(c.x + 8.0 * u, c.y + 8.0 * u), 5.0 * u, Stroke::new(1.5 * u, TEXT));
+            }
             RowIcon::None => {}
         }
         let tx = if row.icon == RowIcon::None { 14.0 } else { 45.0 };
@@ -1236,6 +1242,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         Some(RbField::Artist) => RowIcon::Person,
         Some(RbField::Album) => RowIcon::Disc,
         Some(RbField::Key) => RowIcon::Key,
+        None if b.on_rb_history() => RowIcon::History,
         None if cats.is_some() => RowIcon::List,
         None => RowIcon::Folder,
     };
@@ -1244,7 +1251,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         tagged: e.load().map_or(false, |l| tags.contains(l)),
     }).collect();
     // The unit titles a category's name list BROWSE, a track list by its name.
-    let title = if names.is_some() { "BROWSE".to_string() } else { b.title() };
+    let title = if names.is_some() || b.on_rb_history() { "BROWSE".to_string() } else { b.title() };
     draw_list_header(ui, snap, lay, &title, cats.is_none(), u, out);
     match &cats {
         Some((names, open)) => draw_rb_categories(ui, lay, names, *open, u, out),
@@ -1258,7 +1265,12 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         }
         return draw_status_strip(ui, snap, lay, u, out);
     }
-    let head = match names { Some(f) => f_label(f), None if cats.is_some() => "PLAYLIST".to_string(), None => "FOLDER".to_string() };
+    let head = match names {
+        Some(f) => f_label(f),
+        None if b.on_rb_history() => "HISTORY".to_string(),
+        None if cats.is_some() => "PLAYLIST".to_string(),
+        None => "FOLDER".to_string(),
+    };
     let left = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 730.0 * u, sc.min.y + 628.0 * u));
     draw_list(ui, left, &head, &rows, b.selected, "— empty —", u, Some(out));
     let right = Rect::from_min_max(Pos2::new(sc.min.x + 732.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));

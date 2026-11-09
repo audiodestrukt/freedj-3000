@@ -229,8 +229,16 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
     `.DAT`, `RbAnalysis::preview`) bottom-anchored on black, and its cover
     (artwork table → `RbTrack::artwork_rel`). Both are read once per file and
     cached. Covers are unchecked: the demo export has none.
-  - Not yet: sorting (the sort key is drawn, inert), HISTORY, MATCHING,
-    LINK/dbserver sources in the column, the "H" (hot cues) mark by the ♪.
+  - **HISTORY:** the reader now loads the export's history lists
+    (`RbExport::history`, `history_tracks`). The category lists them newest
+    first, with the list+clock icon, as the unit does
+    (`browse-rekordbox-history.png`); the right pane previews the highlighted
+    list's tracks, and a list opens its tracks in play order. Unchecked on
+    screen: no local export has history (Dan's stick does).
+  - The unit draws tracks played this session in green, in lists and in the
+    category column (TRACK went green after a play). Not done.
+  - Not yet: sorting (the sort key is drawn, inert), MATCHING, LINK/dbserver
+    sources in the column, the "H" (hot cues) mark by the ♪.
   - Dev: `OPENDECK_SCRIPT` browse actions (`screen=browse; open=rekordbox;
     category=2; select=0`).
 - **Phase 1 (part 2): GRID ADJUST.** A long rotary press on the unit (key A,

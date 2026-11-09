@@ -71,6 +71,11 @@ pub struct RbExport {
     pub root:      PathBuf,
     pub tracks:    Vec<RbTrack>,
     pub playlists: Vec<RbPlaylistNode>,
+    /// The player's HISTORY lists (one per session: "HISTORY 001" …), as
+    /// (id, name), in id order.
+    pub history:   Vec<(u32, String)>,
+    /// history list id → ordered track ids.
+    history_entries: HashMap<u32, Vec<u32>>,
     /// playlist node id → ordered track ids.
     entries:       HashMap<u32, Vec<u32>>,
     /// track id → index into `tracks`.
@@ -88,6 +93,13 @@ impl RbExport {
             self.playlists.iter().filter(|n| n.parent_id == parent_id).collect();
         v.sort_by_key(|n| (n.sort_order, n.id));
         v
+    }
+    /// Tracks of a HISTORY list, in play order.
+    pub fn history_tracks(&self, history_id: u32) -> Vec<&RbTrack> {
+        self.history_entries
+            .get(&history_id)
+            .map(|ids| ids.iter().filter_map(|id| self.track(*id)).collect())
+            .unwrap_or_default()
     }
     /// Tracks in a playlist, in playlist order.
     pub fn playlist_tracks(&self, playlist_id: u32) -> Vec<&RbTrack> {
@@ -151,6 +163,8 @@ pub fn read_export_from<R: Read + Seek>(reader: &mut R, root: PathBuf) -> Result
     let mut playlists: Vec<RbPlaylistNode> = Vec::new();
     // playlist id → (entry_index, track_id), sorted into order afterwards.
     let mut raw_entries: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
+    let mut history: Vec<(u32, String)> = Vec::new();
+    let mut raw_history: HashMap<u32, Vec<(u32, u32)>> = HashMap::new();
 
     for row in &rows {
         match row {
@@ -175,6 +189,11 @@ pub fn read_export_from<R: Read + Seek>(reader: &mut R, root: PathBuf) -> Result
                 is_folder:  n.is_folder(),
                 sort_order: n.sort_order,
             }),
+            Row::HistoryPlaylist(h) => history.push((h.id.0, text(&h.name))),
+            Row::HistoryEntry(e) => raw_history
+                .entry(e.playlist_id.0)
+                .or_default()
+                .push((e.entry_index, e.track_id.0)),
             Row::PlaylistEntry(e) => raw_entries
                 .entry(e.playlist_id.0)
                 .or_default()
@@ -195,7 +214,16 @@ pub fn read_export_from<R: Read + Seek>(reader: &mut R, root: PathBuf) -> Result
         })
         .collect();
 
-    Ok(RbExport { root, tracks, playlists, entries, by_id })
+    history.sort_by_key(|(id, _)| *id);
+    let history_entries: HashMap<u32, Vec<u32>> = raw_history
+        .into_iter()
+        .map(|(pid, mut v)| {
+            v.sort_by_key(|(idx, _)| *idx);
+            (pid, v.into_iter().map(|(_, tid)| tid).collect())
+        })
+        .collect();
+
+    Ok(RbExport { root, tracks, playlists, history, history_entries, entries, by_id })
 }
 
 // ── ANLZ analysis import (beat grid + cues) ───────────────────────────────────
