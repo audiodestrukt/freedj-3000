@@ -7,6 +7,13 @@ players as one more deck: it takes a player number, follows the master tempo
 or takes master and the real decks follow it, browses the other players'
 media and serves its own.
 
+It has two screens, switchable in MENU → SCREEN: the **XDJ-1000MK2** it
+started as, and a **CDJ-3000** screen (BEAT LOOP / BEAT JUMP panels, SOURCE,
+LOAD PREVIOUS TRACK, rekordbox category browsing, SEARCH with the on-screen
+keyboard, GRID ADJUST). Both draw the same deck, so switching mid-set loses
+nothing. How it was built: [My XDJ clone grew a CDJ-3000
+screen](https://audiodestrukt.com/blog/posts/freedj-cdj-3000-skin.html).
+
 It ships as **OpenDeck DJ** for iPad and iPhone on the
 [App Store](https://apps.apple.com/app/id6807472453), and the same code runs
 on a Raspberry Pi 5 and on any Linux desktop. Rendering is GPU-accelerated
@@ -29,7 +36,8 @@ and charges recurring subscription fees for music analysis software.
 
 FreeDJ-3000 reimplements the deck from the outside in. Nothing of Pioneer's is
 in it: no firmware, no code, no imagery. The screen was laid out from
-photographs of a real XDJ-1000MK2, the controls are rendered procedurally, and
+photographs of a real XDJ-1000MK2 (the CDJ-3000 screen was measured in
+pixels against an emulated CDJ-3000 showing the same state), the controls are rendered procedurally, and
 the protocols come from the public reverse-engineering work of the open source
 community ([dysentery](https://github.com/Deep-Symmetry/dysentery),
 [beat-link](https://github.com/Deep-Symmetry/beat-link),
@@ -47,33 +55,42 @@ interoperable with Pioneer hardware on the same network.
 ## Status
 
 **On the App Store and in daily use next to a real XDJ.** The deck, the Link
-protocol and the media sharing work; the physical control surface and the
-sampler features are the roadmap.
+protocol, media sharing and both screens work; the physical control surface
+and the sampler features are the roadmap. What is left on the CDJ-3000 side
+is listed in [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md).
 
 | Feature | Status |
 |---|---|
 | MP3/FLAC/AAC/OGG/WAV/AIFF decode | ✅ Working |
 | XDJ-1000MK2 screen: waveforms, beat grid, INFO, BROWSE, PERFORM, MENU/UTILITY | ✅ Working |
-| Play / CUE (hold-to-preview, back-cue) / hot cues A–H / loops / beat jump | ✅ Working |
+| CDJ-3000 screen: playback, BEAT LOOP/JUMP, INFO, SOURCE, LOAD PREVIOUS TRACK, BROWSE/TAG LIST/UTILITY, GRID ADJUST (SNAP/SHIFT GRID), SEARCH | ✅ Working; sorting, TRACK FILTER, KEY SHIFT still to do ([TODO](docs/TODO-cdj-3000.md)) |
+| Play / CUE (hold-to-preview, back-cue) / hot cues A–H / memory cues / loops / beat jump | ✅ Working |
 | Jog wheel: VINYL and CDJ modes, nudge, scratch | ✅ Working |
-| SLIP mode | 📋 Planned ([#28](https://github.com/audiodestrukt/freedj-3000/issues/28)) |
-| Tempo fader ±16 %, MASTER TEMPO key lock (Rubber Band R3) | ✅ Working |
+| SLIP mode | ✅ Working |
+| Tempo fader ±16 %, MASTER TEMPO key lock (Rubber Band R3, Bungee or WSOLA) | ✅ Working |
 | Beat detection + grid (MiniBPM + onset detector), GRID ADJUST | ✅ Working |
-| rekordbox analysis import (beat grid, cues) from USB export / LINK | ✅ Working |
+| rekordbox USB sticks: export.pdb browsing (ARTIST/ALBUM/TRACK/KEY/PLAYLIST/HISTORY), grids, cues, preview waveforms, covers | ✅ Working |
+| rekordbox analysis import (beat grid, cues) over LINK | ✅ Working |
 | Pro DJ Link: announce, beats, status, SYNC, master handoff both ways | ✅ Working on a real XDJ-1000MK2 |
+| SYNC keeps a jog nudge as a phase offset; SHIFT GRID writes it into the grid | ✅ Working, end-to-end test against an emulated CDJ-3000 (`make test-shift-grid`) |
 | Pro DJ Link media: browse and load from linked players / rekordbox | ✅ Working (dbserver + NFS) |
 | Pro DJ Link media: serve tracks to other decks (metadata, grid, waveforms, art) | ✅ OpenDeck→OpenDeck proven; XDJ acceptance test pending |
 | iPad / iPhone app (OpenDeck DJ) | ✅ On the App Store |
 | Raspberry Pi 5 | ✅ 60 fps, ~0.6 of one core playing |
+| Raspberry Pi Zero W / older GPUs (SDL backend, WSOLA key lock) | ✅ Plays cleanly; 49 fps on KMSDRM |
+| Linux (x86_64, aarch64) and Windows prebuilt releases | ✅ [Releases](https://github.com/audiodestrukt/freedj-3000/releases) |
 | Control surfaces: any USB MIDI controller, PCF8574 I2C boards on the Pi, mapped in `controllers.toml` with LED feedback | ✅ MIDI on a DJ2Go; I2C path built and unit-tested, first board pending ([docs/hardware/control-surfaces.md](docs/hardware/control-surfaces.md)) |
 | Sampler-deck: auto one-shots, quantized triggers, cue sequencing | 📋 Roadmap ([#24](https://github.com/audiodestrukt/freedj-3000/issues/24)) |
-| Hardware control surface (RP2350) | 📋 Roadmap |
+| A CDJ-3000 as freedj's control surface and screen (HID over LINK, Control Mode) | 🧪 Experimental, emulator only ([docs/design/cdj-hid-display.md](docs/design/cdj-hid-display.md)) |
+| Hardware control surface (ADK-1000 panel board, RP2350 hub) | 📋 PCB generated and routed, not fabricated ([hardware/](hardware/README.md)) |
 | CDJ-3000-generation media transfer | 📋 Not started (the 3000 moves files differently) |
 | Running OpenDeck *on* a CDJ-3000 (RK3399, as a payload through the deck's updater) | 📋 Designed, not built ([docs/hardware/cdj-3000-install.md](docs/hardware/cdj-3000-install.md)) |
 
 Everything in the Link rows has been exercised against an XDJ-1000MK2.
-CDJ-3000s speak the same Pro DJ Link sync protocol; one has not been on this
-network yet, so treat that as compatible-by-protocol rather than tested.
+CDJ-3000s speak the same Pro DJ Link sync protocol. Sync and master handoff
+have been tested against an emulated CDJ-3000 on a private network segment,
+but a physical CDJ-3000 has not been on this network yet, so treat it as
+compatible-by-protocol rather than tested.
 **Own a CDJ-3000?** Ten minutes and a Python script would settle it:
 [docs/testing/cdj-3000-interop.md](docs/testing/cdj-3000-interop.md).
 
@@ -183,28 +200,40 @@ Building locally needs only rustup and the Visual Studio Build Tools
 ("Desktop development with C++" — MSVC compiles the vendored Rubber Band and
 MiniBPM); no other system libraries. Then `cargo build --release -p opendeck-app`.
 
-### Controls (MVP)
+### Keyboard
+
+The keyboard stands in for the deck's buttons on a desktop.
 
 | Key | Action |
 |---|---|
 | `Space` | Play / pause |
-| `Enter` | CUE — set / return-to-cue / play-from-cue (CDJ) |
-| `,` / `.` | Jog: nudge (playing) / vinyl-scrub (paused) — the jog wheel does this too |
+| `Enter` | CUE (momentary): set / return-to-cue / hold to preview |
+| `,` / `.` | Jog: nudge (playing) / scrub (paused) |
+| `V` | Jog mode: VINYL ↔ CDJ |
 | `←` / `→` | Seek ±10 seconds |
-| `+` / `−` / `0` | Tempo ±1% / reset (±16% range, as the TEMPO readout) |
+| `+` / `−` / `0` | Tempo fader up / down / centre |
+| `K` `S` `Y` `M` | MASTER TEMPO · SLIP · SYNC · MASTER |
+| `N` · `[` / `]` · `Delete` | Memory cue: set · CALL previous / next · delete |
+| `A` | GRID ADJUST (the arrows then move the grid) |
 | `Z` / `X` | Zoom the enlarged waveform in / out |
-| `K` `S` `Y` `M` | Master tempo · SLIP · SYNC · MASTER (indicators; SYNC/MASTER wait on Link send) |
-| `C` | Cycle waveform colour: RGB → 3 BAND → BLUE (the *Waveform Color* setting) |
-| `T` | Toggle time display: TIME (elapsed) ↔ REMAIN |
-| `P` | Phase meter: 4-box beat display ↔ master alignment ticks (also tap it) |
-| `B` | Open / close the file **browser** (also tap BROWSE) |
-| in browser: `↑`/`↓` · `Enter` · `Backspace` | Move selection · open folder / **load track** · up a level |
-| `Q` / `Esc` | Quit (`Esc` closes the browser first) |
+| `C` | Waveform colour: RGB → 3 BAND → BLUE |
+| `T` | TIME ↔ REMAIN |
+| `P` | Phase meter: beat boxes ↔ master alignment |
+| `B` `L` `I` `U` | BROWSE · TAG LIST · INFO · MENU/UTILITY |
+| `O` · `H` | SOURCE · LOAD PREVIOUS TRACK |
+| `/` | SEARCH; then type, `Backspace` deletes, `Esc` leaves |
+| in a list: `↑`/`↓` · `Enter` · `Backspace` · `G` | Move · open / **load track** · back · TAG TRACK |
+| `Q` / `Esc` | Quit (`Esc` closes an open screen first) |
+
+The deck's look is chosen in MENU → SCREEN, or at launch with
+`OPENDECK_SKIN=cdj3000` (or `xdj1000mk2`).
 
 **USB sticks.** Mounted removable media appear as `USB: <label>` rows at the
 top of the browser (re-scanned once a second, so hot-plug works). A rekordbox
-stick is detected by its `PIONEER/rekordbox/export.pdb` and browses as
-PLAYLIST / TRACK with rekordbox's grids and cues; anything else browses as
+stick is detected by its `PIONEER/rekordbox/export.pdb` and browses by
+rekordbox's categories (on the CDJ-3000 screen: ARTIST, ALBUM, TRACK, KEY,
+PLAYLIST, HISTORY, FOLDER, with BPM/KEY columns and each track's preview
+waveform), with rekordbox's grids and cues; anything else browses as
 folders. Pulling the stick is safe: the loaded track is already in memory.
 On a headless Pi install the appliance automount once
 (`sudo deploy/pi/usb-automount/install.sh`, udev + systemd, read-only mounts
@@ -213,34 +242,23 @@ under `/media/usb`), see `docs/reference/raspberry-pi.md`.
 ### Touch screen (mouse for now)
 
 egui treats mouse and touch as the same pointer, so the mouse stands in for
-the panel. Press or drag on the overview to needle-search; scroll the wheel
-over the enlarged waveform to zoom; tap ZOOM / GRID, SLIP, SYNC, MASTER, the
-MT pill, the time readout (TIME ↔ REMAIN) and the LINK / FILE source keys.
-Keys with no function yet (BROWSE, CUE/LOOP, CALL…) press visually and log.
-Every input — keys and touch alike — is an `Event` on one bus applied in
+the panel. Press or drag on the overview to needle-search; drag the
+enlarged waveform to jog; scroll over it to zoom; the on-screen keys and
+panels (BROWSE, BEAT LOOP, hot-cue pads, the SEARCH keyboard…) respond to a
+tap; the few still inert, like KEY SHIFT, are in the TODO list. Every input — keys and touch alike — is an `Event` on one bus applied in
 `DeckApp::apply`; see `docs/INPUT_PLAN.md`.
 
-### Controller input (development only)
+### Controllers
 
-Until the custom hardware and RP2350 firmware exist, a **Numark DJ2Go** (or any class-compliant USB MIDI controller) can be used as a temporary control surface. It is detected automatically over USB MIDI if plugged in before launch.
-
-| Control | Action |
-|---|---|
-| Jog wheel | Nudge playback speed (snaps back on release) |
-| Pitch fader | Set playback speed (±16%) |
-| Pitch +/− buttons | Step speed ±1% |
-| Play button | Play / pause |
-| Cue button | Return to zero |
-
-Deck B controls drive the second beat grid (for ProDJ Link sync comparison):
-
-| Control | Action |
-|---|---|
-| Jog wheel (ch 1) | Nudge B2 BPM |
-| Pitch fader (ch 1) | Set B2 BPM |
-| Cue button (ch 1) | Reset B2 beat phase |
-
-The full DJ2Go mapping is `docs/reference/dj2go-midi-map.md` (from Mixxx, hardware-confirmed): Play, Cue, Sync (drives real Link SYNC), Loop In/Out, pitch fader, jog, plus the shared browse knob and Load. `--deck A` (default) or `--deck B` selects which side of the controller drives this instance — two freedj instances split one DJ2Go. To map a different controller, run with `RUST_LOG=opendeck::midi=debug`; every message is logged.
+Any class-compliant USB MIDI controller, and PCF8574 I2C button boards on
+the Pi, are mapped to deck actions in `controllers.toml`, with LED feedback
+([docs/hardware/control-surfaces.md](docs/hardware/control-surfaces.md)). A
+**Numark DJ2Go** is the built-in preset (full map in
+`docs/reference/dj2go-midi-map.md`): play, cue, sync, loop in/out, pitch
+fader, jog, browse knob and load. `--deck A` (default) or `--deck B` picks
+which side of the controller drives this instance, so two freedj instances
+can share one DJ2Go. To map a different controller, run with
+`RUST_LOG=opendeck::midi=debug`; every message is logged.
 
 ### Key-lock engine
 
@@ -275,7 +293,10 @@ sends a beat packet on 50001 at every beat of the audible position, as player
 `--player N` (default 1; `OPENDECK_PLAYER` also works). It listens on 50001
 (where real CDJ/XDJ hardware sends beats) and 50002, ignoring its own
 broadcasts. Status packets go out on 50002; SYNC follows the master and the
-master handoff works both ways with a real XDJ.
+master handoff works both ways with a real XDJ. While synced, a jog nudge is
+kept as a phase offset (as a CDJ does) until SYNC is pressed again or SHIFT
+GRID writes it into the grid. `OPENDECK_LINK_IFACE=<iface>` pins Link to one
+network interface, for example a private bridge to an emulated deck.
 
 **Media over the link.** The LINK folder in the browser lists every peer's
 media slots the way a player does ("3 USB: OPENDECK"; players and a
@@ -312,6 +333,24 @@ full hex, which is the reference for the packet-format work in
 
 ---
 
+## Testing
+
+```bash
+cargo test --workspace      # ~200 unit tests, no hardware or network needed
+make perf                   # key-lock engines' real-time factors on this machine
+make test-shift-grid        # end-to-end: SYNC + SHIFT GRID against an emulated CDJ-3000
+```
+
+The unit tests are hermetic: they build their own fake USB sticks and
+rekordbox exports and never scan the machine's real drives. The end-to-end
+test needs a private Link bridge and the emulator (setup in
+[docs/design/cdj-grid-adjust.md](docs/design/cdj-grid-adjust.md)); without
+them it reports SKIP and exits 77. `OPENDECK_SCRIPT` drives the app from a
+timed script (`"1:play; 3:sync; 14:jog=3x20; 26:shiftsync; 36:quit"`) for
+tests like that one; see `crates/app/src/devscript.rs`.
+
+---
+
 ## Architecture
 
 The project is a Cargo workspace. Each crate has a single responsibility.
@@ -323,7 +362,7 @@ crates/
   analysis/     — Waveform FFT, beat grid computation
   minibpm-sys/  — Bindings to MiniBPM for tempo estimation
   engine/       — Real-time audio transport
-  timestretch/  — Key-lock (Rubber Band R3) and speed change
+  timestretch/  — Key lock (Rubber Band R3, Bungee, WSOLA) and speed change
   transport/    — CUE / PLAY rules as a pure state machine, checked against behaviour specs
   timecode/     — DVS vinyl timecode decoder (stub; not a current priority)
   link/         — Pro DJ Link packets: announce, beat, status, master handoff
@@ -334,7 +373,8 @@ crates/
   protocol/     — Control events; MCU serial protocol for the RP2350 control surface
   db/           — SQLite track library (beat grids, cue points, playlists, FTS5 search)
   ui/           — Shared UI components
-  app/          — Main binary: deck, screen, faceplate, wgpu renderer, winit event loop, iOS entry
+  app/          — Main binary: deck, both screens (XDJ, CDJ-3000), browser, faceplate,
+                  wgpu and SDL renderers, Link glue, control surfaces, iOS entry
 ```
 
 ### Graphics stack
@@ -350,7 +390,7 @@ The UI philosophy is a **game HUD**, not an application. While playing, every fr
 
 The audio engine runs on an isolated real-time thread and communicates with the UI via lock-free atomics. The callback-based cpal stream advances an `AtomicU64` position counter that the renderer reads each frame.
 
-Speed changes use the Rubber Band R3 time-stretcher (`crates/timestretch/`) for key-locked pitch-preserving playback across the full ±16% pitch range; MASTER TEMPO off switches to plain varispeed. Stops fade over 3 ms so a released CUE never clicks; starts have no fade, so CUE lands on the beat. Planned: slip mode.
+Speed changes use the Rubber Band R3 time-stretcher (`crates/timestretch/`, or Bungee / WSOLA, see above) for key-locked pitch-preserving playback across the full ±16% pitch range; MASTER TEMPO off switches to plain varispeed. Stops fade over 3 ms so a released CUE never clicks; starts have no fade, so CUE lands on the beat. SLIP keeps a shadow playhead running under loops and held hot cues, and jumps to it when they end. Every track, including the one opened at start-up, is resampled to the audio device's rate on load, so a 48 kHz file plays at the right speed on a 44.1 kHz device.
 
 ### Waveform analysis
 
@@ -391,10 +431,11 @@ The name is deliberately provocative. The CDJ-3000 is not a trademark we are imi
 
 The codebase is Rust throughout. Contributions welcome in any area. The most useful near-term work:
 
-- **Beat grid editor** — UI for manually correcting auto-detected beat grids
+- **CDJ-3000 parity** — the open items in [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md): sorting, TRACK FILTER, KEY SHIFT, key detection, hot-cue colours
+- **A physical CDJ-3000 on the network** — run the [interop kit](docs/testing/cdj-3000-interop.md) and report back
 - **RP2350 firmware** — no_std Rust for the control surface MCU
 - **XDJ media-source acceptance** — an XDJ browsing and loading from OpenDeck over LINK (dbserver + NFS servers are in; see `docs/reference/prodj-link-media.md`)
-- **Hardware BOM and PCB** — the physical build hasn't started yet
+- **Hardware** — the panel board is generated and routed ([hardware/](hardware/README.md)); it needs its control positions checked and a first fab
 
 See `AUDIO_ENGINE.md` for detailed design documentation on the audio engine,
 and `docs/design/track-loading.md` for how a track load runs off the UI thread.
