@@ -40,8 +40,8 @@ const RED:     Color32 = Color32::from_rgb(0xe0, 0x2a, 0x2a);
 const GREEN:   Color32 = Color32::from_rgb(0x3c, 0xc8, 0x50);
 const GOLD:    Color32 = Color32::from_rgb(0xf0, 0xb0, 0x20);   // MASTER state
 // Faceplate (chrome) — the physical deck body around the screen.
-const BODY:    Color32 = Color32::from_rgb(0x18, 0x1a, 0x1d);   // letterbox + redaction fill
-const FACE_BODY: Color32 = Color32::from_rgb(0x2b, 0x2e, 0x33); // stand-in deck body (no photo)
+pub(crate) const BODY:    Color32 = Color32::from_rgb(0x18, 0x1a, 0x1d);   // letterbox + redaction fill
+pub(crate) const FACE_BODY: Color32 = Color32::from_rgb(0x2b, 0x2e, 0x33); // stand-in deck body (no photo)
 const PRINT:   Color32 = Color32::from_rgb(0x26, 0x28, 0x2c);   // legend printed on a silver cap
 
 /// Same RGB, custom alpha — a translucent lit overlay to lay over the photo.
@@ -477,7 +477,7 @@ pub fn phone_controls_layout(win: Rect, ins: Insets) -> (FaceLayout, PhoneStrip)
 /// drag (interaction.rs: "a press-release in the same frame is NOT considered
 /// a drag"), so a drag-only momentary control would lose the tap entirely.
 /// Callers treat it as a press followed by a release.
-fn same_frame_tap(ui: &Ui, r: Rect) -> bool {
+pub(crate) fn same_frame_tap(ui: &Ui, r: Rect) -> bool {
     // Read the raw events: `press_origin` is already cleared by the release.
     ui.input(|i| {
         let (mut down_in, mut up) = (false, false);
@@ -749,7 +749,7 @@ fn fader_knob(p: &egui::Painter, ctx: &egui::Context, chrome: &mut ChromeCache, 
 }
 
 /// BROWSE rotary touch behaviour: drag up/down steps the list, tap = LOAD.
-fn browse_knob(ui: &Ui, r: Rect, out: &mut Vec<Event>) {
+pub(crate) fn browse_knob(ui: &Ui, r: Rect, out: &mut Vec<Event>) {
     let brr = ui.interact(r, Id::new("fp-browse"), Sense::click_and_drag());
     if brr.dragged() {
         let d = brr.drag_delta().y;
@@ -769,7 +769,7 @@ fn rect_btn(ui: &Ui, r: Rect, name: &str, lit: Option<Color32>, out: &mut Vec<Ev
 /// Draw the faceplate: the shaded chrome (jog, buttons, knob — see
 /// `chrome.rs`), the live overlays (jog display, fader handle, lit states,
 /// printed legends), and the invisible touch targets that emit `ControlEvent`s.
-fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLayout, sel_tagged: bool,
+pub(crate) fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLayout, sel_tagged: bool,
                   chrome: &mut ChromeCache, out: &mut Vec<Event>) {
     let p = ui.painter();
     let lbl = f.caption;

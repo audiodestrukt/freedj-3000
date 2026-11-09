@@ -226,7 +226,11 @@ The keyboard stands in for the deck's buttons on a desktop.
 | `Q` / `Esc` | Quit (`Esc` closes an open screen first) |
 
 The deck's look is chosen in MENU → SCREEN, or at launch with
-`OPENDECK_SKIN=cdj3000` (or `xdj1000mk2`).
+`OPENDECK_SKIN=cdj3000` (or `xdj1000mk2`). The CDJ-3000 screen comes with
+its hardware buttons: on the desktop, SOURCE / BROWSE / TAG LIST / SEARCH /
+MENU and BACK / TAG TRACK / the rotary sit either side of the screen; on the
+iPad (and with `--faceplate`) it is the whole top panel, with hot-cue pads,
+loop and memory keys, jog, SYNC / MASTER and the tempo fader.
 
 **USB sticks.** Mounted removable media appear as `USB: <label>` rows at the
 top of the browser (re-scanned once a second, so hot-plug works). A rekordbox

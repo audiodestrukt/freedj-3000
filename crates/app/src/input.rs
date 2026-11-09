@@ -62,6 +62,8 @@ pub enum UiEvent {
     /// iPhone: flip between the SCREEN and CONTROLS pages.  The two-finger
     /// swipe does the same thing; this is the visible control for it.
     PhonePageFlip,
+    /// Step a setting as its MENU row would (the CDJ's QUANTIZE key).
+    CycleSetting(crate::settings::Setting),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -32,7 +32,10 @@ exceptions:
 
 | Item | Who | Size |
 |---|---|---|
-| CDJ-3000 faceplate / controls page (buttons, jog, tempo), like the XDJ faceplate | touch | M |
+| ~~CDJ-3000 faceplate (buttons, jog, tempo), like the XDJ faceplate~~ done: `cdjface.rs`, the whole top panel on the iPad / `--faceplate`, key columns beside the screen on desktop | touch | ✓ |
+| Faceplate keys not drawn yet (nothing behind them): PLAYLIST, TRACK FILTER, SHORTCUT, KEY SYNC, TRACK SEARCH / SEARCH ◀◀ ▶▶, DIRECTION, TEMPO RESET / range | touch | S each |
+| Faceplate hot-cue delete (the XDJ uses PERFORM's DELETE mode; the CDJ face has no way yet) | touch | S |
+| Faceplate positions are placed by eye; check against the unit's dimensions | touch | S |
 | Jog-centre display drawn in the on-screen jog (reference: `jog-artwork.png`, `jog-playing.png`) | touch | M |
 | Phone layout for the CDJ skin (the phone keeps the XDJ layout today) | touch | M |
 | Does Control Mode let the host draw the CDJ's jog LCD? | cdj | S (look) |

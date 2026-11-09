@@ -11,7 +11,8 @@
 //! Like `screen.rs`, this reads a [`DeckSnapshot`], holds no deck state, and
 //! leaves the two shader rects (enlarged waveform, overview) unpainted. Only
 //! things that are on the unit's touch screen are drawn; its hardware
-//! buttons arrive as events from the surfaces.
+//! buttons arrive as events from the surfaces, or from the faceplate drawn
+//! around the screen (`cdjface.rs`).
 
 use crate::browser::Browser;
 use crate::input::{ControlEvent, Event, Screen as TopScreen, UiEvent};
@@ -276,13 +277,17 @@ pub fn layout(screen: Rect, panel_open: bool) -> Layout {
 /// Draw the screen for the deck's `view`. `lay` must come from [`layout`] on
 /// the screen rect the shader viewports were taken from. The CDJ has no
 /// PERFORM screen (its pads are hardware), so PERFORM shows playback.
-pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &ScreenView, tag_list: &TagList, out: &mut Vec<Event>) {
+#[allow(clippy::too_many_arguments)]
+pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &ScreenView, tag_list: &TagList,
+            face: Option<&crate::cdjface::CdjFace>, chrome: &mut crate::chrome::ChromeCache, out: &mut Vec<Event>) {
     egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
-        // Letterbox around the 16:9 screen, then the screen's own ground —
-        // everything except the two shader rects.
+        // The faceplate around the screen (its buttons), or a plain
+        // letterbox; then the screen's own ground, everything except the two
+        // shader rects.
         let p = ui.painter();
-        for part in cover(ui.max_rect(), lay.screen, lay.screen) {
-            p.rect_filled(part, 0.0, BG);
+        match face {
+            Some(f) => crate::cdjface::draw(ui, ctx, snap, f, lay.screen, view, tag_list, chrome, out),
+            None => for part in cover(ui.max_rect(), lay.screen, lay.screen) { p.rect_filled(part, 0.0, BG); },
         }
         for part in cover(lay.screen, lay.wave, lay.overview) {
             p.rect_filled(part, 0.0, BG);

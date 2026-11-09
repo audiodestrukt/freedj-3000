@@ -19,6 +19,7 @@ mod prodj;
 mod renderer;
 mod screen;
 mod cdj3000;
+mod cdjface;
 mod devscript;
 mod nav;
 #[cfg(feature = "renderer-sdl")]
@@ -1004,6 +1005,7 @@ impl DeckApp {
                     _ => {}
                 }
             }
+            Event::Ui(UiEvent::CycleSetting(setting)) => self.cycle_setting(setting),
             Event::Ui(UiEvent::MenuTap(i)) => {
                 if i < settings::MENU.len() {
                     self.menu_cursor = i;
@@ -1890,7 +1892,7 @@ impl DeckApp {
         let (win_w, win_h) = if self.phone { (932u32, 430u32) }        // iPhone 6.9" landscape, points
                              else if self.portrait { (966u32, 1288u32) }   // iPad 13" portrait (0.75)
                              else if self.faceplate { (860u32, 1090u32) }
-                             else if self.settings.skin == settings::Skin::Cdj3000 { (1280u32, 720u32) }
+                             else if self.settings.skin == settings::Skin::Cdj3000 { (cdjface::SIDE_ASPECT.x as u32, 720u32) }
                              else { (1024u32, 600u32) };
         std::env::var("OPENDECK_WINDOW").ok()
             .and_then(|v| v.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
@@ -2259,9 +2261,19 @@ impl DeckApp {
                 fit_contain(screen::FACE_ASPECT, win)
             }
         });
-        // CDJ-3000 skin: the unit's 16:9 screen, letterboxed, screen-only
-        // (no faceplate / portrait variant yet; a phone keeps the XDJ pages).
+        // CDJ-3000 skin: the unit's 16:9 screen with its own faceplate. Where
+        // the XDJ draws its deck (iPad, --faceplate) that is the CDJ's whole
+        // top panel; screen-only, the key columns either side of the screen.
+        // A phone keeps the XDJ pages.
         let cdj = self.settings.skin == settings::Skin::Cdj3000 && !phone;
+        let cdj_face = cdj.then(|| {
+            if chrome {
+                let b = if cfg!(target_os = "ios") { win } else { fit_contain(cdjface::DECK_ASPECT, win) };
+                cdjface::deck_layout(b)
+            } else {
+                cdjface::side_layout(fit_contain(cdjface::SIDE_ASPECT, win))
+            }
+        });
         let base = if cdj { None } else { base };
         let (screen_rect, face) = match base {
             Some(b) => {
@@ -2269,7 +2281,7 @@ impl DeckApp {
                 (s, Some(f))
             }
             None if phone => (screen::phone_screen_layout(win, insets).0, None),
-            None if cdj => (fit_contain(cdj3000::ASPECT, win), None),
+            None if cdj => (cdj_face.as_ref().expect("cdj").0, None),
             None => (win, None),
         };
         let lay  = screen::layout(screen_rect);
@@ -2319,7 +2331,7 @@ impl DeckApp {
         let phone_ref = phone_layout.as_ref();
         let chrome = &mut self.chrome;
         let mut output = self.egui_ctx.run(raw, |ctx| match &lay3k {
-            Some(l) => cdj3000::draw(ctx, &snap, l, &view, &self.tag_list, &mut touch),
+            Some(l) => cdj3000::draw(ctx, &snap, l, &view, &self.tag_list, cdj_face.as_ref().map(|(_, f)| f), chrome, &mut touch),
             None => screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, phone_ref, chrome, &mut touch),
         });
         perf_accum("egui_run", _t_run.elapsed());
