@@ -72,7 +72,7 @@ pub enum GridAdjust {
 pub enum Source { Link, Usb }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Screen { Browse, TagList, Info, Menu, Perform }
+pub enum Screen { Browse, TagList, Info, Menu, Perform, Source }
 
 /// PERFORM pad mode: the pads are hot cues, or beat jumps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

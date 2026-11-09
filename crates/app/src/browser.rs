@@ -122,6 +122,58 @@ enum RbSource {
     Link(Ipv4Addr),   // paths are NFS paths on this player
 }
 
+/// What kind of place a SOURCE row opens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceKind {
+    /// The folder freedj started in (its local library).
+    Local,
+    /// A removable stick or card.
+    Usb,
+    /// A player's media, or a rekordbox laptop, on PRO DJ LINK.
+    Link,
+}
+
+/// One row of the SOURCE screen.
+#[derive(Clone, Debug)]
+pub struct SourceRow {
+    pub kind:      SourceKind,
+    pub label:     String,
+    /// The player number badge (LINK media).
+    pub player:    Option<u8>,
+    /// Local folder or mount point.
+    pub path:      Option<PathBuf>,
+    /// A LINK source's address.
+    pub ip:        Option<Ipv4Addr>,
+    pub rekordbox: bool,
+}
+
+impl SourceRow {
+    /// Whether a track loaded from `load` came from this source.
+    pub fn holds(&self, load: &Load) -> bool {
+        match (load, self.kind) {
+            (Load::Local { path, .. }, SourceKind::Local | SourceKind::Usb) =>
+                self.path.as_ref().is_some_and(|root| path.starts_with(root)),
+            (Load::Link { ip, .. } | Load::Db { ip, .. }, SourceKind::Link) => self.ip == Some(*ip),
+            _ => false,
+        }
+    }
+}
+
+/// Total and free bytes of the filesystem holding `path`.
+pub fn disk_space(path: &Path) -> Option<(u64, u64)> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+        let mut st: libc::statvfs = unsafe { std::mem::zeroed() };
+        if unsafe { libc::statvfs(c.as_ptr(), &mut st) } != 0 { return None; }
+        let bs = st.f_frsize as u64;
+        Some((st.f_blocks as u64 * bs, st.f_bavail as u64 * bs))
+    }
+    #[cfg(not(unix))]
+    { let _ = path; None }
+}
+
 pub enum Enter {
     Folder,
     Track(Load),
@@ -152,6 +204,8 @@ pub struct Browser {
     /// The CDJ-3000 skin's right pane: the highlighted folder's contents,
     /// listed once per highlighted folder (see [`Browser::preview`]).
     preview:   std::cell::RefCell<Option<(PathBuf, Vec<(bool, String)>)>>,
+    /// The folder freedj started in: the SOURCE screen's local row.
+    home:      PathBuf,
 }
 
 impl Browser {
@@ -166,7 +220,7 @@ impl Browser {
         };
         let mut b = Browser {
             floor: if cfg!(target_os = "ios") { Some(start.clone()) } else { None },
-            stack: vec![Loc::Fs(start)],
+            stack: vec![Loc::Fs(start.clone())],
             entries: Vec::new(),
             selected: 0,
             rb: None,
@@ -178,6 +232,7 @@ impl Browser {
             db_label: String::new(),
             link,
             preview: Default::default(),
+            home: start.clone(),
         };
         b.rebuild();
         b
@@ -552,6 +607,78 @@ impl Browser {
         }
     }
 
+    /// The SOURCE screen's rows: the local library, each mounted stick, then
+    /// each source on PRO DJ LINK (the same rows the LINK list shows).
+    pub fn sources(&self) -> Vec<SourceRow> {
+        let name = self.home.file_name().and_then(|n| n.to_str()).unwrap_or("/").to_string();
+        let mut out = vec![SourceRow {
+            kind: SourceKind::Local, label: name, player: None,
+            path: Some(self.home.clone()), ip: None, rekordbox: media::has_rekordbox(&self.home),
+        }];
+        for m in &self.media {
+            out.push(SourceRow {
+                kind: SourceKind::Usb, label: format!("USB: {}", m.label), player: None,
+                path: Some(m.path.clone()), ip: None, rekordbox: m.rekordbox,
+            });
+        }
+        for e in self.link_entries() {
+            let (ip, rekordbox) = match e.kind {
+                EntryKind::ConnectLink(ip, _) => (Some(ip), false),
+                EntryKind::ConnectDb(ip) => (Some(ip), true),
+                _ => (None, false),
+            };
+            // "3 USB: NAME" → badge 3, "USB: NAME".
+            let (player, label) = match e.name.split_once(' ') {
+                Some((n, rest)) if !rekordbox => match n.parse::<u8>() {
+                    Ok(p) => (Some(p), rest.to_string()),
+                    Err(_) => (None, e.name.clone()),
+                },
+                _ => (None, e.name.clone()),
+            };
+            out.push(SourceRow { kind: SourceKind::Link, label, player, path: None, ip, rekordbox });
+        }
+        out
+    }
+
+    /// Open the `i`th SOURCE row in the browser (what picking it on the
+    /// CDJ's SOURCE screen does). Returns false when there is no such row or
+    /// a LINK source would not connect.
+    pub fn open_source(&mut self, i: usize) -> bool {
+        let rows = self.sources();
+        let Some(row) = rows.get(i) else { return false };
+        self.stack = vec![Loc::Fs(self.home.clone())];
+        self.selected = 0;
+        match row.kind {
+            SourceKind::Local => { self.rebuild(); true }
+            SourceKind::Usb => {
+                if let Some(p) = &row.path { self.stack.push(Loc::Fs(p.clone())); }
+                self.rebuild();
+                true
+            }
+            SourceKind::Link => {
+                let first_link = rows.iter().position(|r| r.kind == SourceKind::Link).unwrap_or(i);
+                self.stack.push(Loc::Link);
+                self.rebuild();
+                self.selected = i - first_link;
+                if matches!(self.enter(), Enter::Folder) { true } else {
+                    // Stay on the LINK list with the row highlighted.
+                    self.selected = i - first_link;
+                    false
+                }
+            }
+        }
+    }
+
+    /// Songs and playlists in a source's rekordbox export, when it is the one
+    /// currently read (the CDJ shows 0 for a stick without one).
+    pub fn rekordbox_counts(&self, root: &Path) -> Option<(usize, usize)> {
+        match (&self.rb, &self.rb_source) {
+            (Some(rb), Some(RbSource::Local(r))) if r == root =>
+                Some((rb.tracks.len(), rb.playlists.iter().filter(|n| !n.is_folder).count())),
+            _ => None,
+        }
+    }
+
     /// The LINK source key: jump to the list of linked players (from wherever
     /// the browser is).
     pub fn go_link(&mut self) {
@@ -710,6 +837,28 @@ mod tests {
 
         b.selected = b.entries().iter().position(|e| e.name == "loose.mp3").expect("track row");
         assert_eq!(b.preview(), None);
+    }
+
+    #[test]
+    fn source_screen_lists_home_and_opens_it_from_anywhere() {
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-sources");
+        std::fs::create_dir_all(home.path().join("Crate")).unwrap();
+        std::fs::write(home.path().join("Crate").join("t.mp3"), b"").unwrap();
+        let mut b = Browser::new(home.path(), crate::prodj::LinkState::new(1));
+        let rows = b.sources();
+        assert_eq!(rows[0].kind, SourceKind::Local);
+        assert_eq!(rows[0].path.as_deref(), Some(home.path()));
+        // The local row holds a track under it, and nothing on LINK.
+        let local = Load::Local { path: home.path().join("Crate").join("t.mp3"), analyze: None };
+        assert!(rows[0].holds(&local));
+        assert!(!rows[0].holds(&Load::Db { ip: Ipv4Addr::LOCALHOST, id: 1, title: String::new(), rekordbox: false, sd: false }));
+        // Wander into a folder, then pick the local source: back at the top.
+        b.selected = b.entries().iter().position(|e| e.name == "Crate").unwrap();
+        b.enter();
+        assert_eq!(b.title(), "Crate");
+        assert!(b.open_source(0));
+        assert_eq!(b.title(), home.path().file_name().unwrap().to_str().unwrap());
+        assert!(!b.open_source(rows.len()), "no such row");
     }
 
     // Gated on a serving peer: OPENDECK_TEST_LINK=127.0.0.1 (e.g. `opendeck-serve`

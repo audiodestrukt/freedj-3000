@@ -88,7 +88,7 @@ Size: S < 1 day, M 1–3 days, L > 3 days.
 | | Touch Cue / needle search on overview | logic exists | S |
 | | A.HOT CUE / AUTO CUE / GATE CUE captions | partial | S |
 | Lists | BROWSE two-pane (list + preview/INFO pane), status strip | XDJ browse exists | M |
-| | SOURCE screen (devices, LINK, Control Mode) | partial (source keys) | M |
+| | SOURCE screen (devices, LINK, Control Mode) | done (phase 2) | M |
 | | TAG LIST (+ GLOBAL) | exists (XDJ) | S |
 | | PLAYLIST + Playlist Bank | needs rekordbox playlists in UI | M |
 | | Category lists (artist, album, key, date added, history, matching) | rekordbox reader exists | M |
@@ -181,6 +181,21 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
     U = MENU/UTILITY (B = BROWSE as before).
   - Dev: `OPENDECK_SCREEN=browse|taglist|menu|info`,
     `OPENDECK_BROWSE_SELECT=n`.
-  - Still to do: SOURCE screen; track tags (artwork, key, date) in the INFO
-    pane; categories for rekordbox and LINK sources; LOAD PREVIOUS TRACK.
+  - The INFO pane shows the highlighted track's tags (title, artist, album,
+    BPM, key, date, comment) and cover.
+- **Phase 2 (part 2).**
+  - **SOURCE** (`ScreenMode::Source`, key O): one 90 px row per medium on a
+    92 px pitch. The rows are the folder freedj started in, each mounted stick,
+    then each LINK source (badge = player number). The loaded track's source
+    is green with a bracketed "Loaded"; the highlighted row is blue with a ›.
+    The right panel shows Songs / Playlists (from a read rekordbox export, 0
+    without one, as the unit shows) and Total / Available from `statvfs`.
+    Picking a row opens it in BROWSE (`Browser::open_source`). The XDJ skin has
+    no SOURCE screen and shows its browser instead.
+  - The CDJ's BROWSE key reaches freedj over lanhid as a level (0x05/0x80), so
+    a real or emulated CDJ opens and closes BROWSE. Its SOURCE key sends no
+    bit in Control Mode; it only clears that level.
+  - Dev: `OPENDECK_SCREEN=source`.
+  - Still to do: categories for rekordbox and LINK sources; LOAD PREVIOUS
+    TRACK.
 

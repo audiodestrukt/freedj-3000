@@ -58,7 +58,7 @@ const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
 /// Which middle-band mode the deck screen is showing.  PERFORM comes later.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum ScreenMode { Playback, Browse, Info, Perform, TagList, Menu }
+enum ScreenMode { Playback, Browse, Info, Perform, TagList, Menu, Source }
 
 /// The window and input side of a render backend.  winit + egui-winit on the
 /// wgpu path; the SDL backend brings its own window, event pump and egui
@@ -137,6 +137,10 @@ struct DeckApp {
     /// MENU / UTILITY settings; persisted (see settings.rs).
     settings:     settings::Settings,
     menu_cursor:  usize,
+    /// SOURCE screen: highlighted row.
+    source_cursor: usize,
+    /// Where the loaded track came from (marks its SOURCE row "Loaded").
+    loaded: Option<Load>,
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
@@ -406,6 +410,7 @@ impl DeckApp {
         settings:     settings::Settings,
     ) -> Self {
         let browser = Browser::new(browse_root.as_deref().unwrap_or(&path), std::sync::Arc::clone(&link));
+        let loaded = path.is_file().then(|| Load::Local { path: std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()), analyze: None });
         let tag_list = taglist::TagList::open();
         let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
             .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
@@ -457,12 +462,15 @@ impl DeckApp {
                 Ok("perform") => ScreenMode::Perform,
                 Ok("taglist") => ScreenMode::TagList,
                 Ok("menu")    => ScreenMode::Menu,
+                Ok("source")  => ScreenMode::Source,
                 _             => ScreenMode::Playback,
             },
             browser,
             tag_list,
             settings,
             menu_cursor:       0,
+            source_cursor:     0,
+            loaded,
             fader_speed,
             beat2_bpm,
             beat2_player,
@@ -822,6 +830,10 @@ impl DeckApp {
                 match self.screen_mode {
                     ScreenMode::Browse  => self.browser.move_selection(delta),
                     ScreenMode::TagList => self.tag_list.move_selection(delta),
+                    ScreenMode::Source  => {
+                        let last = self.browser.sources().len() as i32 - 1;
+                        self.source_cursor = (self.source_cursor as i32 + delta).clamp(0, last.max(0)) as usize;
+                    }
                     ScreenMode::Menu    => {
                         let last = settings::MENU.len() as i32 - 1;
                         self.menu_cursor = (self.menu_cursor as i32 + delta).clamp(0, last) as usize;
@@ -856,6 +868,11 @@ impl DeckApp {
                             }
                         }
                     }
+                    // SOURCE: open the highlighted source in BROWSE.
+                    ScreenMode::Source => {
+                        self.browser.open_source(self.source_cursor);
+                        self.screen_mode = ScreenMode::Browse;
+                    }
                     // In MENU the selector's press steps the highlighted setting.
                     ScreenMode::Menu => self.cycle_setting(settings::MENU[self.menu_cursor].0),
                     _ => {
@@ -867,7 +884,7 @@ impl DeckApp {
             Event::Deck(ControlEvent::Back) => {
                 match self.screen_mode {
                     ScreenMode::Browse  => self.browser.back(),
-                    ScreenMode::TagList | ScreenMode::Menu => self.screen_mode = ScreenMode::Playback,
+                    ScreenMode::TagList | ScreenMode::Menu | ScreenMode::Source => self.screen_mode = ScreenMode::Playback,
                     _ => {}
                 }
             }
@@ -1057,6 +1074,19 @@ impl DeckApp {
                     } else {
                         ScreenMode::TagList
                     };
+                    log::info!("screen → {:?}", self.screen_mode);
+                }
+                TopScreen::Source => {
+                    // SOURCE: the media list, opened on the loaded track's source.
+                    if self.screen_mode == ScreenMode::Source {
+                        self.screen_mode = ScreenMode::Playback;
+                    } else {
+                        let rows = self.browser.sources();
+                        self.source_cursor = self.loaded.as_ref()
+                            .and_then(|l| rows.iter().rposition(|r| r.holds(l)))
+                            .unwrap_or(0);
+                        self.screen_mode = ScreenMode::Source;
+                    }
                     log::info!("screen → {:?}", self.screen_mode);
                 }
                 TopScreen::Menu => {
@@ -1287,6 +1317,7 @@ impl DeckApp {
 
     /// Dispatch a browser selection: a local file, or a track on a linked player.
     fn load_selected(&mut self, load: Load) -> Result<()> {
+        self.loaded = Some(load.clone());
         match load {
             Load::Local { path, analyze } => self.load_track(&path, analyze.as_deref()),
             Load::Link { ip, rel_path, analyze_rel } => self.load_track_link(ip, &rel_path, &analyze_rel),
@@ -1541,9 +1572,10 @@ impl DeckApp {
         }
         // In a list screen (BROWSE / TAG LIST) the keys navigate the
         // list, not the transport.  G = TAG TRACK / REMOVE.
-        if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu) {
+        if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu | ScreenMode::Source) {
             let here = match self.screen_mode {
-                ScreenMode::Browse => TopScreen::Browse, ScreenMode::TagList => TopScreen::TagList, _ => TopScreen::Menu,
+                ScreenMode::Browse => TopScreen::Browse, ScreenMode::TagList => TopScreen::TagList,
+                ScreenMode::Source => TopScreen::Source, _ => TopScreen::Menu,
             };
             let ev = match code {
                 ArrowDown           => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: 1 })),
@@ -1554,6 +1586,7 @@ impl DeckApp {
                 KeyB | Escape       => Some(Event::Ui(UiEvent::Screen(here))),   // toggle off
                 KeyL                => Some(Event::Ui(UiEvent::Screen(TopScreen::TagList))),
                 KeyU                => Some(Event::Ui(UiEvent::Screen(TopScreen::Menu))),
+                KeyO                => Some(Event::Ui(UiEvent::Screen(TopScreen::Source))),
                 _ => None,
             };
             if let Some(ev) = ev {
@@ -1592,6 +1625,7 @@ impl DeckApp {
             KeyL => Some(Event::Ui(UiEvent::Screen(TopScreen::TagList))),
             KeyI => Some(Event::Ui(UiEvent::Screen(TopScreen::Info))),
             KeyU => Some(Event::Ui(UiEvent::Screen(TopScreen::Menu))),
+            KeyO => Some(Event::Ui(UiEvent::Screen(TopScreen::Source))),
             Comma  => Some(Event::Deck(ControlEvent::JogDelta { delta: -4, velocity_rpm: 0.0 })),
             Period => Some(Event::Deck(ControlEvent::JogDelta { delta:  4, velocity_rpm: 0.0 })),
             KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
@@ -2009,7 +2043,7 @@ impl DeckApp {
             // INFO covers the waveform field; the lists also move the overview
             // into their status strip.
             match self.screen_mode {
-                ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu => (none, l.strip_overview),
+                ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu | ScreenMode::Source => (none, l.strip_overview),
                 ScreenMode::Info => (none, l.overview),
                 _ => (l.wave, l.overview),
             }
@@ -2033,6 +2067,9 @@ impl DeckApp {
             ScreenMode::Perform  => screen::ScreenView::Perform,
             ScreenMode::TagList  => screen::ScreenView::TagList,
             ScreenMode::Menu     => screen::ScreenView::Menu(&self.settings, self.menu_cursor),
+            // The XDJ has no SOURCE screen (its source keys sit in BROWSE).
+            ScreenMode::Source if !cdj => screen::ScreenView::Browse(&self.browser),
+            ScreenMode::Source   => screen::ScreenView::Source(&self.browser, self.source_cursor, self.loaded.as_ref()),
         };
         let face_ref = face.as_ref();
         let phone_ref = phone_layout.as_ref();

@@ -916,7 +916,12 @@ fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &FaceLay
 /// Draw the screen and collect the touch events it produced this frame.
 /// Which screen the LCD shows; the top / middle band follows it.
 #[derive(Clone, Copy)]
-pub enum ScreenView<'a> { Playback, Browse(&'a Browser), Info, Perform, TagList, Menu(&'a Settings, usize) }
+pub enum ScreenView<'a> {
+    Playback, Browse(&'a Browser), Info, Perform, TagList, Menu(&'a Settings, usize),
+    /// SOURCE (CDJ-3000 skin only): the browser's sources, the highlighted
+    /// row, and where the loaded track came from.
+    Source(&'a Browser, usize, Option<&'a crate::browser::Load>),
+}
 
 pub fn draw(
     ctx:    &egui::Context,
@@ -990,7 +995,7 @@ pub fn draw(
                 // BROWSE: the middle band (title + phase + enlarged waveform)
                 // becomes the file list.  The source column, info row and the
                 // overview keep running — the loaded track plays while you browse.
-                ScreenView::Browse(browser) => draw_browse(ui, browser, tag_list, lay, h, snap.loading),
+                ScreenView::Browse(browser) | ScreenView::Source(browser, ..) => draw_browse(ui, browser, tag_list, lay, h, snap.loading),
                 // TAG LIST: the same list, of the tagged tracks.
                 ScreenView::TagList => draw_tag_list(ui, tag_list, lay, h),
                 // INFO: the middle band shows the loaded track's details.

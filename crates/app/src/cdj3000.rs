@@ -290,6 +290,7 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &Scree
         let u = lay.screen.height() / ASPECT.y; // points per unit pixel
         match view {
             ScreenView::Browse(b) => return draw_browse(ui, snap, lay, b, tag_list, u, out),
+            ScreenView::Source(b, cursor, loaded) => return draw_source(ui, snap, lay, b, *cursor, *loaded, u, out),
             ScreenView::TagList => return draw_tag_list(ui, snap, lay, tag_list, u, out),
             ScreenView::Menu(settings, cursor) => return draw_utility(ui, snap, lay, settings, *cursor, u, out),
             ScreenView::Info => draw_info(ui, ctx, snap, lay, u, out),
@@ -718,6 +719,9 @@ const ROWS: usize = 10;
 const ROW_GREY: Color32 = Color32::from_rgb(38, 38, 38);
 const PANE_HEAD: Color32 = Color32::from_rgb(58, 58, 58);
 const COLUMN: Color32 = Color32::from_rgb(55, 55, 55);
+/// SOURCE rows and info panel ground; the highlighted row.
+const PANE: Color32 = Color32::from_rgb(35, 35, 35);
+const SEL_BLUE: Color32 = Color32::from_rgb(0, 125, 225);
 
 #[derive(Clone, Copy, PartialEq)]
 enum RowIcon { Folder, Track, None }
@@ -885,6 +889,140 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
         let y0 = track.min.y + (track.height() - h) * first as f32 / (rows.len() - ROWS) as f32;
         p.rect_filled(Rect::from_min_size(Pos2::new(track.min.x, y0), Vec2::new(track.width(), h)), 0.0, DIM);
     }
+}
+
+/// "0.7" GB / "512" MB, as the SOURCE info panel shows sizes.
+fn size_text(bytes: u64) -> (String, &'static str) {
+    let gb = bytes as f64 / 1e9;
+    if gb >= 1.0 || bytes == 0 { (format!("{:.1}", gb), "GB") } else { (format!("{:.0}", bytes as f64 / 1e6), "MB") }
+}
+
+/// A source's total/free bytes, read at most every two seconds per path.
+fn cached_space(ctx: &egui::Context, path: &std::path::Path) -> Option<(u64, u64)> {
+    let id = Id::new(("cdj3k-space", path));
+    let now = ctx.input(|i| i.time);
+    if let Some((t, v)) = ctx.data(|d| d.get_temp::<(f64, Option<(u64, u64)>)>(id)) {
+        if now - t < 2.0 { return v; }
+    }
+    let v = crate::browser::disk_space(path);
+    ctx.data_mut(|d| d.insert_temp(id, (now, v)));
+    v
+}
+
+/// SOURCE: one 90 px row per medium (icon tile + name, "Loaded" on the
+/// source of the loaded track), and the highlighted source's details on the
+/// right. Measured from the unit's SOURCE screen.
+fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: usize,
+               loaded: Option<&crate::browser::Load>, u: f32, out: &mut Vec<Event>) {
+    use crate::browser::SourceKind;
+    let sc = lay.screen;
+    let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
+    let p = ui.painter();
+    p.rect_filled(Rect::from_min_max(at(0.0, 0.0), at(1280.0, 628.0)), 0.0, HEADER);
+    label(ui, at(36.0, 45.0), Align2::LEFT_CENTER, "SOURCE", 34.0, u, TEXT);
+
+    let rows = b.sources();
+    const PITCH: f32 = 92.0;
+    let visible = 6usize;
+    let first = cursor.saturating_sub(visible - 1);
+    let green = Color32::from_rgb(0, 255, 0);
+    for k in 0..visible {
+        let y = 91.0 + PITCH * k as f32;
+        let bottom = (y + 90.0).min(628.0);
+        let row = Rect::from_min_max(at(0.0, y), at(928.0, bottom));
+        let i = first + k;
+        let sel = i == cursor && i < rows.len();
+        p.rect_filled(row, 0.0, if sel { SEL_BLUE } else { PANE });
+        let Some(r) = rows.get(i) else { continue };
+        if tap(ui, row, &format!("cdj-source-{i}")).0 {
+            out.push(Event::Deck(if sel { ControlEvent::Load }
+                                 else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - cursor as i32 } }));
+        }
+        // Icon tile (inset by the selection border when highlighted).
+        let tile = Rect::from_min_max(at(0.0, y), at(90.0, bottom));
+        p.rect_filled(if sel { tile.shrink(2.0 * u) } else { tile }, 0.0, SOURCE_TILE);
+        let c = Pos2::new(tile.center().x, tile.min.y + 33.0 * u);
+        let kind = match r.kind { SourceKind::Local => "FOLDER", SourceKind::Usb => "USB", SourceKind::Link if r.rekordbox => "PC", SourceKind::Link => "LINK" };
+        match r.kind {
+            SourceKind::Local => folder(ui, c, u * 1.2, TEXT),
+            SourceKind::Usb => usb_icon(ui, c, u),
+            SourceKind::Link => { label(ui, c, Align2::CENTER_CENTER, "▣", 24.0, u, TEXT); }
+        }
+        label(ui, Pos2::new(tile.center().x, tile.min.y + 64.0 * u), Align2::CENTER_CENTER, kind, 17.0, u, TEXT);
+        if let Some(n) = r.player {
+            let badge = Rect::from_min_size(at(2.0, y + 2.0), Vec2::splat(22.0 * u));
+            p.rect_filled(badge, 0.0, Color32::BLACK);
+            outline(ui, badge, TEXT, u);
+            label(ui, badge.center(), Align2::CENTER_CENTER, n, 15.0, u, TEXT);
+        }
+        let held = loaded.is_some_and(|l| r.holds(l));
+        let cy = row.center().y;
+        p.with_clip_rect(Rect::from_min_max(at(100.0, y), at(700.0, bottom)))
+            .text(Pos2::new(sc.min.x + 116.0 * u, cy), Align2::LEFT_CENTER, &r.label, FontId::proportional(30.0 * u), if held { green } else { TEXT });
+        if held {
+            // [ Loaded ] — corner brackets, not a full box.
+            let bx = Rect::from_min_max(Pos2::new(sc.min.x + 710.0 * u, cy - 25.0 * u), Pos2::new(sc.min.x + 850.0 * u, cy + 25.0 * u));
+            let st = Stroke::new(1.5 * u, Color32::from_rgb(75, 75, 75));
+            for x in [bx.min.x, bx.max.x] {
+                let d = if x == bx.min.x { 8.0 * u } else { -8.0 * u };
+                p.line_segment([Pos2::new(x, bx.min.y), Pos2::new(x, bx.max.y)], st);
+                p.line_segment([Pos2::new(x, bx.min.y), Pos2::new(x + d, bx.min.y)], st);
+                p.line_segment([Pos2::new(x, bx.max.y), Pos2::new(x + d, bx.max.y)], st);
+            }
+            label(ui, bx.center(), Align2::CENTER_CENTER, "Loaded", 26.0, u, green);
+        }
+        if sel {
+            let (cx, a) = (sc.min.x + 873.0 * u, 9.0 * u);
+            let st = Stroke::new(3.0 * u, TEXT);
+            p.line_segment([Pos2::new(cx - a * 0.5, cy - a), Pos2::new(cx + a * 0.5, cy)], st);
+            p.line_segment([Pos2::new(cx + a * 0.5, cy), Pos2::new(cx - a * 0.5, cy + a)], st);
+        }
+    }
+
+    // Right panel: the highlighted source's details.
+    let pane = Rect::from_min_max(at(930.0, 91.0), at(1280.0, 628.0));
+    p.rect_filled(pane, 0.0, PANE);
+    if let Some(r) = rows.get(cursor) {
+        let counts = r.path.as_deref().and_then(|root| b.rekordbox_counts(root));
+        let (songs, lists) = match counts {
+            Some((s, l)) => (s.to_string(), l.to_string()),
+            None if r.rekordbox => ("-".into(), "-".into()),
+            None => ("0".into(), "0".into()),
+        };
+        let space = r.path.as_deref().and_then(|root| cached_space(ui.ctx(), root));
+        let line = |y: f32, name: &str, value: Option<(String, &str)>| {
+            label(ui, at(949.0, y), Align2::LEFT_CENTER, name, 17.0, u, LABEL);
+            if let Some((v, unit)) = value {
+                let right = if unit.is_empty() { at(1255.0, y + 2.0) } else {
+                    label(ui, at(1255.0, y + 8.0), Align2::RIGHT_CENTER, unit, 20.0, u, LABEL).left_center() - Vec2::new(6.0 * u, 6.0 * u)
+                };
+                label(ui, right, Align2::RIGHT_CENTER, v, 28.0, u, TEXT);
+            }
+            ui.painter().line_segment([at(949.0, y + 22.0), at(1260.0, y + 22.0)], Stroke::new(1.0, Color32::BLACK));
+        };
+        line(120.0, "Songs", Some((songs, "")));
+        line(166.0, "Playlists", Some((lists, "")));
+        line(219.0, "Date", None);
+        if let Some((total, free)) = space {
+            let (t, tu) = size_text(total);
+            let (f, fu) = size_text(free);
+            line(270.0, "Total", Some((t, tu)));
+            line(322.0, "Available", Some((f, fu)));
+        } else {
+            line(270.0, "Total", None);
+            line(322.0, "Available", None);
+        }
+    }
+    draw_status_strip(ui, snap, lay, u, out);
+}
+
+/// The USB plug glyph on a source tile.
+fn usb_icon(ui: &Ui, c: Pos2, u: f32) {
+    let p = ui.painter();
+    let body = Rect::from_center_size(Pos2::new(c.x, c.y + 4.0 * u), Vec2::new(14.0 * u, 18.0 * u));
+    p.rect_stroke(body, 1.0, Stroke::new(2.0 * u, TEXT));
+    let plug = Rect::from_center_size(Pos2::new(c.x, c.y - 9.0 * u), Vec2::new(10.0 * u, 8.0 * u));
+    p.rect_stroke(plug, 0.0, Stroke::new(1.5 * u, TEXT));
 }
 
 /// BROWSE: the source's lists, two panes. The right pane shows what LOAD on
