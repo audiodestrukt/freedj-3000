@@ -1,6 +1,6 @@
 # CDJ-3000 skin
 
-Status: plan + phase 0 in progress (2026-11-08).
+Status: phase 0 done (2e77df5); phase 1 in progress (2026-11-08).
 
 Goal: a second, switchable deck UI that reproduces the Pioneer CDJ-3000's
 player screens. The goal is feature-complete with the unit. The XDJ-1000MK2 UI
@@ -138,3 +138,27 @@ Size: S < 1 day, M 1–3 days, L > 3 days.
 6. **SHORTCUT + UTILITY** settings parity.
 
 Each phase ends with emulator-vs-freedj captures of the same state side by side.
+
+## Progress notes
+
+- **Phase 1 (part 1).** BEAT LOOP and BEAT JUMP panels, the loop marker,
+  INFO and the CDJ waveform look are done.
+  - Behaviour read off the unit:
+    - A panel shrinks the waveform field (wave y 228–318) and adds a row of
+      eight keys (y 383–466) plus a 1|2 page switch. Each panel remembers its
+      page.
+    - BEAT LOOP page 1 is 1/4…32 with orange edges; page 2 is 3/4, 1, 3/2, 3,
+      5, 6, 7, 9 with white edges. The running length's key fills orange, and
+      tapping it again ends the loop.
+    - BEAT JUMP page 1 is 1/2–4, page 2 is 8–64, each a ◀◀/▶▶ pair.
+    - An active loop draws amber shading with no in/out lines, an orange
+      start triangle and "↻ n", and keeps them after the panel closes.
+    - INFO is a full-width overlay over the field (player tabs 1–6, track
+      details); the info block stays live under it.
+  - The CDJ look in both renderers (`Viewports::cdj`, `WaveformParams::style`):
+    no in-waveform ticks, amber loop shade, bars ×1.5 to fill the field.
+  - Zoom factor 5.3: 18 px per beat at 128 BPM, measured on the unit.
+  - KEY SHIFT stays unwired until the deck can shift key. EDIT RATING and the
+    other players' tabs are drawn but inert.
+  - Dev: `OPENDECK_CDJ_PANEL=loop|jump|info`.
+

@@ -62,7 +62,9 @@ pub struct WaveformParams {
     pub loop_end_col:     f32,
     /// SLIP shadow playhead column; < 0 = none.  Violet marker on both waveforms.
     pub slip_col:         f32,
-    pub _pad:             [f32; 2],
+    /// 0 = XDJ look, 1 = CDJ-3000 look (amber loop shading, no loop lines).
+    pub style:            f32,
+    pub _pad:             f32,
 }
 
 /// Where the shader draws its two waveforms, in physical pixels.
@@ -72,9 +74,10 @@ pub struct Viewports {
     pub overview: [f32; 4],
     /// REMAIN mode: the played part of the overview turns off.
     pub dim_played: bool,
-    /// Draw beat-grid ticks inside the enlarged waveform (the XDJ look). The
-    /// CDJ-3000 skin draws its own tick rows above and below it instead.
-    pub grid_ticks: bool,
+    /// The CDJ-3000 look: no grid ticks inside the enlarged waveform (the skin
+    /// draws its tick rows above and below it), amber loop shading without
+    /// in/out lines, and bars filling the field the way the unit's do.
+    pub cdj: bool,
 }
 
 /// Waveform colour scheme, matching the CDJ `Waveform Color` setting.
@@ -122,7 +125,10 @@ impl WaveformParams {
             .unwrap_or((0.0, 0.0, 0.0, 4.0));
         // No in-waveform ticks: a zero period switches them off in both
         // backends (nothing else reads it).
-        let beat_period_cols = if vp.grid_ticks { beat_period_cols } else { 0.0 };
+        let beat_period_cols = if vp.cdj { 0.0 } else { beat_period_cols };
+        // The XDJ look leaves headroom (loudest column at 62 %); the CDJ's
+        // waveform fills its field.
+        let amp_gain = if vp.cdj { amp_gain * 1.5 } else { amp_gain };
         // The cyan B2 beat strip under the waveform is not an XDJ-1000 element;
         // it was a bring-up aid for external-sync testing.  Disabled for
         // faithful reproduction — the external deck now lives only in the
@@ -150,7 +156,8 @@ impl WaveformParams {
             loop_start_col:    if snap.loop_active { snap.loop_start as f32 / channels / hop_size } else { 0.0 },
             loop_end_col:      if snap.loop_active { snap.loop_end   as f32 / channels / hop_size } else { 0.0 },
             slip_col:          snap.slip_shadow.map_or(-1.0, |v| v as f32 / channels / hop_size),
-            _pad:              [0.0; 2],
+            style:             if vp.cdj { 1.0 } else { 0.0 },
+            _pad:              0.0,
         }
     }
 }
@@ -343,7 +350,8 @@ impl WgpuRenderer {
             loop_start_col:   0.0,
             loop_end_col:     0.0,
             slip_col:         -1.0,
-            _pad:             [0.0; 2],
+            style:            0.0,
+            _pad:             0.0,
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -723,7 +731,8 @@ struct Params {
     loop_start_col:     f32,  // active loop span in columns; end <= start = none
     loop_end_col:       f32,
     slip_col:           f32,  // SLIP shadow playhead column; < 0 = none
-    _p1: f32, _p2: f32,
+    style:              f32,  // 0 XDJ look, 1 CDJ-3000 look
+    _p2: f32,
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
@@ -743,7 +752,10 @@ fn over_bg() -> vec4<f32>  { return ground(); }
 fn playhead() -> vec4<f32> { return srgb(232.0, 40.0, 40.0); }  // red on the unit
 fn cue_color() -> vec4<f32> { return srgb(240.0, 138.0, 30.0); }  // orange start-cue marker
 fn loop_color() -> vec4<f32> { return srgb(250.0, 200.0, 40.0); } // amber loop in/out lines (the unit's yellow LOOP keys)
-fn loop_bg() -> vec4<f32> { return srgb(16.0, 40.0, 66.0); }      // tinted background across the looped span
+fn loop_bg() -> vec4<f32> {                                        // tinted background across the looped span
+    return select(srgb(16.0, 40.0, 66.0), srgb(72.0, 52.0, 10.0), p.style > 0.5);   // CDJ: amber shade
+}
+fn loop_lines() -> bool { return p.style < 0.5; }                  // the CDJ shades the loop without in/out lines
 fn slip_color() -> vec4<f32> { return srgb(200.0, 110.0, 255.0); } // SLIP shadow playhead (violet)
 fn in_loop(col: f32) -> bool { return p.loop_end_col > p.loop_start_col && col >= p.loop_start_col && col < p.loop_end_col; }
 fn white() -> vec4<f32>    { return srgb(244.0, 246.0, 248.0); }
@@ -843,7 +855,7 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
     }
     // Loop in / out lines (amber), when a loop is active.
     let looped = in_loop(col_f);
-    if p.loop_end_col > p.loop_start_col
+    if loop_lines() && p.loop_end_col > p.loop_start_col
        && (abs(col_f - p.loop_start_col) < cue_per_px || abs(col_f - p.loop_end_col) < cue_per_px) {
         return loop_color();
     }
@@ -918,7 +930,7 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
     if p.loop_end_col > p.loop_start_col {
         let ls_x = r.x + p.loop_start_col / p.num_cols * r.z;
         let le_x = r.x + p.loop_end_col   / p.num_cols * r.z;
-        if abs(q.x - ls_x) < 1.5 || abs(q.x - le_x) < 1.5 {
+        if loop_lines() && (abs(q.x - ls_x) < 1.5 || abs(q.x - le_x) < 1.5) {
             return loop_color();
         }
     }

@@ -1613,12 +1613,12 @@ impl DeckApp {
 
     /// Columns across the enlarged waveform at the current zoom step. The
     /// CDJ-3000's waveform spans the whole screen and its default view is
-    /// about 34 s wide (17.5 px per beat at 128 BPM on the unit), about 5× the
+    /// about 34 s wide (18 px per beat at 128 BPM on the unit), about 5.3× the
     /// XDJ's, so the same steps are scaled for it.
     fn cols_visible(&self) -> f32 { Self::cols_for(self.settings.skin, self.zoom_level) }
 
     fn cols_for(skin: settings::Skin, zoom_level: usize) -> f32 {
-        let scale = if skin == settings::Skin::Cdj3000 { 5.0 } else { 1.0 };
+        let scale = if skin == settings::Skin::Cdj3000 { 5.3 } else { 1.0 };
         ZOOM_LEVELS[zoom_level] * scale
     }
 
@@ -1983,19 +1983,21 @@ impl DeckApp {
             None => (win, None),
         };
         let lay  = screen::layout(screen_rect);
-        let lay3k = cdj.then(|| cdj3000::layout(screen_rect));
+        if cdj && self.frame_count == 0 { cdj3000::panel_from_env(&self.egui_ctx); }
+        let lay3k = cdj.then(|| cdj3000::layout(screen_rect, cdj3000::panel(&self.egui_ctx) != cdj3000::Panel::None));
         let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
         let perform = self.screen_mode == ScreenMode::Perform;
         // PERFORM shrinks the enlarged waveform to a strip above the pads.
         // The phone's controls page has no LCD: the shader gets empty rects.
         let none = egui::Rect::NOTHING;
         let (wave_rect, over_rect) = if let Some(l) = &lay3k {
-            (l.wave, l.overview)
+            // INFO covers the waveform field; the shader leaves it undrawn.
+            (if cdj3000::info_open(&self.egui_ctx) { none } else { l.wave }, l.overview)
         } else {
             let wave = if phone && self.phone_controls { none } else if perform { screen::perform_layout(screen_rect).wave } else { lay.wave };
             (wave, if phone && self.phone_controls { none } else { lay.overview })
         };
-        let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(over_rect), dim_played: self.remain_mode, grid_ticks: lay3k.is_none() };
+        let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(over_rect), dim_played: self.remain_mode, cdj: lay3k.is_some() };
 
         // Build egui overlay.
         let mut raw = host.take_egui_input();

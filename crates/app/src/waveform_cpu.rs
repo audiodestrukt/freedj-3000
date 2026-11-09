@@ -74,7 +74,7 @@ impl Default for Lut { fn default() -> Self { Self::new() } }
 
 /// The shader's palette, resolved through the LUT once per draw call.
 struct Palette {
-    ground: Rgba, playhead: Rgba, cue: Rgba, loop_line: Rgba, loop_bg: Rgba, slip: Rgba,
+    ground: Rgba, playhead: Rgba, cue: Rgba, loop_line: Rgba, loop_bg: Rgba, loop_bg_cdj: Rgba, slip: Rgba,
     white: Rgba, band_low: Rgba, band_mid: Rgba, cyan: Rgba, strip_bg: Rgba, tick_hi: Rgba, down_hi: Rgba,
 }
 
@@ -86,6 +86,7 @@ impl Palette {
             cue:       l.rgb(240.0, 138.0, 30.0),     // orange start-cue marker
             loop_line: l.rgb(250.0, 200.0, 40.0),     // amber loop in/out lines
             loop_bg:   l.rgb(16.0, 40.0, 66.0),       // tinted field across the looped span
+            loop_bg_cdj: l.rgb(72.0, 52.0, 10.0),     // CDJ-3000 look: amber shade
             slip:      l.rgb(200.0, 110.0, 255.0),    // SLIP shadow playhead (violet)
             white:     l.rgb(244.0, 246.0, 248.0),
             band_low:  l.rgb(58.0, 123.0, 240.0),     // 3-band blue
@@ -206,6 +207,11 @@ impl OverviewKey {
 }
 
 #[inline(always)]
+/// The looped span's field: navy (XDJ look) or amber (CDJ-3000 look).
+fn loop_bg(pal: &Palette, p: &WaveformParams) -> Rgba {
+    if p.style > 0.5 { pal.loop_bg_cdj } else { pal.loop_bg }
+}
+
 fn in_loop(p: &WaveformParams, col: f32) -> bool {
     p.loop_end_col > p.loop_start_col && col >= p.loop_start_col && col < p.loop_end_col
 }
@@ -240,13 +246,13 @@ fn classify(pal: &Palette, p: &WaveformParams, g: &WaveGeom, cols: &[u32], rect:
         Column::Solid(pal.playhead)
     } else if (col_f - p.cue_col).abs() < g.cue_per_px {
         Column::Solid(pal.cue)
-    } else if p.loop_end_col > p.loop_start_col
+    } else if p.style < 0.5 && p.loop_end_col > p.loop_start_col
         && ((col_f - p.loop_start_col).abs() < g.cue_per_px || (col_f - p.loop_end_col).abs() < g.cue_per_px) {
         Column::Solid(pal.loop_line)
     } else if p.slip_col >= 0.0 && (col_f - p.slip_col).abs() < g.cue_per_px {
         Column::Solid(pal.slip)
     } else {
-        let bg = if in_loop(p, col_f) { pal.loop_bg } else { pal.ground };
+        let bg = if in_loop(p, col_f) { loop_bg(pal, p) } else { pal.ground };
         if col_f < 0.0 || col_f >= p.num_cols || g.num_cols <= 0 || cols.is_empty() {
             Column::Field { bar: None, bg, tick: None }
         } else {
@@ -491,14 +497,14 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
         if p.loop_end_col > p.loop_start_col {
             let ls_x = r[0] + p.loop_start_col / p.num_cols * r[2];
             let le_x = r[0] + p.loop_end_col   / p.num_cols * r[2];
-            if (qx - ls_x).abs() < 1.5 || (qx - le_x).abs() < 1.5 { return Over::Solid(pal.loop_line); }
+            if p.style < 0.5 && ((qx - ls_x).abs() < 1.5 || (qx - le_x).abs() < 1.5) { return Over::Solid(pal.loop_line); }
         }
         if p.slip_col >= 0.0 {
             let sl_x = r[0] + p.slip_col / p.num_cols * r[2];
             if (qx - sl_x).abs() < 1.5 { return Over::Solid(pal.slip); }
         }
         let col_here = sx * p.num_cols;
-        let field = if in_loop(p, col_here) { pal.loop_bg } else { pal.ground };
+        let field = if in_loop(p, col_here) { loop_bg(pal, p) } else { pal.ground };
         // Peak of each band over the columns this pixel covers.
         let c0 = (sx * p.num_cols).max(0.0) as usize;
         let mut c = [0.0f32; 4];
@@ -544,7 +550,7 @@ mod tests {
             screen_w: 1024.0, screen_h: 600.0, beat_anchor_col: 0.0, beat_period_cols: 100.0,
             downbeat_offset: 0.0, beats_per_bar: 4.0, beat2_phase_beats: 0.0, beat2_period_cols: 0.0,
             color_mode: ColorMode::Blue as u32 as f32, wave_rect: wave, over_rect: over, amp_gain: 1.0,
-            dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, _pad: [0.0; 2],
+            dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 0.0, _pad: 0.0,
         }
     }
 
