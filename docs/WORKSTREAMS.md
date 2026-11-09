@@ -3,6 +3,9 @@
 Everything currently open, what each unlocks, and what blocks what. Written to
 answer "where do I go first" rather than to be a complete backlog.
 
+CDJ-3000 work (HID over LINK, the CDJ-3000 skin, SYNC/SHIFT GRID) keeps its
+own list: [TODO-cdj-3000.md](TODO-cdj-3000.md).
+
 Current state as of `26737d5`: a single-deck player that decodes a file from
 `argv`, renders a scrolling three-band waveform with a beat grid, takes MIDI
 from a DJ2Go, and shows an external deck's tempo from received ProDJ Link beat
