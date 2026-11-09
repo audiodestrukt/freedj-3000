@@ -1543,6 +1543,8 @@ impl DeckApp {
                 Backspace           => Some(Event::Deck(ControlEvent::Back)),
                 KeyG                => Some(Event::Ui(UiEvent::TagTrack)),
                 KeyB | Escape       => Some(Event::Ui(UiEvent::Screen(here))),   // toggle off
+                KeyL                => Some(Event::Ui(UiEvent::Screen(TopScreen::TagList))),
+                KeyU                => Some(Event::Ui(UiEvent::Screen(TopScreen::Menu))),
                 _ => None,
             };
             if let Some(ev) = ev {
@@ -1577,6 +1579,10 @@ impl DeckApp {
             KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
             KeyT => Some(Event::Ui(UiEvent::TimeMode)),
             KeyB => Some(Event::Ui(UiEvent::Screen(TopScreen::Browse))),
+            // The CDJ-3000's screen buttons (the XDJ has them as touch keys too).
+            KeyL => Some(Event::Ui(UiEvent::Screen(TopScreen::TagList))),
+            KeyI => Some(Event::Ui(UiEvent::Screen(TopScreen::Info))),
+            KeyU => Some(Event::Ui(UiEvent::Screen(TopScreen::Menu))),
             Comma  => Some(Event::Deck(ControlEvent::JogDelta { delta: -4, velocity_rpm: 0.0 })),
             Period => Some(Event::Deck(ControlEvent::JogDelta { delta:  4, velocity_rpm: 0.0 })),
             KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
@@ -1991,8 +1997,13 @@ impl DeckApp {
         // The phone's controls page has no LCD: the shader gets empty rects.
         let none = egui::Rect::NOTHING;
         let (wave_rect, over_rect) = if let Some(l) = &lay3k {
-            // INFO covers the waveform field; the shader leaves it undrawn.
-            (if cdj3000::info_open(&self.egui_ctx) { none } else { l.wave }, l.overview)
+            // INFO covers the waveform field; the lists also move the overview
+            // into their status strip.
+            match self.screen_mode {
+                ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu => (none, l.strip_overview),
+                ScreenMode::Info => (none, l.overview),
+                _ => (l.wave, l.overview),
+            }
         } else {
             let wave = if phone && self.phone_controls { none } else if perform { screen::perform_layout(screen_rect).wave } else { lay.wave };
             (wave, if phone && self.phone_controls { none } else { lay.overview })
@@ -2018,7 +2029,7 @@ impl DeckApp {
         let phone_ref = phone_layout.as_ref();
         let chrome = &mut self.chrome;
         let mut output = self.egui_ctx.run(raw, |ctx| match &lay3k {
-            Some(l) => cdj3000::draw(ctx, &snap, l, &mut touch),
+            Some(l) => cdj3000::draw(ctx, &snap, l, &view, &self.tag_list, &mut touch),
             None => screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, phone_ref, chrome, &mut touch),
         });
         perf_accum("egui_run", _t_run.elapsed());
@@ -2760,6 +2771,11 @@ pub fn run(cfg: Config) -> Result<()> {
     if std::env::var("OPENDECK_SLIP").as_deref() == Ok("1") { app.slip = true; }
     // Dev: OPENDECK_PLAY=1 starts playback at once (a playing deck for captures).
     if std::env::var("OPENDECK_PLAY").as_deref() == Ok("1") { app.lock_in_play(); }
+    // Dev: OPENDECK_BROWSE_SELECT=n highlights BROWSE row n at startup (with
+    // OPENDECK_SCREEN=browse, for captures of the list screens).
+    if let Some(n) = std::env::var("OPENDECK_BROWSE_SELECT").ok().and_then(|v| v.parse::<i32>().ok()) {
+        app.browser.move_selection(n);
+    }
     if let Ok(v) = std::env::var("OPENDECK_LOOP") {
         let parts: Vec<f64> = v.split(',').filter_map(|s| s.trim().parse().ok()).collect();
         if let ([secs, beats], Some(per_beat)) = (parts.as_slice(), app.samples_per_beat()) {

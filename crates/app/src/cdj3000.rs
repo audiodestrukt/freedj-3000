@@ -13,7 +13,11 @@
 //! things that are on the unit's touch screen are drawn; its hardware
 //! buttons arrive as events from the surfaces.
 
-use crate::input::{ControlEvent, Event, UiEvent};
+use crate::browser::Browser;
+use crate::input::{ControlEvent, Event, Screen as TopScreen, UiEvent};
+use crate::screen::ScreenView;
+use crate::settings::MENU;
+use crate::taglist::TagList;
 use crate::screen::{bars_to_next, cover, needle_touch, tap, wave_touch};
 use crate::settings::Settings;
 use crate::snapshot::DeckSnapshot;
@@ -64,13 +68,12 @@ pub fn panel(ctx: &egui::Context) -> Panel {
     ctx.data(|d| d.get_temp(panel_id())).unwrap_or_default()
 }
 
-/// Dev / screenshots: `OPENDECK_CDJ_PANEL=loop|jump|info` opens that panel
-/// (or INFO) at startup.
+/// Dev / screenshots: `OPENDECK_CDJ_PANEL=loop|jump` opens that panel at
+/// startup (INFO, BROWSE and the other screens are deck screen modes).
 pub fn panel_from_env(ctx: &egui::Context) {
     let p = match std::env::var("OPENDECK_CDJ_PANEL").as_deref() {
         Ok("loop") => Panel::BeatLoop,
         Ok("jump") => Panel::BeatJump,
-        Ok("info") => return set_info(ctx, true),
         _ => return,
     };
     set_panel(ctx, p);
@@ -78,18 +81,6 @@ pub fn panel_from_env(ctx: &egui::Context) {
 
 fn set_panel(ctx: &egui::Context, p: Panel) {
     ctx.data_mut(|d| d.insert_temp(panel_id(), p));
-}
-
-fn info_id() -> Id { Id::new("cdj3k-info") }
-
-/// The INFO screen is up (ⓘ opens it, its ✕ closes it). `render_frame`
-/// leaves the enlarged waveform undrawn while it is.
-pub fn info_open(ctx: &egui::Context) -> bool {
-    ctx.data(|d| d.get_temp(info_id())).unwrap_or(false)
-}
-
-fn set_info(ctx: &egui::Context, on: bool) {
-    ctx.data_mut(|d| d.insert_temp(info_id(), on));
 }
 
 /// Page 1 or 2 of a panel; each panel remembers its own, as the unit does.
@@ -227,6 +218,8 @@ pub struct Layout {
     pub ruler:     Rect,
     pub mt:        Rect,
     pub key:       Rect,
+    // list screens: the status strip along the bottom
+    pub strip_overview: Rect,
 }
 
 /// Lay the playback screen out in `screen` (16:9). With a touch panel open
@@ -273,14 +266,16 @@ pub fn layout(screen: Rect, panel_open: bool) -> Layout {
         ruler:     r(127.0, 680.0, 1150.0, 698.0),
         mt:        r(1172.0, 594.0, 1260.0, 621.0),
         key:       r(1172.0, 630.0, 1260.0, 700.0),
+        strip_overview: r(260.0, 650.0, 890.0, 690.0),
     }
 }
 
 // ── Drawing ──────────────────────────────────────────────────────────────────
 
-/// Draw the playback screen. `lay` must come from [`layout`] on the screen
-/// rect the shader viewports were taken from.
-pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, out: &mut Vec<Event>) {
+/// Draw the screen for the deck's `view`. `lay` must come from [`layout`] on
+/// the screen rect the shader viewports were taken from. The CDJ has no
+/// PERFORM screen (its pads are hardware), so PERFORM shows playback.
+pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &ScreenView, tag_list: &TagList, out: &mut Vec<Event>) {
     egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
         // Letterbox around the 16:9 screen, then the screen's own ground —
         // everything except the two shader rects.
@@ -292,15 +287,19 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, out: &mut Ve
             p.rect_filled(part, 0.0, BG);
         }
         let u = lay.screen.height() / ASPECT.y; // points per unit pixel
-        if info_open(ctx) {
-            draw_info(ui, ctx, snap, lay, u);
-        } else {
-            draw_header(ui, ctx, snap, lay, u);
-            draw_field(ui, snap, lay, u, out);
-            match panel(ctx) {
-                Panel::BeatLoop => draw_loop_panel(ui, ctx, snap, lay, u, out),
-                Panel::BeatJump => draw_jump_panel(ui, ctx, lay, u, out),
-                Panel::None => {}
+        match view {
+            ScreenView::Browse(b) => return draw_browse(ui, snap, lay, b, tag_list, u, out),
+            ScreenView::TagList => return draw_tag_list(ui, snap, lay, tag_list, u, out),
+            ScreenView::Menu(settings, cursor) => return draw_utility(ui, snap, lay, settings, *cursor, u, out),
+            ScreenView::Info => draw_info(ui, ctx, snap, lay, u, out),
+            ScreenView::Playback | ScreenView::Perform => {
+                draw_header(ui, ctx, snap, lay, u, out);
+                draw_field(ui, snap, lay, u, out);
+                match panel(ctx) {
+                    Panel::BeatLoop => draw_loop_panel(ui, ctx, snap, lay, u, out),
+                    Panel::BeatJump => draw_jump_panel(ui, ctx, lay, u, out),
+                    Panel::None => {}
+                }
             }
         }
         draw_info_block(ui, snap, lay, u, out);
@@ -316,7 +315,7 @@ fn outline(ui: &Ui, r: Rect, c: Color32, u: f32) {
     ui.painter().rect_stroke(r, 0.0, Stroke::new((1.5 * u).max(1.0), c));
 }
 
-fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u: f32) {
+fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
     let p = ui.painter();
     p.rect_filled(lay.header, 0.0, HEADER);
 
@@ -346,7 +345,7 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
     }
     // ⓘ opens INFO.
     let i = lay.info_btn;
-    if tap(ui, i.expand(10.0 * u), "cdj-info").0 { set_info(ctx, true); }
+    if tap(ui, i.expand(10.0 * u), "cdj-info").0 { out.push(Event::Ui(UiEvent::Screen(TopScreen::Info))); }
     p.circle_filled(i.center(), i.width() * 0.5, TEXT);
     label(ui, i.center(), Align2::CENTER_CENTER, "i", 20.0, u, Color32::BLACK);
 
@@ -613,7 +612,7 @@ fn star(ui: &Ui, c: Pos2, r: f32, u: f32) {
 /// INFO: the loaded track's details over the top of the screen; the info
 /// block and overview stay live under it. Other players' tabs stay dim until
 /// their details come over the link.
-fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u: f32) {
+fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
     let sc = lay.screen;
     let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(
         Pos2::new(sc.min.x + x0 * u, sc.min.y + y0 * u), Pos2::new(sc.min.x + x1 * u, sc.min.y + y1 * u));
@@ -630,7 +629,7 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
     label(ui, Pos2::new(er.center().x, sc.min.y + 33.0 * u), Align2::CENTER_CENTER, "EDIT", 21.0, u, DIM);
     label(ui, Pos2::new(er.center().x, sc.min.y + 57.0 * u), Align2::CENTER_CENTER, "RATING", 21.0, u, DIM);
     let x = r(1183.0, 22.0, 1230.0, 70.0);
-    if tap(ui, x, "cdj-info-close").0 { set_info(ctx, false); }
+    if tap(ui, x, "cdj-info-close").0 { out.push(Event::Ui(UiEvent::Screen(TopScreen::Info))); }
     p.rect_filled(x, 0.0, Color32::from_rgb(130, 130, 130));
     let xs = Stroke::new(2.0 * u, Color32::from_rgb(40, 40, 40));
     let xi = x.shrink(12.0 * u);
@@ -709,6 +708,254 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
     icon(ui, Icon::Calendar, at(1067.0, 288.0), u);
     label(ui, at(1090.0, 288.0), Align2::LEFT_CENTER, dash(&t.year), 22.0, u, TEXT);
     p.line_segment([at(1050.0, 313.0), at(1228.0, 313.0)], Stroke::new(1.0, RULE));
+}
+
+// ── List screens (BROWSE, TAG LIST, UTILITY) ─────────────────────────────────
+
+const ROW_H: f32 = 48.0;
+const ROWS: usize = 10;
+const ROW_GREY: Color32 = Color32::from_rgb(38, 38, 38);
+const PANE_HEAD: Color32 = Color32::from_rgb(58, 58, 58);
+const COLUMN: Color32 = Color32::from_rgb(55, 55, 55);
+
+#[derive(Clone, Copy, PartialEq)]
+enum RowIcon { Folder, Track, None }
+
+/// One row of a list: icon, text, and an optional right-hand value.
+struct Row<'a> { icon: RowIcon, text: &'a str, value: Option<String>, tagged: bool }
+
+/// The status strip every list screen keeps at the bottom: PLAYER, time,
+/// the overview (the shader draws it into `lay.strip_overview`), MT, range,
+/// tempo and BPM.
+fn draw_status_strip(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
+    let sc = lay.screen;
+    let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(
+        Pos2::new(sc.min.x + x0 * u, sc.min.y + y0 * u), Pos2::new(sc.min.x + x1 * u, sc.min.y + y1 * u));
+    let p = ui.painter();
+    p.line_segment([Pos2::new(sc.min.x, sc.min.y + 629.0 * u), Pos2::new(sc.max.x, sc.min.y + 629.0 * u)], Stroke::new(2.0 * u, HEADER));
+    let pl = r(20.0, 643.0, 80.0, 703.0);
+    outline(ui, pl, BOX, u);
+    label(ui, Pos2::new(pl.center().x, pl.min.y + 12.0 * u), Align2::CENTER_CENTER, "PLAYER", 10.0, u, TEXT);
+    label(ui, Pos2::new(pl.center().x, pl.min.y + 38.0 * u), Align2::CENTER_CENTER, snap.player, 32.0, u, TEXT);
+    let secs = if snap.remain_mode { snap.remaining_secs() } else { snap.elapsed_secs() };
+    label(ui, Pos2::new(sc.min.x + 100.0 * u, sc.min.y + 682.0 * u), Align2::LEFT_CENTER,
+          format!("{:02}:{:02}", (secs / 60.0) as u64, (secs % 60.0) as u64), 50.0, u, TEXT);
+    needle_touch(ui, lay.strip_overview, out);
+    if snap.total_samples > 0 {
+        let ov = lay.strip_overview;
+        for i in 0..=10 {
+            let x = ov.min.x + ov.width() * i as f32 / 10.0;
+            let tall = i % 2 == 0;
+            p.line_segment([Pos2::new(x, ov.max.y + 2.0 * u), Pos2::new(x, ov.max.y + if tall { 10.0 } else { 6.0 } * u)],
+                           Stroke::new(if tall { 2.0 } else { 1.0 } * u, if tall { TEXT } else { DIM }));
+        }
+    }
+    if snap.key_lock {
+        let mt = r(915.0, 644.0, 985.0, 666.0);
+        outline(ui, mt, ORANGE, u);
+        label(ui, mt.center(), Align2::CENTER_CENTER, "MT", 17.0, u, ORANGE);
+    }
+    let rg = r(1000.0, 644.0, 1055.0, 668.0);
+    p.rect_filled(rg, 0.0, ORANGE);
+    label(ui, rg.center(), Align2::CENTER_CENTER, Settings::range_label(snap.tempo_range), 18.0, u, TEXT);
+    let pct = snap.tempo_percent();
+    let digits = if pct.abs() < 0.005 { "0.00".to_string() } else { format!("{:+.2}", pct) };
+    let pc = label(ui, Pos2::new(sc.min.x + 1116.0 * u, sc.min.y + 703.0 * u), Align2::RIGHT_BOTTOM, "%", 16.0, u, TEXT);
+    label(ui, Pos2::new(pc.min.x - 2.0 * u, sc.min.y + 706.0 * u), Align2::RIGHT_BOTTOM, digits, 30.0, u, TEXT);
+    let bb = r(1133.0, 643.0, 1260.0, 703.0);
+    outline(ui, bb, if snap.master { ORANGE } else { BOX }, u);
+    label(ui, Pos2::new(bb.min.x + 6.0 * u, bb.min.y + 8.0 * u), Align2::LEFT_CENTER, "BPM", 10.0, u, TEXT);
+    if let Some(bpm) = snap.bpm() {
+        let t = (bpm * 10.0).round() as u64;
+        let c = if snap.master { ORANGE } else { TEXT };
+        let dec = label(ui, Pos2::new(bb.max.x - 8.0 * u, bb.max.y - 6.0 * u), Align2::RIGHT_BOTTOM, format!(".{}", t % 10), 24.0, u, c);
+        label(ui, Pos2::new(dec.min.x, bb.max.y - 2.0 * u), Align2::RIGHT_BOTTOM, t / 10, 44.0, u, c);
+    }
+}
+
+/// The header of a list screen: source tile, ← BACK, the title with its icon.
+fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, folder_icon: bool, u: f32, out: &mut Vec<Event>) {
+    let p = ui.painter();
+    p.rect_filled(lay.header, 0.0, HEADER);
+    let s = lay.source;
+    p.rect_filled(s, 0.0, SOURCE_TILE);
+    label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
+    label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
+    let back = Rect::from_min_max(Pos2::new(lay.screen.min.x + 121.0 * u, lay.screen.min.y + 21.0 * u),
+                                  Pos2::new(lay.screen.min.x + 169.0 * u, lay.screen.min.y + 69.0 * u));
+    if tap(ui, back, "cdj-list-back").0 { out.push(Event::Deck(ControlEvent::Back)); }
+    p.rect_filled(back, 0.0, Color32::from_rgb(35, 35, 35));
+    outline(ui, back, Color32::from_rgb(100, 100, 100), u);
+    // ← (drawn; the default font has no arrow glyph)
+    let (c, a) = (back.center(), 11.0 * u);
+    let st = Stroke::new(2.5 * u, TEXT);
+    ui.painter().line_segment([Pos2::new(c.x - a, c.y), Pos2::new(c.x + a, c.y)], st);
+    ui.painter().line_segment([Pos2::new(c.x - a, c.y), Pos2::new(c.x - a * 0.3, c.y - a * 0.7)], st);
+    ui.painter().line_segment([Pos2::new(c.x - a, c.y), Pos2::new(c.x - a * 0.3, c.y + a * 0.7)], st);
+    let x = lay.screen.min.x + 190.0 * u;
+    let y = lay.screen.min.y + 45.0 * u;
+    let tx = if folder_icon {
+        folder(ui, Pos2::new(x + 9.0 * u, y), u, TEXT);
+        x + 30.0 * u
+    } else { x };
+    ui.painter().with_clip_rect(Rect::from_min_max(Pos2::new(tx, lay.screen.min.y), Pos2::new(lay.screen.min.x + 1000.0 * u, lay.screen.min.y + 90.0 * u)))
+        .text(Pos2::new(tx, y), Align2::LEFT_CENTER, title, FontId::proportional(32.0 * u), TEXT);
+}
+
+fn folder(ui: &Ui, c: Pos2, u: f32, col: Color32) {
+    let b = Rect::from_center_size(Pos2::new(c.x, c.y + 1.0 * u), Vec2::new(18.0 * u, 13.0 * u));
+    ui.painter().rect_filled(b, 1.0, col);
+    ui.painter().rect_filled(Rect::from_min_size(Pos2::new(b.min.x, b.min.y - 3.0 * u), Vec2::new(8.0 * u, 4.0 * u)), 1.0, col);
+}
+
+/// The category column at the left (only the categories the source has).
+fn draw_categories(ui: &Ui, lay: &Layout, cats: &[&str], u: f32) {
+    let sc = lay.screen;
+    let col = Rect::from_min_max(Pos2::new(sc.min.x, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 90.0 * u, sc.min.y + 628.0 * u));
+    ui.painter().rect_filled(col, 0.0, COLUMN);
+    for (i, c) in cats.iter().enumerate() {
+        let t = Rect::from_min_size(Pos2::new(col.min.x, col.min.y + 2.0 * u + 68.0 * u * i as f32), Vec2::new(90.0 * u, 66.0 * u));
+        ui.painter().rect_filled(t, 0.0, if i == 0 { Color32::from_rgb(85, 85, 85) } else { COLUMN });
+        folder(ui, Pos2::new(t.center().x, t.min.y + 24.0 * u), u, TEXT);
+        label(ui, Pos2::new(t.center().x, t.min.y + 52.0 * u), Align2::CENTER_CENTER, *c, 13.0, u, TEXT);
+    }
+}
+
+/// A list pane: header bar, then up to [`ROWS`] rows scrolled to keep
+/// `selected` in view. Tapping a row selects it; tapping the selected row
+/// loads it (the rotary's press).
+fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, empty: &str, u: f32, out: Option<&mut Vec<Event>>) {
+    let p = ui.painter();
+    let hb = Rect::from_min_size(pane.min, Vec2::new(pane.width(), 60.0 * u));
+    p.rect_filled(hb, 0.0, PANE_HEAD);
+    label(ui, Pos2::new(hb.min.x + 11.0 * u, hb.center().y), Align2::LEFT_CENTER, head, 21.0, u, LABEL);
+    // usize::MAX = nothing highlighted (a preview pane).
+    let first = if selected == usize::MAX { 0 } else { selected.saturating_sub(ROWS / 2).min(rows.len().saturating_sub(ROWS)) };
+    let mut out = out;
+    for k in 0..ROWS {
+        let y = hb.max.y + ROW_H * u * k as f32;
+        let rr = Rect::from_min_size(Pos2::new(pane.min.x, y), Vec2::new(pane.width(), ROW_H * u));
+        if rr.max.y > pane.max.y + 1.0 { break; }
+        let i = first + k;
+        let sel = i == selected && i < rows.len();
+        p.rect_filled(rr, 0.0, if sel { KEY_LIT } else if k % 2 == 0 { ROW_GREY } else { BG });
+        let Some(row) = rows.get(i) else { continue };
+        if let Some(out) = out.as_deref_mut() {
+            if tap(ui, rr, &format!("cdj-row-{head}-{i}")).0 {
+                if sel { out.push(Event::Deck(ControlEvent::Load)); }
+                else { out.push(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: i as i32 - selected as i32 })); }
+            }
+        }
+        let cy = rr.center().y;
+        match row.icon {
+            RowIcon::Folder => folder(ui, Pos2::new(rr.min.x + 22.0 * u, cy), u, TEXT),
+            RowIcon::Track => { label(ui, Pos2::new(rr.min.x + 22.0 * u, cy), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT); }
+            RowIcon::None => {}
+        }
+        let tx = if row.icon == RowIcon::None { 14.0 } else { 45.0 };
+        let right = if let Some(v) = &row.value {
+            label(ui, Pos2::new(rr.max.x - 14.0 * u, cy), Align2::RIGHT_CENTER, v, 24.0, u, TEXT).min.x - 12.0 * u
+        } else { rr.max.x - 10.0 * u };
+        p.with_clip_rect(Rect::from_min_max(Pos2::new(rr.min.x, rr.min.y), Pos2::new(right, rr.max.y)))
+            .text(Pos2::new(rr.min.x + tx * u, cy), Align2::LEFT_CENTER, row.text, FontId::proportional(27.0 * u), TEXT);
+        if row.tagged {
+            p.circle_filled(Pos2::new(right - 6.0 * u, cy), 5.0 * u, BARS_ORANGE);
+        }
+    }
+    if rows.is_empty() {
+        label(ui, Pos2::new(pane.center().x, hb.max.y + 60.0 * u), Align2::CENTER_CENTER, empty, 22.0, u, DIM);
+    }
+    // Scroll position along the right edge.
+    if rows.len() > ROWS {
+        let track = Rect::from_min_max(Pos2::new(pane.max.x - 5.0 * u, hb.max.y), Pos2::new(pane.max.x, pane.max.y));
+        let h = track.height() * ROWS as f32 / rows.len() as f32;
+        let y0 = track.min.y + (track.height() - h) * first as f32 / (rows.len() - ROWS) as f32;
+        p.rect_filled(Rect::from_min_size(Pos2::new(track.min.x, y0), Vec2::new(track.width(), h)), 0.0, DIM);
+    }
+}
+
+/// BROWSE: the source's lists, two panes. The right pane shows what LOAD on
+/// the highlighted row would act on: a track's details and a LOAD key.
+fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &TagList, u: f32, out: &mut Vec<Event>) {
+    let sc = lay.screen;
+    let rows: Vec<Row> = b.entries().iter().map(|e| Row {
+        icon: if e.is_dir { RowIcon::Folder } else { RowIcon::Track }, text: &e.name, value: None,
+        tagged: e.load().map_or(false, |l| tags.contains(l)),
+    }).collect();
+    draw_list_header(ui, snap, lay, &b.title(), true, u, out);
+    draw_categories(ui, lay, &["FOLDER"], u);
+    let left = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 730.0 * u, sc.min.y + 628.0 * u));
+    draw_list(ui, left, "FOLDER", &rows, b.selected, "— empty —", u, Some(out));
+    let right = Rect::from_min_max(Pos2::new(sc.min.x + 732.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
+    ui.painter().rect_filled(right, 0.0, BG);
+    ui.painter().line_segment([Pos2::new(right.min.x - 1.0 * u, right.min.y), Pos2::new(right.min.x - 1.0 * u, right.max.y)], Stroke::new(2.0 * u, PANE_HEAD));
+    match b.selected_entry() {
+        Some(e) if !e.is_dir => {
+            let hb = Rect::from_min_size(right.min, Vec2::new(right.width(), 60.0 * u));
+            ui.painter().rect_filled(hb, 0.0, PANE_HEAD);
+            label(ui, Pos2::new(hb.min.x + 11.0 * u, hb.center().y), Align2::LEFT_CENTER, "INFO", 21.0, u, LABEL);
+            let mut y = hb.max.y + 30.0 * u;
+            let clip = ui.painter().with_clip_rect(right);
+            for (ic, v) in [(None, Some(e.name.clone())), (Some(Icon::Person), e.artist.clone()),
+                            (None, e.bpm.map(|b| format!("{b:.1}")))] {
+                match ic {
+                    Some(k) => icon(ui, k, Pos2::new(right.min.x + 24.0 * u, y), u),
+                    None if y < hb.max.y + 40.0 * u => { label(ui, Pos2::new(right.min.x + 24.0 * u, y), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT); }
+                    None => boxed(ui, "BPM", Pos2::new(right.min.x + 24.0 * u, y), u),
+                }
+                clip.text(Pos2::new(right.min.x + 48.0 * u, y), Align2::LEFT_CENTER, v.unwrap_or_default(), FontId::proportional(24.0 * u), TEXT);
+                y += 50.0 * u;
+            }
+            let load = Rect::from_min_max(Pos2::new(sc.min.x + 935.0 * u, sc.min.y + 552.0 * u), Pos2::new(sc.min.x + 1085.0 * u, sc.min.y + 602.0 * u));
+            if tap(ui, load, "cdj-browse-load").0 { out.push(Event::Deck(ControlEvent::Load)); }
+            ui.painter().rect_filled(load, 0.0, Color32::from_rgb(225, 225, 225));
+            label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::from_rgb(30, 30, 30));
+        }
+        _ => {
+            // A folder: what is in it, as the next level would list it.
+            let peek = b.preview().unwrap_or_default();
+            let rows: Vec<Row> = peek.iter().map(|(d, n)| Row {
+                icon: if *d { RowIcon::Folder } else { RowIcon::Track }, text: n, value: None, tagged: false,
+            }).collect();
+            draw_list(ui, right, "FOLDER", &rows, usize::MAX, "", u, None);
+        }
+    }
+    if let Some(name) = snap.loading {
+        label(ui, Pos2::new(sc.min.x + 1000.0 * u, sc.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
+    }
+    draw_status_strip(ui, snap, lay, u, out);
+}
+
+/// TAG LIST: the tagged tracks; LOAD plays one, TAG TRACK removes it.
+fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: f32, out: &mut Vec<Event>) {
+    let sc = lay.screen;
+    let rows: Vec<Row> = tags.entries().iter().map(|e| Row {
+        icon: RowIcon::Track, text: &e.name, value: e.artist.clone(), tagged: false,
+    }).collect();
+    draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, u, out);
+    let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
+    ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
+    draw_list(ui, pane, "TRACK", &rows, tags.selected, "No tagged tracks. Tag one in BROWSE.", u, Some(out));
+    draw_status_strip(ui, snap, lay, u, out);
+}
+
+/// UTILITY: the deck's settings, one per row with its value at the right. The
+/// rotary moves the highlight; its press (or a tap on the row) steps the value.
+fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings, cursor: usize, u: f32, out: &mut Vec<Event>) {
+    let sc = lay.screen;
+    let rows: Vec<Row> = MENU.iter().map(|(s, name)| Row {
+        icon: RowIcon::None, text: name, value: Some(settings.value(*s)), tagged: false,
+    }).collect();
+    draw_list_header(ui, snap, lay, "UTILITY", false, u, out);
+    let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
+    ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
+    draw_list(ui, pane, "SETTINGS", &rows, cursor, "", u, None);
+    // A tap on a row steps that setting, as on the XDJ's MENU.
+    for (i, _) in MENU.iter().enumerate() {
+        let rr = Rect::from_min_size(Pos2::new(pane.min.x, pane.min.y + 60.0 * u + ROW_H * u * i as f32), Vec2::new(pane.width(), ROW_H * u));
+        if tap(ui, rr, &format!("cdj-util-{i}")).0 { out.push(Event::Ui(UiEvent::MenuTap(i))); }
+    }
+    draw_status_strip(ui, snap, lay, u, out);
 }
 
 fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {

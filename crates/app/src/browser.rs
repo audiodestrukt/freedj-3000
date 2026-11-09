@@ -149,6 +149,9 @@ pub struct Browser {
     /// start folder is the app's sandbox, and climbing out of it only shows the
     /// container's UUID directories — so the start is the floor there.
     floor:     Option<PathBuf>,
+    /// The CDJ-3000 skin's right pane: the highlighted folder's contents,
+    /// listed once per highlighted folder (see [`Browser::preview`]).
+    preview:   std::cell::RefCell<Option<(PathBuf, Vec<(bool, String)>)>>,
 }
 
 impl Browser {
@@ -174,6 +177,7 @@ impl Browser {
             db_title: String::new(),
             db_label: String::new(),
             link,
+            preview: Default::default(),
         };
         b.rebuild();
         b
@@ -207,6 +211,37 @@ impl Browser {
     }
 
     pub fn refresh(&mut self) { self.rebuild(); }
+
+    /// What is inside the highlighted row, if it is a folder on the
+    /// filesystem: `(is_dir, name)` for its folders then audio files, sorted
+    /// as BROWSE sorts them. Listed once per highlighted folder and cached.
+    /// None for tracks, and for rekordbox / linked-player folders, which
+    /// would cost a network round trip to peek into.
+    pub fn preview(&self) -> Option<Vec<(bool, String)>> {
+        let Some(Entry { kind: EntryKind::Descend(Loc::Fs(dir)), .. }) = self.selected_entry() else { return None };
+        if let Some((p, v)) = self.preview.borrow().as_ref() {
+            if p == dir { return Some(v.clone()); }
+        }
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(dir) {
+            for e in rd.flatten() {
+                let path = e.path();
+                let name = e.file_name().to_string_lossy().into_owned();
+                if name.starts_with('.') { continue; }
+                if path.is_dir() {
+                    if !is_housekeeping_dir(&name) { dirs.push(name); }
+                } else if is_audio(&path) {
+                    files.push(name);
+                }
+            }
+        }
+        dirs.sort_by_key(|n| n.to_lowercase());
+        files.sort_by_key(|n| n.to_lowercase());
+        let v: Vec<(bool, String)> = dirs.into_iter().map(|n| (true, n)).chain(files.into_iter().map(|n| (false, n))).collect();
+        *self.preview.borrow_mut() = Some((dir.clone(), v.clone()));
+        Some(v)
+    }
 
     fn rebuild(&mut self) {
         let entries = match self.stack.last().cloned() {
@@ -650,6 +685,31 @@ mod tests {
         assert!(b.entries().iter().all(|e| !e.name.starts_with("USB:")), "no USB row left");
         assert!(b.rb.is_none(), "export dropped with the stick");
         std::env::remove_var("OPENDECK_MEDIA_DIRS");
+    }
+
+    // The CDJ-3000 skin's right pane: the highlighted folder's contents,
+    // folders first then audio files, case-insensitively sorted, without
+    // hidden files, non-audio files or housekeeping folders; nothing for a
+    // highlighted track.
+    #[test]
+    fn preview_lists_the_highlighted_folder() {
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-preview");
+        let crate_dir = home.path().join("Crate");
+        std::fs::create_dir_all(crate_dir.join("inner")).unwrap();
+        std::fs::create_dir_all(crate_dir.join("_CodeSignature")).unwrap();
+        for f in ["b.mp3", "A.wav", "notes.txt", ".hidden.mp3"] {
+            std::fs::write(crate_dir.join(f), b"").unwrap();
+        }
+        std::fs::write(home.path().join("loose.mp3"), b"").unwrap();
+        let mut b = Browser::new(home.path(), crate::prodj::LinkState::new(1));
+
+        b.selected = b.entries().iter().position(|e| e.name == "Crate").expect("Crate row");
+        let want = vec![(true, "inner".to_string()), (false, "A.wav".to_string()), (false, "b.mp3".to_string())];
+        assert_eq!(b.preview(), Some(want.clone()));
+        assert_eq!(b.preview(), Some(want), "cached second call agrees");
+
+        b.selected = b.entries().iter().position(|e| e.name == "loose.mp3").expect("track row");
+        assert_eq!(b.preview(), None);
     }
 
     // Gated on a serving peer: OPENDECK_TEST_LINK=127.0.0.1 (e.g. `opendeck-serve`

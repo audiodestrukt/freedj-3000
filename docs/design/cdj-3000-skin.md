@@ -161,4 +161,26 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
   - KEY SHIFT stays unwired until the deck can shift key. EDIT RATING and the
     other players' tabs are drawn but inert.
   - Dev: `OPENDECK_CDJ_PANEL=loop|jump|info`.
+- **Phase 2 (part 1).**
+  - The CDJ skin renders the deck's own screen modes, so both skins share one
+    navigation model and any surface (keyboard, MIDI, a real CDJ) drives either.
+    INFO moved onto `ScreenMode::Info` (ⓘ and ✕ toggle it).
+  - **BROWSE:**
+    - The header has the source tile, a drawn ← BACK key and the folder title.
+    - The category column (FOLDER), then the list pane: 60 px header, 48 px
+      rows alternating grey/black, a blue highlight and a scrollbar.
+    - The right pane previews the highlighted folder (`Browser::preview`,
+      filesystem folders only, cached per folder) or shows INFO + LOAD for a
+      track.
+    - A tap selects a row; a second tap loads it.
+  - **TAG LIST** and **UTILITY** (the deck's settings) use the same list
+    renderer.
+  - Every list screen keeps the status strip (PLAYER, mm:ss, mini overview
+    drawn by the shader, MT, range, tempo, BPM).
+  - New keys for the CDJ's hardware screen buttons: L = TAG LIST, I = INFO,
+    U = MENU/UTILITY (B = BROWSE as before).
+  - Dev: `OPENDECK_SCREEN=browse|taglist|menu|info`,
+    `OPENDECK_BROWSE_SELECT=n`.
+  - Still to do: SOURCE screen; track tags (artwork, key, date) in the INFO
+    pane; categories for rekordbox and LINK sources; LOAD PREVIOUS TRACK.
 
