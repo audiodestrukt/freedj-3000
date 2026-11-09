@@ -117,6 +117,77 @@ fn beats_label(b: f32) -> String {
     if (b - b.round()).abs() < 1e-3 { format!("{}", b.round() as i64) } else { format!("{b:.2}") }
 }
 
+// ── Artwork ──────────────────────────────────────────────────────────────────
+
+/// Decode embedded cover art (JPEG or PNG bytes) to an egui image.
+fn decode_art(mime: &str, bytes: &[u8]) -> Option<egui::ColorImage> {
+    if mime.contains("png") || bytes.starts_with(b"\x89PNG") {
+        let mut r = png::Decoder::new(std::io::Cursor::new(bytes));
+        r.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut rd = r.read_info().ok()?;
+        let mut buf = vec![0; rd.output_buffer_size()];
+        let info = rd.next_frame(&mut buf).ok()?;
+        let px = &buf[..info.buffer_size()];
+        let (w, h) = (info.width as usize, info.height as usize);
+        let rgba: Vec<u8> = match info.color_type {
+            png::ColorType::Rgba => px.to_vec(),
+            png::ColorType::Rgb => px.chunks(3).flat_map(|c| [c[0], c[1], c[2], 255]).collect(),
+            png::ColorType::GrayscaleAlpha => px.chunks(2).flat_map(|c| [c[0], c[0], c[0], c[1]]).collect(),
+            png::ColorType::Grayscale => px.iter().flat_map(|&g| [g, g, g, 255]).collect(),
+            png::ColorType::Indexed => return None, // EXPAND turns these into RGB(A)
+        };
+        Some(egui::ColorImage::from_rgba_unmultiplied([w, h], &rgba))
+    } else {
+        let mut d = jpeg_decoder::Decoder::new(std::io::Cursor::new(bytes));
+        let px = d.decode().ok()?;
+        let info = d.info()?;
+        let (w, h) = (info.width as usize, info.height as usize);
+        match info.pixel_format {
+            jpeg_decoder::PixelFormat::RGB24 => Some(egui::ColorImage::from_rgb([w, h], &px)),
+            jpeg_decoder::PixelFormat::L8 => {
+                let rgb: Vec<u8> = px.iter().flat_map(|&g| [g, g, g]).collect();
+                Some(egui::ColorImage::from_rgb([w, h], &rgb))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// The loaded track's cover as a texture, decoded once per track and kept in
+/// egui's memory (keyed by a hash of the bytes). None without embedded art.
+fn artwork(ctx: &egui::Context, snap: &DeckSnapshot) -> Option<egui::TextureHandle> {
+    use std::hash::{Hash, Hasher};
+    let (mime, bytes) = snap.tags.artwork.as_ref()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    bytes.len().hash(&mut h);
+    bytes[..bytes.len().min(4096)].hash(&mut h);
+    let key = h.finish();
+    let id = Id::new("cdj3k-art");
+    if let Some((k, tex)) = ctx.data(|d| d.get_temp::<(u64, Option<egui::TextureHandle>)>(id)) {
+        if k == key { return tex; }
+    }
+    let tex = decode_art(mime, bytes).map(|img| ctx.load_texture("cdj3k-art", img, egui::TextureOptions::LINEAR));
+    if tex.is_none() { log::debug!("cdj3000: cover art ({mime}, {} B) did not decode", bytes.len()); }
+    ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
+    tex
+}
+
+/// Cover art into `r`, or the record placeholder without any.
+fn draw_art(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, r: Rect) {
+    let p = ui.painter();
+    match artwork(ctx, snap) {
+        Some(tex) => {
+            let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+            p.image(tex.id(), r, uv, Color32::WHITE);
+        }
+        None => {
+            p.rect_filled(r, 0.0, Color32::from_rgb(40, 40, 40));
+            p.circle_filled(r.center(), r.width() * 0.42, Color32::from_rgb(70, 70, 70));
+            p.circle_filled(r.center(), r.width() * 0.08, Color32::from_rgb(15, 15, 15));
+        }
+    }
+}
+
 // ── Layout ───────────────────────────────────────────────────────────────────
 
 /// Playback-screen regions in logical points.
@@ -256,11 +327,7 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
     label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, src, 18.0, u, TEXT);
     label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
 
-    // Artwork: a record until the loader carries the track's own picture.
-    let a = lay.art;
-    p.rect_filled(a, 0.0, Color32::from_rgb(40, 40, 40));
-    p.circle_filled(a.center(), a.width() * 0.42, Color32::from_rgb(70, 70, 70));
-    p.circle_filled(a.center(), a.width() * 0.08, Color32::from_rgb(15, 15, 15));
+    draw_art(ui, ctx, snap, lay.art);
 
     // Title, then length · BPM · key.
     let clip = ui.painter().with_clip_rect(lay.title.union(lay.track_row));
@@ -589,9 +656,7 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
     let src = r(132.0, 112.0, 222.0, 202.0);
     p.rect_filled(src, 0.0, SOURCE_TILE);
     label(ui, Pos2::new(src.center().x, src.min.y + 64.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
-    let art = r(222.0, 112.0, 312.0, 202.0);
-    p.rect_filled(art, 0.0, Color32::from_rgb(40, 40, 40));
-    p.circle_filled(art.center(), art.width() * 0.42, Color32::from_rgb(70, 70, 70));
+    draw_art(ui, ctx, snap, r(222.0, 112.0, 312.0, 202.0));
     for i in 0..5 { star(ui, at(155.0 + 33.0 * i as f32, 237.0), 13.0 * u, u); }
     for y in [262.0, 313.0, 364.0, 415.0] {
         p.line_segment([at(140.0, y), at(312.0, y)], Stroke::new(1.0, RULE));
