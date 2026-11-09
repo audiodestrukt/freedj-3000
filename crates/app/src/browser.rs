@@ -108,6 +108,8 @@ enum Loc {
     /// HISTORY: the history lists, then one list's tracks in play order.
     RbHistory,
     RbHistoryList(u32),
+    /// SEARCH results for `Browser::search_query`, within the source below.
+    Search,
     /// A dbserver source's category menu (PLAYLIST / ARTIST / ALBUM / TRACK /
     /// FILENAME …), the first thing a player shows for a linked source.
     DbRoot,
@@ -231,7 +233,14 @@ pub struct Browser {
     home:      PathBuf,
     /// Tracks loaded this session (the CDJ draws them green in lists).
     played:    Vec<Load>,
+    /// SEARCH: the typed text, and the audio files under a folder (built
+    /// once per folder searched).
+    search_query: String,
+    fs_index:  std::cell::RefCell<Option<(PathBuf, Vec<PathBuf>)>>,
 }
+
+/// Most files indexed for a folder SEARCH (a big library stays responsive).
+const SEARCH_INDEX_MAX: usize = 50_000;
 
 impl Browser {
     pub fn new(dir: &Path, link: Arc<LinkState>) -> Self {
@@ -259,6 +268,8 @@ impl Browser {
             preview: Default::default(),
             home: start.clone(),
             played: Vec::new(),
+            search_query: String::new(),
+            fs_index: Default::default(),
         };
         b.rebuild();
         b
@@ -286,6 +297,7 @@ impl Browser {
             Some(Loc::RbNames(f)) => f.label().to_string(),
             Some(Loc::RbNamed(_, n)) => if n.is_empty() { "(none)".to_string() } else { n.clone() },
             Some(Loc::RbHistory) => "HISTORY".to_string(),
+            Some(Loc::Search) => "SEARCH".to_string(),
             Some(Loc::RbHistoryList(id)) => self.rb.as_ref()
                 .and_then(|e| e.history.iter().find(|(h, _)| h == id).map(|(_, n)| n.clone()))
                 .unwrap_or_else(|| "HISTORY".to_string()),
@@ -347,6 +359,7 @@ impl Browser {
             Some(Loc::RbNames(f))     => self.rb_name_entries(f),
             Some(Loc::RbNamed(f, n))  => self.rb_track_entries(|e| e.tracks.iter().filter(|t| f.of(t) == n).collect()),
             Some(Loc::RbHistory)      => self.rb_history_entries(),
+            Some(Loc::Search)         => self.search_entries(),
             Some(Loc::RbHistoryList(id)) => self.rb_track_entries(|e| e.history_tracks(id)),
             Some(Loc::DbRoot)         => self.db_root_entries(),
             Some(Loc::DbFolder(id))   => self.db_folder_entries(id),
@@ -632,6 +645,66 @@ impl Browser {
     /// Whether the HISTORY lists are shown (the CDJ skin's row icon).
     pub fn on_rb_history(&self) -> bool { matches!(self.stack.last(), Some(Loc::RbHistory)) }
 
+    /// SEARCH: start (or restart) a search from where the browser is.
+    pub fn begin_search(&mut self) {
+        if !self.in_search() { self.stack.push(Loc::Search); }
+        self.search_query.clear();
+        self.selected = 0;
+        self.rebuild();
+    }
+    pub fn in_search(&self) -> bool { matches!(self.stack.last(), Some(Loc::Search)) }
+    pub fn search_query(&self) -> &str { &self.search_query }
+    /// New search text: the results follow, the first one highlighted.
+    pub fn set_search_query(&mut self, q: String) {
+        self.search_query = q;
+        self.selected = 0;
+        if self.in_search() { self.rebuild(); }
+    }
+
+    /// Results for the query, case-insensitive. Under a rekordbox source:
+    /// tracks whose title or artist contains it (the unit's SEARCH). In a
+    /// folder: audio files anywhere below it whose name contains it.
+    /// An empty query has no results, as on the unit.
+    fn search_entries(&self) -> Vec<Entry> {
+        let q = self.search_query.to_lowercase();
+        if q.is_empty() { return Vec::new(); }
+        if self.stack.iter().any(|l| matches!(l, Loc::RbRoot)) {
+            return self.rb_track_entries(|e| e.tracks.iter()
+                .filter(|t| t.title.to_lowercase().contains(&q) || t.artist.to_lowercase().contains(&q))
+                .collect());
+        }
+        let Some(dir) = self.stack.iter().rev().find_map(|l| match l { Loc::Fs(p) => Some(p.clone()), _ => None }) else { return Vec::new() };
+        let mut idx = self.fs_index.borrow_mut();
+        if idx.as_ref().map(|(d, _)| d != &dir).unwrap_or(true) {
+            let mut files = Vec::new();
+            let mut stack = vec![(dir.clone(), 0u8)];
+            while let Some((d, depth)) = stack.pop() {
+                let Ok(rd) = std::fs::read_dir(&d) else { continue };
+                for e in rd.flatten() {
+                    let p = e.path();
+                    let name = e.file_name().to_string_lossy().into_owned();
+                    if name.starts_with('.') { continue; }
+                    if p.is_dir() {
+                        if depth < 8 && !is_housekeeping_dir(&name) { stack.push((p, depth + 1)); }
+                    } else if is_audio(&p) {
+                        files.push(p);
+                        if files.len() >= SEARCH_INDEX_MAX { break; }
+                    }
+                }
+                if files.len() >= SEARCH_INDEX_MAX { log::warn!("SEARCH: indexed the first {SEARCH_INDEX_MAX} files"); break; }
+            }
+            files.sort_by_key(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()));
+            *idx = Some((dir, files));
+        }
+        idx.as_ref().unwrap().1.iter()
+            .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().to_lowercase().contains(&q)))
+            .map(|p| Entry {
+                name: p.file_name().unwrap().to_string_lossy().into_owned(), is_dir: false,
+                artist: None, bpm: None, key: None, art: None,
+                kind: EntryKind::Track(Load::Local { path: p.clone(), analyze: None }),
+            }).collect()
+    }
+
     /// The rekordbox field a name list groups by, while one is shown.
     pub fn rb_names_field(&self) -> Option<RbField> {
         match self.stack.last() { Some(Loc::RbNames(f)) => Some(*f), _ => None }
@@ -656,7 +729,7 @@ impl Browser {
         let Some(exp) = self.rb.as_ref() else { return Vec::new() };
         let src = self.rb_source.clone();
         let mut tracks = pick(exp);
-        if matches!(self.stack.last(), Some(Loc::RbAllTracks | Loc::RbNamed(..))) {
+        if matches!(self.stack.last(), Some(Loc::RbAllTracks | Loc::RbNamed(..) | Loc::Search)) {
             tracks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         }
         tracks.into_iter().filter_map(|t| {
@@ -981,6 +1054,42 @@ mod tests {
 
         b.selected = b.entries().iter().position(|e| e.name == "loose.mp3").expect("track row");
         assert_eq!(b.preview(), None);
+    }
+
+    #[test]
+    fn search_finds_files_below_the_folder() {
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-search");
+        std::fs::create_dir_all(home.path().join("Crate/deep")).unwrap();
+        for f in ["Crate/ALOTT - Lights Out.mp3", "Crate/deep/Alok - Cant Get Enough.mp3", "Other.mp3", "Crate/notes.txt"] {
+            std::fs::write(home.path().join(f), b"").unwrap();
+        }
+        let mut b = Browser::new(home.path(), crate::prodj::LinkState::new(1));
+        b.begin_search();
+        assert!(b.in_search());
+        assert!(b.entries().is_empty(), "empty query, no results");
+        b.set_search_query("alo".into());
+        let names: Vec<_> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Alok - Cant Get Enough.mp3", "ALOTT - Lights Out.mp3"], "sorted by name");
+        b.set_search_query("zzz".into());
+        assert!(b.entries().is_empty());
+        b.back();
+        assert!(!b.in_search(), "BACK leaves SEARCH");
+    }
+
+    #[test]
+    fn search_in_rekordbox_matches_title_or_artist() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/rekordcrate/data/complete_export/demo_tracks");
+        let mut b = Browser::new(&root, crate::prodj::LinkState::new(1));
+        b.selected = b.entries().iter().position(|e| e.name == "rekordbox").unwrap();
+        b.enter();
+        b.open_rb_category(0);
+        b.begin_search();
+        b.set_search_query("loopm".into());   // the artist
+        assert_eq!(b.entries().len(), 2);
+        b.set_search_query("track 2".into()); // a title
+        assert_eq!(b.entries().len(), 1);
+        assert_eq!(b.entries()[0].key.as_deref(), Some("Fm"));
     }
 
     #[test]

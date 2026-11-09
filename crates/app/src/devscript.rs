@@ -16,6 +16,7 @@
 //! | `open=<row name>` | BROWSE: highlight the row with that name and enter it |
 //! | `select=<n>` | BROWSE: highlight row n |
 //! | `category=<n>` | BROWSE on rekordbox: open category n (0 = ARTIST) |
+//! | `search=<text>` | open SEARCH and type the text |
 //! | `quit` | exit the process (status 0) |
 
 /// One parsed action.
@@ -32,6 +33,7 @@ pub enum Action {
     Open(String),
     Select(usize),
     Category(usize),
+    Search(String),
     Quit,
 }
 
@@ -54,6 +56,7 @@ pub fn parse(src: &str) -> Result<Vec<(f64, Action)>, String> {
             "quit" => Action::Quit,
             _ if act.starts_with("screen=") => Action::Screen(act[7..].to_string()),
             _ if act.starts_with("open=") => Action::Open(act[5..].to_string()),
+            _ if act.starts_with("search=") => Action::Search(act[7..].to_string()),
             _ if act.starts_with("select=") => Action::Select(act[7..].parse().map_err(|_| format!("{entry:?}: bad row"))?),
             _ if act.starts_with("category=") => Action::Category(act[9..].parse().map_err(|_| format!("{entry:?}: bad category"))?),
             _ => {

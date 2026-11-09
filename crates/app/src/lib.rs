@@ -57,6 +57,21 @@ use winit::{
 /// Target frame interval — 60 fps.
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
+/// The character a key types into SEARCH (by physical position, US layout).
+fn search_char(code: KeyCode) -> Option<char> {
+    use KeyCode::*;
+    let letters = [KeyA, KeyB, KeyC, KeyD, KeyE, KeyF, KeyG, KeyH, KeyI, KeyJ, KeyK, KeyL, KeyM,
+                   KeyN, KeyO, KeyP, KeyQ, KeyR, KeyS, KeyT, KeyU, KeyV, KeyW, KeyX, KeyY, KeyZ];
+    let digits = [Digit0, Digit1, Digit2, Digit3, Digit4, Digit5, Digit6, Digit7, Digit8, Digit9];
+    if let Some(i) = letters.iter().position(|k| *k == code) { return Some((b'A' + i as u8) as char); }
+    if let Some(i) = digits.iter().position(|k| *k == code) { return Some((b'0' + i as u8) as char); }
+    Some(match code {
+        Space => ' ', Minus => '-', Period => '.', Comma => ',', Quote => '\'',
+        Semicolon => ':', BracketLeft => '(', BracketRight => ')',
+        _ => return None,
+    })
+}
+
 /// How many earlier tracks LOAD PREVIOUS TRACK keeps.
 const HISTORY_MAX: usize = 100;
 
@@ -1146,6 +1161,19 @@ impl DeckApp {
                 self.screen_mode = ScreenMode::Browse;
                 log::info!("source {src:?}");
             }
+            Event::Ui(UiEvent::Search(edit)) => {
+                use input::SearchEdit as S;
+                match edit {
+                    S::Open => {
+                        if self.screen_mode != ScreenMode::Browse { self.browser.refresh(); }
+                        self.screen_mode = ScreenMode::Browse;
+                        self.browser.begin_search();
+                    }
+                    S::Char(c) => { let mut q = self.browser.search_query().to_string(); q.push(c); self.browser.set_search_query(q); }
+                    S::Backspace => { let mut q = self.browser.search_query().to_string(); q.pop(); self.browser.set_search_query(q); }
+                    S::Clear => self.browser.set_search_query(String::new()),
+                }
+            }
             Event::Ui(UiEvent::BrowseCategory(i)) => {
                 self.browser.open_rb_category(i);
                 self.screen_mode = ScreenMode::Browse;
@@ -1480,6 +1508,10 @@ impl DeckApp {
                 }
                 A::Select(i) => self.browser.selected = i.min(self.browser.entries().len().saturating_sub(1)),
                 A::Category(i) => self.apply(Event::Ui(UiEvent::BrowseCategory(i))),
+                A::Search(text) => {
+                    self.apply(Event::Ui(UiEvent::Search(input::SearchEdit::Open)));
+                    for c in text.chars() { self.apply(Event::Ui(UiEvent::Search(input::SearchEdit::Char(c)))); }
+                }
                 A::Quit => { log::info!("script: quit"); log::logger().flush(); std::process::exit(0); }
             }
         }
@@ -1744,6 +1776,27 @@ impl DeckApp {
         // Phone preview: Tab flips SCREEN / CONTROLS (the swipe on device).
         if self.phone && code == Tab {
             self.phone_controls = !self.phone_controls;
+            self.request_redraw();
+            return false;
+        }
+        // SEARCH: the keyboard types; arrows/Enter pick, Esc leaves.
+        if self.screen_mode == ScreenMode::Browse && self.browser.in_search() {
+            let ev = match code {
+                ArrowDown           => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: 1 })),
+                ArrowUp             => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: -1 })),
+                Enter | NumpadEnter => Some(Event::Deck(ControlEvent::Load)),
+                Backspace           => Some(Event::Ui(UiEvent::Search(input::SearchEdit::Backspace))),
+                Escape              => Some(Event::Deck(ControlEvent::Back)),
+                c => search_char(c).map(|ch| Event::Ui(UiEvent::Search(input::SearchEdit::Char(ch)))),
+            };
+            if let Some(ev) = ev {
+                self.events.push(ev);
+                self.request_redraw();
+            }
+            return false;
+        }
+        if code == Slash {
+            self.events.push(Event::Ui(UiEvent::Search(input::SearchEdit::Open)));
             self.request_redraw();
             return false;
         }

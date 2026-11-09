@@ -92,7 +92,7 @@ Size: S < 1 day, M 1–3 days, L > 3 days.
 | | TAG LIST (+ GLOBAL) | exists (XDJ) | S |
 | | PLAYLIST + Playlist Bank | needs rekordbox playlists in UI | M |
 | | Category lists (artist, album, key, date added, history, matching) | artist/album/track/key/playlist/folder done (local stick) | M |
-| | SEARCH screen + keyboard | missing | M |
+| | SEARCH screen + keyboard | done (phase 3) | M |
 | | TRACK FILTER | missing | M |
 | | LOAD PREVIOUS TRACK (history) | done (phase 2) | S |
 | | Artwork in header, lists, INFO, jog | missing (tags have it) | S |
@@ -178,7 +178,8 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
   - Every list screen keeps the status strip (PLAYER, mm:ss, mini overview
     drawn by the shader, MT, range, tempo, BPM).
   - New keys for the CDJ's hardware screen buttons: L = TAG LIST, I = INFO,
-    U = MENU/UTILITY (B = BROWSE as before).
+    U = MENU/UTILITY, O = SOURCE, H = LOAD PREVIOUS TRACK, / = SEARCH
+    (B = BROWSE as before).
   - Dev: `OPENDECK_SCREEN=browse|taglist|menu|info`,
     `OPENDECK_BROWSE_SELECT=n`.
   - The INFO pane shows the highlighted track's tags (title, artist, album,
@@ -244,6 +245,25 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
     sources in the column, the "H" (hot cues) mark by the ♪.
   - Dev: `OPENDECK_SCRIPT` browse actions (`screen=browse; open=rekordbox;
     category=2; select=0`).
+- **Phase 3 (part 2): SEARCH.** Measured from the unit (`search-empty.png`,
+  `search-alo.png`, `search-123.png`).
+  - **Opening it:** the `/` key, a surface, or the `search=` script action
+    (`UiEvent::Search(SearchEdit::Open)`) opens it from wherever the browser
+    is (`Loc::Search` on the browse stack, so BACK leaves it).
+  - **Matching:** case-insensitive. Under a rekordbox source it matches title
+    or artist, as the unit does ("ALO" finds ALOTT's Lights Out and Galo's
+    Can't Get Enough). In a folder it matches file names anywhere below it,
+    from an index built once per folder (up to 50,000 files). An empty query
+    has no results.
+  - **Screen:**
+    - The header holds the search field (magnifier, text, caret).
+    - The results are the track table from x 0 (PREVIEW 0–239), six rows,
+      with a three-digit count.
+    - The keyboard sits below (keys 90×74 on a 100 px pitch; ⌫, CLEAR, SPACE,
+      123/ABC). The 123 page has the digits and `# + - / : ( ) & @` and
+      `. , ? ! ' " ~`.
+  - **Computer keyboard:** letters, digits, space and punctuation type;
+    Backspace deletes; arrows and Enter pick and load; Esc leaves.
 - **Phase 1 (part 2): GRID ADJUST.** A long rotary press on the unit (key A,
   or a tap on the pill) swaps in the GRID key row: SNAP GRID (CUE) = beat 1
   on the cue (`GridAdjust::ShiftCue`), SHIFT GRID (dim: it commits a sync

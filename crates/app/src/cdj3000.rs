@@ -1236,6 +1236,7 @@ fn usb_icon(ui: &Ui, c: Pos2, u: f32) {
 /// the highlighted row would act on: a track's details and a LOAD key.
 fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &TagList, u: f32, out: &mut Vec<Event>) {
     use crate::browser::RbField;
+    if b.in_search() { return draw_search(ui, snap, lay, b, tags, u, out); }
     let sc = lay.screen;
     let cats = b.rb_categories();
     let names = b.rb_names_field();
@@ -1262,7 +1263,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     }
     // A rekordbox track list is one full-width table (PREVIEW, TRACK, BPM, KEY).
     if cats.is_some() && !b.entries().is_empty() && b.entries().iter().all(|e| !e.is_dir) {
-        draw_track_table(ui, lay, b, &rows, &title, u, out);
+        draw_track_table(ui, lay, b, &rows, 92.0, 628.0, 4, u, out);
         if let Some(name) = snap.loading {
             label(ui, Pos2::new(sc.min.x + 1000.0 * u, sc.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
         }
@@ -1441,14 +1442,17 @@ fn draw_row_preview(ui: &Ui, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32
 /// A rekordbox track list as the unit draws it: PREVIEW (blue preview +
 /// cover), TRACK ▲ [count], BPM, KEY; the highlighted row carries
 /// LOAD in the BPM/KEY cells. Tap selects, a second tap (or LOAD) loads.
-fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], _title: &str, u: f32, out: &mut Vec<Event>) {
+fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32, bottom: f32, count_digits: usize, u: f32, out: &mut Vec<Event>) {
+    // Columns from the left edge: PREVIEW 239, then TRACK from +240.
+    let (pv, tr) = (left + 239.0, left + 240.0);
+    let vis = (((bottom - 152.0) / ROW_H).floor() as usize).max(1);
     let sc = lay.screen;
     let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
     let p = ui.painter();
     let grey = Color32::from_rgb(60, 60, 60);
-    let hb = Rect::from_min_max(at(92.0, 92.0), at(1280.0, 152.0));
+    let hb = Rect::from_min_max(at(left, 92.0), at(1280.0, 152.0));
     p.rect_filled(hb, 0.0, grey);
-    for x in [331.0, 1079.0, 1189.0] {
+    for x in [pv, 1079.0, 1189.0] {
         p.line_segment([at(x, 92.0), at(x, 152.0)], Stroke::new(1.5 * u, Color32::BLACK));
     }
     // ▲ drawn: the default font has no triangle glyph.
@@ -1457,10 +1461,10 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], _title: &s
         ui.painter().add(Shape::convex_polygon(vec![Pos2::new(x, y + h), Pos2::new(x + 2.0 * h, y + h), Pos2::new(x + h, y - h)], c, Stroke::NONE));
         x + 2.0 * h
     };
-    label(ui, at(103.0, 122.0), Align2::LEFT_CENTER, "PREVIEW", 21.0, u, LABEL);
-    let th = label(ui, at(343.0, 122.0), Align2::LEFT_CENTER, "TRACK", 21.0, u, ZOOM_BLUE);
+    label(ui, at(left + 11.0, 122.0), Align2::LEFT_CENTER, "PREVIEW", 21.0, u, LABEL);
+    let th = label(ui, at(tr + 11.0, 122.0), Align2::LEFT_CENTER, "TRACK", 21.0, u, ZOOM_BLUE);
     let tx = up(th, ZOOM_BLUE);
-    label(ui, Pos2::new(tx + 22.0 * u, th.center().y), Align2::LEFT_CENTER, format!("[{:04}]", rows.len()), 21.0, u, LABEL);
+    label(ui, Pos2::new(tx + 22.0 * u, th.center().y), Align2::LEFT_CENTER, format!("[{:0w$}]", rows.len(), w = count_digits), 21.0, u, LABEL);
     up(label(ui, at(1090.0, 122.0), Align2::LEFT_CENTER, "BPM", 21.0, u, LABEL), LABEL);
     up(label(ui, at(1200.0, 122.0), Align2::LEFT_CENTER, "KEY", 21.0, u, LABEL), LABEL);
     // The sort-order key (inert): a box with ⌃⌄.
@@ -1474,30 +1478,37 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], _title: &s
     p.line_segment([Pos2::new(cx - 6.0 * u, cy + 4.0 * u), Pos2::new(cx, cy + 10.0 * u)], st);
     p.line_segment([Pos2::new(cx, cy + 10.0 * u), Pos2::new(cx + 6.0 * u, cy + 4.0 * u)], st);
     let sel = b.selected;
-    let first = sel.saturating_sub(ROWS / 2).min(rows.len().saturating_sub(ROWS));
-    for k in 0..ROWS {
+    let first = sel.saturating_sub(vis / 2).min(rows.len().saturating_sub(vis));
+    for k in 0..vis {
         let y = 152.0 + ROW_H * k as f32;
-        if y + ROW_H > 629.0 { break; }
+        if y + ROW_H > bottom + 1.0 { break; }
         let i = first + k;
-        let row = Rect::from_min_max(at(92.0, y), at(1280.0, y + ROW_H));
+        let row = Rect::from_min_max(at(left, y), at(1280.0, y + ROW_H));
+        // Column rules, as the unit draws them (not through the LOAD key).
+        let rules = |skip_value_cols: bool| for x in [pv, 1079.0, 1189.0] {
+            if skip_value_cols && x > pv { continue; }
+            ui.painter().line_segment([at(x, y), at(x, y + ROW_H)], Stroke::new(1.0 * u, Color32::from_rgb(70, 70, 70)));
+        };
         let (Some(r), Some(e)) = (rows.get(i), b.entries().get(i)) else {
             p.rect_filled(row, 0.0, if k % 2 == 0 { ROW_GREY } else { BG });
+            rules(false);
             continue;
         };
         let lit = i == sel;
         let stripe = if k % 2 == 0 { Color32::from_rgb(40, 40, 40) } else { BG };
-        p.rect_filled(Rect::from_min_max(at(92.0, y), at(331.0, y + ROW_H)), 0.0, stripe);
-        draw_row_preview(ui, e, sc.min.x + 92.0 * u, sc.min.y + y * u, u);
-        p.rect_filled(Rect::from_min_max(at(332.0, y), at(1280.0, y + ROW_H)), 0.0, if lit { SEL_BLUE } else { stripe });
+        p.rect_filled(Rect::from_min_max(at(left, y), at(pv, y + ROW_H)), 0.0, stripe);
+        draw_row_preview(ui, e, sc.min.x + left * u, sc.min.y + y * u, u);
+        p.rect_filled(Rect::from_min_max(at(tr, y), at(1280.0, y + ROW_H)), 0.0, if lit { SEL_BLUE } else { stripe });
         let cy = sc.min.y + (y + ROW_H / 2.0) * u;
-        let title = Rect::from_min_max(at(332.0, y), at(1079.0, y + ROW_H));
+        let title = Rect::from_min_max(at(tr, y), at(1079.0, y + ROW_H));
         if tap(ui, title, &format!("cdj-trk-{i}")).0 {
             out.push(Event::Deck(if lit { ControlEvent::Load } else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - sel as i32 } }));
         }
-        label(ui, Pos2::new(sc.min.x + 355.0 * u, cy), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
-        p.with_clip_rect(title.shrink2(Vec2::new(0.0, 0.0)).intersect(Rect::from_min_max(at(332.0, y), at(1075.0, y + ROW_H))))
-            .text(Pos2::new(sc.min.x + 378.0 * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), if r.played { PLAYED } else { TEXT });
+        label(ui, Pos2::new(sc.min.x + (tr + 23.0) * u, cy), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
+        p.with_clip_rect(title.shrink2(Vec2::new(0.0, 0.0)).intersect(Rect::from_min_max(at(tr, y), at(1075.0, y + ROW_H))))
+            .text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), if r.played { PLAYED } else { TEXT });
         if r.tagged { p.circle_filled(Pos2::new(sc.min.x + 1068.0 * u, cy), 5.0 * u, BARS_ORANGE); }
+        rules(lit);
         if lit {
             let load = Rect::from_min_max(at(1080.0, y), at(1280.0, y + ROW_H));
             p.rect_filled(load, 0.0, Color32::from_rgb(225, 225, 225));
@@ -1513,11 +1524,87 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], _title: &s
         }
     }
     // Scroll position.
-    if rows.len() > ROWS {
-        let track = Rect::from_min_max(at(1275.0, 152.0), at(1280.0, 628.0));
-        let h = track.height() * ROWS as f32 / rows.len() as f32;
-        let y0 = track.min.y + (track.height() - h) * first as f32 / (rows.len() - ROWS) as f32;
+    if rows.len() > vis {
+        let track = Rect::from_min_max(at(1275.0, 152.0), at(1280.0, bottom));
+        let h = track.height() * vis as f32 / rows.len() as f32;
+        let y0 = track.min.y + (track.height() - h) * first as f32 / (rows.len() - vis) as f32;
         p.rect_filled(Rect::from_min_size(Pos2::new(track.min.x, y0), Vec2::new(track.width(), h)), 0.0, DIM);
+    }
+}
+
+/// SEARCH (measured on the unit): the text field in the header, the results
+/// as the track table (six rows, no category column) and the keyboard below,
+/// with a 123 page for digits and symbols.
+fn draw_search(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &TagList, u: f32, out: &mut Vec<Event>) {
+    use crate::input::SearchEdit as S;
+    let sc = lay.screen;
+    let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
+    let p = ui.painter();
+    // Header: source tile, then the search field.
+    p.rect_filled(lay.header, 0.0, HEADER);
+    let st = lay.source;
+    p.rect_filled(st, 0.0, SOURCE_TILE);
+    label(ui, Pos2::new(st.center().x, st.min.y + 66.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
+    label(ui, Pos2::new(st.center().x, st.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
+    let field = Rect::from_min_max(at(109.0, 20.0), at(874.0, 70.0));
+    p.rect_filled(field, 0.0, Color32::BLACK);
+    let m = at(137.0, 43.0);
+    p.circle_stroke(m, 7.0 * u, Stroke::new(2.0 * u, LABEL));
+    p.line_segment([Pos2::new(m.x + 5.0 * u, m.y + 5.0 * u), Pos2::new(m.x + 11.0 * u, m.y + 11.0 * u)], Stroke::new(2.5 * u, LABEL));
+    let q = b.search_query();
+    let t = ui.painter().with_clip_rect(field).text(at(173.0, 45.0), Align2::LEFT_CENTER, q, FontId::proportional(28.0 * u), TEXT);
+    let cx = if q.is_empty() { at(176.0, 0.0).x } else { t.max.x + 3.0 * u };
+    p.line_segment([Pos2::new(cx, sc.min.y + 31.0 * u), Pos2::new(cx, sc.min.y + 59.0 * u)], Stroke::new(2.0 * u, TEXT));
+
+    // Results.
+    let rows: Vec<Row> = b.entries().iter().map(|e| Row {
+        icon: RowIcon::Track, text: &e.name, value: None,
+        tagged: e.load().map_or(false, |l| tags.contains(l)),
+        played: e.load().map_or(false, |l| b.was_played(l)),
+    }).collect();
+    draw_track_table(ui, lay, b, &rows, 0.0, 439.0, 3, u, out);
+
+    // Keyboard.
+    let kb = Rect::from_min_max(at(0.0, 439.0), at(1280.0, 720.0));
+    p.rect_filled(kb, 0.0, Color32::from_rgb(35, 35, 35));
+    p.line_segment([at(0.0, 439.0), at(1280.0, 439.0)], Stroke::new(1.5 * u, Color32::from_rgb(75, 75, 75)));
+    let page_id = Id::new("cdj3k-search-123");
+    let digits = ui.ctx().data(|d| d.get_temp::<bool>(page_id)).unwrap_or(false);
+    let rows_k: [(&str, f32); 3] = if digits {
+        [("1234567890", 145.0), ("#+-/:()&@", 195.0), (".,?!'\"~", 295.0)]
+    } else {
+        [("QWERTYUIOP", 145.0), ("ASDFGHJKL", 195.0), ("ZXCVBNM", 295.0)]
+    };
+    let key = |r: Rect, text: &str, id: &str| -> bool {
+        let p = ui.painter();
+        p.rect_filled(r, 0.0, Color32::from_rgb(48, 48, 48));
+        p.line_segment([Pos2::new(r.min.x, r.max.y), Pos2::new(r.max.x, r.max.y)], Stroke::new(2.0 * u, Color32::from_rgb(17, 17, 17)));
+        p.line_segment([Pos2::new(r.max.x, r.min.y), Pos2::new(r.max.x, r.max.y)], Stroke::new(2.0 * u, Color32::from_rgb(17, 17, 17)));
+        label(ui, r.center(), Align2::CENTER_CENTER, text, 26.0, u, TEXT);
+        tap(ui, r, id).0
+    };
+    for (row, (chars, x0)) in rows_k.iter().enumerate() {
+        let y = 459.0 + 84.0 * row as f32;
+        for (i, ch) in chars.chars().enumerate() {
+            let x = x0 + 100.0 * i as f32;
+            if key(Rect::from_min_max(at(x, y), at(x + 90.0, y + 74.0)), &ch.to_string(), &format!("cdj-kb-{row}-{i}")) {
+                out.push(Event::Ui(UiEvent::Search(S::Char(ch))));
+            }
+        }
+    }
+    // ⌫: a key with a pointed left end.
+    let bk = Rect::from_min_max(at(1169.0, 459.0), at(1260.0, 533.0));
+    let pts = vec![Pos2::new(bk.min.x, bk.center().y), Pos2::new(bk.min.x + 16.0 * u, bk.min.y), Pos2::new(bk.max.x, bk.min.y),
+                   Pos2::new(bk.max.x, bk.max.y), Pos2::new(bk.min.x + 16.0 * u, bk.max.y)];
+    p.add(Shape::convex_polygon(pts, Color32::from_rgb(48, 48, 48), Stroke::NONE));
+    let (c, a) = (Pos2::new(bk.center().x + 6.0 * u, bk.center().y), 8.0 * u);
+    p.line_segment([Pos2::new(c.x - a, c.y - a), Pos2::new(c.x + a, c.y + a)], Stroke::new(2.5 * u, TEXT));
+    p.line_segment([Pos2::new(c.x - a, c.y + a), Pos2::new(c.x + a, c.y - a)], Stroke::new(2.5 * u, TEXT));
+    if tap(ui, bk, "cdj-kb-back").0 { out.push(Event::Ui(UiEvent::Search(S::Backspace))); }
+    if key(Rect::from_min_max(at(1139.0, 543.0), at(1260.0, 617.0)), "CLEAR", "cdj-kb-clear") { out.push(Event::Ui(UiEvent::Search(S::Clear))); }
+    if key(Rect::from_min_max(at(1139.0, 627.0), at(1260.0, 701.0)), "SPACE", "cdj-kb-space") { out.push(Event::Ui(UiEvent::Search(S::Char(' ')))); }
+    if key(Rect::from_min_max(at(20.0, 627.0), at(140.0, 701.0)), if digits { "ABC" } else { "123" }, "cdj-kb-page") {
+        ui.ctx().data_mut(|d| d.insert_temp(page_id, !digits));
     }
 }
 

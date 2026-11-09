@@ -48,6 +48,9 @@ pub enum UiEvent {
     /// Open (true) or close BROWSE outright, for surfaces that report BROWSE
     /// as a level (a CDJ-3000 over lanhid) rather than a toggling key.
     ShowBrowse(bool),
+    /// SEARCH: open it, or edit the text (the CDJ-3000's on-screen keyboard,
+    /// or typing on a computer keyboard).
+    Search(SearchEdit),
     /// BROWSE on a rekordbox source: open the `n`th category (ARTIST, ALBUM…)
     /// from the CDJ-3000 skin's category column.
     BrowseCategory(usize),
@@ -79,6 +82,10 @@ pub enum GridAdjust {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Source { Link, Usb }
+
+/// An edit to the SEARCH text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SearchEdit { Open, Char(char), Backspace, Clear }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Screen { Browse, TagList, Info, Menu, Perform, Source, History }
