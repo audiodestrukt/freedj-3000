@@ -75,6 +75,9 @@ pub struct DeckSnapshot<'a> {
     pub grid_edited: bool,
     /// The cue point was set by hand, not only placed at load (SNAP GRID lights).
     pub cue_set: bool,
+    /// SYNC's held phase offset in beats (a jog nudge while synced); nonzero
+    /// lights SHIFT GRID.
+    pub sync_offset: f32,
     /// LINK selected in the source column (else the local file / USB).
     pub source_link:  bool,
     /// Phase-meter slot shows the master-alignment tick view.

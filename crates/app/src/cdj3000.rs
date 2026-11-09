@@ -477,9 +477,9 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
 /// GRID ADJUST's key row (replaces a touch panel): SNAP GRID (CUE), SHIFT
 /// GRID, ◀◀ 1/2, ▶▶ 1/2, RESET. Measured on the unit: 116×84 keys at y 383.
 /// SNAP GRID lights once a cue has been set by hand (the unit keeps it dim
-/// while the only cue is the one placed at load). SHIFT GRID commits a sync
-/// pitch-bend offset freedj does not keep, so it stays dim; RESET lights once
-/// the grid is edited.
+/// while the only cue is the one placed at load). SHIFT GRID lights while
+/// SYNC holds a phase offset left by a jog nudge and folds it into the grid;
+/// RESET lights once the grid is edited.
 fn draw_grid_keys(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
     use crate::input::GridAdjust as G;
     let sc = lay.screen;
@@ -487,7 +487,7 @@ fn draw_grid_keys(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut 
     let have_grid = snap.beat_grid.is_some();
     let keys: [(f32, &[&str], Option<G>, bool); 5] = [
         (315.0, &["SNAP", "GRID"], Some(G::ShiftCue), have_grid && snap.cue_set),
-        (451.0, &["SHIFT", "GRID"], None, false),
+        (451.0, &["SHIFT", "GRID"], Some(G::ShiftSync), have_grid && snap.sync_offset.abs() > 0.005),
         (587.0, &["1/2"], Some(G::HalfBeat { forward: false }), have_grid),
         (713.0, &["1/2"], Some(G::HalfBeat { forward: true }), have_grid),
         (849.0, &["RESET"], Some(G::Reset), snap.grid_edited),

@@ -324,7 +324,7 @@ struct DeckApp {
 #[derive(Clone, Copy)]
 struct UiFlags {
     key_lock: bool, jog_vinyl: bool, remain_mode: bool, auto_cue: bool, slip: bool, sync: bool, master: bool,
-    zoom_grid_mode: bool, grid_edited: bool, cue_set: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
+    zoom_grid_mode: bool, grid_edited: bool, cue_set: bool, sync_offset: f32, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
     player: u8,
     cue_point: u64,
     hot_cues: [Option<u64>; 8],
@@ -394,6 +394,7 @@ fn make_snapshot<'a>(
         zoom_grid_mode: f.zoom_grid_mode,
         grid_edited:   f.grid_edited,
         cue_set:       f.cue_set,
+        sync_offset:   f.sync_offset,
         source_link:   f.source_link,
         phase_ticks_view: f.phase_ticks_view,
         linked:        f.linked,
@@ -660,6 +661,11 @@ impl DeckApp {
                     const NUDGE_PER_TICK: f32 = 0.002;
                     self.jog_offset = (self.jog_offset + delta as f32 * NUDGE_PER_TICK).clamp(-0.5, 0.5);
                     self.jog_until  = Some(Instant::now() + Duration::from_millis(150));
+                    // Synced: tell SYNC to leave the phase where the nudge puts it.
+                    if self.link.sync.load(Ordering::Relaxed) {
+                        let ms = self.link.epoch.elapsed().as_millis() as u64 + 150;
+                        self.link.jog_nudge_ms.store(ms, Ordering::Relaxed);
+                    }
                     let f = f32::from_bits(self.fader_speed.load(Ordering::Relaxed));
                     let spd = (f + self.jog_offset).clamp(0.25, 4.0);
                     self.audio.speed.store(spd.to_bits(), Ordering::Relaxed);
@@ -1091,6 +1097,17 @@ impl DeckApp {
                         self.grids.remove(&self.path.to_string_lossy());
                         self.link_grid.store(Arc::new(self.beat_grid.clone()));
                         log::info!("grid: reset to analysed");
+                    }
+                    ShiftSync => {
+                        let held = f32::from_bits(self.link.sync_offset.swap(0.0f32.to_bits(), Ordering::Relaxed)) as f64;
+                        if let (Some(g), true) = (self.beat_grid.as_mut(), held != 0.0) {
+                            // We sit `held` beats past each grid beat when the
+                            // master's lands: move the beats there.
+                            let per = grids::period_frames(g, self.audio.sample_rate);
+                            grids::shift(g, (held * per).round() as i64, per);
+                            self.grid_changed();
+                            log::info!("grid: SHIFT GRID by {held:+.3} beat");
+                        }
                     }
                     HalfBeat { forward } => {
                         if let Some(g) = self.beat_grid.as_mut() {
@@ -2058,6 +2075,7 @@ impl DeckApp {
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             grid_edited: self.grids.get(&self.path.to_string_lossy()).is_some(),
             cue_set: self.cue_set,
+            sync_offset: f32::from_bits(self.link.sync_offset.load(Ordering::Relaxed)),
             source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             // Master indicator (phase-ticks view): the real XDJ shows a flat
@@ -2241,6 +2259,7 @@ impl DeckApp {
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             grid_edited: self.grids.get(&self.path.to_string_lossy()).is_some(),
             cue_set: self.cue_set,
+            sync_offset: f32::from_bits(self.link.sync_offset.load(Ordering::Relaxed)),
             source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             // Master indicator (phase-ticks view): the real XDJ shows a flat

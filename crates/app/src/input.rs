@@ -68,6 +68,10 @@ pub enum GridAdjust {
     ShiftCue,
     /// CDJ-3000 ◀◀ 1/2 / ▶▶ 1/2: slide the grid half a beat.
     HalfBeat { forward: bool },
+    /// CDJ-3000 SHIFT GRID: fold SYNC's held phase offset (left by a jog
+    /// nudge while synced) into the grid, so the deck stays where it is heard
+    /// with no offset.
+    ShiftSync,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

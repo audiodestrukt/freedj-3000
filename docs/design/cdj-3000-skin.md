@@ -209,7 +209,7 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
 - **Phase 1 (part 2): GRID ADJUST.** A long rotary press on the unit (key A,
   or a tap on the pill) swaps in the GRID key row: SNAP GRID (CUE) = beat 1
   on the cue (`GridAdjust::ShiftCue`), SHIFT GRID (dim: it commits a sync
-  pitch-bend offset freedj does not keep), ◀◀ 1/2 and ▶▶ 1/2
+  pitch-bend offset; see below), ◀◀ 1/2 and ▶▶ 1/2
   (`GridAdjust::HalfBeat`), and RESET, lit once the grid is edited
   (`DeckSnapshot::grid_edited`). The field shrinks as for a touch panel and
   the pill boxes GRID ("– ZOOM [GRID]"). The selector moves the grid 1/64 beat
@@ -220,6 +220,10 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
     or off the cue, and after a snap. freedj follows this with
     `DeckSnapshot::cue_set` (set by a new CUE or a called memory point, cleared
     on load).
+  - SHIFT GRID lights while SYNC holds a phase offset left by a jog bend and
+    folds it into the grid; freedj's SYNC now holds that offset instead of
+    pulling back to 0. Full findings, data and the test rig:
+    [cdj-grid-adjust.md](cdj-grid-adjust.md).
   - The manual also lists ×2, ×1/2, Enlarge and Reduce. The emulated firmware
     shows only the five keys, for analysed and unanalysed tracks alike, so
     freedj draws five.

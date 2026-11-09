@@ -97,6 +97,26 @@ pub struct LinkState {
     /// INFO page — so a deck on the wrong interface or subnet is visible on
     /// the device itself.
     pub own_addr:      Mutex<String>,
+    /// SYNC's held phase offset, in beats (f32 bits). A jog nudge while
+    /// synced leaves the deck off the master's beat by this much, and SYNC
+    /// keeps it there (as a CDJ does) instead of pulling back to 0. SHIFT
+    /// GRID folds it into the beat grid. Cleared when SYNC goes off.
+    pub sync_offset:   AtomicU32,
+    /// Until when (ms since `epoch`) the jog is nudging a synced deck; SYNC
+    /// leaves the phase alone meanwhile and measures the new offset after.
+    pub jog_nudge_ms:  AtomicU64,
+}
+
+/// How long after the last jog nudge SYNC waits before measuring the offset
+/// the nudge left (the deck is back at the fader speed by then).
+const JOG_SETTLE_MS: u64 = 300;
+
+/// The phase error SYNC corrects, in beats within ±0.5: how far `frac` (our
+/// position in our own beat when the master's beat lands) is from the held
+/// `offset`.
+fn phase_err(frac: f64, offset: f64) -> f64 {
+    let e = frac - offset;
+    e - e.round()
 }
 
 impl LinkState {
@@ -122,6 +142,8 @@ impl LinkState {
             beat2_beat_ms: AtomicU64::new(0),
             beat2_seen_ms: AtomicU64::new(0),
             beat2_playing: AtomicBool::new(false),
+            sync_offset: AtomicU32::new(0.0f32.to_bits()),
+            jog_nudge_ms: AtomicU64::new(0),
             master_seen_ms: AtomicU64::new(0),
             own_addr: Mutex::new(String::new()),
         })
@@ -378,7 +400,14 @@ fn link_interface(peers: &[Ipv4Addr]) -> (Ipv4Addr, Ipv4Addr, [u8; 6], String) {
         for i in ifs {
             if i.is_loopback() { continue; }
             let if_addrs::IfAddr::V4(v4) = &i.addr else { continue };
-            let Some(bc) = v4.broadcast else { continue };
+            // An address added without `brd` reports no broadcast (or its own
+            // address); derive it from the netmask rather than broadcasting to
+            // ourselves.
+            let bc = match v4.broadcast {
+                Some(b) if b != v4.ip && !b.is_unspecified() => b,
+                _ if v4.netmask.is_unspecified() || v4.netmask.is_broadcast() => continue,
+                _ => Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask)),
+            };
             if let Some((name, ..)) = pin {
                 if i.name != *name { continue; }
             } else if i.name.starts_with("docker") || i.name.starts_with("br-") || i.name.starts_with("lxc") || i.name.starts_with("virbr") {
@@ -797,6 +826,9 @@ impl ProDjSender {
                 // Sync follow: phase nudge in progress (speed offset, until).
                 let mut nudge: Option<(f32, Instant)> = None;
                 let mut seen_master_beat = link.master_beat_seq.load(Ordering::Relaxed);
+                // A jog nudge happened while synced: measure the offset it
+                // left at the next master beat after the wheel settles.
+                let mut offset_pending = false;
                 // Status goes out immediately when our master/sync flags change:
                 // the old master waits only briefly for the new one's claim.
                 let mut last_flags = (false, false);
@@ -1018,6 +1050,15 @@ impl ProDjSender {
 
                     // ── SYNC follow ──────────────────────────────────────────
                     let sync = link.sync.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed);
+                    if !sync {
+                        offset_pending = false;
+                        if link.sync_offset.load(Ordering::Relaxed) != 0.0f32.to_bits() {
+                            link.sync_offset.store(0.0f32.to_bits(), Ordering::Relaxed);
+                        }
+                    }
+                    let now_ms = link.epoch.elapsed().as_millis() as u64;
+                    let jogging = now_ms < link.jog_nudge_ms.load(Ordering::Relaxed).saturating_add(JOG_SETTLE_MS);
+                    if jogging { offset_pending = true; }
                     if sync && cur_grid.is_some() {
                         let grid = cur_grid.as_ref().unwrap();
                         let master_bpm = f32::from_bits(link.master_bpm.load(Ordering::Relaxed));
@@ -1035,7 +1076,17 @@ impl ProDjSender {
                             if seq != seen_master_beat {
                                 seen_master_beat = seq;
                                 if let Some((_, frac)) = beat_now {
-                                    let err = if frac > 0.5 { frac - 1.0 } else { frac };   // beats, ±0.5
+                                    let offset = f32::from_bits(link.sync_offset.load(Ordering::Relaxed)) as f64;
+                                    if jogging {
+                                        // The jog owns the speed while it nudges.
+                                    } else if offset_pending {
+                                        // Hold the phase the nudge left (CDJ: SHIFT GRID lights).
+                                        offset_pending = false;
+                                        let held = phase_err(frac, 0.0);
+                                        link.sync_offset.store((held as f32).to_bits(), Ordering::Relaxed);
+                                        log::info!("ProDJ sync: holding phase offset {held:+.3} beat");
+                                    } else {
+                                    let err = phase_err(frac, offset);   // beats, ±0.5
                                     if err.abs() > 0.01 {
                                         // Correct half the error per master beat: bounded like a
                                         // jog nudge, and halving avoids the overshoot a full
@@ -1045,6 +1096,7 @@ impl ProDjSender {
                                         nudge = Some((offset, now + Duration::from_secs_f32(period_s)));
                                         st.speed.store((want + offset).to_bits(), Ordering::Relaxed);
                                         log::debug!("ProDJ sync: phase err {err:+.3} beat → nudge {:+.2}%", offset * 100.0);
+                                    }
                                     }
                                 }
                             }
@@ -1259,5 +1311,29 @@ mod peer_phase_tests {
         assert!(beat_is_twin(&mut last, 3, t0 + Duration::from_millis(5)));    // the unicast copy
         assert!(!beat_is_twin(&mut last, 4, t0 + Duration::from_millis(5)));   // another player
         assert!(!beat_is_twin(&mut last, 3, t0 + Duration::from_millis(300))); // the next beat (200 BPM)
+    }
+}
+
+#[cfg(test)]
+mod sync_offset_tests {
+    use super::phase_err;
+
+    #[test]
+    fn phase_err_wraps_around_the_held_offset() {
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        // No offset: just past a beat is +, just before the next is −.
+        assert!(close(phase_err(0.1, 0.0), 0.1));
+        assert!(close(phase_err(0.9, 0.0), -0.1));
+        // Holding +0.2: sitting at 0.2 is on target; 0.1 is 0.1 behind it.
+        assert!(close(phase_err(0.2, 0.2), 0.0));
+        assert!(close(phase_err(0.1, 0.2), -0.1));
+        // Holding −0.2 (0.8 in beat terms) wraps across the beat.
+        assert!(close(phase_err(0.8, -0.2), 0.0));
+        assert!(close(phase_err(0.05, -0.2), 0.25));
+        // Always within half a beat.
+        for i in 0..100 {
+            let f = i as f64 / 100.0;
+            assert!(phase_err(f, 0.37).abs() <= 0.5 + 1e-9);
+        }
     }
 }
