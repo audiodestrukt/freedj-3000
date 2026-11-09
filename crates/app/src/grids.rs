@@ -48,6 +48,13 @@ pub fn snap_to(g: &mut BeatGrid, frame: u64, period: f64, downbeat: bool) {
     }
 }
 
+/// SHIFT GRID: SYNC held the deck `beats` past each of its own beats when the
+/// master's landed (a jog nudge while synced). Move the beats there, so with
+/// the offset cleared SYNC keeps the deck exactly where it was heard.
+pub fn shift_by_beats(g: &mut BeatGrid, beats: f64, period: f64) {
+    shift(g, (beats * period).round() as i64, period);
+}
+
 /// Hand-corrected grids, persisted across launches.
 pub struct GridStore {
     path: PathBuf,
@@ -99,6 +106,28 @@ mod tests {
     fn beat_in_bar(g: &BeatGrid, frame: u64) -> u8 {
         let beat = ((frame as f64 - g.anchor_sample as f64) / P).floor() as i64;
         ((beat + g.downbeat_offset as i64).rem_euclid(4) + 1) as u8
+    }
+
+    /// SHIFT GRID keeps what you hear: the frame the deck was playing when the
+    /// master's beat landed (held offset past our beat) becomes a beat.
+    #[test]
+    fn shift_by_beats_puts_the_heard_point_on_the_beat() {
+        for held in [0.2, -0.15, 0.49] {
+            let mut g = grid(1000, 1);
+            let k = 7.0;
+            let heard = (1000.0 + (k + held) * P).round() as u64;
+            let before_bar = beat_in_bar(&g, 1000 + 7 * 22050 + 10);
+            shift_by_beats(&mut g, held, P);
+            let rel = (heard as f64 - g.anchor_sample as f64) / P;
+            assert!((rel - rel.round()).abs() < 1e-3, "held {held}: heard point now {rel:.4} beats");
+            // Same beat number in the bar for that beat (shifted along with it).
+            let after = beat_in_bar(&g, heard + 10);
+            assert_eq!(after, before_bar, "held {held}: bar position kept");
+        }
+        // A zero offset changes nothing.
+        let mut g = grid(1000, 0);
+        shift_by_beats(&mut g, 0.0, P);
+        assert_eq!(g.anchor_sample, 1000);
     }
 
     #[test]

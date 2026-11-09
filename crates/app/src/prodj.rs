@@ -119,6 +119,53 @@ fn phase_err(frac: f64, offset: f64) -> f64 {
     e - e.round()
 }
 
+/// What SYNC does with the phase on one master beat.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PhaseAct {
+    /// Leave the speed alone (on target, or the jog owns it).
+    None,
+    /// A nudge just settled: hold this offset (beats) from now on.
+    Hold(f64),
+    /// Run at the fader speed plus this fraction for one beat.
+    Correct(f32),
+}
+
+/// SYNC's phase decisions, kept out of the Link thread so they can be tested
+/// as sequences. A CDJ keeps the offset a jog bend leaves while synced (SHIFT
+/// GRID then writes it into the grid); this does the same.
+#[derive(Default)]
+struct SyncPhase {
+    /// A nudge happened; measure the offset at the next beat after it settles.
+    pending: bool,
+}
+
+impl SyncPhase {
+    /// Every loop pass. Returns true when the held offset must be cleared
+    /// (SYNC is off).
+    fn tick(&mut self, sync: bool, jogging: bool) -> bool {
+        if !sync {
+            self.pending = false;
+            return true;
+        }
+        if jogging { self.pending = true; }
+        false
+    }
+
+    /// A master beat landed with us `frac` (0..1) into our own beat.
+    fn on_master_beat(&mut self, frac: f64, offset: f64, jogging: bool) -> PhaseAct {
+        if jogging { return PhaseAct::None; }
+        if self.pending {
+            self.pending = false;
+            return PhaseAct::Hold(phase_err(frac, 0.0));
+        }
+        let err = phase_err(frac, offset);
+        // Correct half the error per master beat: bounded like a jog nudge,
+        // and halving avoids the overshoot a full correction gives (measured
+        // ±0.02 beat oscillation at gain 1).
+        if err.abs() > 0.01 { PhaseAct::Correct((-(err as f32) * 0.5).clamp(-0.03, 0.03)) } else { PhaseAct::None }
+    }
+}
+
 impl LinkState {
     pub fn new(player: u8) -> Arc<Self> {
         Arc::new(Self {
@@ -383,10 +430,26 @@ fn pinned_iface() -> Option<&'static (String, Ipv4Addr, Ipv4Addr)> {
 
 /// Whether a Link packet from `src` should be heard (always, unless pinned).
 fn heard_from(src: SocketAddr) -> bool {
-    match (pinned_iface(), src.ip()) {
+    heard_on(pinned_iface().map(|(_, ip, mask)| (*ip, *mask)), src)
+}
+
+/// [`heard_from`] with the pin given: (our ip, netmask) or none.
+fn heard_on(pin: Option<(Ipv4Addr, Ipv4Addr)>, src: SocketAddr) -> bool {
+    match (pin, src.ip()) {
         (None, _) => true,
-        (Some((_, ip, mask)), std::net::IpAddr::V4(from)) => same_subnet(*ip, from, *mask) || from.is_loopback(),
+        (Some((ip, mask)), std::net::IpAddr::V4(from)) => same_subnet(ip, from, mask) || from.is_loopback(),
         (Some(_), _) => false,
+    }
+}
+
+/// The broadcast address to send Link on. An address added without `brd`
+/// reports none (or its own address); derive it from the netmask instead of
+/// broadcasting to ourselves. None for a host route (/32) or no mask.
+fn broadcast_for(ip: Ipv4Addr, mask: Ipv4Addr, reported: Option<Ipv4Addr>) -> Option<Ipv4Addr> {
+    match reported {
+        Some(b) if b != ip && !b.is_unspecified() => Some(b),
+        _ if mask.is_unspecified() || mask.is_broadcast() => None,
+        _ => Some(Ipv4Addr::from(u32::from(ip) | !u32::from(mask))),
     }
 }
 
@@ -403,11 +466,7 @@ fn link_interface(peers: &[Ipv4Addr]) -> (Ipv4Addr, Ipv4Addr, [u8; 6], String) {
             // An address added without `brd` reports no broadcast (or its own
             // address); derive it from the netmask rather than broadcasting to
             // ourselves.
-            let bc = match v4.broadcast {
-                Some(b) if b != v4.ip && !b.is_unspecified() => b,
-                _ if v4.netmask.is_unspecified() || v4.netmask.is_broadcast() => continue,
-                _ => Ipv4Addr::from(u32::from(v4.ip) | !u32::from(v4.netmask)),
-            };
+            let Some(bc) = broadcast_for(v4.ip, v4.netmask, v4.broadcast) else { continue };
             if let Some((name, ..)) = pin {
                 if i.name != *name { continue; }
             } else if i.name.starts_with("docker") || i.name.starts_with("br-") || i.name.starts_with("lxc") || i.name.starts_with("virbr") {
@@ -828,7 +887,7 @@ impl ProDjSender {
                 let mut seen_master_beat = link.master_beat_seq.load(Ordering::Relaxed);
                 // A jog nudge happened while synced: measure the offset it
                 // left at the next master beat after the wheel settles.
-                let mut offset_pending = false;
+                let mut phase = SyncPhase::default();
                 // Status goes out immediately when our master/sync flags change:
                 // the old master waits only briefly for the new one's claim.
                 let mut last_flags = (false, false);
@@ -1050,15 +1109,11 @@ impl ProDjSender {
 
                     // ── SYNC follow ──────────────────────────────────────────
                     let sync = link.sync.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed);
-                    if !sync {
-                        offset_pending = false;
-                        if link.sync_offset.load(Ordering::Relaxed) != 0.0f32.to_bits() {
-                            link.sync_offset.store(0.0f32.to_bits(), Ordering::Relaxed);
-                        }
-                    }
                     let now_ms = link.epoch.elapsed().as_millis() as u64;
                     let jogging = now_ms < link.jog_nudge_ms.load(Ordering::Relaxed).saturating_add(JOG_SETTLE_MS);
-                    if jogging { offset_pending = true; }
+                    if phase.tick(sync, jogging) && link.sync_offset.load(Ordering::Relaxed) != 0.0f32.to_bits() {
+                        link.sync_offset.store(0.0f32.to_bits(), Ordering::Relaxed);
+                    }
                     if sync && cur_grid.is_some() {
                         let grid = cur_grid.as_ref().unwrap();
                         let master_bpm = f32::from_bits(link.master_bpm.load(Ordering::Relaxed));
@@ -1076,27 +1131,19 @@ impl ProDjSender {
                             if seq != seen_master_beat {
                                 seen_master_beat = seq;
                                 if let Some((_, frac)) = beat_now {
-                                    let offset = f32::from_bits(link.sync_offset.load(Ordering::Relaxed)) as f64;
-                                    if jogging {
-                                        // The jog owns the speed while it nudges.
-                                    } else if offset_pending {
-                                        // Hold the phase the nudge left (CDJ: SHIFT GRID lights).
-                                        offset_pending = false;
-                                        let held = phase_err(frac, 0.0);
-                                        link.sync_offset.store((held as f32).to_bits(), Ordering::Relaxed);
-                                        log::info!("ProDJ sync: holding phase offset {held:+.3} beat");
-                                    } else {
-                                    let err = phase_err(frac, offset);   // beats, ±0.5
-                                    if err.abs() > 0.01 {
-                                        // Correct half the error per master beat: bounded like a
-                                        // jog nudge, and halving avoids the overshoot a full
-                                        // correction gives (measured ±0.02 beat oscillation at gain 1).
-                                        let offset = (-(err as f32) * 0.5).clamp(-0.03, 0.03);
-                                        let period_s = 60.0 / master_bpm.max(1.0);
-                                        nudge = Some((offset, now + Duration::from_secs_f32(period_s)));
-                                        st.speed.store((want + offset).to_bits(), Ordering::Relaxed);
-                                        log::debug!("ProDJ sync: phase err {err:+.3} beat → nudge {:+.2}%", offset * 100.0);
-                                    }
+                                    let held = f32::from_bits(link.sync_offset.load(Ordering::Relaxed)) as f64;
+                                    match phase.on_master_beat(frac, held, jogging) {
+                                        PhaseAct::None => {}
+                                        PhaseAct::Hold(off) => {
+                                            link.sync_offset.store((off as f32).to_bits(), Ordering::Relaxed);
+                                            log::info!("ProDJ sync: holding phase offset {off:+.3} beat");
+                                        }
+                                        PhaseAct::Correct(offset) => {
+                                            let period_s = 60.0 / master_bpm.max(1.0);
+                                            nudge = Some((offset, now + Duration::from_secs_f32(period_s)));
+                                            st.speed.store((want + offset).to_bits(), Ordering::Relaxed);
+                                            log::debug!("ProDJ sync: phase {frac:.3} vs held {held:+.3} → nudge {:+.2}%", offset * 100.0);
+                                        }
                                     }
                                 }
                             }
@@ -1316,7 +1363,119 @@ mod peer_phase_tests {
 
 #[cfg(test)]
 mod sync_offset_tests {
-    use super::phase_err;
+    use super::{phase_err, PhaseAct, SyncPhase};
+    use super::{broadcast_for, heard_on};
+    use std::net::{Ipv4Addr, SocketAddr};
+
+    #[test]
+    fn broadcast_is_derived_when_the_interface_reports_none() {
+        let ip = Ipv4Addr::new(169, 254, 77, 1);
+        let m16 = Ipv4Addr::new(255, 255, 0, 0);
+        // `ip addr add 169.254.77.1/16` with no brd: none, or our own address.
+        assert_eq!(broadcast_for(ip, m16, None), Some(Ipv4Addr::new(169, 254, 255, 255)));
+        assert_eq!(broadcast_for(ip, m16, Some(ip)), Some(Ipv4Addr::new(169, 254, 255, 255)));
+        assert_eq!(broadcast_for(ip, m16, Some(Ipv4Addr::UNSPECIFIED)), Some(Ipv4Addr::new(169, 254, 255, 255)));
+        // A reported broadcast is trusted.
+        let lan = Ipv4Addr::new(192, 168, 68, 64);
+        let b = Ipv4Addr::new(192, 168, 71, 255);
+        assert_eq!(broadcast_for(lan, Ipv4Addr::new(255, 255, 252, 0), Some(b)), Some(b));
+        // A host route has nowhere to broadcast.
+        assert_eq!(broadcast_for(ip, Ipv4Addr::BROADCAST, None), None);
+    }
+
+    #[test]
+    fn a_pinned_interface_hears_only_its_subnet() {
+        let at = |a: [u8; 4]| SocketAddr::from((Ipv4Addr::from(a), 50000));
+        let pin = Some((Ipv4Addr::new(169, 254, 77, 1), Ipv4Addr::new(255, 255, 0, 0)));
+        assert!(heard_on(pin, at([169, 254, 5, 55])), "the emulated CDJ on the bridge");
+        assert!(!heard_on(pin, at([192, 168, 68, 20])), "a deck on the LAN is ignored");
+        assert!(heard_on(pin, at([127, 0, 0, 1])), "loopback still works");
+        assert!(heard_on(None, at([192, 168, 68, 20])), "unpinned hears everything");
+    }
+
+    /// Synced, no jog: the classic pull toward the master's beat.
+    #[test]
+    fn without_a_nudge_sync_pulls_to_the_beat() {
+        let mut p = SyncPhase::default();
+        assert!(!p.tick(true, false));
+        match p.on_master_beat(0.1, 0.0, false) {
+            PhaseAct::Correct(o) => assert!(o < 0.0, "ahead → slow down, got {o}"),
+            other => panic!("{other:?}"),
+        }
+        match p.on_master_beat(0.9, 0.0, false) {
+            PhaseAct::Correct(o) => assert!(o > 0.0, "behind → speed up, got {o}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(p.on_master_beat(0.005, 0.0, false), PhaseAct::None, "inside the dead band");
+    }
+
+    /// The CDJ behaviour SHIFT GRID depends on: a nudge while synced is kept.
+    #[test]
+    fn a_nudge_while_synced_is_held_not_undone() {
+        let mut p = SyncPhase::default();
+        // The jog nudges for a few beats: SYNC keeps its hands off.
+        for frac in [0.05, 0.12, 0.2] {
+            p.tick(true, true);
+            assert_eq!(p.on_master_beat(frac, 0.0, true), PhaseAct::None);
+        }
+        // Wheel settles; the next master beat measures where it landed.
+        p.tick(true, false);
+        assert_eq!(p.on_master_beat(0.2, 0.0, false), PhaseAct::Hold(0.2));
+        // Sitting at the held offset is on target: no pull back to 0.
+        assert_eq!(p.on_master_beat(0.2, 0.2, false), PhaseAct::None);
+        // Drifting off it corrects toward the offset, not toward 0.
+        match p.on_master_beat(0.3, 0.2, false) {
+            PhaseAct::Correct(o) => assert!(o < 0.0),
+            other => panic!("{other:?}"),
+        }
+        match p.on_master_beat(0.1, 0.2, false) {
+            PhaseAct::Correct(o) => assert!(o > 0.0, "0.1 is behind a 0.2 hold"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_backward_nudge_holds_a_negative_offset() {
+        let mut p = SyncPhase::default();
+        p.tick(true, true);
+        p.tick(true, false);
+        match p.on_master_beat(0.85, 0.0, false) {
+            PhaseAct::Hold(h) => assert!((h + 0.15).abs() < 1e-9, "0.85 into the beat is 0.15 early, got {h}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn sync_off_clears_the_hold_and_forgets_a_pending_nudge() {
+        let mut p = SyncPhase::default();
+        p.tick(true, true);                // nudging...
+        assert!(p.tick(false, false), "SYNC off asks to clear the offset");
+        p.tick(true, false);               // SYNC back on, no new nudge
+        assert!(matches!(p.on_master_beat(0.2, 0.0, false), PhaseAct::Correct(_)),
+                "no stale Hold from the nudge before SYNC went off");
+    }
+
+    /// Closed loop: each master beat applies the correction for one beat
+    /// (a speed offset of f moves the phase f beats), plus some drift. SYNC
+    /// must settle on the held offset, from either side.
+    #[test]
+    fn closed_loop_settles_on_the_held_offset() {
+        for (start, held, drift) in [(0.5, 0.2, 0.0), (0.0, 0.2, 0.004), (0.9, -0.15, -0.003)] {
+            let mut p = SyncPhase::default();
+            let mut frac: f64 = start;
+            for _ in 0..80 {
+                p.tick(true, false);
+                let corr = match p.on_master_beat(frac.rem_euclid(1.0), held, false) {
+                    PhaseAct::Correct(o) => o as f64,
+                    PhaseAct::None => 0.0,
+                    PhaseAct::Hold(_) => unreachable!(),
+                };
+                frac += corr + drift;
+            }
+            let err = phase_err(frac.rem_euclid(1.0), held);
+            assert!(err.abs() < 0.02, "start {start} hold {held} drift {drift}: ended {err:+.3} off");
+        }
+    }
 
     #[test]
     fn phase_err_wraps_around_the_held_offset() {

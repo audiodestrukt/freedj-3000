@@ -119,7 +119,7 @@ move with its known nudge direction (see Reproducing).
 
 - `LinkState::sync_offset` (beats, f32 bits) is the held offset;
   `LinkState::jog_nudge_ms` says the jog is nudging a synced deck.
-- **The SYNC loop** (`prodj.rs`, SYNC follow) corrects toward the held offset
+- **The SYNC loop** (`prodj.rs`, SYNC follow; decisions in `SyncPhase`) corrects toward the held offset
   (`phase_err(frac, offset)`, wrapped ±½ beat) instead of toward 0.
   - While the jog nudges, the loop leaves the phase alone.
   - At the first master beat after the wheel settles (`JOG_SETTLE_MS` = 300),
@@ -165,3 +165,24 @@ The rig puts the emulator and freedj on a private Link segment on one machine.
 
 Captures from these runs are in `reference/pioneer/cdj3000-emu/` (local only):
 `grid-adjust.png`, `browse-rekordbox-*.png` and `source-rekordbox.png`.
+
+## Tests
+
+The logic behind both keys is in pure functions with unit tests, so a
+regression does not need the emulator to show up:
+
+| What | Test |
+|---|---|
+| Phase error wraps around the held offset | `prodj::sync_offset_tests::phase_err_wraps_around_the_held_offset` |
+| No nudge: SYNC pulls to the beat | `…::without_a_nudge_sync_pulls_to_the_beat` |
+| A nudge while synced is held, and drift corrects toward it, not 0 | `…::a_nudge_while_synced_is_held_not_undone` |
+| A backward nudge holds a negative offset | `…::a_backward_nudge_holds_a_negative_offset` |
+| SYNC off clears the hold and a pending nudge | `…::sync_off_clears_the_hold_and_forgets_a_pending_nudge` |
+| Closed loop settles on the held offset, from either side, with drift | `…::closed_loop_settles_on_the_held_offset` |
+| SHIFT GRID puts the heard point on a beat and keeps the bar | `grids::tests::shift_by_beats_puts_the_heard_point_on_the_beat` |
+| Which keys light | `cdj3000::grid_key_tests::grid_keys_follow_the_units_rules` |
+| Only a new CUE reports a cue point (SNAP's signal) | `transport::tests::only_setting_a_new_cue_reports_cue_point` |
+| Broadcast derived without `brd`; the pin hears only its subnet | `prodj::sync_offset_tests::broadcast_is_derived_…`, `…::a_pinned_interface_hears_only_its_subnet` |
+
+Still manual: the live run against the emulator (Reproducing), and freedj as
+the synced deck.

@@ -474,6 +474,41 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
     }
 }
 
+/// Which GRID ADJUST keys are lit: SNAP GRID, SHIFT GRID, ◀◀ 1/2, ▶▶ 1/2,
+/// RESET. The unit's rules (docs/design/cdj-grid-adjust.md): SNAP after a
+/// hand-set cue, SHIFT while SYNC holds a jog offset, RESET once edited.
+fn grid_keys_lit(have_grid: bool, cue_set: bool, sync_offset: f32, grid_edited: bool) -> [bool; 5] {
+    [
+        have_grid && cue_set,
+        have_grid && sync_offset.abs() > 0.005,
+        have_grid,
+        have_grid,
+        grid_edited,
+    ]
+}
+
+#[cfg(test)]
+mod grid_key_tests {
+    use super::grid_keys_lit;
+
+    #[test]
+    fn grid_keys_follow_the_units_rules() {
+        // Fresh load: only the 1/2 keys.
+        assert_eq!(grid_keys_lit(true, false, 0.0, false), [false, false, true, true, false]);
+        // A hand-set cue lights SNAP.
+        assert_eq!(grid_keys_lit(true, true, 0.0, false)[0], true);
+        // A held sync offset (either sign) lights SHIFT; jitter below the
+        // threshold does not.
+        assert!(grid_keys_lit(true, false, 0.2, false)[1]);
+        assert!(grid_keys_lit(true, false, -0.2, false)[1]);
+        assert!(!grid_keys_lit(true, false, 0.003, false)[1]);
+        // An edited grid lights RESET.
+        assert!(grid_keys_lit(true, false, 0.0, true)[4]);
+        // No grid: nothing to snap, shift or slide.
+        assert_eq!(grid_keys_lit(false, true, 0.2, false), [false, false, false, false, false]);
+    }
+}
+
 /// GRID ADJUST's key row (replaces a touch panel): SNAP GRID (CUE), SHIFT
 /// GRID, ◀◀ 1/2, ▶▶ 1/2, RESET. Measured on the unit: 116×84 keys at y 383.
 /// SNAP GRID lights once a cue has been set by hand (the unit keeps it dim
@@ -484,13 +519,13 @@ fn draw_grid_keys(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut 
     use crate::input::GridAdjust as G;
     let sc = lay.screen;
     let key = |x: f32| Rect::from_min_max(Pos2::new(sc.min.x + x * u, sc.min.y + 383.0 * u), Pos2::new(sc.min.x + (x + 116.0) * u, sc.min.y + 467.0 * u));
-    let have_grid = snap.beat_grid.is_some();
+    let lit = grid_keys_lit(snap.beat_grid.is_some(), snap.cue_set, snap.sync_offset, snap.grid_edited);
     let keys: [(f32, &[&str], Option<G>, bool); 5] = [
-        (315.0, &["SNAP", "GRID"], Some(G::ShiftCue), have_grid && snap.cue_set),
-        (451.0, &["SHIFT", "GRID"], Some(G::ShiftSync), have_grid && snap.sync_offset.abs() > 0.005),
-        (587.0, &["1/2"], Some(G::HalfBeat { forward: false }), have_grid),
-        (713.0, &["1/2"], Some(G::HalfBeat { forward: true }), have_grid),
-        (849.0, &["RESET"], Some(G::Reset), snap.grid_edited),
+        (315.0, &["SNAP", "GRID"], Some(G::ShiftCue), lit[0]),
+        (451.0, &["SHIFT", "GRID"], Some(G::ShiftSync), lit[1]),
+        (587.0, &["1/2"], Some(G::HalfBeat { forward: false }), lit[2]),
+        (713.0, &["1/2"], Some(G::HalfBeat { forward: true }), lit[3]),
+        (849.0, &["RESET"], Some(G::Reset), lit[4]),
     ];
     let p = ui.painter();
     for (i, (x, words, op, on)) in keys.iter().enumerate() {

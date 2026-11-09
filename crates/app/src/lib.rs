@@ -1104,7 +1104,7 @@ impl DeckApp {
                             // We sit `held` beats past each grid beat when the
                             // master's lands: move the beats there.
                             let per = grids::period_frames(g, self.audio.sample_rate);
-                            grids::shift(g, (held * per).round() as i64, per);
+                            grids::shift_by_beats(g, held, per);
                             self.grid_changed();
                             log::info!("grid: SHIFT GRID by {held:+.3} beat");
                         }

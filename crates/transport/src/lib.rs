@@ -219,6 +219,24 @@ mod tests {
         assert_eq!(t.cue_point, CUE, "returning must not move the cue");
     }
 
+    /// The app's SNAP GRID (CDJ-3000) lights on a *hand-set* cue, which it
+    /// learns from `Outcome::cue_point`: reported only when a new cue is set,
+    /// never for returning to, previewing or releasing the existing one.
+    #[test]
+    fn only_setting_a_new_cue_reports_cue_point() {
+        let mut t = Transport::new(100);
+        assert_eq!(t.cue(true, false, 100).cue_point, None, "preview from the cue");
+        assert_eq!(t.cue(false, true, 150).cue_point, None, "release");
+        t.play_pause(false);
+        assert_eq!(t.cue(true, true, 900).cue_point, None, "return while playing");
+        t.cue(false, false, 100);
+        t.searched();
+        assert_eq!(t.cue(true, false, 640).cue_point, Some(640), "paused away → new cue");
+        assert_eq!(t.cue(false, true, 700).cue_point, None);
+        t.arrived_at_cue(50);
+        assert_eq!(t.cue(true, false, 50).cue_point, None, "a load or memory recall is not a CUE press");
+    }
+
     #[test]
     fn re_tapping_cue_never_moves_it() {
         let (mut t, mut playing, mut position) = deck();
