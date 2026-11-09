@@ -656,7 +656,7 @@ fn draw_jump_panel(ui: &Ui, ctx: &egui::Context, lay: &Layout, u: f32, out: &mut
 /// Small line icons standing in for the unit's glyphs (the default font has
 /// none of them).
 #[derive(Clone, Copy)]
-enum Icon { Disc, Person, Building, Bubble, Calendar, Clock }
+enum Icon { Disc, Person, Building, Bubble, Calendar, Clock, List, Rings }
 
 fn icon(ui: &Ui, kind: Icon, c: Pos2, u: f32) {
     let p = ui.painter();
@@ -696,6 +696,18 @@ fn icon(ui: &Ui, kind: Icon, c: Pos2, u: f32) {
             p.circle_stroke(c, half, s);
             p.line_segment([c, Pos2::new(c.x, c.y - half * 0.6)], s);
             p.line_segment([c, Pos2::new(c.x + half * 0.5, c.y)], s);
+        }
+        Icon::List => {
+            p.rect_stroke(sq, 0.0, s);
+            for k in 0..3 {
+                let y = sq.min.y + sq.height() * (0.3 + 0.2 * k as f32);
+                p.circle_filled(Pos2::new(sq.min.x + 5.0 * u, y), 1.3 * u, TEXT);
+                p.line_segment([Pos2::new(sq.min.x + 9.0 * u, y), Pos2::new(sq.max.x - 4.0 * u, y)], s);
+            }
+        }
+        Icon::Rings => {
+            p.circle_stroke(Pos2::new(c.x - half * 0.3, c.y + half * 0.2), half * 0.65, s);
+            p.circle_stroke(Pos2::new(c.x + half * 0.3, c.y - half * 0.2), half * 0.65, s);
         }
     }
 }
@@ -829,7 +841,7 @@ const PANE: Color32 = Color32::from_rgb(35, 35, 35);
 const SEL_BLUE: Color32 = Color32::from_rgb(0, 125, 225);
 
 #[derive(Clone, Copy, PartialEq)]
-enum RowIcon { Folder, Track, None }
+enum RowIcon { Folder, Track, Person, Disc, Key, List, None }
 
 /// One row of a list: icon, text, and an optional right-hand value.
 struct Row<'a> { icon: RowIcon, text: &'a str, value: Option<String>, tagged: bool }
@@ -972,6 +984,10 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
         match row.icon {
             RowIcon::Folder => folder(ui, Pos2::new(rr.min.x + 22.0 * u, cy), u, TEXT),
             RowIcon::Track => { label(ui, Pos2::new(rr.min.x + 22.0 * u, cy), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT); }
+            RowIcon::Person => icon(ui, Icon::Person, Pos2::new(rr.min.x + 22.0 * u, cy), u),
+            RowIcon::Disc => icon(ui, Icon::Disc, Pos2::new(rr.min.x + 22.0 * u, cy), u),
+            RowIcon::Key => boxed(ui, "b#", Pos2::new(rr.min.x + 22.0 * u, cy), u),
+            RowIcon::List => icon(ui, Icon::List, Pos2::new(rr.min.x + 22.0 * u, cy), u),
             RowIcon::None => {}
         }
         let tx = if row.icon == RowIcon::None { 14.0 } else { 45.0 };
@@ -1211,15 +1227,40 @@ fn usb_icon(ui: &Ui, c: Pos2, u: f32) {
 /// BROWSE: the source's lists, two panes. The right pane shows what LOAD on
 /// the highlighted row would act on: a track's details and a LOAD key.
 fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &TagList, u: f32, out: &mut Vec<Event>) {
+    use crate::browser::RbField;
     let sc = lay.screen;
+    let cats = b.rb_categories();
+    let names = b.rb_names_field();
+    // rekordbox: name rows get their category's icon; playlist folders a list.
+    let dir_icon = match names {
+        Some(RbField::Artist) => RowIcon::Person,
+        Some(RbField::Album) => RowIcon::Disc,
+        Some(RbField::Key) => RowIcon::Key,
+        None if cats.is_some() => RowIcon::List,
+        None => RowIcon::Folder,
+    };
     let rows: Vec<Row> = b.entries().iter().map(|e| Row {
-        icon: if e.is_dir { RowIcon::Folder } else { RowIcon::Track }, text: &e.name, value: None,
+        icon: if e.is_dir { dir_icon } else { RowIcon::Track }, text: &e.name, value: None,
         tagged: e.load().map_or(false, |l| tags.contains(l)),
     }).collect();
-    draw_list_header(ui, snap, lay, &b.title(), true, u, out);
-    draw_categories(ui, lay, &["FOLDER"], u);
+    // The unit titles a category's name list BROWSE, a track list by its name.
+    let title = if names.is_some() { "BROWSE".to_string() } else { b.title() };
+    draw_list_header(ui, snap, lay, &title, cats.is_none(), u, out);
+    match &cats {
+        Some((names, open)) => draw_rb_categories(ui, lay, names, *open, u, out),
+        None => draw_categories(ui, lay, &["FOLDER"], u),
+    }
+    // A rekordbox track list is one full-width table (PREVIEW, TRACK, BPM, KEY).
+    if cats.is_some() && !b.entries().is_empty() && b.entries().iter().all(|e| !e.is_dir) {
+        draw_track_table(ui, lay, b, &rows, &title, u, out);
+        if let Some(name) = snap.loading {
+            label(ui, Pos2::new(sc.min.x + 1000.0 * u, sc.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
+        }
+        return draw_status_strip(ui, snap, lay, u, out);
+    }
+    let head = match names { Some(f) => f_label(f), None if cats.is_some() => "PLAYLIST".to_string(), None => "FOLDER".to_string() };
     let left = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 730.0 * u, sc.min.y + 628.0 * u));
-    draw_list(ui, left, "FOLDER", &rows, b.selected, "— empty —", u, Some(out));
+    draw_list(ui, left, &head, &rows, b.selected, "— empty —", u, Some(out));
     let right = Rect::from_min_max(Pos2::new(sc.min.x + 732.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(right, 0.0, BG);
     ui.painter().line_segment([Pos2::new(right.min.x - 1.0 * u, right.min.y), Pos2::new(right.min.x - 1.0 * u, right.max.y)], Stroke::new(2.0 * u, PANE_HEAD));
@@ -1274,6 +1315,13 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
             ui.painter().rect_filled(load, 0.0, Color32::from_rgb(225, 225, 225));
             label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::from_rgb(30, 30, 30));
         }
+        _ if b.rb_preview().is_some() => {
+            // A rekordbox name: an artist's albums, else its tracks.
+            let (head, items) = b.rb_preview().unwrap();
+            let icon = if head == "ALBUM" { RowIcon::Disc } else { RowIcon::Track };
+            let rows: Vec<Row> = items.iter().map(|n| Row { icon, text: n, value: None, tagged: false }).collect();
+            draw_list(ui, right, head, &rows, usize::MAX, "", u, None);
+        }
         _ => {
             // A folder: what is in it, as the next level would list it.
             let peek = b.preview().unwrap_or_default();
@@ -1287,6 +1335,120 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         label(ui, Pos2::new(sc.min.x + 1000.0 * u, sc.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
     }
     draw_status_strip(ui, snap, lay, u, out);
+}
+
+fn f_label(f: crate::browser::RbField) -> String {
+    use crate::browser::RbField::*;
+    match f { Artist => "ARTIST", Album => "ALBUM", Key => "KEY" }.to_string()
+}
+
+/// A rekordbox source's category column (unit: 90×66 tiles on a 67 px
+/// pitch from y 94, grey 60, the open one blue). Tapping one opens it.
+fn draw_rb_categories(ui: &Ui, lay: &Layout, names: &[String], open: Option<usize>, u: f32, out: &mut Vec<Event>) {
+    let sc = lay.screen;
+    let col = Rect::from_min_max(Pos2::new(sc.min.x, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 90.0 * u, sc.min.y + 628.0 * u));
+    ui.painter().rect_filled(col, 0.0, Color32::BLACK);
+    for (i, name) in names.iter().enumerate() {
+        let t = Rect::from_min_size(Pos2::new(col.min.x, sc.min.y + (94.0 + 67.0 * i as f32) * u), Vec2::new(88.0 * u, 66.0 * u));
+        if t.max.y > col.max.y + 1.0 { break; }
+        let lit = open == Some(i);
+        ui.painter().rect_filled(t, 0.0, if lit { SEL_BLUE } else { Color32::from_rgb(60, 60, 60) });
+        if tap(ui, t, &format!("cdj-rbcat-{i}")).0 { out.push(Event::Ui(UiEvent::BrowseCategory(i))); }
+        let c = Pos2::new(t.center().x, t.min.y + 24.0 * u);
+        match name.as_str() {
+            "ARTIST" => icon(ui, Icon::Person, c, u),
+            "ALBUM" => icon(ui, Icon::Disc, c, u),
+            "TRACK" => { label(ui, c, Align2::CENTER_CENTER, "♪", 28.0, u, TEXT); }
+            "KEY" => boxed(ui, "b#", c, u),
+            "PLAYLIST" => icon(ui, Icon::List, c, u),
+            "HISTORY" => icon(ui, Icon::Clock, c, u),
+            "MATCHING" => icon(ui, Icon::Rings, c, u),
+            _ => folder(ui, c, u * 1.3, TEXT),
+        }
+        label(ui, Pos2::new(t.center().x, t.min.y + 52.0 * u), Align2::CENTER_CENTER, name, 13.0, u, TEXT);
+    }
+}
+
+/// A rekordbox track list as the unit draws it: PREVIEW (waveform + cover,
+/// not drawn yet), TRACK ▲ [count], BPM, KEY; the highlighted row carries
+/// LOAD in the BPM/KEY cells. Tap selects, a second tap (or LOAD) loads.
+fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], _title: &str, u: f32, out: &mut Vec<Event>) {
+    let sc = lay.screen;
+    let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
+    let p = ui.painter();
+    let grey = Color32::from_rgb(60, 60, 60);
+    let hb = Rect::from_min_max(at(92.0, 92.0), at(1280.0, 152.0));
+    p.rect_filled(hb, 0.0, grey);
+    for x in [331.0, 1079.0, 1189.0] {
+        p.line_segment([at(x, 92.0), at(x, 152.0)], Stroke::new(1.5 * u, Color32::BLACK));
+    }
+    // ▲ drawn: the default font has no triangle glyph.
+    let up = |r: Rect, c: Color32| {
+        let (x, y, h) = (r.max.x + 12.0 * u, r.center().y, 7.0 * u);
+        ui.painter().add(Shape::convex_polygon(vec![Pos2::new(x, y + h), Pos2::new(x + 2.0 * h, y + h), Pos2::new(x + h, y - h)], c, Stroke::NONE));
+        x + 2.0 * h
+    };
+    label(ui, at(103.0, 122.0), Align2::LEFT_CENTER, "PREVIEW", 21.0, u, LABEL);
+    let th = label(ui, at(343.0, 122.0), Align2::LEFT_CENTER, "TRACK", 21.0, u, ZOOM_BLUE);
+    let tx = up(th, ZOOM_BLUE);
+    label(ui, Pos2::new(tx + 22.0 * u, th.center().y), Align2::LEFT_CENTER, format!("[{:04}]", rows.len()), 21.0, u, LABEL);
+    up(label(ui, at(1090.0, 122.0), Align2::LEFT_CENTER, "BPM", 21.0, u, LABEL), LABEL);
+    up(label(ui, at(1200.0, 122.0), Align2::LEFT_CENTER, "KEY", 21.0, u, LABEL), LABEL);
+    // The sort-order key (inert): a box with ⌃⌄.
+    let sb = Rect::from_min_max(at(1011.0, 98.0), at(1069.0, 146.0));
+    p.rect_filled(sb, 0.0, Color32::from_rgb(50, 50, 50));
+    outline(ui, sb, Color32::BLACK, u);
+    let (cx, cy) = (sb.center().x, sb.center().y);
+    let st = Stroke::new(1.5 * u, LABEL);
+    p.line_segment([Pos2::new(cx - 6.0 * u, cy - 4.0 * u), Pos2::new(cx, cy - 10.0 * u)], st);
+    p.line_segment([Pos2::new(cx, cy - 10.0 * u), Pos2::new(cx + 6.0 * u, cy - 4.0 * u)], st);
+    p.line_segment([Pos2::new(cx - 6.0 * u, cy + 4.0 * u), Pos2::new(cx, cy + 10.0 * u)], st);
+    p.line_segment([Pos2::new(cx, cy + 10.0 * u), Pos2::new(cx + 6.0 * u, cy + 4.0 * u)], st);
+    let sel = b.selected;
+    let first = sel.saturating_sub(ROWS / 2).min(rows.len().saturating_sub(ROWS));
+    for k in 0..ROWS {
+        let y = 152.0 + ROW_H * k as f32;
+        if y + ROW_H > 629.0 { break; }
+        let i = first + k;
+        let row = Rect::from_min_max(at(92.0, y), at(1280.0, y + ROW_H));
+        let (Some(r), Some(e)) = (rows.get(i), b.entries().get(i)) else {
+            p.rect_filled(row, 0.0, if k % 2 == 0 { ROW_GREY } else { BG });
+            continue;
+        };
+        let lit = i == sel;
+        let stripe = if k % 2 == 0 { Color32::from_rgb(40, 40, 40) } else { BG };
+        p.rect_filled(Rect::from_min_max(at(92.0, y), at(331.0, y + ROW_H)), 0.0, stripe);
+        p.rect_filled(Rect::from_min_max(at(332.0, y), at(1280.0, y + ROW_H)), 0.0, if lit { SEL_BLUE } else { stripe });
+        let cy = sc.min.y + (y + ROW_H / 2.0) * u;
+        let title = Rect::from_min_max(at(332.0, y), at(1079.0, y + ROW_H));
+        if tap(ui, title, &format!("cdj-trk-{i}")).0 {
+            out.push(Event::Deck(if lit { ControlEvent::Load } else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - sel as i32 } }));
+        }
+        label(ui, Pos2::new(sc.min.x + 355.0 * u, cy), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
+        p.with_clip_rect(title.shrink2(Vec2::new(0.0, 0.0)).intersect(Rect::from_min_max(at(332.0, y), at(1075.0, y + ROW_H))))
+            .text(Pos2::new(sc.min.x + 378.0 * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), TEXT);
+        if r.tagged { p.circle_filled(Pos2::new(sc.min.x + 1068.0 * u, cy), 5.0 * u, BARS_ORANGE); }
+        if lit {
+            let load = Rect::from_min_max(at(1080.0, y), at(1280.0, y + ROW_H));
+            p.rect_filled(load, 0.0, Color32::from_rgb(225, 225, 225));
+            label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::BLACK);
+            if tap(ui, load, &format!("cdj-trk-load-{i}")).0 { out.push(Event::Deck(ControlEvent::Load)); }
+        } else {
+            if let Some(bpm) = e.bpm.filter(|b| *b > 0.0) {
+                label(ui, Pos2::new(sc.min.x + 1178.0 * u, cy), Align2::RIGHT_CENTER, format!("{bpm:.1}"), 27.0, u, TEXT);
+            }
+            if let Some(k) = &e.key {
+                label(ui, Pos2::new(sc.min.x + 1200.0 * u, cy), Align2::LEFT_CENTER, k, 27.0, u, TEXT);
+            }
+        }
+    }
+    // Scroll position.
+    if rows.len() > ROWS {
+        let track = Rect::from_min_max(at(1275.0, 152.0), at(1280.0, 628.0));
+        let h = track.height() * ROWS as f32 / rows.len() as f32;
+        let y0 = track.min.y + (track.height() - h) * first as f32 / (rows.len() - ROWS) as f32;
+        p.rect_filled(Rect::from_min_size(Pos2::new(track.min.x, y0), Vec2::new(track.width(), h)), 0.0, DIM);
+    }
 }
 
 /// TAG LIST: the tagged tracks; LOAD plays one, TAG TRACK removes it.

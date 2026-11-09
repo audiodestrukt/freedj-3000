@@ -22,6 +22,12 @@ pub struct RbTrack {
     pub id:            u32,
     pub title:         String,
     pub artist:        String,
+    /// Album name ("" when none).
+    pub album:         String,
+    /// Musical key as rekordbox shows it (e.g. "Em", "F#m"; "" when none).
+    pub key:           String,
+    /// Date added to the collection, "YYYY-MM-DD" ("" when none).
+    pub date_added:    String,
     pub bpm:           f32,
     pub duration_secs: u32,
     pub sample_rate:   u32,
@@ -122,9 +128,14 @@ pub fn read_export_from<R: Read + Seek>(reader: &mut R, root: PathBuf) -> Result
     let rows = read_all_rows(reader)?;
 
     let mut artists: HashMap<u32, String> = HashMap::new();
+    let mut albums: HashMap<u32, String> = HashMap::new();
+    let mut keys: HashMap<u32, String> = HashMap::new();
     for row in &rows {
-        if let Row::Artist(a) = row {
-            artists.insert(a.id.0, text(&a.name));
+        match row {
+            Row::Artist(a) => { artists.insert(a.id.0, text(&a.name)); }
+            Row::Album(a) => { albums.insert(a.id.0, text(&a.name)); }
+            Row::Key(k) => { keys.insert(k.id.0, text(&k.name)); }
+            _ => {}
         }
     }
 
@@ -139,6 +150,9 @@ pub fn read_export_from<R: Read + Seek>(reader: &mut R, root: PathBuf) -> Result
                 id:            t.id.0,
                 title:         text(&t.title),
                 artist:        artists.get(&t.artist_id.0).cloned().unwrap_or_default(),
+                album:         albums.get(&t.album_id.0).cloned().unwrap_or_default(),
+                key:           keys.get(&t.key_id.0).cloned().unwrap_or_default(),
+                date_added:    text(&t.date_added),
                 bpm:           t.tempo as f32 / 100.0,
                 duration_secs: t.duration as u32,
                 sample_rate:   t.sample_rate,
@@ -250,6 +264,20 @@ pub fn read_anlz_from<R: Read + Seek>(reader: &mut R) -> Result<RbAnalysis> {
 mod tests {
     use super::*;
     // Gated: OPENDECK_TEST_RB=/run/media/dan/CDJ1
+    /// rekordcrate's demo export: artist, album, key and date resolve.
+    #[test]
+    fn demo_export_resolves_album_key_and_date() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/rekordcrate/data/complete_export/demo_tracks");
+        let exp = read_export(&root).unwrap();
+        assert!(!exp.tracks.is_empty());
+        for t in &exp.tracks {
+            eprintln!("{:>3} {:30} | {:20} | {:20} | {:5} | {}", t.id, t.title, t.artist, t.album, t.key, t.date_added);
+        }
+        assert!(exp.tracks.iter().all(|t| t.date_added.len() == 10), "dates are YYYY-MM-DD");
+        assert!(exp.tracks.iter().any(|t| !t.key.is_empty()), "some track has a key");
+    }
+
     #[test]
     fn reads_anlz_beatgrid() {
         let Ok(root) = std::env::var("OPENDECK_TEST_RB") else { return };

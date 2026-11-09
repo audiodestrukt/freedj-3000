@@ -91,7 +91,7 @@ Size: S < 1 day, M 1–3 days, L > 3 days.
 | | SOURCE screen (devices, LINK, Control Mode) | done (phase 2) | M |
 | | TAG LIST (+ GLOBAL) | exists (XDJ) | S |
 | | PLAYLIST + Playlist Bank | needs rekordbox playlists in UI | M |
-| | Category lists (artist, album, key, date added, history, matching) | rekordbox reader exists | M |
+| | Category lists (artist, album, key, date added, history, matching) | artist/album/track/key/playlist/folder done (local stick) | M |
 | | SEARCH screen + keyboard | missing | M |
 | | TRACK FILTER | missing | M |
 | | LOAD PREVIOUS TRACK (history) | done (phase 2) | S |
@@ -206,6 +206,30 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
     skin: no such screen, H does nothing.
   - Dev: `OPENDECK_SCREEN=history`, `OPENDECK_HISTORY=a.mp3:b.mp3`.
   - Still to do: categories for rekordbox and LINK sources.
+- **Phase 3 (part 1): rekordbox categories.** Measured from Dan's rekordbox
+  stick on the emulator (`browse-rekordbox-artist.png`,
+  `browse-rekordbox-track.png`).
+  - **The rekordbox root** now lists the CDJ-3000's categories: ARTIST, ALBUM,
+    TRACK, KEY, PLAYLIST (always, as the unit does), HISTORY and MATCHING
+    (shown, not walkable yet) and FOLDER (the stick's files). The XDJ skin's
+    list shows the same rows.
+  - **ARTIST / ALBUM / KEY** open name lists (`Loc::RbNames`), and a name
+    opens its tracks.
+  - **Reader:** it now resolves album, key and date added
+    (`RbTrack::album/key/date_added`).
+  - **CDJ skin:**
+    - The category column is 90×66 tiles on a 67 px pitch, the open one blue;
+      a tap opens it (`UiEvent::BrowseCategory`).
+    - Name lists carry their category's icon and preview the highlighted
+      name on the right: an artist's albums, else its tracks.
+    - Track lists are one full-width table: PREVIEW 92–331, TRACK ▲ [count],
+      BPM 1080–1189, KEY 1190–1280, and LOAD in the highlighted row.
+    - Opening a rekordbox stick from SOURCE lands on ARTIST, as on the unit.
+  - Not yet: the PREVIEW column's waveforms and covers (ANLZ preview + the
+    artwork table), sorting (the sort key is drawn, inert), HISTORY,
+    MATCHING, LINK/dbserver sources in the column.
+  - Dev: `OPENDECK_SCRIPT` browse actions (`screen=browse; open=rekordbox;
+    category=2; select=0`).
 - **Phase 1 (part 2): GRID ADJUST.** A long rotary press on the unit (key A,
   or a tap on the pill) swaps in the GRID key row: SNAP GRID (CUE) = beat 1
   on the cue (`GridAdjust::ShiftCue`), SHIFT GRID (dim: it commits a sync

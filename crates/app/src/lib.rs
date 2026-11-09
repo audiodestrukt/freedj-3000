@@ -1144,6 +1144,10 @@ impl DeckApp {
                 self.screen_mode = ScreenMode::Browse;
                 log::info!("source {src:?}");
             }
+            Event::Ui(UiEvent::BrowseCategory(i)) => {
+                self.browser.open_rb_category(i);
+                self.screen_mode = ScreenMode::Browse;
+            }
             Event::Ui(UiEvent::ShowBrowse(on)) => {
                 if on && self.screen_mode != ScreenMode::Browse {
                     self.browser.refresh();
@@ -1456,6 +1460,24 @@ impl DeckApp {
                 A::ShiftSync => self.apply(Event::Ui(UiEvent::GridAdjust(input::GridAdjust::ShiftSync))),
                 A::SnapGrid => self.apply(Event::Ui(UiEvent::GridAdjust(input::GridAdjust::ShiftCue))),
                 A::GridReset => self.apply(Event::Ui(UiEvent::GridAdjust(input::GridAdjust::Reset))),
+                A::Screen(s) => {
+                    self.screen_mode = match s.as_str() {
+                        "browse" => { self.browser.refresh(); ScreenMode::Browse }
+                        "taglist" => ScreenMode::TagList,
+                        "menu" => ScreenMode::Menu,
+                        "source" => ScreenMode::Source,
+                        "history" => ScreenMode::History,
+                        _ => ScreenMode::Playback,
+                    };
+                }
+                A::Open(name) => {
+                    match self.browser.entries().iter().position(|e| e.name == name) {
+                        Some(i) => { self.browser.selected = i; self.apply(Event::Deck(ControlEvent::Load)); }
+                        None => log::warn!("script: no row {name:?}"),
+                    }
+                }
+                A::Select(i) => self.browser.selected = i.min(self.browser.entries().len().saturating_sub(1)),
+                A::Category(i) => self.apply(Event::Ui(UiEvent::BrowseCategory(i))),
                 A::Quit => { log::info!("script: quit"); log::logger().flush(); std::process::exit(0); }
             }
         }

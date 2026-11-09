@@ -48,6 +48,9 @@ pub enum UiEvent {
     /// Open (true) or close BROWSE outright, for surfaces that report BROWSE
     /// as a level (a CDJ-3000 over lanhid) rather than a toggling key.
     ShowBrowse(bool),
+    /// BROWSE on a rekordbox source: open the `n`th category (ARTIST, ALBUM…)
+    /// from the CDJ-3000 skin's category column.
+    BrowseCategory(usize),
     /// MENU: a row was tapped — select it and step its value.
     MenuTap(usize),
     /// GRID ADJUST touch keys (shown in place of the Bars readouts while the

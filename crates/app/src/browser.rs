@@ -61,6 +61,8 @@ pub struct Entry {
     pub artist: Option<String>,
     #[allow(dead_code)]
     pub bpm:    Option<f32>,
+    /// Musical key, for the CDJ-3000 skin's KEY column.
+    pub key:    Option<String>,
     kind:       EntryKind,
 }
 
@@ -98,6 +100,9 @@ enum Loc {
     RbPlaylist(u32),
     /// Every track in the export (the TRACK category).
     RbAllTracks,
+    /// ARTIST / ALBUM / KEY categories: the names, then one name's tracks.
+    RbNames(RbField),
+    RbNamed(RbField, String),
     /// A dbserver source's category menu (PLAYLIST / ARTIST / ALBUM / TRACK /
     /// FILENAME …), the first thing a player shows for a linked source.
     DbRoot,
@@ -112,6 +117,19 @@ enum Loc {
     DbAlbums,
     DbAlbum(u32),
     DbFilenames,
+}
+
+/// A track field the rekordbox categories group by.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RbField { Artist, Album, Key }
+
+impl RbField {
+    fn of(self, t: &opendeck_rekordbox::RbTrack) -> &str {
+        match self { RbField::Artist => &t.artist, RbField::Album => &t.album, RbField::Key => &t.key }
+    }
+    fn label(self) -> &'static str {
+        match self { RbField::Artist => "ARTIST", RbField::Album => "ALBUM", RbField::Key => "KEY" }
+    }
 }
 
 /// Which media the currently-loaded rekordbox export came from — decides how a
@@ -251,6 +269,8 @@ impl Browser {
             },
             Some(Loc::RbTree(0)) => "PLAYLIST".to_string(),
             Some(Loc::RbAllTracks) => "TRACK".to_string(),
+            Some(Loc::RbNames(f)) => f.label().to_string(),
+            Some(Loc::RbNamed(_, n)) => if n.is_empty() { "(none)".to_string() } else { n.clone() },
             Some(Loc::RbTree(id)) | Some(Loc::RbPlaylist(id)) => self.rb.as_ref()
                 .and_then(|e| e.playlists.iter().find(|n| n.id == *id))
                 .map(|n| n.name.clone()).unwrap_or_else(|| "rekordbox".to_string()),
@@ -306,6 +326,8 @@ impl Browser {
             Some(Loc::RbTree(node))   => self.rb_tree_entries(node),
             Some(Loc::RbPlaylist(id)) => self.rb_playlist_entries(id),
             Some(Loc::RbAllTracks)    => self.rb_track_entries(|e| e.tracks.iter().collect()),
+            Some(Loc::RbNames(f))     => self.rb_name_entries(f),
+            Some(Loc::RbNamed(f, n))  => self.rb_track_entries(|e| e.tracks.iter().filter(|t| f.of(t) == n).collect()),
             Some(Loc::DbRoot)         => self.db_root_entries(),
             Some(Loc::DbFolder(id))   => self.db_folder_entries(id),
             Some(Loc::DbPlaylist(id)) => self.db_track_entries(|c, s| c.playlist(s, id, false)),
@@ -330,14 +352,14 @@ impl Browser {
         // buttons), not inside every folder.
         let at_top = self.stack.len() == 1;
         if at_top {
-            out.push(Entry { name: "LINK".into(), is_dir: true, artist: None, bpm: None,
+            out.push(Entry { name: "LINK".into(), is_dir: true, artist: None, bpm: None, key: None,
                 kind: EntryKind::Descend(Loc::Link) });
             // Every removable mount is a source row, like the XDJ's USB slot:
             // "USB: CDJ1" (the volume label), marked when it is a rekordbox stick.
             for m in &self.media {
                 if m.path == *dir { continue; }   // already browsing it as the root
                 let name = if m.rekordbox { format!("USB: {}   rekordbox", m.label) } else { format!("USB: {}", m.label) };
-                out.push(Entry { name, is_dir: true, artist: None, bpm: None,
+                out.push(Entry { name, is_dir: true, artist: None, bpm: None, key: None,
                     kind: EntryKind::Descend(Loc::Fs(m.path.clone())) });
             }
         }
@@ -352,7 +374,7 @@ impl Browser {
                 }
             }
             if matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir) {
-                out.push(Entry { name: "rekordbox".into(), is_dir: true, artist: None, bpm: None,
+                out.push(Entry { name: "rekordbox".into(), is_dir: true, artist: None, bpm: None, key: None,
                     kind: EntryKind::Descend(Loc::RbRoot) });
             }
         }
@@ -366,10 +388,10 @@ impl Browser {
                 if name.starts_with('.') { continue; }
                 if path.is_dir() {
                     if is_housekeeping_dir(&name) { continue; }
-                    dirs.push(Entry { name, is_dir: true, artist: None, bpm: None,
+                    dirs.push(Entry { name, is_dir: true, artist: None, bpm: None, key: None,
                         kind: EntryKind::Descend(Loc::Fs(path)) });
                 } else if is_audio(&path) {
-                    files.push(Entry { name, is_dir: false, artist: None, bpm: None,
+                    files.push(Entry { name, is_dir: false, artist: None, bpm: None, key: None,
                         kind: EntryKind::Track(Load::Local { path, analyze: None }) });
                 }
             }
@@ -392,7 +414,7 @@ impl Browser {
         let names = self.link.peer_names.lock().map(|p| p.clone()).unwrap_or_default();
         let mut v: Vec<(u8, Ipv4Addr)> = peers.into_iter().collect();
         v.sort_by_key(|(p, _)| *p);
-        let dir = |name: String, kind| Entry { name, is_dir: true, artist: None, bpm: None, kind };
+        let dir = |name: String, kind| Entry { name, is_dir: true, artist: None, bpm: None, key: None, kind };
         let mut out = Vec::new();
         for (player, ip) in v {
             let name = names.get(&player).cloned().unwrap_or_default();
@@ -433,7 +455,7 @@ impl Browser {
                 "root-filename" => EntryKind::Descend(Loc::DbFilenames),
                 _ => EntryKind::Unsupported,
             };
-            Entry { name: i.label, is_dir: true, artist: None, bpm: None, kind }
+            Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, kind }
         }).collect()
     }
 
@@ -442,7 +464,7 @@ impl Browser {
         let Some((_, c, slot)) = self.db.as_mut() else { return Vec::new() };
         match fetch(c, *slot) {
             Ok(items) => items.into_iter().map(|i| Entry {
-                name: i.label, is_dir: true, artist: None, bpm: None, kind: EntryKind::Descend(loc(i.id)),
+                name: i.label, is_dir: true, artist: None, bpm: None, key: None, kind: EntryKind::Descend(loc(i.id)),
             }).collect(),
             Err(e) => { log::warn!("LINK names: {e:#}"); Vec::new() }
         }
@@ -455,13 +477,13 @@ impl Browser {
         let slot = *slot;
         let mut out = Vec::new();
         if folder == 0 && !matches!(self.stack.last(), Some(Loc::DbFolder(0))) {
-            out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None,
+            out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None, key: None,
                              kind: EntryKind::Descend(Loc::DbAllTracks) });
         }
         match c.playlist(slot, folder, true) {
             Ok(items) => for i in items {
                 let is_folder = i.type_name() == "folder";
-                out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None,
+                out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None, key: None,
                     kind: EntryKind::Descend(if is_folder { Loc::DbFolder(i.id) } else { Loc::DbPlaylist(i.id) }) });
             },
             Err(e) => log::warn!("rekordbox folder {folder}: {e:#}"),
@@ -476,7 +498,7 @@ impl Browser {
         match fetch(c, slot) {
             Ok(items) => items.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
                 name: i.label.clone(), is_dir: false,
-                artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None,
+                artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None,
                 kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }),
             }).collect(),
             Err(e) => { log::warn!("LINK tracks: {e:#}"); Vec::new() }
@@ -498,20 +520,94 @@ impl Browser {
     fn rb_tree_entries(&self, node: u32) -> Vec<Entry> {
         let Some(exp) = self.rb.as_ref() else { return Vec::new() };
         exp.children(node).into_iter().map(|n| Entry {
-            name: n.name.clone(), is_dir: true, artist: None, bpm: None,
+            name: n.name.clone(), is_dir: true, artist: None, bpm: None, key: None,
             kind: EntryKind::Descend(if n.is_folder { Loc::RbTree(n.id) } else { Loc::RbPlaylist(n.id) }),
         }).collect()
     }
 
     /// The export's category menu: PLAYLIST only when the stick has any, then
     /// TRACK (everything, by title) so an unsorted stick is still browsable.
+    /// A rekordbox export's categories, in the order a CDJ-3000 lists them
+    /// (it shows PLAYLIST even when there are none). HISTORY and MATCHING are
+    /// shown but not walkable yet; FOLDER is the stick's files.
     fn rb_root_entries(&self) -> Vec<Entry> {
-        let Some(exp) = self.rb.as_ref() else { return Vec::new() };
+        if self.rb.is_none() { return Vec::new() }
         let mut out = Vec::new();
-        let cat = |name: &str, loc: Loc| Entry { name: name.into(), is_dir: true, artist: None, bpm: None, kind: EntryKind::Descend(loc) };
-        if !exp.playlists.is_empty() { out.push(cat("PLAYLIST", Loc::RbTree(0))); }
-        out.push(cat(&format!("TRACK   {}", exp.tracks.len()), Loc::RbAllTracks));
+        let cat = |name: &str, kind: EntryKind| Entry { name: name.into(), is_dir: true, artist: None, bpm: None, key: None, kind };
+        out.push(cat("ARTIST", EntryKind::Descend(Loc::RbNames(RbField::Artist))));
+        out.push(cat("ALBUM", EntryKind::Descend(Loc::RbNames(RbField::Album))));
+        out.push(cat("TRACK", EntryKind::Descend(Loc::RbAllTracks)));
+        out.push(cat("KEY", EntryKind::Descend(Loc::RbNames(RbField::Key))));
+        out.push(cat("PLAYLIST", EntryKind::Descend(Loc::RbTree(0))));
+        out.push(cat("HISTORY", EntryKind::Unsupported));
+        out.push(cat("MATCHING", EntryKind::Unsupported));
+        if let Some(RbSource::Local(root)) = &self.rb_source {
+            out.push(cat("FOLDER", EntryKind::Descend(Loc::Fs(root.clone()))));
+        }
         out
+    }
+
+    /// ARTIST / ALBUM / KEY: the distinct names, sorted, each opening its
+    /// tracks. Tracks with no name group under "(none)" at the end.
+    fn rb_name_entries(&self, f: RbField) -> Vec<Entry> {
+        let Some(exp) = self.rb.as_ref() else { return Vec::new() };
+        let mut names: Vec<String> = exp.tracks.iter().map(|t| f.of(t).to_string()).collect();
+        names.sort_by_key(|n| (n.is_empty(), n.to_lowercase()));
+        names.dedup();
+        names.into_iter().map(|n| Entry {
+            name: if n.is_empty() { "(none)".into() } else { n.clone() },
+            is_dir: true, artist: None, bpm: None, key: None,
+            kind: EntryKind::Descend(Loc::RbNamed(f, n)),
+        }).collect()
+    }
+
+    /// The category column of a rekordbox source (CDJ-3000 skin): the
+    /// categories and which one is open, while browsing inside one.
+    pub fn rb_categories(&self) -> Option<(Vec<String>, Option<usize>)> {
+        let r = self.stack.iter().position(|l| matches!(l, Loc::RbRoot))?;
+        let cats = self.rb_root_entries();
+        let open = self.stack.get(r + 1).and_then(|l| cats.iter().position(|c| match (&c.kind, l) {
+            (EntryKind::Descend(Loc::RbNames(a)), Loc::RbNames(b) | Loc::RbNamed(b, _)) => a == b,
+            (EntryKind::Descend(Loc::RbAllTracks), Loc::RbAllTracks) => true,
+            (EntryKind::Descend(Loc::RbTree(_)), Loc::RbTree(_) | Loc::RbPlaylist(_)) => true,
+            (EntryKind::Descend(Loc::Fs(a)), Loc::Fs(b)) => b.starts_with(a),
+            _ => false,
+        }));
+        Some((cats.into_iter().map(|c| c.name).collect(), open))
+    }
+
+    /// What the highlighted ARTIST / ALBUM / KEY row holds, for the CDJ-3000
+    /// skin's right pane: an artist's albums, else the tracks.
+    pub fn rb_preview(&self) -> Option<(&'static str, Vec<String>)> {
+        let Some(Entry { kind: EntryKind::Descend(Loc::RbNamed(f, n)), .. }) = self.selected_entry() else { return None };
+        let exp = self.rb.as_ref()?;
+        let mine = exp.tracks.iter().filter(|t| f.of(t) == n);
+        if *f == RbField::Artist {
+            let mut albums: Vec<String> = mine.map(|t| t.album.clone()).filter(|a| !a.is_empty()).collect();
+            albums.sort_by_key(|a| a.to_lowercase());
+            albums.dedup();
+            Some(("ALBUM", albums))
+        } else {
+            let mut titles: Vec<String> = mine.map(|t| t.title.clone()).collect();
+            titles.sort_by_key(|a| a.to_lowercase());
+            Some(("TRACK", titles))
+        }
+    }
+
+    /// The rekordbox field a name list groups by, while one is shown.
+    pub fn rb_names_field(&self) -> Option<RbField> {
+        match self.stack.last() { Some(Loc::RbNames(f)) => Some(*f), _ => None }
+    }
+
+    /// Open the `i`th rekordbox category from anywhere inside the source.
+    pub fn open_rb_category(&mut self, i: usize) {
+        let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot)) else { return };
+        self.stack.truncate(r + 1);
+        self.rebuild();
+        if i < self.entries.len() {
+            self.selected = i;
+            self.enter();
+        }
     }
 
     fn rb_playlist_entries(&self, id: u32) -> Vec<Entry> {
@@ -522,7 +618,7 @@ impl Browser {
         let Some(exp) = self.rb.as_ref() else { return Vec::new() };
         let src = self.rb_source.clone();
         let mut tracks = pick(exp);
-        if matches!(self.stack.last(), Some(Loc::RbAllTracks)) {
+        if matches!(self.stack.last(), Some(Loc::RbAllTracks | Loc::RbNamed(..))) {
             tracks.sort_by(|a, b| a.title.to_lowercase().cmp(&b.title.to_lowercase()));
         }
         tracks.into_iter().filter_map(|t| {
@@ -534,6 +630,7 @@ impl Browser {
             Some(Entry {
                 name: t.title.clone(), is_dir: false,
                 artist: Some(t.artist.clone()), bpm: Some(t.bpm),
+                key: (!t.key.is_empty()).then(|| t.key.clone()),
                 kind: EntryKind::Track(load),
             })
         }).collect()
@@ -653,6 +750,13 @@ impl Browser {
             SourceKind::Usb => {
                 if let Some(p) = &row.path { self.stack.push(Loc::Fs(p.clone())); }
                 self.rebuild();
+                // A rekordbox stick opens on its categories, ARTIST first,
+                // as a CDJ does.
+                if self.entries.iter().any(|e| matches!(e.kind, EntryKind::Descend(Loc::RbRoot))) {
+                    self.stack.push(Loc::RbRoot);
+                    self.rebuild();
+                    self.open_rb_category(0);
+                }
                 true
             }
             SourceKind::Link => {
@@ -712,7 +816,7 @@ impl Browser {
         for gone in self.media.iter().filter(|m| !now.contains(m)) {
             log::info!("media removed: {}", gone.path.display());
             if self.stack.iter().any(|l| matches!(l, Loc::Fs(p) if p.starts_with(&gone.path)))
-                || self.stack.iter().any(|l| matches!(l, Loc::RbRoot | Loc::RbTree(_) | Loc::RbPlaylist(_) | Loc::RbAllTracks))
+                || self.stack.iter().any(|l| matches!(l, Loc::RbRoot | Loc::RbTree(_) | Loc::RbPlaylist(_) | Loc::RbAllTracks | Loc::RbNames(_) | Loc::RbNamed(..)))
                     && matches!(&self.rb_source, Some(RbSource::Local(r)) if r.starts_with(&gone.path))
             {
                 self.stack.truncate(1);
@@ -788,8 +892,9 @@ mod tests {
         b.selected = rb;
         assert!(matches!(b.enter(), Enter::Folder));
         assert_eq!(b.title(), "REKORDBOX");
-        // The demo export has no playlists: the menu is just TRACK, which lists both tracks.
-        assert!(b.entries().iter().all(|e| e.name != "PLAYLIST"));
+        // The demo export has no playlists, but PLAYLIST is listed anyway (a
+        // CDJ-3000 always shows it); TRACK lists both tracks.
+        assert!(b.entries().iter().any(|e| e.name == "PLAYLIST"));
         let tr = b.entries().iter().position(|e| e.name.starts_with("TRACK")).expect("TRACK category");
         b.selected = tr;
         assert!(matches!(b.enter(), Enter::Folder));
@@ -837,6 +942,45 @@ mod tests {
 
         b.selected = b.entries().iter().position(|e| e.name == "loose.mp3").expect("track row");
         assert_eq!(b.preview(), None);
+    }
+
+    /// rekordcrate's demo export (2 tracks, artist Loopmasters, key Fm).
+    #[test]
+    fn rekordbox_categories_walk_like_a_cdj() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/rekordcrate/data/complete_export/demo_tracks");
+        let mut b = Browser::new(&root, crate::prodj::LinkState::new(1));
+        b.selected = b.entries().iter().position(|e| e.name == "rekordbox").expect("rekordbox row");
+        b.enter();
+        let names: Vec<_> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(&names[..4], &["ARTIST", "ALBUM", "TRACK", "KEY"]);
+        assert_eq!(&names[4..], &["PLAYLIST", "HISTORY", "MATCHING", "FOLDER"]);
+        // At the root no category is open yet.
+        assert_eq!(b.rb_categories().unwrap().1, None);
+
+        b.open_rb_category(0);
+        assert_eq!(b.title(), "ARTIST");
+        assert_eq!(b.entries()[0].name, "Loopmasters");
+        assert_eq!(b.rb_categories().unwrap().1, Some(0));
+        b.enter();
+        assert_eq!(b.title(), "Loopmasters");
+        assert_eq!(b.entries().len(), 2);
+        assert_eq!(b.rb_categories().unwrap().1, Some(0), "still under ARTIST");
+
+        // Jump straight to KEY from inside ARTIST.
+        b.open_rb_category(3);
+        assert_eq!(b.title(), "KEY");
+        assert_eq!(b.entries()[0].name, "Fm");
+        b.enter();
+        assert!(b.entries().iter().all(|e| e.key.as_deref() == Some("Fm") && e.load().is_some()));
+        // TRACK lists everything, sorted by title.
+        b.open_rb_category(2);
+        let titles: Vec<_> = b.entries().iter().map(|e| e.name.clone()).collect();
+        assert_eq!(titles, vec!["Demo Track 1".to_string(), "Demo Track 2".to_string()]);
+        // HISTORY is shown but does not open.
+        let h = b.rb_categories().unwrap().0.iter().position(|c| c == "HISTORY").unwrap();
+        b.open_rb_category(h);
+        assert_eq!(b.title(), "REKORDBOX", "stays on the categories");
     }
 
     #[test]

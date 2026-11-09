@@ -12,6 +12,10 @@
 //! | `jogmode=cdj` / `jogmode=vinyl` | JOG MODE (not saved) |
 //! | `jog=<delta>x<frames>` | one jog delta per frame for that many frames |
 //! | `shiftsync` / `snapgrid` / `gridreset` | the GRID ADJUST actions |
+//! | `screen=browse` (`taglist`, `menu`, `source`, `history`, `playback`) | open that screen |
+//! | `open=<row name>` | BROWSE: highlight the row with that name and enter it |
+//! | `select=<n>` | BROWSE: highlight row n |
+//! | `category=<n>` | BROWSE on rekordbox: open category n (0 = ARTIST) |
 //! | `quit` | exit the process (status 0) |
 
 /// One parsed action.
@@ -24,6 +28,10 @@ pub enum Action {
     ShiftSync,
     SnapGrid,
     GridReset,
+    Screen(String),
+    Open(String),
+    Select(usize),
+    Category(usize),
     Quit,
 }
 
@@ -44,6 +52,10 @@ pub fn parse(src: &str) -> Result<Vec<(f64, Action)>, String> {
             "snapgrid" => Action::SnapGrid,
             "gridreset" => Action::GridReset,
             "quit" => Action::Quit,
+            _ if act.starts_with("screen=") => Action::Screen(act[7..].to_string()),
+            _ if act.starts_with("open=") => Action::Open(act[5..].to_string()),
+            _ if act.starts_with("select=") => Action::Select(act[7..].parse().map_err(|_| format!("{entry:?}: bad row"))?),
+            _ if act.starts_with("category=") => Action::Category(act[9..].parse().map_err(|_| format!("{entry:?}: bad category"))?),
             _ => {
                 let spec = act.strip_prefix("jog=").ok_or_else(|| format!("{entry:?}: unknown action"))?;
                 let (d, n) = spec.split_once('x').ok_or_else(|| format!("{entry:?}: want jog=<delta>x<frames>"))?;
