@@ -25,7 +25,7 @@
 //! The identity (posed-vendor secret + device ID) is loaded at runtime from
 //! that conf, never compiled in — see `lanhid_auth`.
 
-use crate::input::{ControlEvent as CE, Event, JOG_SECS_PER_TICK};
+use crate::input::{ControlEvent as CE, Event, UiEvent, JOG_SECS_PER_TICK};
 use opendeck_link::lanhid::{CdjButton, CdjControl};
 use opendeck_link::lanhid_display::{self as disp, DeckRow, HotCue};
 use opendeck_link::lanhid_frag::fragment;
@@ -96,6 +96,8 @@ pub fn map(c: &CdjControl, jog: &mut JogScaler) -> Option<Event> {
             deck(CE::TempoFader { position })
         }
         CdjControl::Browse { delta } => deck(CE::BrowseEncoderDelta { delta }),
+        // The CDJ's BROWSE key: follow the deck's browse-open level.
+        CdjControl::BrowseView { on } => Some(Event::Ui(UiEvent::ShowBrowse(on))),
 
         // ── pads ────────────────────────────────────────────────────────
         CdjControl::HotCue { slot, pressed } => deck(if pressed {
@@ -130,7 +132,7 @@ fn map_button(btn: CdjButton, pressed: bool) -> Option<Event> {
         B::LoopOut => deck(CE::LoopOut),
         B::Reloop => deck(CE::Reloop),
         B::Back => deck(CE::Back),
-        B::Browse => deck(CE::Load), // rotary push loads the selected track
+        B::RotaryPush => deck(CE::Load), // rotary push loads the selected track
         B::BeatJumpFwd => deck(CE::BeatJump { beats: 1.0 }),
         B::BeatJumpRev => deck(CE::BeatJump { beats: -1.0 }),
         // Modifiers / settings with no direct deck event yet.
@@ -511,6 +513,20 @@ mod tests {
             Some(Event::Deck(e)) => Some(e),
             _ => None,
         }
+    }
+
+    #[test]
+    fn browse_key_opens_and_closes_browse_and_rotary_push_loads() {
+        let ui = |c| match map(&c, &mut JogScaler::cdj()) {
+            Some(Event::Ui(e)) => Some(e),
+            _ => None,
+        };
+        assert!(matches!(ui(CdjControl::BrowseView { on: true }), Some(UiEvent::ShowBrowse(true))));
+        assert!(matches!(ui(CdjControl::BrowseView { on: false }), Some(UiEvent::ShowBrowse(false))));
+        assert!(matches!(
+            deck(CdjControl::Button { btn: CdjButton::RotaryPush, pressed: true }),
+            Some(CE::Load)
+        ));
     }
 
     #[test]

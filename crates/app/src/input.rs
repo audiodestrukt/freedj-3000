@@ -45,6 +45,9 @@ pub enum UiEvent {
     /// TAG TRACK / REMOVE: in BROWSE, tag/untag the highlighted track; on the
     /// TAG LIST screen, remove the highlighted one.
     TagTrack,
+    /// Open (true) or close BROWSE outright, for surfaces that report BROWSE
+    /// as a level (a CDJ-3000 over lanhid) rather than a toggling key.
+    ShowBrowse(bool),
     /// MENU: a row was tapped — select it and step its value.
     MenuTap(usize),
     /// GRID ADJUST touch keys (shown in place of the Bars readouts while the

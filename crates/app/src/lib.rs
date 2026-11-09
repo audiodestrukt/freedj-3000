@@ -1022,6 +1022,15 @@ impl DeckApp {
                 self.screen_mode = ScreenMode::Browse;
                 log::info!("source {src:?}");
             }
+            Event::Ui(UiEvent::ShowBrowse(on)) => {
+                if on && self.screen_mode != ScreenMode::Browse {
+                    self.browser.refresh();
+                    self.screen_mode = ScreenMode::Browse;
+                } else if !on && self.screen_mode == ScreenMode::Browse {
+                    self.screen_mode = ScreenMode::Playback;
+                }
+                log::info!("screen → {:?}", self.screen_mode);
+            }
             Event::Ui(UiEvent::Screen(sc)) => match sc {
                 TopScreen::Browse => {
                     self.screen_mode = if self.screen_mode == ScreenMode::Browse {

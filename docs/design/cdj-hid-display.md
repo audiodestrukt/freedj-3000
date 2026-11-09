@@ -296,6 +296,13 @@ Validated with `examples/cdj_hid_host.rs` and the emulator control API's
   with **no** Browse row selection; the deck sent no Browse events. Keep sending
   0x2A: with two CDJs, the Browse pick is still how each player chooses its
   deck (brief p.4).
+- **Screen keys in Control Mode (probe `--raw`, 2026-11-09).** The rotary
+  push is 0x05 bit 0x08 (the brief's "BROWSE" bit), so loading on it is right.
+  The BROWSE key has no momentary bit: it flips 0x05 bit 0x80, a level that
+  says the deck's browse list is open. BACK from the playback screen sets it
+  (and that press reports no BACK bit), SOURCE clears it. TAG LIST, MENU and
+  rotary turns sent nothing. freedj follows the level with
+  `UiEvent::ShowBrowse(on)`.
 - The empty waveform field and the empty overview strip are now the target. 0x2C
   should fill the strip under the ruler, and 0x2E the enlarged waveform.
 - The emulator also sends a stream of all-zero type-1 reports (`payload[1] =

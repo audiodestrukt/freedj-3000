@@ -176,7 +176,8 @@ pub enum CdjButton {
     TempoRange,
     TempoReset,
     Back,
-    Browse,
+    /// Rotary encoder push (0x05 bit 0x08).
+    RotaryPush,
     Quantize,
     Shift,
     BeatJumpFwd,
@@ -196,7 +197,7 @@ const BUTTON_BITS: &[(usize, u8, CdjButton)] = &[
     (0x04, 0x08, CdjButton::TempoRange),
     (0x04, 0x02, CdjButton::TempoReset),
     (0x05, 0x04, CdjButton::Back),
-    (0x05, 0x08, CdjButton::Browse),
+    (0x05, 0x08, CdjButton::RotaryPush),
     (0x05, 0x40, CdjButton::Quantize),
     (0x06, 0x04, CdjButton::Shift),
     (0x07, 0x80, CdjButton::BeatJumpFwd),
@@ -233,6 +234,10 @@ pub enum CdjControl {
     LoopLength { beats: f32 },
     /// A beat-jump-size control was pressed; `forward` picks the direction.
     BeatJumpSize { beats: f32, forward: bool },
+    /// The deck's own browse list opened or closed (0x05 bit 0x80). This is a
+    /// level, not a key: on cdj3k-emu in Control Mode the BROWSE key flips it,
+    /// BACK from the playback screen sets it, SOURCE clears it.
+    BrowseView { on: bool },
     /// Browse encoder moved; wrapping signed delta of the 0x13 counter.
     Browse { delta: i32 },
     /// Tempo fader raw signed value (0x15); span about -1000..1000, caller
@@ -279,6 +284,12 @@ impl InputDecoder {
             if now != was && !(first && !now) {
                 out.push(CdjControl::Button { btn, pressed: now });
             }
+        }
+        // Browse-view level: report every change, and the initial state so
+        // the app starts in step with the deck.
+        let view = cur[0x05] & 0x80 != 0;
+        if (first && view) || (!first && view != (prev[0x05] & 0x80 != 0)) {
+            out.push(CdjControl::BrowseView { on: view });
         }
         // Hot cues A..H, byte 0x0F, 0x80 down to 0x01.
         for slot in 0..8u8 {
@@ -360,6 +371,31 @@ mod tests {
         r[1] = 0x20;
         fill(&mut r);
         r
+    }
+
+    #[test]
+    fn browse_key_is_a_level_and_rotary_push_is_a_button() {
+        // Read off cdj3k-emu in Control Mode: the rotary push is 0x05/0x08,
+        // the BROWSE key flips 0x05/0x80 and leaves it set.
+        let mut d = InputDecoder::new();
+        d.decode(&input_report(|_| {})); // seeds state (and reports tempo)
+        assert_eq!(
+            d.decode(&input_report(|r| r[0x05] = 0x08)),
+            vec![CdjControl::Button { btn: CdjButton::RotaryPush, pressed: true }]
+        );
+        d.decode(&input_report(|_| {}));
+        assert_eq!(d.decode(&input_report(|r| r[0x05] = 0x80)), vec![CdjControl::BrowseView { on: true }]);
+        // Holding the level reports nothing more; BACK on top is just BACK.
+        assert!(d.decode(&input_report(|r| r[0x05] = 0x80)).is_empty());
+        assert_eq!(
+            d.decode(&input_report(|r| r[0x05] = 0x84)),
+            vec![CdjControl::Button { btn: CdjButton::Back, pressed: true }]
+        );
+        d.decode(&input_report(|r| r[0x05] = 0x80));
+        assert_eq!(d.decode(&input_report(|_| {})), vec![CdjControl::BrowseView { on: false }]);
+        // A session that starts with the deck already browsing says so.
+        let mut d = InputDecoder::new();
+        assert!(d.decode(&input_report(|r| r[0x05] = 0x80)).contains(&CdjControl::BrowseView { on: true }));
     }
 
     #[test]

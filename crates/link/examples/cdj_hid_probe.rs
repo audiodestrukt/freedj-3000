@@ -12,7 +12,9 @@
 //!
 //!   cargo run -p opendeck-link --example cdj_hid_probe -- \
 //!       --id /path/to/cdj_hid_identity.conf \
-//!       [--sock /tmp/cdj3k-emu-1000/instance-1/usb-link.sock] [--secs 15]
+//!       [--sock /tmp/cdj3k-emu-1000/instance-1/usb-link.sock] [--secs 15] [--raw]
+//!
+//! `--raw` also prints every input-report byte that changed, mapped or not.
 //!
 //! Start the emulator's bridge first (Developer Mode on):
 //!   cdj3k-emu ctl --slot 1 sh 'systemctl start cdj3k-pc-link-bridge'
@@ -30,12 +32,14 @@ fn main() -> std::io::Result<()> {
     let mut sock = "/tmp/cdj3k-emu-1000/instance-1/usb-link.sock".to_string();
     let mut id_path: Option<PathBuf> = None;
     let mut secs = 15u64;
+    let mut raw = false;
     let mut seed = [1u8, 2, 3, 4, 5, 6, 7, 8];
     let mut a = std::env::args().skip(1);
     while let Some(arg) = a.next() {
         match arg.as_str() {
             "--sock" => sock = a.next().expect("--sock needs a path"),
             "--id" => id_path = a.next().map(PathBuf::from),
+            "--raw" => raw = true,
             "--secs" => secs = a.next().and_then(|s| s.parse().ok()).unwrap_or(15),
             "--seed" => {
                 // 16 hex chars = 8 seed bytes, optional
@@ -75,6 +79,7 @@ fn main() -> std::io::Result<()> {
     let mut reached_11 = false;
     let mut highest_stage = 0u8;
     let mut input_reports = 0u64;
+    let mut last_report = [0u8; 64];
 
     // First 16 bytes of a frame as hex, for logging the deck's stage frames.
     fn hex8(p: &[u8]) -> String {
@@ -161,6 +166,18 @@ fn main() -> std::io::Result<()> {
                         }
                     } else if payload.len() >= 2 && payload[1] == 0x20 {
                         input_reports += 1;
+                        // --raw: print every byte that changed since the last
+                        // report, so unmapped bits show up too.
+                        if raw {
+                            let diffs: Vec<String> = (0..payload.len().min(64))
+                                .filter(|&i| payload[i] != last_report[i])
+                                .map(|i| format!("[{i:02x}] {:02x}->{:02x}", last_report[i], payload[i]))
+                                .collect();
+                            if !diffs.is_empty() && input_reports > 1 {
+                                println!("raw {}", diffs.join(" "));
+                            }
+                            last_report[..payload.len().min(64)].copy_from_slice(&payload[..payload.len().min(64)]);
+                        }
                         for ev in dec.decode(&payload) {
                             println!("{ev:?}");
                         }
