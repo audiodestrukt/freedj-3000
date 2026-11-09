@@ -298,6 +298,8 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &Scree
                 draw_header(ui, ctx, snap, lay, u, out);
                 draw_field(ui, snap, lay, u, out);
                 match panel(ctx) {
+                    // GRID ADJUST's keys take the panel row.
+                    _ if snap.zoom_grid_mode => draw_grid_keys(ui, snap, lay, u, out),
                     Panel::BeatLoop => draw_loop_panel(ui, ctx, snap, lay, u, out),
                     Panel::BeatJump => draw_jump_panel(ui, ctx, lay, u, out),
                     Panel::None => {}
@@ -459,10 +461,72 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
     let z = lay.zoom;
     let (flip, _) = tap(ui, z.union(Rect::from_min_size(Pos2::new(z.max.x, z.min.y), Vec2::new(64.0 * u, z.height()))), "cdj-zoom-grid");
     if flip { out.push(Event::Ui(UiEvent::ZoomGridMode)); }
-    let (zc, gc) = if snap.zoom_grid_mode { (DIM, ZOOM_BLUE) } else { (ZOOM_BLUE, DIM) };
-    outline(ui, z, zc, u);
-    label(ui, z.center(), Align2::CENTER_CENTER, "ZOOM", 15.0, u, zc);
-    label(ui, Pos2::new(z.max.x + 9.0 * u, z.center().y), Align2::LEFT_CENTER, "– GRID", 15.0, u, gc);
+    // The boxed word is the live mode: "[ZOOM] – GRID" or "– ZOOM [GRID]".
+    if snap.zoom_grid_mode {
+        let g = Rect::from_min_size(Pos2::new(z.min.x + 68.0 * u, z.min.y), Vec2::new(47.0 * u, z.height()));
+        outline(ui, g, ZOOM_BLUE, u);
+        label(ui, g.center(), Align2::CENTER_CENTER, "GRID", 15.0, u, ZOOM_BLUE);
+        label(ui, Pos2::new(g.min.x - 9.0 * u, z.center().y), Align2::RIGHT_CENTER, "– ZOOM", 15.0, u, DIM);
+    } else {
+        outline(ui, z, ZOOM_BLUE, u);
+        label(ui, z.center(), Align2::CENTER_CENTER, "ZOOM", 15.0, u, ZOOM_BLUE);
+        label(ui, Pos2::new(z.max.x + 9.0 * u, z.center().y), Align2::LEFT_CENTER, "– GRID", 15.0, u, DIM);
+    }
+}
+
+/// GRID ADJUST's key row (replaces a touch panel): SNAP GRID (CUE), SHIFT
+/// GRID, ◀◀ 1/2, ▶▶ 1/2, RESET. Measured on the unit: 116×84 keys at y 383.
+/// SHIFT GRID commits a sync pitch-bend offset freedj does not keep, so it
+/// stays dim; RESET lights once the grid is edited.
+fn draw_grid_keys(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
+    use crate::input::GridAdjust as G;
+    let sc = lay.screen;
+    let key = |x: f32| Rect::from_min_max(Pos2::new(sc.min.x + x * u, sc.min.y + 383.0 * u), Pos2::new(sc.min.x + (x + 116.0) * u, sc.min.y + 467.0 * u));
+    let have_grid = snap.beat_grid.is_some();
+    let keys: [(f32, &[&str], Option<G>, bool); 5] = [
+        (315.0, &["SNAP", "GRID"], Some(G::ShiftCue), have_grid),
+        (451.0, &["SHIFT", "GRID"], None, false),
+        (587.0, &["1/2"], Some(G::HalfBeat { forward: false }), have_grid),
+        (713.0, &["1/2"], Some(G::HalfBeat { forward: true }), have_grid),
+        (849.0, &["RESET"], Some(G::Reset), snap.grid_edited),
+    ];
+    let p = ui.painter();
+    for (i, (x, words, op, on)) in keys.iter().enumerate() {
+        let r = key(*x);
+        let (bg, edge, ink) = if *on { (Color32::from_rgb(50, 50, 50), Color32::from_rgb(125, 125, 125), TEXT) }
+                              else { (Color32::from_rgb(15, 15, 15), Color32::from_rgb(38, 38, 38), Color32::from_rgb(77, 77, 77)) };
+        p.rect_filled(r, 0.0, bg);
+        p.rect_stroke(r.shrink(1.0 * u), 0.0, Stroke::new(2.0 * u, edge));
+        if *on {
+            if let Some(op) = op {
+                if tap(ui, r, &format!("cdj-grid-{i}")).0 { out.push(Event::Ui(UiEvent::GridAdjust(*op))); }
+            }
+        }
+        let n = words.len() as f32;
+        let top = if i == 0 { r.center().y - 18.0 * u } else { r.center().y - (n - 1.0) * 12.0 * u };
+        for (k, w) in words.iter().enumerate() {
+            let px = if *w == "1/2" { 26.0 } else { 20.0 };
+            label(ui, Pos2::new(r.center().x, top + 24.0 * u * k as f32), Align2::CENTER_CENTER, *w, px, u, ink);
+        }
+        if i == 0 { label(ui, Pos2::new(r.center().x, r.max.y - 16.0 * u), Align2::CENTER_CENTER, "(CUE)", 12.0, u, ink); }
+        // The 1/2 keys carry a ◀◀ / ▶▶ tab on their inner top corner.
+        if i == 2 || i == 3 {
+            let fwd = i == 3;
+            let (x0, x1) = if fwd { (r.min.x + 2.0 * u, r.min.x + 34.0 * u) } else { (r.max.x - 34.0 * u, r.max.x - 2.0 * u) };
+            let (y0, y1) = (r.min.y + 2.0 * u, r.min.y + 16.0 * u);
+            let slant = 6.0 * u;
+            let tab = if fwd { vec![Pos2::new(x0, y0), Pos2::new(x1, y0), Pos2::new(x1 - slant, y1), Pos2::new(x0, y1)] }
+                      else { vec![Pos2::new(x0, y0), Pos2::new(x1, y0), Pos2::new(x1, y1), Pos2::new(x0 + slant, y1)] };
+            p.add(Shape::convex_polygon(tab, Color32::from_rgb(80, 80, 80), Stroke::NONE));
+            let c = Pos2::new((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+            for d in [-4.0f32, 3.0] {
+                let ox = c.x + d * u;
+                let s = if fwd { 1.0 } else { -1.0 };
+                let tri = vec![Pos2::new(ox - 3.5 * u * s, c.y - 4.0 * u), Pos2::new(ox + 3.5 * u * s, c.y), Pos2::new(ox - 3.5 * u * s, c.y + 4.0 * u)];
+                p.add(Shape::convex_polygon(tri, Color32::BLACK, Stroke::NONE));
+            }
+        }
+    }
 }
 
 /// The loop glyph: a ↻-like hook with an arrowhead, drawn (not a font glyph).

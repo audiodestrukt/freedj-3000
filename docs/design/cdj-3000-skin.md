@@ -80,7 +80,7 @@ Size: S < 1 day, M 1–3 days, L > 3 days.
 |---|---|---|---|
 | Playback screen | Layout (header, waveform field, info block, overview with ruler) | phase 0 | M |
 | | Beat countdown (bars/beats to the next cue, two rows) | missing | S |
-| | ZOOM / GRID pill + Grid Adjust touch buttons (CDJ set) | logic exists | S |
+| | ZOOM / GRID pill + Grid Adjust touch buttons (CDJ set) | done (phase 1) | S |
 | | BEAT LOOP panel 1/4–32 (paged) | logic exists | S |
 | | BEAT JUMP panel ◀▶ ×(1/2–4, paged) | logic exists | S |
 | | KEY SHIFT panel | needs key shift | M |
@@ -206,4 +206,14 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
     skin: no such screen, H does nothing.
   - Dev: `OPENDECK_SCREEN=history`, `OPENDECK_HISTORY=a.mp3:b.mp3`.
   - Still to do: categories for rekordbox and LINK sources.
+- **Phase 1 (part 2): GRID ADJUST.** A long rotary press on the unit (key A,
+  or a tap on the pill) swaps in the GRID key row: SNAP GRID (CUE) = beat 1
+  on the cue (`GridAdjust::ShiftCue`), SHIFT GRID (dim: it commits a sync
+  pitch-bend offset freedj does not keep), ◀◀ 1/2 and ▶▶ 1/2
+  (`GridAdjust::HalfBeat`), and RESET, lit once the grid is edited
+  (`DeckSnapshot::grid_edited`). The field shrinks as for a touch panel and
+  the pill boxes GRID ("– ZOOM [GRID]"). The selector moves the grid 1/64 beat
+  per detent, as before.
+  - The unit left SNAP GRID dim in every state tried (cue set, paused, at the
+    track end); freedj lights it whenever there is a grid.
 

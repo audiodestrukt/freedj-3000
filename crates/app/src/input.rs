@@ -66,6 +66,8 @@ pub enum GridAdjust {
     SnapCue,
     /// SHIFT GRID (CUE): the cue point becomes beat 1.
     ShiftCue,
+    /// CDJ-3000 ◀◀ 1/2 / ▶▶ 1/2: slide the grid half a beat.
+    HalfBeat { forward: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

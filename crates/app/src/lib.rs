@@ -320,7 +320,7 @@ struct DeckApp {
 #[derive(Clone, Copy)]
 struct UiFlags {
     key_lock: bool, jog_vinyl: bool, remain_mode: bool, auto_cue: bool, slip: bool, sync: bool, master: bool,
-    zoom_grid_mode: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
+    zoom_grid_mode: bool, grid_edited: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
     player: u8,
     cue_point: u64,
     hot_cues: [Option<u64>; 8],
@@ -388,6 +388,7 @@ fn make_snapshot<'a>(
         sync:          f.sync,
         master:        f.master,
         zoom_grid_mode: f.zoom_grid_mode,
+        grid_edited:   f.grid_edited,
         source_link:   f.source_link,
         phase_ticks_view: f.phase_ticks_view,
         linked:        f.linked,
@@ -1083,6 +1084,14 @@ impl DeckApp {
                         self.grids.remove(&self.path.to_string_lossy());
                         self.link_grid.store(Arc::new(self.beat_grid.clone()));
                         log::info!("grid: reset to analysed");
+                    }
+                    HalfBeat { forward } => {
+                        if let Some(g) = self.beat_grid.as_mut() {
+                            let per = grids::period_frames(g, self.audio.sample_rate);
+                            let half = (per / 2.0).round() as i64;
+                            grids::shift(g, if forward { half } else { -half }, per);
+                            self.grid_changed();
+                        }
                     }
                     SnapCue | ShiftCue => {
                         let frame = self.transport.cue_point / self.audio.channels as u64;
@@ -2038,6 +2047,7 @@ impl DeckApp {
         let flags = UiFlags {
             key_lock: self.key_lock, jog_vinyl: self.settings.jog_vinyl, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
+            grid_edited: self.grids.get(&self.path.to_string_lossy()).is_some(),
             source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             // Master indicator (phase-ticks view): the real XDJ shows a flat
@@ -2125,7 +2135,9 @@ impl DeckApp {
         };
         let lay  = screen::layout(screen_rect);
         if cdj && self.frame_count == 0 { cdj3000::panel_from_env(&self.egui_ctx); }
-        let lay3k = cdj.then(|| cdj3000::layout(screen_rect, cdj3000::panel(&self.egui_ctx) != cdj3000::Panel::None));
+        // A touch panel or GRID ADJUST's key row shrinks the waveform field.
+        let lay3k = cdj.then(|| cdj3000::layout(screen_rect,
+            cdj3000::panel(&self.egui_ctx) != cdj3000::Panel::None || self.zoom_grid_mode));
         let px   = |r: egui::Rect| [r.min.x * ppp, r.min.y * ppp, r.width() * ppp, r.height() * ppp];
         let perform = self.screen_mode == ScreenMode::Perform;
         // PERFORM shrinks the enlarged waveform to a strip above the pads.
@@ -2217,6 +2229,7 @@ impl DeckApp {
         let flags = UiFlags {
             key_lock: self.key_lock, jog_vinyl: self.settings.jog_vinyl, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
+            grid_edited: self.grids.get(&self.path.to_string_lossy()).is_some(),
             source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             // Master indicator (phase-ticks view): the real XDJ shows a flat
