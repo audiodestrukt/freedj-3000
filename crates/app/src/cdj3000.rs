@@ -488,6 +488,77 @@ fn grid_keys_lit(have_grid: bool, cue_set: bool, sync_offset: f32, grid_edited: 
 }
 
 #[cfg(test)]
+mod helper_tests {
+    use super::*;
+
+    /// The panels' pages as read off the unit (page 2 of BEAT LOOP is not in
+    /// the manual).
+    #[test]
+    fn loop_and_jump_pages_match_the_unit() {
+        let labels = |p: &[f32]| p.iter().map(|b| beats_label(*b)).collect::<Vec<_>>();
+        assert_eq!(labels(&LOOP_PAGES[0]), ["1/4", "1/2", "1", "2", "4", "8", "16", "32"]);
+        assert_eq!(labels(&LOOP_PAGES[1]), ["3/4", "1", "3/2", "3", "5", "6", "7", "9"]);
+        assert_eq!(labels(&JUMP_PAGES[0]), ["1/2", "1", "2", "4"]);
+        assert_eq!(labels(&JUMP_PAGES[1]), ["8", "16", "32", "64"]);
+        assert_eq!(beats_label(2.5), "2.50", "an odd length still prints");
+    }
+
+    #[test]
+    fn readouts_format_like_the_unit() {
+        assert_eq!(bars_text(Some((4, 2))), "4.2");
+        assert_eq!(bars_text(None), "--.-");
+        assert_eq!(size_text(768 << 20), ("0.8".to_string(), "GB"));
+        assert_eq!(size_text(700_000_000), ("0.7".to_string(), "GB"));
+        assert_eq!(size_text(31_457_280_000), ("31.5".to_string(), "GB"));
+        assert_eq!(size_text(0), ("0.0".to_string(), "GB"));
+    }
+
+    /// Every region sits on the screen, scales with it, and a touch panel
+    /// (or GRID ADJUST) shrinks the waveform field and lifts the ZOOM pill.
+    #[test]
+    fn layout_fits_scales_and_shrinks_for_panels() {
+        let screen = Rect::from_min_size(Pos2::new(40.0, 20.0), ASPECT);
+        let all = |l: &Layout| vec![l.header, l.source, l.art, l.title, l.track_row, l.info_btn, l.bars, l.field,
+                                    l.ticks_top, l.wave, l.ticks_bot, l.zoom, l.loop_mark, l.page, l.player, l.track,
+                                    l.time, l.tempo, l.bpm, l.overview, l.ruler, l.mt, l.key, l.strip_overview];
+        for open in [false, true] {
+            let l = layout(screen, open);
+            for (i, r) in all(&l).iter().enumerate() {
+                assert!(screen.expand(0.5).contains_rect(*r), "region {i} {r:?} off screen (panel {open})");
+            }
+            for k in l.keys.iter().chain(l.panel.iter()) { assert!(screen.contains_rect(*k)); }
+            assert!(l.wave.max.y <= l.field.max.y && l.wave.min.y >= l.field.min.y);
+        }
+        let (shut, open) = (layout(screen, false), layout(screen, true));
+        assert!(open.wave.height() < shut.wave.height());
+        assert!(open.zoom.max.y < open.panel[0].min.y, "pill above the key row");
+        assert!(shut.zoom.min.y > shut.wave.max.y);
+        // Twice the size: every region scales about the origin.
+        let big = layout(Rect::from_min_size(Pos2::ZERO, ASPECT * 2.0), false);
+        let one = layout(Rect::from_min_size(Pos2::ZERO, ASPECT), false);
+        assert!((big.wave.width() - 2.0 * one.wave.width()).abs() < 0.01);
+        assert!((big.overview.min.y - 2.0 * one.overview.min.y).abs() < 0.01);
+    }
+
+    #[test]
+    fn cover_art_decodes_png_and_rejects_garbage() {
+        let mut png_bytes = Vec::new();
+        {
+            let mut e = png::Encoder::new(&mut png_bytes, 2, 2);
+            e.set_color(png::ColorType::Rgba);
+            e.set_depth(png::BitDepth::Eight);
+            let mut w = e.write_header().unwrap();
+            w.write_image_data(&[255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255]).unwrap();
+        }
+        let img = decode_art("image/png", &png_bytes).expect("png decodes");
+        assert_eq!(img.size, [2, 2]);
+        assert_eq!(img.pixels[0], Color32::from_rgb(255, 0, 0));
+        assert!(decode_art("image/jpeg", b"not an image").is_none());
+        assert!(decode_art("image/png", &png_bytes[..10]).is_none(), "truncated");
+    }
+}
+
+#[cfg(test)]
 mod grid_key_tests {
     use super::grid_keys_lit;
 
@@ -1020,10 +1091,10 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
     }
 }
 
-/// "0.7" GB / "512" MB, as the SOURCE info panel shows sizes.
+/// "0.7" GB, as the SOURCE info panel shows sizes.
 fn size_text(bytes: u64) -> (String, &'static str) {
-    let gb = bytes as f64 / 1e9;
-    if gb >= 1.0 || bytes == 0 { (format!("{:.1}", gb), "GB") } else { (format!("{:.0}", bytes as f64 / 1e6), "MB") }
+    // Always GB, one decimal: the unit shows a 768 MB stick as "0.7 GB".
+    (format!("{:.1}", bytes as f64 / 1e9), "GB")
 }
 
 /// A source's total/free bytes, read at most every two seconds per path.

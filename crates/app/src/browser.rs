@@ -950,6 +950,17 @@ impl Browser {
     #[cfg(test)]
     fn force_media_rescan(&mut self) -> bool { self.media_at = None; self.poll_media() }
 
+    /// Tests: browse an in-memory export as if it were on local media at
+    /// `root`, standing on its category list.
+    #[cfg(test)]
+    fn browse_rb(&mut self, exp: RbExport, root: &Path) {
+        self.rb = Some(Arc::new(exp));
+        self.rb_source = Some(RbSource::Local(root.to_path_buf()));
+        self.stack = vec![Loc::Fs(root.to_path_buf()), Loc::RbRoot];
+        self.selected = 0;
+        self.rebuild();
+    }
+
     /// Whether the browser is on the LINK side (the player list, or a linked
     /// player's library) — lights the LINK source key rather than FILE.
     pub fn on_link(&self) -> bool {
@@ -987,6 +998,7 @@ mod tests {
     // this is the only test that sets it).
     #[test]
     fn usb_stick_is_detected_entered_and_survives_removal() {
+        let _env = MEDIA_ENV.lock().unwrap_or_else(|e| e.into_inner());
         let (root, stick) = crate::media::tests::fake_media_root("browser-usb");
         std::env::set_var("OPENDECK_MEDIA_DIRS", root.path());
         let link = crate::prodj::LinkState::new(1);
@@ -1090,6 +1102,134 @@ mod tests {
         b.set_search_query("track 2".into()); // a title
         assert_eq!(b.entries().len(), 1);
         assert_eq!(b.entries()[0].key.as_deref(), Some("Fm"));
+    }
+
+    /// SOURCE rows for LINK: a player's media carries its player number as a
+    /// badge ("3" + "USB: OPENDECK"); a rekordbox laptop gets no badge.
+    #[test]
+    fn source_rows_for_link_players_and_rekordbox() {
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-src-link");
+        let link = crate::prodj::LinkState::new(1);
+        let cdj = Ipv4Addr::new(169, 254, 5, 55);
+        let laptop = Ipv4Addr::new(169, 254, 9, 9);
+        link.peers.lock().unwrap().extend([(3u8, cdj), (17u8, laptop)]);
+        link.peer_names.lock().unwrap().extend([(3u8, "CDJ-3000".to_string()), (17u8, "rekordbox".to_string())]);
+        link.peer_media.lock().unwrap().insert((3, 3), (opendeck_link::prodj::MediaInfo {
+            player: 3, slot: 3, name: "OPENDECK".into(), tracks: 12, playlists: 1,
+        }, std::time::Instant::now()));
+        let b = Browser::new(home.path(), link);
+        let rows = b.sources();
+        let usb = rows.iter().find(|r| r.kind == SourceKind::Link && !r.rekordbox).expect("player media row");
+        assert_eq!((usb.player, usb.label.as_str(), usb.ip), (Some(3), "USB: OPENDECK", Some(cdj)));
+        let rb = rows.iter().find(|r| r.rekordbox && r.kind == SourceKind::Link).expect("rekordbox row");
+        assert_eq!((rb.player, rb.ip), (None, Some(laptop)));
+        // A track from that player belongs to its row, not to the laptop's.
+        let from_cdj = Load::Db { ip: cdj, id: 7, title: String::new(), rekordbox: false, sd: false };
+        assert!(usb.holds(&from_cdj) && !rb.holds(&from_cdj));
+        assert!(!rows[0].holds(&from_cdj), "nor to the local folder");
+    }
+
+    /// Picking a rekordbox stick on SOURCE lands on its first category,
+    /// ARTIST, as a CDJ does; a plain folder lands on its files.
+    #[test]
+    fn a_rekordbox_stick_from_source_opens_on_artist() {
+        let _env = MEDIA_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (root, _stick) = crate::media::tests::fake_media_root("browser-src-rb");
+        std::env::set_var("OPENDECK_MEDIA_DIRS", root.path());
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-src-rb-home");
+        let mut b = Browser::new(home.path(), crate::prodj::LinkState::new(1));
+        let rows = b.sources();
+        let i = rows.iter().position(|r| r.kind == SourceKind::Usb && r.label == "USB: CDJ1").expect("the stick");
+        assert!(rows[i].rekordbox);
+        assert!(b.open_source(i));
+        assert_eq!(b.title(), "ARTIST");
+        assert_eq!(b.rb_categories().unwrap().1, Some(0));
+        assert!(b.open_source(0));
+        assert!(b.rb_categories().is_none(), "the local folder has no categories");
+        std::env::remove_var("OPENDECK_MEDIA_DIRS");
+    }
+
+    /// Tests that point OPENDECK_MEDIA_DIRS at a fake stick run one at a
+    /// time: the variable is process-wide and the tests run in parallel.
+    static MEDIA_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn library() -> RbExport {
+        let t = |id: u32, title: &str, artist: &str, album: &str, key: &str| opendeck_rekordbox::RbTrack {
+            id, title: title.into(), artist: artist.into(), album: album.into(), key: key.into(),
+            bpm: 120.0 + id as f32, rel_path: format!("/Contents/{title}.mp3"), ..Default::default()
+        };
+        RbExport::from_parts(PathBuf::from("/stick"), vec![
+            t(1, "Lights Out", "ALOTT", "Lights Out EP", "Fm"),
+            t(2, "Daddy", "Ali Storm", "B Album", "Am"),
+            t(3, "Fans Only", "Ali Storm", "A Album", "Am"),
+            t(4, "Fans Only (Dub)", "Ali Storm", "A Album", ""),
+            t(5, "Untitled", "", "", "Em"),
+        ], Vec::new(), vec![
+            (1, "HISTORY 001".into(), vec![2, 1]),
+            (2, "HISTORY 002".into(), vec![5, 3, 1]),
+        ])
+    }
+
+    #[test]
+    fn rekordbox_names_group_sort_and_preview() {
+        let mut b = Browser::new(Path::new("/"), crate::prodj::LinkState::new(1));
+        b.browse_rb(library(), Path::new("/stick"));
+        b.open_rb_category(0); // ARTIST
+        let names: Vec<_> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["Ali Storm", "ALOTT", "(none)"], "case-insensitive, unnamed last");
+        // The right pane: an artist's albums, sorted and unique.
+        b.selected = 0;
+        assert_eq!(b.rb_preview(), Some(("ALBUM", vec!["A Album".to_string(), "B Album".to_string()])));
+        b.enter();
+        let titles: Vec<_> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(titles, ["Daddy", "Fans Only", "Fans Only (Dub)"]);
+        // KEY: the keys, a track without one under (none); a key previews tracks.
+        b.open_rb_category(3);
+        let keys: Vec<_> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(keys, ["Am", "Em", "Fm", "(none)"]);
+        b.selected = 0;
+        assert_eq!(b.rb_preview().unwrap().1, vec!["Daddy".to_string(), "Fans Only".to_string()]);
+        b.selected = 3;
+        b.enter();
+        assert_eq!(b.entries().len(), 1);
+        assert_eq!(b.entries()[0].key, None);
+        assert_eq!(b.title(), "(none)");
+    }
+
+    #[test]
+    fn rekordbox_history_is_newest_first_in_play_order() {
+        let mut b = Browser::new(Path::new("/"), crate::prodj::LinkState::new(1));
+        b.browse_rb(library(), Path::new("/stick"));
+        let h = b.rb_categories().unwrap().0.iter().position(|c| c == "HISTORY").unwrap();
+        b.open_rb_category(h);
+        assert!(b.on_rb_history());
+        let lists: Vec<_> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(lists, ["HISTORY 002", "HISTORY 001"]);
+        b.selected = 0;
+        assert_eq!(b.rb_preview().unwrap(), ("TRACK", vec!["Untitled".into(), "Fans Only".into(), "Lights Out".into()]));
+        b.enter();
+        assert_eq!(b.title(), "HISTORY 002");
+        let played: Vec<_> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(played, ["Untitled", "Fans Only", "Lights Out"], "play order, not sorted");
+        assert_eq!(b.rb_categories().unwrap().1, Some(h), "still under HISTORY");
+    }
+
+    #[test]
+    fn rekordbox_track_rows_carry_key_bpm_and_paths() {
+        let mut b = Browser::new(Path::new("/"), crate::prodj::LinkState::new(1));
+        b.browse_rb(library(), Path::new("/stick"));
+        b.open_rb_category(2); // TRACK
+        let e = b.entries().iter().find(|e| e.name == "Lights Out").unwrap();
+        assert_eq!((e.key.as_deref(), e.bpm), (Some("Fm"), Some(121.0)));
+        match e.load() {
+            Some(Load::Local { path, .. }) => assert_eq!(path, &PathBuf::from("/stick/Contents/Lights Out.mp3")),
+            _ => panic!("local load"),
+        }
+        b.begin_search();
+        b.set_search_query("ali".into());
+        assert_eq!(b.entries().len(), 3, "artist match: Ali Storm's three");
+        b.set_search_query("DUB".into());
+        assert_eq!(b.entries().len(), 1, "title match, any case");
     }
 
     #[test]

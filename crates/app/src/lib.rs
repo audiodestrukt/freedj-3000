@@ -20,6 +20,7 @@ mod renderer;
 mod screen;
 mod cdj3000;
 mod devscript;
+mod nav;
 #[cfg(feature = "renderer-sdl")]
 mod sdl_backend;
 mod waveform_cpu;
@@ -91,6 +92,29 @@ fn record_load(history: &mut Vec<Load>, loaded: &mut Option<Load>, load: Load) {
 #[cfg(test)]
 mod history_tests {
     use super::*;
+
+    /// The CDJ-3000's waveform zoom, measured on the unit: 18 px per beat at
+    /// 128 BPM on its 1280 px field, 5.3 times as wide a window as the XDJ.
+    #[test]
+    fn cdj_zoom_is_5_3_times_the_xdj() {
+        for z in 0..ZOOM_LEVELS.len() {
+            let (x, c) = (DeckApp::cols_for(settings::Skin::Xdj1000Mk2, z), DeckApp::cols_for(settings::Skin::Cdj3000, z));
+            assert!((c / x - 5.3).abs() < 1e-4, "level {z}: {c} vs {x}");
+        }
+    }
+
+    #[test]
+    fn search_keys_type_letters_digits_and_punctuation() {
+        use KeyCode::*;
+        assert_eq!(search_char(KeyA), Some('A'));
+        assert_eq!(search_char(KeyZ), Some('Z'));
+        assert_eq!(search_char(Digit0), Some('0'));
+        assert_eq!(search_char(Digit9), Some('9'));
+        assert_eq!(search_char(Space), Some(' '));
+        assert_eq!(search_char(Minus), Some('-'));
+        assert_eq!(search_char(Quote), Some('\''));
+        for k in [Enter, Escape, Backspace, ArrowUp, Tab, F1] { assert_eq!(search_char(k), None, "{k:?}"); }
+    }
     fn t(n: &str) -> Load { Load::Local { path: n.into(), analyze: None } }
 
     #[test]
@@ -915,19 +939,8 @@ impl DeckApp {
                 match self.screen_mode {
                     ScreenMode::Browse  => self.browser.move_selection(delta),
                     ScreenMode::TagList => self.tag_list.move_selection(delta),
-                    ScreenMode::History => {
-                        let last = self.history.len() as i32 - 1;
-                        if last >= 0 {
-                            self.history_cursor = Some(match self.history_cursor {
-                                None => 0,
-                                Some(c) => (c as i32 + delta).clamp(0, last) as usize,
-                            });
-                        }
-                    }
-                    ScreenMode::Source  => {
-                        let last = self.browser.sources().len() as i32 - 1;
-                        self.source_cursor = (self.source_cursor as i32 + delta).clamp(0, last.max(0)) as usize;
-                    }
+                    ScreenMode::History => self.history_cursor = nav::step_history_cursor(self.history_cursor, delta, self.history.len()),
+                    ScreenMode::Source  => self.source_cursor = nav::step_cursor(self.source_cursor, delta, self.browser.sources().len()),
                     ScreenMode::Menu    => {
                         let last = settings::MENU.len() as i32 - 1;
                         self.menu_cursor = (self.menu_cursor as i32 + delta).clamp(0, last) as usize;
@@ -1179,13 +1192,11 @@ impl DeckApp {
                 self.screen_mode = ScreenMode::Browse;
             }
             Event::Ui(UiEvent::ShowBrowse(on)) => {
-                if on && self.screen_mode != ScreenMode::Browse {
-                    self.browser.refresh();
-                    self.screen_mode = ScreenMode::Browse;
-                } else if !on && self.screen_mode == ScreenMode::Browse {
-                    self.screen_mode = ScreenMode::Playback;
+                if let Some(m) = nav::follow_browse_level(self.screen_mode, on) {
+                    if m == ScreenMode::Browse { self.browser.refresh(); }
+                    self.screen_mode = m;
+                    log::info!("screen → {:?}", self.screen_mode);
                 }
-                log::info!("screen → {:?}", self.screen_mode);
             }
             Event::Ui(UiEvent::Screen(sc)) => match sc {
                 TopScreen::Browse => {
@@ -1218,12 +1229,9 @@ impl DeckApp {
                 TopScreen::History => {
                     // LOAD PREVIOUS TRACK: a CDJ-3000 pop-up over the waveform
                     // screen. The XDJ-1000MK2 has none.
-                    if self.screen_mode == ScreenMode::History {
-                        self.screen_mode = ScreenMode::Playback;
-                    } else if self.settings.skin == settings::Skin::Cdj3000 {
-                        self.history_cursor = None;
-                        self.screen_mode = ScreenMode::History;
-                    }
+                    let m = nav::toggle_history(self.screen_mode, self.settings.skin);
+                    if m == ScreenMode::History { self.history_cursor = None; }
+                    self.screen_mode = m;
                     log::info!("screen → {:?}", self.screen_mode);
                 }
                 TopScreen::Source => {
@@ -1231,10 +1239,7 @@ impl DeckApp {
                     if self.screen_mode == ScreenMode::Source {
                         self.screen_mode = ScreenMode::Playback;
                     } else {
-                        let rows = self.browser.sources();
-                        self.source_cursor = self.loaded.as_ref()
-                            .and_then(|l| rows.iter().rposition(|r| r.holds(l)))
-                            .unwrap_or(0);
+                        self.source_cursor = nav::source_start(&self.browser.sources(), self.loaded.as_ref());
                         self.screen_mode = ScreenMode::Source;
                     }
                     log::info!("screen → {:?}", self.screen_mode);

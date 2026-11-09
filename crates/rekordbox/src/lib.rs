@@ -17,7 +17,7 @@ use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 /// One track from the rekordbox database.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct RbTrack {
     pub id:            u32,
     pub title:         String,
@@ -83,6 +83,18 @@ pub struct RbExport {
 }
 
 impl RbExport {
+    /// An export assembled in memory (tests, and sources that are not a
+    /// `export.pdb`). `history` is (id, name, track ids in play order);
+    /// playlist entries start empty.
+    pub fn from_parts(root: PathBuf, mut tracks: Vec<RbTrack>, playlists: Vec<RbPlaylistNode>,
+                      history: Vec<(u32, String, Vec<u32>)>) -> Self {
+        tracks.sort_by_key(|t| t.id);
+        let by_id = tracks.iter().enumerate().map(|(i, t)| (t.id, i)).collect();
+        let history_entries = history.iter().map(|(id, _, ids)| (*id, ids.clone())).collect();
+        let history = history.into_iter().map(|(id, name, _)| (id, name)).collect();
+        RbExport { root, tracks, playlists, history, history_entries, entries: HashMap::new(), by_id }
+    }
+
     /// Track by rekordbox id.
     pub fn track(&self, id: u32) -> Option<&RbTrack> {
         self.by_id.get(&id).map(|&i| &self.tracks[i])

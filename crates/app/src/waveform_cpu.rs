@@ -574,6 +574,36 @@ mod tests {
         assert_eq!(px(&out, w, 200, 0), pal.ground);
     }
 
+    /// A loop on the enlarged waveform: the XDJ shades it navy between two
+    /// loop lines; the CDJ-3000 look shades it amber with no lines.
+    #[test]
+    fn loop_shading_follows_the_skin_style() {
+        let lut = Lut::new(); let pal = Palette::new(&lut);
+        let cols: Vec<u32> = vec![0; 2000];   // silence: the field shows through
+        let mut p = params(2000, [0.0, 0.0, 800.0, 200.0], [0.0; 4]);
+        p.playhead_col = 1000.0;              // centre x = 400; 0.75 cols per px
+        p.beat_period_cols = 0.0;
+        p.cue_col = -100.0;
+        p.loop_start_col = 900.0;             // x ≈ 267
+        p.loop_end_col = 1100.0;              // x ≈ 533
+        let rect = PxRect::from_f32(p.wave_rect).unwrap();
+        let w = rect.w as usize;
+        let mut out = Vec::new();
+
+        draw(&lut, &p, &cols, Kind::Wave, rect, &mut out);
+        assert_eq!(px(&out, w, 267, 100), pal.loop_line, "XDJ: a loop line at the start");
+        assert_eq!(px(&out, w, 533, 100), pal.loop_line, "XDJ: and at the end");
+        assert_eq!(px(&out, w, 330, 100), pal.loop_bg, "XDJ: navy inside");
+        assert_eq!(px(&out, w, 150, 100), pal.ground, "outside the loop");
+
+        p.style = 1.0;
+        draw(&lut, &p, &cols, Kind::Wave, rect, &mut out);
+        assert_eq!(px(&out, w, 267, 100), pal.loop_bg_cdj, "CDJ: no line, shade from the start");
+        assert_eq!(px(&out, w, 330, 100), pal.loop_bg_cdj, "CDJ: amber inside");
+        assert_eq!(px(&out, w, 150, 100), pal.ground);
+        assert_ne!(pal.loop_bg_cdj, pal.loop_bg);
+    }
+
     #[test]
     fn overview_marks_the_playhead_and_fills_the_body() {
         let lut = Lut::new(); let pal = Palette::new(&lut);

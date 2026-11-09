@@ -573,9 +573,46 @@ fn read_block<'a>(
 
 #[cfg(test)]
 mod loop_read_tests {
-    use super::read_block;
+    use super::{read_block, resample_interleaved};
 
     fn ramp(n: usize) -> Vec<f32> { (0..n).map(|i| i as f32).collect() }
+
+    /// The start-up track and every LOAD are converted to the device rate:
+    /// a 1 kHz tone at 48 kHz must come out at 44.1 kHz the right length and
+    /// still 1 kHz (the bug this fixed played it 8 % slow and flat).
+    #[test]
+    fn resampling_keeps_length_and_pitch() {
+        let (src, dst, secs) = (48_000u32, 44_100u32, 1.0f64);
+        let n = (src as f64 * secs) as usize;
+        let mut stereo = Vec::with_capacity(n * 2);
+        for i in 0..n {
+            let v = (2.0 * std::f64::consts::PI * 1000.0 * i as f64 / src as f64).sin() as f32 * 0.5;
+            stereo.extend_from_slice(&[v, -v]);
+        }
+        let out = resample_interleaved(&stereo, 2, src, dst).unwrap();
+        let frames = out.len() / 2;
+        assert!((frames as f64 - dst as f64 * secs).abs() < dst as f64 * 0.01, "{frames} frames");
+        // Count rising zero crossings of the left channel away from the edges.
+        let left: Vec<f32> = out.chunks(2).map(|c| c[0]).collect();
+        let mid = &left[dst as usize / 10..dst as usize * 9 / 10];
+        let rising = mid.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
+        let hz = rising as f64 / (mid.len() as f64 / dst as f64);
+        assert!((hz - 1000.0).abs() < 5.0, "came out at {hz:.1} Hz");
+        // Channels stay channels.
+        assert!(out.chunks(2).skip(1000).take(100).all(|c| (c[0] + c[1]).abs() < 1e-3));
+        // Same rate: untouched.
+        assert_eq!(resample_interleaved(&stereo[..20], 2, src, src).unwrap(), stereo[..20].to_vec());
+        // Timing: a click at 0.5 s is still at 0.5 s (grids and cues are in
+        // time, so a filter delay would put every beat early).
+        let mut click = vec![0.0f32; n * 2];
+        click[(n / 2) * 2] = 1.0;
+        click[(n / 2) * 2 + 1] = 1.0;
+        let out = resample_interleaved(&click, 2, src, dst).unwrap();
+        assert_eq!(out.len() / 2, (n as f64 * dst as f64 / src as f64).round() as usize, "exact length");
+        let peak = out.chunks(2).enumerate().max_by(|a, b| a.1[0].total_cmp(&b.1[0])).unwrap().0;
+        let want = (0.5 * dst as f64).round() as i64;
+        assert!((peak as i64 - want).abs() <= 1, "click moved to frame {peak}, want {want}");
+    }
 
     #[test]
     fn plain_read_without_a_loop_clamps_to_track_end() {
@@ -963,9 +1000,20 @@ pub fn resample_interleaved(
         let out = rs.process_partial(Some(&rem), None).context("resample tail failed")?;
         for c in 0..channels { out_planar[c].extend_from_slice(&out[c]); }
     }
+    // The last partial chunk comes back padded to a whole chunk (~20 ms of
+    // extra silence on a 48 → 44.1 kHz track): cut to the exact length,
+    // flushing first if the output is short. The start needs no trim; the
+    // click test pins that the timing is already right.
+    let want = (frames as f64 * ratio).round() as usize;
+    while out_planar[0].len() < want {
+        let out = rs.process_partial::<Vec<f32>>(None, None).context("resample flush failed")?;
+        if out[0].is_empty() { break; }
+        for c in 0..channels { out_planar[c].extend_from_slice(&out[c]); }
+    }
 
     // Re-interleave.
-    let out_frames = out_planar.iter().map(|c| c.len()).min().unwrap_or(0);
+    let avail = out_planar.iter().map(|c| c.len()).min().unwrap_or(0);
+    let out_frames = want.min(avail);
     let mut out = Vec::with_capacity(out_frames * channels);
     for f in 0..out_frames {
         for c in 0..channels { out.push(out_planar[c][f]); }

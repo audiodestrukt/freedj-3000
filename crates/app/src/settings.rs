@@ -37,8 +37,12 @@ impl Skin {
     /// `OPENDECK_SKIN=cdj3000` / `xdj1000mk2` (case-insensitive), for
     /// screenshots and dev runs; it is not saved.
     pub fn from_env() -> Option<Skin> {
-        let v = std::env::var("OPENDECK_SKIN").ok()?.to_ascii_lowercase();
-        match v.as_str() {
+        Self::parse(&std::env::var("OPENDECK_SKIN").ok()?)
+    }
+
+    /// A skin name as `OPENDECK_SKIN` takes it.
+    pub fn parse(v: &str) -> Option<Skin> {
+        match v.to_ascii_lowercase().as_str() {
             "cdj3000" | "cdj-3000" | "cdj" => Some(Skin::Cdj3000),
             "xdj1000mk2" | "xdj-1000mk2" | "xdj" => Some(Skin::Xdj1000Mk2),
             _ => None,
@@ -181,6 +185,22 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skin_switch_names_toggles_and_persists() {
+        assert_eq!(Settings::default().skin, Skin::Xdj1000Mk2, "the XDJ UI stays the default");
+        for v in ["cdj3000", "CDJ-3000", "cdj"] { assert_eq!(Skin::parse(v), Some(Skin::Cdj3000), "{v}"); }
+        for v in ["xdj1000mk2", "XDJ-1000MK2", "xdj"] { assert_eq!(Skin::parse(v), Some(Skin::Xdj1000Mk2), "{v}"); }
+        assert_eq!(Skin::parse("cdj2000"), None);
+        // The MENU row: SCREEN, stepping either way flips the skin.
+        assert!(MENU.iter().any(|(s, n)| *s == Setting::Skin && *n == "SCREEN"));
+        let s = Settings::default().cycled(Setting::Skin, 1);
+        assert_eq!((s.skin, s.value(Setting::Skin).as_str()), (Skin::Cdj3000, "CDJ-3000"));
+        assert_eq!(s.cycled(Setting::Skin, -1).skin, Skin::Xdj1000Mk2);
+        // Saved and read back with the other settings.
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.skin, Skin::Cdj3000);
+    }
 
     #[test]
     fn cycle_wraps_both_ways_and_toggles() {

@@ -123,6 +123,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_the_browse_and_grid_actions() {
+        let v: Vec<Action> = parse("1:screen=browse; 2:open=rekordbox; 3:select=4; 4:category=2; 5:search=ALO B; \
+                                    6:shiftsync; 7:snapgrid; 8:gridreset; 9:unsync; 10:play; 11:jogmode=vinyl")
+            .unwrap().into_iter().map(|(_, a)| a).collect();
+        assert_eq!(v, vec![
+            Action::Screen("browse".into()), Action::Open("rekordbox".into()), Action::Select(4),
+            Action::Category(2), Action::Search("ALO B".into()), Action::ShiftSync, Action::SnapGrid,
+            Action::GridReset, Action::Sync(false), Action::Play, Action::JogVinyl(true),
+        ]);
+        assert!(parse("1:select=x").is_err());
+        assert!(parse("1:category=").is_err());
+    }
+
+    #[test]
     fn jog_feeds_one_delta_per_frame() {
         let mut s = Script { pending: parse("1:jog=2x3").unwrap().into(), jog: None };
         assert_eq!(s.step(0.5), (vec![], None));

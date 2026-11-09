@@ -37,7 +37,9 @@ pub fn mounts() -> Vec<Mount> {
     if let Some(extra) = std::env::var_os("OPENDECK_MEDIA_DIRS") {
         roots.extend(std::env::split_paths(&extra).filter(|p| !p.as_os_str().is_empty()).map(|p| (p, true)));
     }
-    #[cfg(target_os = "linux")]
+    // Unit tests see only OPENDECK_MEDIA_DIRS: a stick plugged into the dev
+    // machine must not change what a test finds.
+    #[cfg(all(target_os = "linux", not(test)))]
     {
         roots.push((PathBuf::from("/media"), false));
         roots.push((PathBuf::from("/media/usb"), false));   // deploy/pi/usb-automount
@@ -47,11 +49,11 @@ pub fn mounts() -> Vec<Mount> {
         }
         roots.push((PathBuf::from("/mnt"), false));
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(test)))]
     roots.push((PathBuf::from("/Volumes"), false));
 
     let mut out = scan(&roots);
-    #[cfg(windows)]
+    #[cfg(all(windows, not(test)))]
     out.extend(windows_drives());
     out.sort_by(|a, b| a.path.cmp(&b.path));
     out.dedup_by(|a, b| a.path == b.path);
