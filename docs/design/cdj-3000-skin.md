@@ -235,8 +235,11 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
     (`browse-rekordbox-history.png`); the right pane previews the highlighted
     list's tracks, and a list opens its tracks in play order. Unchecked on
     screen: no local export has history (Dan's stick does).
-  - The unit draws tracks played this session in green, in lists and in the
-    category column (TRACK went green after a play). Not done.
+  - Tracks played this session are drawn green (0,255,0) in BROWSE lists and
+    the track table, as on the unit (`Browser::note_played` / `was_played`,
+    fed by each load and the start-up track). Not yet: the unit also greens
+    the category a played track came from (TRACK after a play) and uses a
+    dimmer green (22,139,22) in the preview pane.
   - Not yet: sorting (the sort key is drawn, inert), MATCHING, LINK/dbserver
     sources in the column, the "H" (hot cues) mark by the ♪.
   - Dev: `OPENDECK_SCRIPT` browse actions (`screen=browse; open=rekordbox;

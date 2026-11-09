@@ -229,6 +229,8 @@ pub struct Browser {
     preview:   std::cell::RefCell<Option<(PathBuf, Vec<(bool, String)>)>>,
     /// The folder freedj started in: the SOURCE screen's local row.
     home:      PathBuf,
+    /// Tracks loaded this session (the CDJ draws them green in lists).
+    played:    Vec<Load>,
 }
 
 impl Browser {
@@ -256,12 +258,19 @@ impl Browser {
             link,
             preview: Default::default(),
             home: start.clone(),
+            played: Vec::new(),
         };
         b.rebuild();
         b
     }
 
     pub fn entries(&self) -> &[Entry] { &self.entries }
+
+    /// A track was loaded: lists mark it as played this session.
+    pub fn note_played(&mut self, l: &Load) {
+        if !self.played.contains(l) { self.played.push(l.clone()); }
+    }
+    pub fn was_played(&self, l: &Load) -> bool { self.played.contains(l) }
     pub fn selected_entry(&self) -> Option<&Entry> { self.entries.get(self.selected) }
 
     pub fn title(&self) -> String {
@@ -972,6 +981,19 @@ mod tests {
 
         b.selected = b.entries().iter().position(|e| e.name == "loose.mp3").expect("track row");
         assert_eq!(b.preview(), None);
+    }
+
+    #[test]
+    fn played_tracks_are_remembered_once() {
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-played");
+        let mut b = Browser::new(home.path(), crate::prodj::LinkState::new(1));
+        let a = Load::Local { path: home.path().join("a.mp3"), analyze: None };
+        let c = Load::Local { path: home.path().join("c.mp3"), analyze: None };
+        assert!(!b.was_played(&a));
+        b.note_played(&a);
+        b.note_played(&a);
+        assert!(b.was_played(&a) && !b.was_played(&c));
+        assert_eq!(b.played.len(), 1);
     }
 
     /// rekordcrate's demo export (2 tracks, artist Loopmasters, key Fm).

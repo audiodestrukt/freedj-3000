@@ -465,6 +465,8 @@ impl DeckApp {
     ) -> Self {
         let browser = Browser::new(browse_root.as_deref().unwrap_or(&path), std::sync::Arc::clone(&link));
         let loaded = path.is_file().then(|| Load::Local { path: std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()), analyze: None });
+        let mut browser = browser;
+        if let Some(l) = &loaded { browser.note_played(l); }
         let tag_list = taglist::TagList::open();
         let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
             .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
@@ -1487,6 +1489,7 @@ impl DeckApp {
     }
 
     fn note_loaded(&mut self, load: Load) {
+        self.browser.note_played(&load);
         record_load(&mut self.history, &mut self.loaded, load);
     }
 

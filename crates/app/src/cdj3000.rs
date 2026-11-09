@@ -839,12 +839,14 @@ const COLUMN: Color32 = Color32::from_rgb(55, 55, 55);
 /// SOURCE rows and info panel ground; the highlighted row.
 const PANE: Color32 = Color32::from_rgb(35, 35, 35);
 const SEL_BLUE: Color32 = Color32::from_rgb(0, 125, 225);
+/// A track already played this session, in BROWSE lists.
+const PLAYED: Color32 = Color32::from_rgb(0, 255, 0);
 
 #[derive(Clone, Copy, PartialEq)]
 enum RowIcon { Folder, Track, Person, Disc, Key, List, History, None }
 
 /// One row of a list: icon, text, and an optional right-hand value.
-struct Row<'a> { icon: RowIcon, text: &'a str, value: Option<String>, tagged: bool }
+struct Row<'a> { icon: RowIcon, text: &'a str, value: Option<String>, tagged: bool, played: bool }
 
 /// The status strip every list screen keeps at the bottom: PLAYER, time,
 /// the overview (the shader draws it into `lay.strip_overview`), MT, range,
@@ -1001,7 +1003,7 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
             label(ui, Pos2::new(rr.max.x - 14.0 * u, cy), Align2::RIGHT_CENTER, v, 24.0, u, TEXT).min.x - 12.0 * u
         } else { rr.max.x - 10.0 * u };
         p.with_clip_rect(Rect::from_min_max(Pos2::new(rr.min.x, rr.min.y), Pos2::new(right, rr.max.y)))
-            .text(Pos2::new(rr.min.x + tx * u, cy), Align2::LEFT_CENTER, row.text, FontId::proportional(27.0 * u), TEXT);
+            .text(Pos2::new(rr.min.x + tx * u, cy), Align2::LEFT_CENTER, row.text, FontId::proportional(27.0 * u), if row.played { PLAYED } else { TEXT });
         if row.tagged {
             p.circle_filled(Pos2::new(right - 6.0 * u, cy), 5.0 * u, BARS_ORANGE);
         }
@@ -1249,6 +1251,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     let rows: Vec<Row> = b.entries().iter().map(|e| Row {
         icon: if e.is_dir { dir_icon } else { RowIcon::Track }, text: &e.name, value: None,
         tagged: e.load().map_or(false, |l| tags.contains(l)),
+        played: e.load().map_or(false, |l| b.was_played(l)),
     }).collect();
     // The unit titles a category's name list BROWSE, a track list by its name.
     let title = if names.is_some() || b.on_rb_history() { "BROWSE".to_string() } else { b.title() };
@@ -1331,14 +1334,14 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
             // A rekordbox name: an artist's albums, else its tracks.
             let (head, items) = b.rb_preview().unwrap();
             let icon = if head == "ALBUM" { RowIcon::Disc } else { RowIcon::Track };
-            let rows: Vec<Row> = items.iter().map(|n| Row { icon, text: n, value: None, tagged: false }).collect();
+            let rows: Vec<Row> = items.iter().map(|n| Row { icon, text: n, value: None, tagged: false, played: false }).collect();
             draw_list(ui, right, head, &rows, usize::MAX, "", u, None);
         }
         _ => {
             // A folder: what is in it, as the next level would list it.
             let peek = b.preview().unwrap_or_default();
             let rows: Vec<Row> = peek.iter().map(|(d, n)| Row {
-                icon: if *d { RowIcon::Folder } else { RowIcon::Track }, text: n, value: None, tagged: false,
+                icon: if *d { RowIcon::Folder } else { RowIcon::Track }, text: n, value: None, tagged: false, played: false,
             }).collect();
             draw_list(ui, right, "FOLDER", &rows, usize::MAX, "", u, None);
         }
@@ -1493,7 +1496,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], _title: &s
         }
         label(ui, Pos2::new(sc.min.x + 355.0 * u, cy), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
         p.with_clip_rect(title.shrink2(Vec2::new(0.0, 0.0)).intersect(Rect::from_min_max(at(332.0, y), at(1075.0, y + ROW_H))))
-            .text(Pos2::new(sc.min.x + 378.0 * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), TEXT);
+            .text(Pos2::new(sc.min.x + 378.0 * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), if r.played { PLAYED } else { TEXT });
         if r.tagged { p.circle_filled(Pos2::new(sc.min.x + 1068.0 * u, cy), 5.0 * u, BARS_ORANGE); }
         if lit {
             let load = Rect::from_min_max(at(1080.0, y), at(1280.0, y + ROW_H));
@@ -1522,7 +1525,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], _title: &s
 fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: f32, out: &mut Vec<Event>) {
     let sc = lay.screen;
     let rows: Vec<Row> = tags.entries().iter().map(|e| Row {
-        icon: RowIcon::Track, text: &e.name, value: e.artist.clone(), tagged: false,
+        icon: RowIcon::Track, text: &e.name, value: e.artist.clone(), tagged: false, played: false,
     }).collect();
     draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
@@ -1536,7 +1539,7 @@ fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: 
 fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings, cursor: usize, u: f32, out: &mut Vec<Event>) {
     let sc = lay.screen;
     let rows: Vec<Row> = MENU.iter().map(|(s, name)| Row {
-        icon: RowIcon::None, text: name, value: Some(settings.value(*s)), tagged: false,
+        icon: RowIcon::None, text: name, value: Some(settings.value(*s)), tagged: false, played: false,
     }).collect();
     draw_list_header(ui, snap, lay, "UTILITY", false, u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
