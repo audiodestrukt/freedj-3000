@@ -1533,7 +1533,7 @@ impl DeckApp {
     fn grid_from_analysis(a: &opendeck_mediaserver::Analysis, deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
         let rb = opendeck_rekordbox::RbAnalysis {
             beats: a.beats.iter().map(|&(bib, bpm, ms)| opendeck_rekordbox::RbBeat { time_ms: ms, bpm, beat_in_bar: bib }).collect(),
-            memory_cues: Vec::new(), hot_cues: Vec::new(),
+            memory_cues: Vec::new(), hot_cues: Vec::new(), preview: Vec::new(),
         };
         Self::anlz_to_grid(rb, deck_sr, ch)
     }
@@ -2431,7 +2431,7 @@ impl Prep {
             FetchedGrid::Beats(beats) if !beats.is_empty() => {
                 let a = opendeck_rekordbox::RbAnalysis {
                     beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
-                    memory_cues: Vec::new(), hot_cues: Vec::new(),
+                    memory_cues: Vec::new(), hot_cues: Vec::new(), preview: Vec::new(),
                 };
                 DeckApp::anlz_to_grid(a, self.deck_sr, ch as u8)
             }

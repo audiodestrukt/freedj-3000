@@ -63,6 +63,8 @@ pub struct Entry {
     pub bpm:    Option<f32>,
     /// Musical key, for the CDJ-3000 skin's KEY column.
     pub key:    Option<String>,
+    /// Cover image file (rekordbox tracks on local media).
+    pub art:    Option<PathBuf>,
     kind:       EntryKind,
 }
 
@@ -352,14 +354,14 @@ impl Browser {
         // buttons), not inside every folder.
         let at_top = self.stack.len() == 1;
         if at_top {
-            out.push(Entry { name: "LINK".into(), is_dir: true, artist: None, bpm: None, key: None,
+            out.push(Entry { name: "LINK".into(), is_dir: true, artist: None, bpm: None, key: None, art: None,
                 kind: EntryKind::Descend(Loc::Link) });
             // Every removable mount is a source row, like the XDJ's USB slot:
             // "USB: CDJ1" (the volume label), marked when it is a rekordbox stick.
             for m in &self.media {
                 if m.path == *dir { continue; }   // already browsing it as the root
                 let name = if m.rekordbox { format!("USB: {}   rekordbox", m.label) } else { format!("USB: {}", m.label) };
-                out.push(Entry { name, is_dir: true, artist: None, bpm: None, key: None,
+                out.push(Entry { name, is_dir: true, artist: None, bpm: None, key: None, art: None,
                     kind: EntryKind::Descend(Loc::Fs(m.path.clone())) });
             }
         }
@@ -374,7 +376,7 @@ impl Browser {
                 }
             }
             if matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir) {
-                out.push(Entry { name: "rekordbox".into(), is_dir: true, artist: None, bpm: None, key: None,
+                out.push(Entry { name: "rekordbox".into(), is_dir: true, artist: None, bpm: None, key: None, art: None,
                     kind: EntryKind::Descend(Loc::RbRoot) });
             }
         }
@@ -388,10 +390,10 @@ impl Browser {
                 if name.starts_with('.') { continue; }
                 if path.is_dir() {
                     if is_housekeeping_dir(&name) { continue; }
-                    dirs.push(Entry { name, is_dir: true, artist: None, bpm: None, key: None,
+                    dirs.push(Entry { name, is_dir: true, artist: None, bpm: None, key: None, art: None,
                         kind: EntryKind::Descend(Loc::Fs(path)) });
                 } else if is_audio(&path) {
-                    files.push(Entry { name, is_dir: false, artist: None, bpm: None, key: None,
+                    files.push(Entry { name, is_dir: false, artist: None, bpm: None, key: None, art: None,
                         kind: EntryKind::Track(Load::Local { path, analyze: None }) });
                 }
             }
@@ -414,7 +416,7 @@ impl Browser {
         let names = self.link.peer_names.lock().map(|p| p.clone()).unwrap_or_default();
         let mut v: Vec<(u8, Ipv4Addr)> = peers.into_iter().collect();
         v.sort_by_key(|(p, _)| *p);
-        let dir = |name: String, kind| Entry { name, is_dir: true, artist: None, bpm: None, key: None, kind };
+        let dir = |name: String, kind| Entry { name, is_dir: true, artist: None, bpm: None, key: None, art: None, kind };
         let mut out = Vec::new();
         for (player, ip) in v {
             let name = names.get(&player).cloned().unwrap_or_default();
@@ -455,7 +457,7 @@ impl Browser {
                 "root-filename" => EntryKind::Descend(Loc::DbFilenames),
                 _ => EntryKind::Unsupported,
             };
-            Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, kind }
+            Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None, kind }
         }).collect()
     }
 
@@ -464,7 +466,7 @@ impl Browser {
         let Some((_, c, slot)) = self.db.as_mut() else { return Vec::new() };
         match fetch(c, *slot) {
             Ok(items) => items.into_iter().map(|i| Entry {
-                name: i.label, is_dir: true, artist: None, bpm: None, key: None, kind: EntryKind::Descend(loc(i.id)),
+                name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(loc(i.id)),
             }).collect(),
             Err(e) => { log::warn!("LINK names: {e:#}"); Vec::new() }
         }
@@ -477,13 +479,13 @@ impl Browser {
         let slot = *slot;
         let mut out = Vec::new();
         if folder == 0 && !matches!(self.stack.last(), Some(Loc::DbFolder(0))) {
-            out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None, key: None,
+            out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None, key: None, art: None,
                              kind: EntryKind::Descend(Loc::DbAllTracks) });
         }
         match c.playlist(slot, folder, true) {
             Ok(items) => for i in items {
                 let is_folder = i.type_name() == "folder";
-                out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None, key: None,
+                out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None, key: None, art: None,
                     kind: EntryKind::Descend(if is_folder { Loc::DbFolder(i.id) } else { Loc::DbPlaylist(i.id) }) });
             },
             Err(e) => log::warn!("rekordbox folder {folder}: {e:#}"),
@@ -498,7 +500,7 @@ impl Browser {
         match fetch(c, slot) {
             Ok(items) => items.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
                 name: i.label.clone(), is_dir: false,
-                artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None,
+                artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None, art: None,
                 kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }),
             }).collect(),
             Err(e) => { log::warn!("LINK tracks: {e:#}"); Vec::new() }
@@ -520,7 +522,7 @@ impl Browser {
     fn rb_tree_entries(&self, node: u32) -> Vec<Entry> {
         let Some(exp) = self.rb.as_ref() else { return Vec::new() };
         exp.children(node).into_iter().map(|n| Entry {
-            name: n.name.clone(), is_dir: true, artist: None, bpm: None, key: None,
+            name: n.name.clone(), is_dir: true, artist: None, bpm: None, key: None, art: None,
             kind: EntryKind::Descend(if n.is_folder { Loc::RbTree(n.id) } else { Loc::RbPlaylist(n.id) }),
         }).collect()
     }
@@ -533,7 +535,7 @@ impl Browser {
     fn rb_root_entries(&self) -> Vec<Entry> {
         if self.rb.is_none() { return Vec::new() }
         let mut out = Vec::new();
-        let cat = |name: &str, kind: EntryKind| Entry { name: name.into(), is_dir: true, artist: None, bpm: None, key: None, kind };
+        let cat = |name: &str, kind: EntryKind| Entry { name: name.into(), is_dir: true, artist: None, bpm: None, key: None, art: None, kind };
         out.push(cat("ARTIST", EntryKind::Descend(Loc::RbNames(RbField::Artist))));
         out.push(cat("ALBUM", EntryKind::Descend(Loc::RbNames(RbField::Album))));
         out.push(cat("TRACK", EntryKind::Descend(Loc::RbAllTracks)));
@@ -556,7 +558,7 @@ impl Browser {
         names.dedup();
         names.into_iter().map(|n| Entry {
             name: if n.is_empty() { "(none)".into() } else { n.clone() },
-            is_dir: true, artist: None, bpm: None, key: None,
+            is_dir: true, artist: None, bpm: None, key: None, art: None,
             kind: EntryKind::Descend(Loc::RbNamed(f, n)),
         }).collect()
     }
@@ -631,6 +633,7 @@ impl Browser {
                 name: t.title.clone(), is_dir: false,
                 artist: Some(t.artist.clone()), bpm: Some(t.bpm),
                 key: (!t.key.is_empty()).then(|| t.key.clone()),
+                art: match &src { Some(RbSource::Local(root)) => t.artwork_on(root), _ => None },
                 kind: EntryKind::Track(load),
             })
         }).collect()

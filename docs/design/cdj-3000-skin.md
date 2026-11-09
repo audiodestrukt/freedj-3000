@@ -225,9 +225,12 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
     - Track lists are one full-width table: PREVIEW 92–331, TRACK ▲ [count],
       BPM 1080–1189, KEY 1190–1280, and LOAD in the highlighted row.
     - Opening a rekordbox stick from SOURCE lands on ARTIST, as on the unit.
-  - Not yet: the PREVIEW column's waveforms and covers (ANLZ preview + the
-    artwork table), sorting (the sort key is drawn, inert), HISTORY,
-    MATCHING, LINK/dbserver sources in the column.
+  - The PREVIEW column draws each track's blue preview (PWAV from its
+    `.DAT`, `RbAnalysis::preview`) bottom-anchored on black, and its cover
+    (artwork table → `RbTrack::artwork_rel`). Both are read once per file and
+    cached. Covers are unchecked: the demo export has none.
+  - Not yet: sorting (the sort key is drawn, inert), HISTORY, MATCHING,
+    LINK/dbserver sources in the column, the "H" (hot cues) mark by the ♪.
   - Dev: `OPENDECK_SCRIPT` browse actions (`screen=browse; open=rekordbox;
     category=2; select=0`).
 - **Phase 1 (part 2): GRID ADJUST.** A long rotary press on the unit (key A,

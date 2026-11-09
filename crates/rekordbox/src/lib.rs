@@ -28,6 +28,8 @@ pub struct RbTrack {
     pub key:           String,
     /// Date added to the collection, "YYYY-MM-DD" ("" when none).
     pub date_added:    String,
+    /// Cover image, rooted at the USB like `rel_path` ("" when none).
+    pub artwork_rel:   String,
     pub bpm:           f32,
     pub duration_secs: u32,
     pub sample_rate:   u32,
@@ -43,6 +45,10 @@ impl RbTrack {
         usb_root.join(self.rel_path.trim_start_matches('/'))
     }
     /// Absolute path to the ANLZ analysis file, if one is set.
+    pub fn artwork_on(&self, usb_root: &Path) -> Option<PathBuf> {
+        (!self.artwork_rel.is_empty())
+            .then(|| usb_root.join(self.artwork_rel.trim_start_matches('/')))
+    }
     pub fn analyze_on(&self, usb_root: &Path) -> Option<PathBuf> {
         (!self.analyze_rel.is_empty())
             .then(|| usb_root.join(self.analyze_rel.trim_start_matches('/')))
@@ -130,8 +136,10 @@ pub fn read_export_from<R: Read + Seek>(reader: &mut R, root: PathBuf) -> Result
     let mut artists: HashMap<u32, String> = HashMap::new();
     let mut albums: HashMap<u32, String> = HashMap::new();
     let mut keys: HashMap<u32, String> = HashMap::new();
+    let mut artwork: HashMap<u32, String> = HashMap::new();
     for row in &rows {
         match row {
+            Row::Artwork(a) => { artwork.insert(a.id.0, text(&a.path)); }
             Row::Artist(a) => { artists.insert(a.id.0, text(&a.name)); }
             Row::Album(a) => { albums.insert(a.id.0, text(&a.name)); }
             Row::Key(k) => { keys.insert(k.id.0, text(&k.name)); }
@@ -153,6 +161,7 @@ pub fn read_export_from<R: Read + Seek>(reader: &mut R, root: PathBuf) -> Result
                 album:         albums.get(&t.album_id.0).cloned().unwrap_or_default(),
                 key:           keys.get(&t.key_id.0).cloned().unwrap_or_default(),
                 date_added:    text(&t.date_added),
+                artwork_rel:   artwork.get(&t.artwork_id.0).cloned().unwrap_or_default(),
                 bpm:           t.tempo as f32 / 100.0,
                 duration_secs: t.duration as u32,
                 sample_rate:   t.sample_rate,
@@ -218,10 +227,15 @@ pub struct RbAnalysis {
     pub beats:       Vec<RbBeat>,
     pub memory_cues: Vec<RbCue>,
     pub hot_cues:    Vec<RbCue>,
+    /// The fixed-width blue preview (PWAV, usually 400 columns): per column
+    /// a height 0–31 and a whiteness 0–7, as players draw in their browse
+    /// lists and overview.
+    pub preview:     Vec<(u8, u8)>,
 }
 
-/// Read a rekordbox `ANLZ####.DAT` analysis file: beat grid + cue points.
-/// Waveforms are ignored (freedj renders its own). Missing sections are fine.
+/// Read a rekordbox `ANLZ####.DAT` analysis file: beat grid, cue points and
+/// the small blue preview (the detailed waveforms are ignored: freedj renders
+/// its own). Missing sections are fine.
 pub fn read_anlz(path: &Path) -> Result<RbAnalysis> {
     let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
     read_anlz_from(&mut f)
@@ -240,6 +254,9 @@ pub fn read_anlz_from<R: Read + Seek>(reader: &mut R) -> Result<RbAnalysis> {
                     bpm:         b.tempo as f32 / 100.0,
                     beat_in_bar: b.beat_number as u8,
                 }).collect();
+            }
+            Content::WaveformPreview(w) => {
+                out.preview = w.data.iter().map(|c| (c.height(), c.whiteness())).collect();
             }
             Content::CueList(cl) => {
                 let hot = cl.list_type == CueListType::HotCues;
@@ -276,6 +293,13 @@ mod tests {
         }
         assert!(exp.tracks.iter().all(|t| t.date_added.len() == 10), "dates are YYYY-MM-DD");
         assert!(exp.tracks.iter().any(|t| !t.key.is_empty()), "some track has a key");
+        // Each demo track has a DAT with the blue preview.
+        for t in &exp.tracks {
+            let a = read_anlz(&t.analyze_on(&root).unwrap()).unwrap();
+            assert_eq!(a.preview.len(), 400, "{}", t.title);
+            assert!(a.preview.iter().all(|&(h, w)| h < 32 && w < 8));
+            assert!(a.preview.iter().any(|&(h, _)| h > 10), "not silent");
+        }
     }
 
     #[test]

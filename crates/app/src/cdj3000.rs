@@ -1369,8 +1369,62 @@ fn draw_rb_categories(ui: &Ui, lay: &Layout, names: &[String], open: Option<usiz
     }
 }
 
-/// A rekordbox track list as the unit draws it: PREVIEW (waveform + cover,
-/// not drawn yet), TRACK ▲ [count], BPM, KEY; the highlighted row carries
+/// A rekordbox track's blue preview (height 0–31, whiteness 0–7 per column),
+/// read from its analysis file once and kept in egui memory.
+fn rb_wave(ctx: &egui::Context, anlz: &std::path::Path) -> Option<std::sync::Arc<Vec<(u8, u8)>>> {
+    let id = Id::new(("cdj3k-rbwave", anlz));
+    if let Some(w) = ctx.data(|d| d.get_temp::<Option<std::sync::Arc<Vec<(u8, u8)>>>>(id)) { return w; }
+    let w = opendeck_rekordbox::read_anlz(anlz).ok().map(|a| a.preview).filter(|p| !p.is_empty()).map(std::sync::Arc::new);
+    ctx.data_mut(|d| d.insert_temp(id, w.clone()));
+    w
+}
+
+/// A cover image file (rekordbox artwork) as a texture, decoded once per file.
+fn file_art(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::TextureHandle> {
+    let id = Id::new(("cdj3k-fileart", path));
+    if let Some(t) = ctx.data(|d| d.get_temp::<Option<egui::TextureHandle>>(id)) { return t; }
+    let mime = match path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).as_deref() {
+        Some("png") => "image/png",
+        _ => "image/jpeg",
+    };
+    let tex = std::fs::read(path).ok().and_then(|b| decode_art(mime, &b))
+        .map(|img| ctx.load_texture(format!("cdj3k-fileart-{}", path.display()), img, egui::TextureOptions::LINEAR));
+    ctx.data_mut(|d| d.insert_temp(id, tex.clone()));
+    tex
+}
+
+/// The PREVIEW cell of a track row: the blue preview bottom-anchored on black
+/// (unit: 192×44 at x 92), then the cover in the 47 px square at x 284.
+fn draw_row_preview(ui: &Ui, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32) {
+    let p = ui.painter();
+    let wave = Rect::from_min_max(Pos2::new(x0 + 1.0 * u, y0 + 2.0 * u), Pos2::new(x0 + 191.0 * u, y0 + 46.0 * u));
+    p.rect_filled(wave, 0.0, Color32::BLACK);
+    let anlz = match e.load() { Some(crate::browser::Load::Local { analyze: Some(a), .. }) => Some(a.clone()), _ => None };
+    if let Some(w) = anlz.as_deref().and_then(|a| rb_wave(ui.ctx(), a)) {
+        let n = w.len().max(1);
+        let cols = wave.width().floor().max(1.0) as usize;
+        for c in 0..cols {
+            // The loudest source column under each pixel column.
+            let (a, b) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
+            let (h, wh) = w[a..b].iter().fold((0u8, 0u8), |m, &(h, wh)| if h > m.0 { (h, wh) } else { m });
+            if h == 0 { continue; }
+            let top = wave.max.y - wave.height() * h as f32 / 31.0;
+            let x = wave.min.x + c as f32 + 0.5;
+            // Unit colours: blue (18,96,151) brightening with whiteness.
+            let k = wh as f32 / 7.0;
+            let col = Color32::from_rgb((18.0 + 90.0 * k) as u8, (96.0 + 90.0 * k) as u8, (151.0 + 80.0 * k) as u8);
+            p.line_segment([Pos2::new(x, top), Pos2::new(x, wave.max.y)], Stroke::new(1.0, col));
+        }
+    }
+    let art = Rect::from_min_size(Pos2::new(x0 + 192.0 * u, y0 + 0.5 * u), Vec2::splat(47.0 * u));
+    match e.art.as_deref().and_then(|a| file_art(ui.ctx(), a)) {
+        Some(tex) => { p.image(tex.id(), art, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE); }
+        None => { p.rect_filled(art, 0.0, Color32::from_rgb(30, 30, 30)); }
+    }
+}
+
+/// A rekordbox track list as the unit draws it: PREVIEW (blue preview +
+/// cover), TRACK ▲ [count], BPM, KEY; the highlighted row carries
 /// LOAD in the BPM/KEY cells. Tap selects, a second tap (or LOAD) loads.
 fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], _title: &str, u: f32, out: &mut Vec<Event>) {
     let sc = lay.screen;
@@ -1418,6 +1472,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], _title: &s
         let lit = i == sel;
         let stripe = if k % 2 == 0 { Color32::from_rgb(40, 40, 40) } else { BG };
         p.rect_filled(Rect::from_min_max(at(92.0, y), at(331.0, y + ROW_H)), 0.0, stripe);
+        draw_row_preview(ui, e, sc.min.x + 92.0 * u, sc.min.y + y * u, u);
         p.rect_filled(Rect::from_min_max(at(332.0, y), at(1280.0, y + ROW_H)), 0.0, if lit { SEL_BLUE } else { stripe });
         let cy = sc.min.y + (y + ROW_H / 2.0) * u;
         let title = Rect::from_min_max(at(332.0, y), at(1079.0, y + ROW_H));
