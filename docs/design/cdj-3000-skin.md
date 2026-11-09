@@ -214,6 +214,13 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
   (`DeckSnapshot::grid_edited`). The field shrinks as for a touch panel and
   the pill boxes GRID ("– ZOOM [GRID]"). The selector moves the grid 1/64 beat
   per detent, as before.
-  - The unit left SNAP GRID dim in every state tried (cue set, paused, at the
-    track end); freedj lights it whenever there is a grid.
+  - SNAP GRID (read off the unit with a rekordbox-analysed track): dim while
+    the only cue is the one placed at load; lit once a cue is set by hand
+    (pause off the cue + CUE). It then stays lit whether playing, paused, on
+    or off the cue, and after a snap. freedj follows this with
+    `DeckSnapshot::cue_set` (set by a new CUE or a called memory point, cleared
+    on load).
+  - The manual also lists ×2, ×1/2, Enlarge and Reduce. The emulated firmware
+    shows only the five keys, for analysed and unanalysed tracks alike, so
+    freedj draws five.
 

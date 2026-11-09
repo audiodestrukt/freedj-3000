@@ -73,6 +73,8 @@ pub struct DeckSnapshot<'a> {
     pub zoom_grid_mode: bool,
     /// The beat grid differs from the analysed one (GRID ADJUST RESET lights).
     pub grid_edited: bool,
+    /// The cue point was set by hand, not only placed at load (SNAP GRID lights).
+    pub cue_set: bool,
     /// LINK selected in the source column (else the local file / USB).
     pub source_link:  bool,
     /// Phase-meter slot shows the master-alignment tick view.

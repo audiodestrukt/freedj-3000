@@ -185,6 +185,10 @@ struct DeckApp {
     /// TRACK), and that list's highlight (none until the selector turns).
     history: Vec<Load>,
     history_cursor: Option<usize>,
+    /// The cue point was set by hand (CUE while paused off the cue, or a
+    /// memory point called), not just placed at load. Lights the CDJ's SNAP
+    /// GRID (CUE), as the unit does.
+    cue_set: bool,
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
@@ -320,7 +324,7 @@ struct DeckApp {
 #[derive(Clone, Copy)]
 struct UiFlags {
     key_lock: bool, jog_vinyl: bool, remain_mode: bool, auto_cue: bool, slip: bool, sync: bool, master: bool,
-    zoom_grid_mode: bool, grid_edited: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
+    zoom_grid_mode: bool, grid_edited: bool, cue_set: bool, source_link: bool, phase_ticks_view: bool, linked: bool, master_player: u8,
     player: u8,
     cue_point: u64,
     hot_cues: [Option<u64>; 8],
@@ -389,6 +393,7 @@ fn make_snapshot<'a>(
         master:        f.master,
         zoom_grid_mode: f.zoom_grid_mode,
         grid_edited:   f.grid_edited,
+        cue_set:       f.cue_set,
         source_link:   f.source_link,
         phase_ticks_view: f.phase_ticks_view,
         linked:        f.linked,
@@ -522,6 +527,7 @@ impl DeckApp {
                 .map(|p| Load::Local { path: std::fs::canonicalize(&p).unwrap_or(p), analyze: None }).collect())
                 .unwrap_or_default(),
             history_cursor:    None,
+            cue_set:           false,
             fader_speed,
             beat2_bpm,
             beat2_player,
@@ -761,6 +767,7 @@ impl DeckApp {
                         self.audio.playing.store(false, Ordering::Relaxed);
                         self.transport.preview = false;
                         self.transport.arrived_at_cue(m);
+                        self.cue_set = true;
                         self.seek_to(m);
                         let sr_ch = self.audio.sample_rate as f64 * ch as f64;
                         log::info!("call {}: cued at {:.2}s", if next { "▶" } else { "◀" }, m as f64 / sr_ch);
@@ -1231,6 +1238,7 @@ impl DeckApp {
     /// seeking, a preview seeks before starting.  Starting goes through
     /// `set_playing` so the parked processor thread wakes at once (0.2.1).
     fn apply_transport(&mut self, outcome: transport::Outcome) {
+        if outcome.cue_point.is_some() { self.cue_set = true; }
         if outcome.playing == Some(false) {
             self.audio.set_playing(false);
         }
@@ -1635,6 +1643,7 @@ impl DeckApp {
         self.prev_pos     = 0;
         self.transport.preview = false;
         self.transport.arrived_at_cue(p.cue_pt);
+        self.cue_set = false;
         // Park the deck at the cue (a CDJ sits at the cue after load) so PLAY
         // starts there — with AUTO CUE that's the first sound, not the leader.
         if p.cue_pt > 0 { self.seek_to(p.cue_pt); }
@@ -2048,6 +2057,7 @@ impl DeckApp {
             key_lock: self.key_lock, jog_vinyl: self.settings.jog_vinyl, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             grid_edited: self.grids.get(&self.path.to_string_lossy()).is_some(),
+            cue_set: self.cue_set,
             source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             // Master indicator (phase-ticks view): the real XDJ shows a flat
@@ -2230,6 +2240,7 @@ impl DeckApp {
             key_lock: self.key_lock, jog_vinyl: self.settings.jog_vinyl, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,
             grid_edited: self.grids.get(&self.path.to_string_lossy()).is_some(),
+            cue_set: self.cue_set,
             source_link: self.browser.on_link(), phase_ticks_view: self.phase_ticks_view,
             linked: beat2_player > 0,
             // Master indicator (phase-ticks view): the real XDJ shows a flat
