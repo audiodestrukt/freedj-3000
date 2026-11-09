@@ -19,6 +19,7 @@ mod prodj;
 mod renderer;
 mod screen;
 mod cdj3000;
+mod devscript;
 #[cfg(feature = "renderer-sdl")]
 mod sdl_backend;
 mod waveform_cpu;
@@ -189,6 +190,8 @@ struct DeckApp {
     /// memory point called), not just placed at load. Lights the CDJ's SNAP
     /// GRID (CUE), as the unit does.
     cue_set: bool,
+    /// Dev: OPENDECK_SCRIPT, timed actions for end-to-end tests.
+    script: Option<(devscript::Script, Instant)>,
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
@@ -529,6 +532,7 @@ impl DeckApp {
                 .unwrap_or_default(),
             history_cursor:    None,
             cue_set:           false,
+            script:            devscript::Script::from_env().map(|s| (s, Instant::now())),
             fader_speed,
             beat2_bpm,
             beat2_player,
@@ -1437,6 +1441,29 @@ impl DeckApp {
 
     /// Record a load: the track it replaces goes to the top of the history,
     /// and the new one leaves it (the CDJ lists only earlier tracks).
+    /// Dev: apply the OPENDECK_SCRIPT actions that are due (once per frame).
+    fn run_script(&mut self) {
+        use devscript::Action as A;
+        let Some((script, t0)) = self.script.as_mut() else { return };
+        let (due, jog) = script.step(t0.elapsed().as_secs_f64());
+        for a in due {
+            log::info!("script: {a:?}");
+            match a {
+                A::Sync(on) => self.link.sync.store(on, Ordering::Relaxed),
+                A::Play => self.lock_in_play(),
+                A::JogVinyl(v) => self.settings.jog_vinyl = v,
+                A::Jog { .. } => {}
+                A::ShiftSync => self.apply(Event::Ui(UiEvent::GridAdjust(input::GridAdjust::ShiftSync))),
+                A::SnapGrid => self.apply(Event::Ui(UiEvent::GridAdjust(input::GridAdjust::ShiftCue))),
+                A::GridReset => self.apply(Event::Ui(UiEvent::GridAdjust(input::GridAdjust::Reset))),
+                A::Quit => { log::info!("script: quit"); log::logger().flush(); std::process::exit(0); }
+            }
+        }
+        if let Some(d) = jog {
+            self.apply(Event::Deck(ControlEvent::JogDelta { delta: d, velocity_rpm: 0.0 }));
+        }
+    }
+
     fn note_loaded(&mut self, load: Load) {
         record_load(&mut self.history, &mut self.loaded, load);
     }
@@ -1856,6 +1883,7 @@ impl DeckApp {
                 }
             }
         }
+        self.run_script();
         let frame_start = Instant::now();
         let frame_dt    = frame_start.duration_since(self.last_render);
         self.last_render = frame_start;

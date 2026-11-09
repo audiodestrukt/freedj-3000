@@ -184,5 +184,35 @@ regression does not need the emulator to show up:
 | Only a new CUE reports a cue point (SNAP's signal) | `transport::tests::only_setting_a_new_cue_reports_cue_point` |
 | Broadcast derived without `brd`; the pin hears only its subnet | `prodj::sync_offset_tests::broadcast_is_derived_…`, `…::a_pinned_interface_hears_only_its_subnet` |
 
-Still manual: the live run against the emulator (Reproducing), and freedj as
-the synced deck.
+### End to end: `make test-shift-grid`
+
+`tools/test_shift_grid.py` runs freedj as the **synced** deck against the
+emulated CDJ (master) on the bridge. It skips with exit 77 when the rig is not
+up.
+
+- **CDJ setup:** it loads a track from the rekordbox stick, then reads the
+  CDJ's screen and presses PLAY and MASTER until both show (white playhead,
+  orange MASTER tag).
+- **freedj:** driven by `OPENDECK_SCRIPT` (`src/devscript.rs`): play, sync,
+  CDJ jog mode, a nudge, SHIFT GRID, quit.
+- **The checks** come from freedj's per-master-beat debug line (`beat phase
+  … held …`):
+  - **A:** on the beat (|phase| < 0.05) before the nudge;
+  - **B:** the nudge leaves a held offset (> 0.05 beat), the offset stays
+    held, and the phase sits on it, not on 0;
+  - **C:** SHIFT GRID moves the grid by exactly the held offset, the offset
+    clears, and the phase is on the new beat at once, without a jump.
+
+First passing run: offset held +0.069 beat; after SHIFT, phases +0.008,
+−0.017, −0.017.
+
+**What it caught on its first run:** freedj kept the start-up track's
+sample rate as the deck rate. A 48 kHz track on a 44.1 kHz device played 8 %
+slow for the whole session, and SYNC could never lock: the phase walked about
+0.075 beat per master beat. The start-up track is now resampled to the device
+rate (`AudioHandle::open_inner`), as later loads already were. Grids
+hand-edited during such a session were saved in 48 kHz frames and are off on
+the next run.
+
+Still manual: the CDJ-side observation (which keys light, how far its grid
+moves) and the direction question above.

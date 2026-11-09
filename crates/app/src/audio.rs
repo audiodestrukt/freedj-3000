@@ -259,16 +259,20 @@ impl AudioHandle {
 
         // ── 1. Initial track, or an empty deck.  Empty takes the device rate/ch
         //       and starts paused; the processor idles until a track loads. ─────
-        let (decoded, file_sr, file_ch, playing_init) = match initial {
+        let (mut decoded, mut file_sr, file_ch, playing_init) = match initial {
             Some((d, sr, ch)) => (d, sr, ch, true),
             None              => (Vec::new(), device_sr, device_ch, false),
         };
+        // The deck runs at the device's rate: there is no real-time SRC, so a
+        // start-up track at another rate is converted here, as every later
+        // LOAD is (`finish_load`). Keeping the file's rate made the whole
+        // session play off-speed (a 48 kHz track on a 44.1 kHz device ran
+        // 8 % slow) and broke SYNC, whose beat clock assumes the deck rate.
         if !decoded.is_empty() && device_sr != file_sr {
-            log::warn!(
-                "device sample rate {}Hz != file sample rate {}Hz — pitch will be wrong \
-                 (resampling not yet implemented)",
-                device_sr, file_sr,
-            );
+            let t0 = std::time::Instant::now();
+            decoded = resample_interleaved(&decoded, file_ch, file_sr, device_sr)?;
+            log::info!("resampled start-up track {file_sr} → {device_sr} Hz in {:.2}s", t0.elapsed().as_secs_f32());
+            file_sr = device_sr;
         }
         let samples = Arc::new(ArcSwap::from_pointee(decoded));
 

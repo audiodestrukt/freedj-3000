@@ -1132,6 +1132,9 @@ impl ProDjSender {
                                 seen_master_beat = seq;
                                 if let Some((_, frac)) = beat_now {
                                     let held = f32::from_bits(link.sync_offset.load(Ordering::Relaxed)) as f64;
+                                    // One line per master beat: the end-to-end SHIFT GRID
+                                    // test (tools/test_shift_grid.py) reads these.
+                                    log::debug!("ProDJ sync: beat phase {:+.3} held {held:+.3}{}", phase_err(frac, 0.0), if jogging { " jog" } else { "" });
                                     match phase.on_master_beat(frac, held, jogging) {
                                         PhaseAct::None => {}
                                         PhaseAct::Hold(off) => {

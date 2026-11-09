@@ -161,6 +161,9 @@ shots-appstore-iphone: build ## App Store screenshots (iPhone 6.9", 2868x1320 la
 
 ## ── Quality ────────────────────────────────────────────────────────────────
 
+test-shift-grid: debug ## End-to-end SYNC/SHIFT GRID test against cdj3k-emu on the djlink0 bridge (skips without the rig)
+	python3 tools/test_shift_grid.py
+
 check: ## Type-check the whole workspace
 	$(CARGO) check --workspace
 
