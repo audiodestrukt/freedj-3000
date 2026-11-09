@@ -56,9 +56,49 @@ use winit::{
 /// Target frame interval — 60 fps.
 const FRAME_INTERVAL: Duration = Duration::from_micros(16_667);
 
+/// How many earlier tracks LOAD PREVIOUS TRACK keeps.
+const HISTORY_MAX: usize = 100;
+
+/// LOAD PREVIOUS TRACK bookkeeping for a new load: the track it replaces
+/// goes to the top of `history`, and the new one leaves it.
+fn record_load(history: &mut Vec<Load>, loaded: &mut Option<Load>, load: Load) {
+    if let Some(prev) = loaded.replace(load.clone()) {
+        if prev != load {
+            history.retain(|l| *l != prev);
+            history.insert(0, prev);
+        }
+    }
+    history.retain(|l| *l != load);
+    history.truncate(HISTORY_MAX);
+}
+
+#[cfg(test)]
+mod history_tests {
+    use super::*;
+    fn t(n: &str) -> Load { Load::Local { path: n.into(), analyze: None } }
+
+    #[test]
+    fn history_is_newest_first_without_the_loaded_track() {
+        let (mut h, mut cur) = (Vec::new(), None);
+        record_load(&mut h, &mut cur, t("a"));
+        assert!(h.is_empty(), "the first load has nothing before it");
+        record_load(&mut h, &mut cur, t("b"));
+        record_load(&mut h, &mut cur, t("c"));
+        assert_eq!(h, vec![t("b"), t("a")]);
+        // Reloading an earlier track moves it out; what it replaced goes on top.
+        record_load(&mut h, &mut cur, t("a"));
+        assert_eq!(h, vec![t("c"), t("b")]);
+        // Reloading the same track changes nothing.
+        record_load(&mut h, &mut cur, t("a"));
+        assert_eq!(h, vec![t("c"), t("b")]);
+        for i in 0..2 * HISTORY_MAX { record_load(&mut h, &mut cur, t(&i.to_string())); }
+        assert_eq!(h.len(), HISTORY_MAX);
+    }
+}
+
 /// Which middle-band mode the deck screen is showing.  PERFORM comes later.
 #[derive(Clone, Copy, Debug, PartialEq)]
-enum ScreenMode { Playback, Browse, Info, Perform, TagList, Menu, Source }
+enum ScreenMode { Playback, Browse, Info, Perform, TagList, Menu, Source, History }
 
 /// The window and input side of a render backend.  winit + egui-winit on the
 /// wgpu path; the SDL backend brings its own window, event pump and egui
@@ -141,6 +181,10 @@ struct DeckApp {
     source_cursor: usize,
     /// Where the loaded track came from (marks its SOURCE row "Loaded").
     loaded: Option<Load>,
+    /// Tracks loaded before the current one, newest first (LOAD PREVIOUS
+    /// TRACK), and that list's highlight (none until the selector turns).
+    history: Vec<Load>,
+    history_cursor: Option<usize>,
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
@@ -463,6 +507,7 @@ impl DeckApp {
                 Ok("taglist") => ScreenMode::TagList,
                 Ok("menu")    => ScreenMode::Menu,
                 Ok("source")  => ScreenMode::Source,
+                Ok("history") => ScreenMode::History,
                 _             => ScreenMode::Playback,
             },
             browser,
@@ -471,6 +516,11 @@ impl DeckApp {
             menu_cursor:       0,
             source_cursor:     0,
             loaded,
+            // Dev: OPENDECK_HISTORY=a.mp3:b.mp3 seeds LOAD PREVIOUS TRACK.
+            history:           std::env::var("OPENDECK_HISTORY").ok().map(|v| std::env::split_paths(&v)
+                .map(|p| Load::Local { path: std::fs::canonicalize(&p).unwrap_or(p), analyze: None }).collect())
+                .unwrap_or_default(),
+            history_cursor:    None,
             fader_speed,
             beat2_bpm,
             beat2_player,
@@ -830,6 +880,15 @@ impl DeckApp {
                 match self.screen_mode {
                     ScreenMode::Browse  => self.browser.move_selection(delta),
                     ScreenMode::TagList => self.tag_list.move_selection(delta),
+                    ScreenMode::History => {
+                        let last = self.history.len() as i32 - 1;
+                        if last >= 0 {
+                            self.history_cursor = Some(match self.history_cursor {
+                                None => 0,
+                                Some(c) => (c as i32 + delta).clamp(0, last) as usize,
+                            });
+                        }
+                    }
                     ScreenMode::Source  => {
                         let last = self.browser.sources().len() as i32 - 1;
                         self.source_cursor = (self.source_cursor as i32 + delta).clamp(0, last.max(0)) as usize;
@@ -868,6 +927,15 @@ impl DeckApp {
                             }
                         }
                     }
+                    // LOAD PREVIOUS TRACK: reload the highlighted track.
+                    ScreenMode::History => {
+                        if let Some(l) = self.history_cursor.and_then(|i| self.history.get(i)).cloned() {
+                            match self.load_selected(l) {
+                                Ok(())  => self.screen_mode = ScreenMode::Playback,
+                                Err(e)  => log::warn!("load failed: {e:#}"),
+                            }
+                        }
+                    }
                     // SOURCE: open the highlighted source in BROWSE.
                     ScreenMode::Source => {
                         self.browser.open_source(self.source_cursor);
@@ -884,7 +952,7 @@ impl DeckApp {
             Event::Deck(ControlEvent::Back) => {
                 match self.screen_mode {
                     ScreenMode::Browse  => self.browser.back(),
-                    ScreenMode::TagList | ScreenMode::Menu | ScreenMode::Source => self.screen_mode = ScreenMode::Playback,
+                    ScreenMode::TagList | ScreenMode::Menu | ScreenMode::Source | ScreenMode::History => self.screen_mode = ScreenMode::Playback,
                     _ => {}
                 }
             }
@@ -1074,6 +1142,17 @@ impl DeckApp {
                     } else {
                         ScreenMode::TagList
                     };
+                    log::info!("screen → {:?}", self.screen_mode);
+                }
+                TopScreen::History => {
+                    // LOAD PREVIOUS TRACK: a CDJ-3000 pop-up over the waveform
+                    // screen. The XDJ-1000MK2 has none.
+                    if self.screen_mode == ScreenMode::History {
+                        self.screen_mode = ScreenMode::Playback;
+                    } else if self.settings.skin == settings::Skin::Cdj3000 {
+                        self.history_cursor = None;
+                        self.screen_mode = ScreenMode::History;
+                    }
                     log::info!("screen → {:?}", self.screen_mode);
                 }
                 TopScreen::Source => {
@@ -1317,7 +1396,18 @@ impl DeckApp {
 
     /// Dispatch a browser selection: a local file, or a track on a linked player.
     fn load_selected(&mut self, load: Load) -> Result<()> {
-        self.loaded = Some(load.clone());
+        let r = self.load_selected_inner(load.clone());
+        if r.is_ok() { self.note_loaded(load); }
+        r
+    }
+
+    /// Record a load: the track it replaces goes to the top of the history,
+    /// and the new one leaves it (the CDJ lists only earlier tracks).
+    fn note_loaded(&mut self, load: Load) {
+        record_load(&mut self.history, &mut self.loaded, load);
+    }
+
+    fn load_selected_inner(&mut self, load: Load) -> Result<()> {
         match load {
             Load::Local { path, analyze } => self.load_track(&path, analyze.as_deref()),
             Load::Link { ip, rel_path, analyze_rel } => self.load_track_link(ip, &rel_path, &analyze_rel),
@@ -1572,10 +1662,10 @@ impl DeckApp {
         }
         // In a list screen (BROWSE / TAG LIST) the keys navigate the
         // list, not the transport.  G = TAG TRACK / REMOVE.
-        if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu | ScreenMode::Source) {
+        if matches!(self.screen_mode, ScreenMode::Browse | ScreenMode::TagList | ScreenMode::Menu | ScreenMode::Source | ScreenMode::History) {
             let here = match self.screen_mode {
                 ScreenMode::Browse => TopScreen::Browse, ScreenMode::TagList => TopScreen::TagList,
-                ScreenMode::Source => TopScreen::Source, _ => TopScreen::Menu,
+                ScreenMode::Source => TopScreen::Source, ScreenMode::History => TopScreen::History, _ => TopScreen::Menu,
             };
             let ev = match code {
                 ArrowDown           => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: 1 })),
@@ -1587,6 +1677,7 @@ impl DeckApp {
                 KeyL                => Some(Event::Ui(UiEvent::Screen(TopScreen::TagList))),
                 KeyU                => Some(Event::Ui(UiEvent::Screen(TopScreen::Menu))),
                 KeyO                => Some(Event::Ui(UiEvent::Screen(TopScreen::Source))),
+                KeyH                => Some(Event::Ui(UiEvent::Screen(TopScreen::History))),
                 _ => None,
             };
             if let Some(ev) = ev {
@@ -1626,6 +1717,7 @@ impl DeckApp {
             KeyI => Some(Event::Ui(UiEvent::Screen(TopScreen::Info))),
             KeyU => Some(Event::Ui(UiEvent::Screen(TopScreen::Menu))),
             KeyO => Some(Event::Ui(UiEvent::Screen(TopScreen::Source))),
+            KeyH => Some(Event::Ui(UiEvent::Screen(TopScreen::History))),
             Comma  => Some(Event::Deck(ControlEvent::JogDelta { delta: -4, velocity_rpm: 0.0 })),
             Period => Some(Event::Deck(ControlEvent::JogDelta { delta:  4, velocity_rpm: 0.0 })),
             KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
@@ -2070,6 +2162,7 @@ impl DeckApp {
             // The XDJ has no SOURCE screen (its source keys sit in BROWSE).
             ScreenMode::Source if !cdj => screen::ScreenView::Browse(&self.browser),
             ScreenMode::Source   => screen::ScreenView::Source(&self.browser, self.source_cursor, self.loaded.as_ref()),
+            ScreenMode::History  => screen::ScreenView::History(&self.history, self.history_cursor),
         };
         let face_ref = face.as_ref();
         let phone_ref = phone_layout.as_ref();

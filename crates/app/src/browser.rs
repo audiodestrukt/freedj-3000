@@ -39,7 +39,7 @@ fn is_audio(path: &Path) -> bool {
 }
 
 /// Where a track to load lives.
-#[derive(Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Load {
     /// A local file (with an optional local ANLZ analysis file).
     Local { path: PathBuf, analyze: Option<PathBuf> },

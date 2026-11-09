@@ -294,13 +294,17 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &Scree
             ScreenView::TagList => return draw_tag_list(ui, snap, lay, tag_list, u, out),
             ScreenView::Menu(settings, cursor) => return draw_utility(ui, snap, lay, settings, *cursor, u, out),
             ScreenView::Info => draw_info(ui, ctx, snap, lay, u, out),
-            ScreenView::Playback | ScreenView::Perform => {
+            ScreenView::Playback | ScreenView::Perform | ScreenView::History(..) => {
                 draw_header(ui, ctx, snap, lay, u, out);
                 draw_field(ui, snap, lay, u, out);
                 match panel(ctx) {
                     Panel::BeatLoop => draw_loop_panel(ui, ctx, snap, lay, u, out),
                     Panel::BeatJump => draw_jump_panel(ui, ctx, lay, u, out),
                     Panel::None => {}
+                }
+                if let ScreenView::History(items, cursor) = view {
+                    draw_info_block(ui, snap, lay, u, out);
+                    return draw_history(ui, ctx, lay, items, *cursor, u, out);
                 }
             }
         }
@@ -1014,6 +1018,84 @@ fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: 
         }
     }
     draw_status_strip(ui, snap, lay, u, out);
+}
+
+/// Tags of a local file, read once per path and kept in egui memory (the
+/// LOAD PREVIOUS TRACK rows each keep their own).
+fn tags_at(ctx: &egui::Context, path: &std::path::Path) -> Option<opendeck_decode::TrackTags> {
+    let id = Id::new(("cdj3k-tags", path));
+    if let Some(t) = ctx.data(|d| d.get_temp::<Option<opendeck_decode::TrackTags>>(id)) { return t; }
+    let t = opendeck_decode::SymphoniaDecoder::open(path).ok().map(|d| d.tags().clone());
+    ctx.data_mut(|d| d.insert_temp(id, t.clone()));
+    t
+}
+
+/// What a history row says: the title tag, else the file name without its
+/// extension, else what the source called it.
+fn load_title(ctx: &egui::Context, l: &crate::browser::Load) -> (String, Option<opendeck_decode::TrackTags>) {
+    use crate::browser::Load;
+    let stem = |p: &std::path::Path| p.file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string();
+    match l {
+        Load::Local { path, .. } => {
+            let tags = tags_at(ctx, path);
+            (tags.as_ref().and_then(|t| t.title.clone()).unwrap_or_else(|| stem(path)), tags)
+        }
+        Load::Link { rel_path, .. } => (stem(std::path::Path::new(rel_path)), None),
+        Load::Db { title, .. } => (title.clone(), None),
+    }
+}
+
+/// LOAD PREVIOUS TRACK: the pop-up over the right of the waveform screen
+/// (568×464 at x 712), 50 px rows of cover + title, newest first, with the
+/// two empty value columns the unit draws. Tap a row to highlight it, tap
+/// it again to load.
+fn draw_history(ui: &Ui, ctx: &egui::Context, lay: &Layout, items: &[crate::browser::Load], cursor: Option<usize>, u: f32, out: &mut Vec<Event>) {
+    let sc = lay.screen;
+    let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
+    let p = ui.painter();
+    let frame = Rect::from_min_max(at(712.0, 0.0), at(1280.0, 464.0));
+    p.rect_filled(frame, 0.0, Color32::BLACK);
+    let grey = Color32::from_rgb(128, 128, 128);
+    p.rect_filled(Rect::from_min_max(at(714.0, 2.0), at(1278.0, 60.0)), 0.0, Color32::from_rgb(75, 75, 75));
+    label(ui, at(735.0, 32.0), Align2::LEFT_CENTER, "LOAD PREVIOUS TRACK", 20.0, u, Color32::from_rgb(200, 200, 200));
+    const ROW: f32 = 50.0;
+    const SHOWN: usize = 8;
+    let sel = cursor.unwrap_or(usize::MAX);
+    let first = if sel == usize::MAX { 0 } else { sel.saturating_sub(SHOWN - 1) };
+    for k in 0..SHOWN {
+        let y = 60.0 + ROW * k as f32;
+        let rr = Rect::from_min_max(at(714.0, y), at(1278.0, (y + ROW).min(462.0)));
+        let i = first + k;
+        let lit = i == sel && i < items.len();
+        p.rect_filled(rr, 0.0, if lit { SEL_BLUE } else if k % 2 == 0 { HEADER } else { Color32::BLACK });
+        let Some(l) = items.get(i) else { continue };
+        if tap(ui, rr, &format!("cdj-history-{i}")).0 {
+            out.push(Event::Deck(if lit { ControlEvent::Load } else {
+                ControlEvent::BrowseEncoderDelta { delta: if sel == usize::MAX { 1 } else { i as i32 - sel as i32 } }
+            }));
+            // The first tap from "nothing highlighted" lands on row 0; step on.
+            if sel == usize::MAX && i > 0 { out.push(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: i as i32 })); }
+        }
+        let (title, tags) = load_title(ctx, l);
+        let art = Rect::from_min_size(at(714.0, y), Vec2::splat(ROW * u));
+        let slot = format!("hist-{i}");
+        match tags.as_ref() {
+            Some(t) => draw_art(ui, ctx, t, &slot, art),
+            None => draw_art(ui, ctx, &Default::default(), &slot, art),
+        }
+        let cy = rr.center().y;
+        label(ui, Pos2::new(sc.min.x + 784.0 * u, cy), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
+        p.with_clip_rect(Rect::from_min_max(at(798.0, y), at(1090.0, y + ROW)))
+            .text(Pos2::new(sc.min.x + 798.0 * u, cy), Align2::LEFT_CENTER, title, FontId::proportional(27.0 * u), TEXT);
+    }
+    // Column rules and the frame.
+    for x in [1093.0, 1193.0] {
+        p.line_segment([at(x, 60.0), at(x, 462.0)], Stroke::new(1.0 * u, grey));
+    }
+    p.rect_stroke(frame.shrink(1.0 * u), 0.0, Stroke::new(2.0 * u, grey));
+    if items.is_empty() {
+        label(ui, at(996.0, 120.0), Align2::CENTER_CENTER, "— no earlier tracks —", 20.0, u, DIM);
+    }
 }
 
 /// The USB plug glyph on a source tile.

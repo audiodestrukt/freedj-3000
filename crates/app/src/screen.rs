@@ -921,6 +921,9 @@ pub enum ScreenView<'a> {
     /// SOURCE (CDJ-3000 skin only): the browser's sources, the highlighted
     /// row, and where the loaded track came from.
     Source(&'a Browser, usize, Option<&'a crate::browser::Load>),
+    /// LOAD PREVIOUS TRACK (CDJ-3000 skin only): earlier tracks, newest
+    /// first, and the highlight.
+    History(&'a [crate::browser::Load], Option<usize>),
 }
 
 pub fn draw(
@@ -1002,7 +1005,7 @@ pub fn draw(
                 ScreenView::Info => draw_info_screen(ui, snap, lay, h),
                 // MENU / UTILITY: the settings list.
                 ScreenView::Menu(settings, cursor) => draw_menu(ui, settings, cursor, lay, h, out),
-                ScreenView::Playback => {
+                ScreenView::Playback | ScreenView::History(..) => {
                     draw_title(ui, snap, lay, h);
                     draw_phase(ui, snap, lay, h, out);
                     draw_wave_area(ui, snap, lay, h, out);

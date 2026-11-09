@@ -94,7 +94,7 @@ Size: S < 1 day, M 1–3 days, L > 3 days.
 | | Category lists (artist, album, key, date added, history, matching) | rekordbox reader exists | M |
 | | SEARCH screen + keyboard | missing | M |
 | | TRACK FILTER | missing | M |
-| | LOAD PREVIOUS TRACK (history) | missing | S |
+| | LOAD PREVIOUS TRACK (history) | done (phase 2) | S |
 | | Artwork in header, lists, INFO, jog | missing (tags have it) | S |
 | Settings | SHORTCUT screen (time mode, auto cue, colour, position…) | partial (MENU) | M |
 | | UTILITY list (CDJ set) | partial | M |
@@ -196,6 +196,14 @@ Each phase ends with emulator-vs-freedj captures of the same state side by side.
     a real or emulated CDJ opens and closes BROWSE. Its SOURCE key sends no
     bit in Control Mode; it only clears that level.
   - Dev: `OPENDECK_SCREEN=source`.
-  - Still to do: categories for rekordbox and LINK sources; LOAD PREVIOUS
-    TRACK.
+  - **LOAD PREVIOUS TRACK** (`ScreenMode::History`, key H; MENU short press
+    on the unit): a pop-up over the right of the waveform screen (568×464 at
+    x 712, grey 128 frame, 58 px header). It has 50 px rows of cover + title,
+    alternating 25/0 grey, with two empty value columns at x 1093/1193. Tracks
+    are listed newest first and the loaded track is never listed. Nothing is
+    highlighted until the selector turns. The deck keeps 100
+    (`record_load`), in memory only, like the unit's power-cycle reset. XDJ
+    skin: no such screen, H does nothing.
+  - Dev: `OPENDECK_SCREEN=history`, `OPENDECK_HISTORY=a.mp3:b.mp3`.
+  - Still to do: categories for rekordbox and LINK sources.
 
