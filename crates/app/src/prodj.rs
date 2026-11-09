@@ -335,14 +335,53 @@ fn same_subnet(a: Ipv4Addr, b: Ipv4Addr, mask: Ipv4Addr) -> bool {
 /// while the XDJ sat on the Wi-Fi subnet.  Status packets are unicast to each
 /// discovered peer, so master handoff and tempo kept working and only the
 /// broadcast beat clock was lost.
+/// `OPENDECK_LINK_IFACE=<name>` pins Link to one interface: only it is used
+/// to send, and packets from outside its subnet are ignored. It is for test
+/// rigs on a private segment (an emulated CDJ on a hand-made bridge) where
+/// freedj may take master without reaching the real decks on the LAN. An
+/// interface that does not exist pins Link to loopback rather than falling
+/// back to the LAN. Returns (name, ip, netmask).
+fn pinned_iface() -> Option<&'static (String, Ipv4Addr, Ipv4Addr)> {
+    static PIN: std::sync::OnceLock<Option<(String, Ipv4Addr, Ipv4Addr)>> = std::sync::OnceLock::new();
+    PIN.get_or_init(|| {
+        let name = std::env::var("OPENDECK_LINK_IFACE").ok().filter(|n| !n.is_empty())?;
+        let found = if_addrs::get_if_addrs().ok().and_then(|ifs| ifs.into_iter().find_map(|i| match i.addr {
+            if_addrs::IfAddr::V4(v4) if i.name == name => Some((v4.ip, v4.netmask)),
+            _ => None,
+        }));
+        match found {
+            Some((ip, mask)) => { log::info!("ProDJ Link pinned to {name} ({ip})"); Some((name, ip, mask)) }
+            None => {
+                log::error!("ProDJ Link: OPENDECK_LINK_IFACE={name} has no IPv4 address; using loopback only");
+                Some((name, Ipv4Addr::LOCALHOST, Ipv4Addr::new(255, 0, 0, 0)))
+            }
+        }
+    }).as_ref()
+}
+
+/// Whether a Link packet from `src` should be heard (always, unless pinned).
+fn heard_from(src: SocketAddr) -> bool {
+    match (pinned_iface(), src.ip()) {
+        (None, _) => true,
+        (Some((_, ip, mask)), std::net::IpAddr::V4(from)) => same_subnet(*ip, from, *mask) || from.is_loopback(),
+        (Some(_), _) => false,
+    }
+}
+
 fn link_interface(peers: &[Ipv4Addr]) -> (Ipv4Addr, Ipv4Addr, [u8; 6], String) {
+    let pin = pinned_iface();
+    if let Some((_, ip, _)) = pin {
+        if ip.is_loopback() { return (Ipv4Addr::LOCALHOST, Ipv4Addr::LOCALHOST, [0x02, 0xfd, 0, 0, 0, 1], "lo".into()); }
+    }
     let mut best: Option<(u8, Ipv4Addr, Ipv4Addr, [u8; 6], String)> = None;
     if let Ok(ifs) = if_addrs::get_if_addrs() {
         for i in ifs {
             if i.is_loopback() { continue; }
             let if_addrs::IfAddr::V4(v4) = &i.addr else { continue };
             let Some(bc) = v4.broadcast else { continue };
-            if i.name.starts_with("docker") || i.name.starts_with("br-") || i.name.starts_with("lxc") || i.name.starts_with("virbr") {
+            if let Some((name, ..)) = pin {
+                if i.name != *name { continue; }
+            } else if i.name.starts_with("docker") || i.name.starts_with("br-") || i.name.starts_with("lxc") || i.name.starts_with("virbr") {
                 continue;
             }
             let reaches_peer = peers.iter().any(|p| same_subnet(v4.ip, *p, v4.netmask));
@@ -402,7 +441,7 @@ fn spawn(name: &str, port: u16, sock: UdpSocket, mut f: impl FnMut(&[u8], Socket
             let mut failures = 0u32;
             loop {
                 match sock.recv_from(&mut buf) {
-                    Ok((n, addr)) => { failures = 0; f(&buf[..n], addr) }
+                    Ok((n, addr)) => { failures = 0; if heard_from(addr) { f(&buf[..n], addr) } }
                     Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
                     // Benign on Linux UDP: a prior unicast to a peer that has
                     // gone draws an ICMP port-unreachable, surfaced on the next
