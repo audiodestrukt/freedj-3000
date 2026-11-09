@@ -144,29 +144,30 @@ fn decode_art(mime: &str, bytes: &[u8]) -> Option<egui::ColorImage> {
     }
 }
 
-/// The loaded track's cover as a texture, decoded once per track and kept in
-/// egui's memory (keyed by a hash of the bytes). None without embedded art.
-fn artwork(ctx: &egui::Context, snap: &DeckSnapshot) -> Option<egui::TextureHandle> {
+/// A track's cover as a texture, decoded once per cover and kept in egui's
+/// memory under `slot` (keyed by a hash of the bytes; the loaded track and the
+/// BROWSE highlight each keep one). None without embedded art.
+fn artwork(ctx: &egui::Context, tags: &opendeck_decode::TrackTags, slot: &str) -> Option<egui::TextureHandle> {
     use std::hash::{Hash, Hasher};
-    let (mime, bytes) = snap.tags.artwork.as_ref()?;
+    let (mime, bytes) = tags.artwork.as_ref()?;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     bytes.len().hash(&mut h);
     bytes[..bytes.len().min(4096)].hash(&mut h);
     let key = h.finish();
-    let id = Id::new("cdj3k-art");
+    let id = Id::new(("cdj3k-art", slot));
     if let Some((k, tex)) = ctx.data(|d| d.get_temp::<(u64, Option<egui::TextureHandle>)>(id)) {
         if k == key { return tex; }
     }
-    let tex = decode_art(mime, bytes).map(|img| ctx.load_texture("cdj3k-art", img, egui::TextureOptions::LINEAR));
+    let tex = decode_art(mime, bytes).map(|img| ctx.load_texture(format!("cdj3k-art-{slot}"), img, egui::TextureOptions::LINEAR));
     if tex.is_none() { log::debug!("cdj3000: cover art ({mime}, {} B) did not decode", bytes.len()); }
     ctx.data_mut(|d| d.insert_temp(id, (key, tex.clone())));
     tex
 }
 
 /// Cover art into `r`, or the record placeholder without any.
-fn draw_art(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, r: Rect) {
+fn draw_art(ui: &Ui, ctx: &egui::Context, tags: &opendeck_decode::TrackTags, slot: &str, r: Rect) {
     let p = ui.painter();
-    match artwork(ctx, snap) {
+    match artwork(ctx, tags, slot) {
         Some(tex) => {
             let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
             p.image(tex.id(), r, uv, Color32::WHITE);
@@ -326,7 +327,7 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
     label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, src, 18.0, u, TEXT);
     label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
 
-    draw_art(ui, ctx, snap, lay.art);
+    draw_art(ui, ctx, snap.tags, "deck", lay.art);
 
     // Title, then length · BPM · key.
     let clip = ui.painter().with_clip_rect(lay.title.union(lay.track_row));
@@ -655,7 +656,7 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
     let src = r(132.0, 112.0, 222.0, 202.0);
     p.rect_filled(src, 0.0, SOURCE_TILE);
     label(ui, Pos2::new(src.center().x, src.min.y + 64.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
-    draw_art(ui, ctx, snap, r(222.0, 112.0, 312.0, 202.0));
+    draw_art(ui, ctx, snap.tags, "deck", r(222.0, 112.0, 312.0, 202.0));
     for i in 0..5 { star(ui, at(155.0 + 33.0 * i as f32, 237.0), 13.0 * u, u); }
     for y in [262.0, 313.0, 364.0, 415.0] {
         p.line_segment([at(140.0, y), at(312.0, y)], Stroke::new(1.0, RULE));
@@ -808,6 +809,18 @@ fn folder(ui: &Ui, c: Pos2, u: f32, col: Color32) {
     ui.painter().rect_filled(Rect::from_min_size(Pos2::new(b.min.x, b.min.y - 3.0 * u), Vec2::new(8.0 * u, 4.0 * u)), 1.0, col);
 }
 
+/// The tags of a file highlighted in BROWSE, read once per highlighted file
+/// (a metadata probe, no decoding) and kept in egui memory.
+fn browse_tags(ctx: &egui::Context, path: &std::path::Path) -> Option<opendeck_decode::TrackTags> {
+    let id = Id::new("cdj3k-browse-tags");
+    if let Some((p, t)) = ctx.data(|d| d.get_temp::<(std::path::PathBuf, Option<opendeck_decode::TrackTags>)>(id)) {
+        if p == path { return t; }
+    }
+    let t = opendeck_decode::SymphoniaDecoder::open(path).ok().map(|d| d.tags().clone());
+    ctx.data_mut(|d| d.insert_temp(id, (path.to_path_buf(), t.clone())));
+    t
+}
+
 /// The category column at the left (only the categories the source has).
 fn draw_categories(ui: &Ui, lay: &Layout, cats: &[&str], u: f32) {
     let sc = lay.screen;
@@ -891,22 +904,51 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     ui.painter().line_segment([Pos2::new(right.min.x - 1.0 * u, right.min.y), Pos2::new(right.min.x - 1.0 * u, right.max.y)], Stroke::new(2.0 * u, PANE_HEAD));
     match b.selected_entry() {
         Some(e) if !e.is_dir => {
+            // A track: its details (tags for a local file; what the source
+            // listed otherwise), the cover, and LOAD, on the pane's grey.
+            ui.painter().rect_filled(right, 0.0, Color32::from_rgb(50, 50, 50));
             let hb = Rect::from_min_size(right.min, Vec2::new(right.width(), 60.0 * u));
             ui.painter().rect_filled(hb, 0.0, PANE_HEAD);
             label(ui, Pos2::new(hb.min.x + 11.0 * u, hb.center().y), Align2::LEFT_CENTER, "INFO", 21.0, u, LABEL);
-            let mut y = hb.max.y + 30.0 * u;
-            let clip = ui.painter().with_clip_rect(right);
-            for (ic, v) in [(None, Some(e.name.clone())), (Some(Icon::Person), e.artist.clone()),
-                            (None, e.bpm.map(|b| format!("{b:.1}")))] {
-                match ic {
-                    Some(k) => icon(ui, k, Pos2::new(right.min.x + 24.0 * u, y), u),
-                    None if y < hb.max.y + 40.0 * u => { label(ui, Pos2::new(right.min.x + 24.0 * u, y), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT); }
-                    None => boxed(ui, "BPM", Pos2::new(right.min.x + 24.0 * u, y), u),
+            let tags = match e.load() {
+                Some(crate::browser::Load::Local { path, .. }) => browse_tags(ui.ctx(), path),
+                _ => None,
+            }.unwrap_or_default();
+            let title = tags.title.clone().unwrap_or_else(|| e.name.clone());
+            let artist = tags.artist.clone().or_else(|| e.artist.clone()).unwrap_or_default();
+            let bpm = tags.bpm.or(e.bpm).map(|b| format!("{b:.1}")).unwrap_or_default();
+            let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
+            let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0, Color32::from_rgb(70, 70, 70)));
+            let clip = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 152.0), at(1270.0, 248.0)));
+            label(ui, at(758.0, 176.0), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
+            clip.text(at(780.0, 176.0), Align2::LEFT_CENTER, &title, FontId::proportional(26.0 * u), TEXT);
+            rule(200.0, 1270.0);
+            icon(ui, Icon::Person, at(758.0, 224.0), u);
+            clip.text(at(780.0, 224.0), Align2::LEFT_CENTER, &artist, FontId::proportional(26.0 * u), TEXT);
+            rule(248.0, 1270.0);
+            let small = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 248.0), at(1062.0, 440.0)));
+            let rows: [(&str, String); 4] = [
+                ("disc", tags.album.clone().unwrap_or_default()),
+                ("BPM", bpm),
+                ("b#", tags.key.clone().unwrap_or_default()),
+                ("cal", tags.year.clone().unwrap_or_default()),
+            ];
+            for (i, (k, v)) in rows.iter().enumerate() {
+                let y = 272.0 + 48.0 * i as f32;
+                match *k {
+                    "disc" => icon(ui, Icon::Disc, at(758.0, y), u),
+                    "cal" => icon(ui, Icon::Calendar, at(758.0, y), u),
+                    t => boxed(ui, t, at(758.0, y), u),
                 }
-                clip.text(Pos2::new(right.min.x + 48.0 * u, y), Align2::LEFT_CENTER, v.unwrap_or_default(), FontId::proportional(24.0 * u), TEXT);
-                y += 50.0 * u;
+                small.text(at(780.0, y), Align2::LEFT_CENTER, v, FontId::proportional(22.0 * u), TEXT);
+                rule(y + 24.0, 1062.0);
             }
-            let load = Rect::from_min_max(Pos2::new(sc.min.x + 935.0 * u, sc.min.y + 552.0 * u), Pos2::new(sc.min.x + 1085.0 * u, sc.min.y + 602.0 * u));
+            draw_art(ui, ui.ctx(), &tags, "browse", Rect::from_min_max(at(1073.0, 252.0), at(1260.0, 439.0)));
+            icon(ui, Icon::Bubble, at(758.0, 513.0), u);
+            ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 490.0), at(1270.0, 536.0)))
+                .text(at(780.0, 513.0), Align2::LEFT_CENTER, tags.comment.clone().unwrap_or_default(), FontId::proportional(20.0 * u), TEXT);
+            rule(537.0, 1270.0);
+            let load = Rect::from_min_max(at(935.0, 552.0), at(1085.0, 602.0));
             if tap(ui, load, "cdj-browse-load").0 { out.push(Event::Deck(ControlEvent::Load)); }
             ui.painter().rect_filled(load, 0.0, Color32::from_rgb(225, 225, 225));
             label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::from_rgb(30, 30, 30));
