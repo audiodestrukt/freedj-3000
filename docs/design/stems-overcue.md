@@ -165,9 +165,13 @@ matters in a booth: a freedj next to CDJs, loading from their sticks.
    entirely.
 3. **Stretcher latency:** if mutes under Bungee feel late, do we accept it or
    pay for per-stem stretching while a stem is changed?
-4. **Store text:** "reads stems prepared by OverCue Desktop" is a factual
-   compatibility statement. Mention it, or keep the listing generic
-   ("stems")? The listing must not name the CDJ-3000 either way.
+4. **Store text:** decided 2026-11-10: name OverCue. Use it in the
+   description only, as a factual compatibility line ("plays stems prepared
+   with OverCue Desktop"), never in the app name, subtitle or keywords
+   (guideline 2.3.7). Add OverCue to the trademark disclaimer with "not
+   affiliated". Once phase 3 works on a real stick, send OverCue a
+   compatibility report (their README asks for them) and ask to be listed
+   as a reader.
 
 ## Out of scope
 
