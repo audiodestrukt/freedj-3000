@@ -1,6 +1,7 @@
 # Stems: reading OverCue-prepared media
 
-Status: plan, 2026-11-10. Nothing built yet.
+Status, 2026-11-10: phase 1 (the reader crate, `crates/stems`) is built.
+Phases 0 and 2–6 are not started.
 
 ## What OverCue is, and what we take from it
 
@@ -145,7 +146,7 @@ preallocated stem buffer. A per-page "ready" bitmap is published atomically.
 | # | Phase | What | Size |
 |---|---|---|---|
 | 0 | Test media | Dan runs OverCue Desktop on his Mac on a spare stick with a few tracks: a LAME MP3, an ffmpeg-tagged (Beatport) MP3, a FLAC, a WAV. We also build synthetic banks in tests (our own writer, as the spec's tests do), so CI needs no music | S |
-| 1 | `opendeck-stems` crate | Pure, no audio thread. Parses `index.json` and `index-v2`. Reads `.pgz` header and page table. Validates every field and hash the spec lists, and keeps index paths inside the USB root. Decodes FLAC and zlib pages. Decimates 96 → 48 kHz. Reads through a `ReadAt` trait so local files and NFS share the code | M |
+| 1 ✓ | `opendeck-stems` crate | Pure, no audio thread. Parses `index.json` and `index-v2`. Reads `.pgz` header and page table. Validates every field and hash the spec lists, and keeps index paths inside the USB root. Decodes FLAC and zlib pages. Decimates 96 → 48 kHz. Reads through a `ReadAt` trait so local files and NFS share the code | M |
 | 2 | Engine | A `StemBank` behind an `ArcSwap` in `AudioHandle`, with three atomic gains, the stem mix in `read_block`, original/stems crossfade, the page bitmap, and the same source for scrub. A loader stage after `Prepared` fills pages and runs the alignment check. Tests: sum of stems at gain 1 ≈ original; a mute ramp has no click; loop wrap; seek; scrub | M |
 | 3 | UI | **CDJ skin:** STEMS tab and panel as on the unit (TOGGLE/VOLUME, FULL MIX, DRUMS/VOCAL/HARMONICS, grey while loading, blue underline when changed), stem-tinted waveform, S badge in BROWSE. **XDJ skin:** no screen element, per the screen-fidelity rule; stems go on the faceplate/CONTROLS side. **Controllers:** `stem_mute`/`stem_level` actions in `controllers.toml` (DJ2Go preset, I2C). Gains reset to full mix on every load | M |
 | 4 | LINK | On a dbserver/NFS load, look the track ID up in the peer's `CDJMODS/index-v2` (or `index.json` by path), then fetch pages over NFS ahead of the playhead in priority order. A lost page means the original plays there. Works with any player whose stick was prepared, stock or modded, because we only read files | M |
@@ -154,6 +155,32 @@ preallocated stem buffer. A per-page "ready" bitmap is published atomically.
 
 Phases 1–3 make a usable feature for local sticks. Phase 4 is the one that
 matters in a booth: a freedj next to CDJs, loading from their sticks.
+
+## Phase 1 as built
+
+`crates/stems` (`opendeck-stems`):
+
+- `index` parses `index.json` and refuses duplicate members.
+- `v2` reads the bounded index and fails closed when it's damaged.
+- `pgz` checks the header and page table, then decodes one page at a time
+  (FLAC through Symphonia, or zlib), verifying each page's hash, or the
+  whole role.
+- `decimate` converts 96 → 48 kHz with a zero-phase half-band filter.
+- `media` is the `Media` trait, plus `DirMedia` with path and symlink
+  checks.
+- `synth` writes synthetic prepared sticks for tests.
+
+What the tests cover:
+
+- Every codec round-trips, read through both `index.json` and `index-v2`.
+- Tampering is caught in the header, a page, trailing bytes, an index-v2
+  bucket and the index-v2 marker.
+- Pages compressed by the reference `flac` encoder decode correctly.
+- OverCue's own reference validator (`verify_usb.py`) accepts sticks from
+  `examples/synth_stick.rs` in every variant. That confirms our test writer
+  matches the spec, and with it what the reader is tested against.
+- Still to do: a run against a stick from OverCue Desktop itself (phase 0;
+  the Wine route is blocked by a Wine `ole32` bug).
 
 ## Open questions for Dan
 
