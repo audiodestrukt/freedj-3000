@@ -83,6 +83,10 @@ pub struct Settings {
     /// 0.2.1, when every iOS device was seeded to 3).  Lets a later default
     /// re-seed a device once without touching a number the user chose.
     pub seed: u8,
+    /// Running on a phone (not saved): the CDJ-3000 screen has no phone
+    /// layout yet, so SCREEN stays on the XDJ-1000MK2 there.
+    #[serde(skip)]
+    pub phone: bool,
 }
 
 /// Seeding generation written by this build; see `Settings::seed`.
@@ -90,7 +94,7 @@ const SEED: u8 = 1;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, perf_log: false, skin: Skin::Xdj1000Mk2, seed: 0 }
+        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, perf_log: false, skin: Skin::Xdj1000Mk2, seed: 0, phone: false }
     }
 }
 
@@ -158,6 +162,7 @@ impl Settings {
             Setting::Quantize     => c.quantize = !c.quantize,
             Setting::TempoRange   => c.tempo_range = step(&TEMPO_RANGES, c.tempo_range, dir),
             Setting::Player       => c.player = step(&[1u8, 2, 3, 4], c.player, dir),
+            Setting::Skin if c.phone => {}
             Setting::Skin         => c.skin = step(&[Skin::Xdj1000Mk2, Skin::Cdj3000], c.skin, dir),
             Setting::PerfLog      => c.perf_log = !c.perf_log,
         }
@@ -171,6 +176,7 @@ impl Settings {
             Setting::Quantize     => if self.quantize { "ON".into() } else { "OFF".into() },
             Setting::TempoRange   => Self::range_label(self.tempo_range),
             Setting::Player       => format!("{}   (applies at next launch)", self.player),
+            Setting::Skin if self.phone => format!("{}   (CDJ-3000: iPad only)", Skin::Xdj1000Mk2.label()),
             Setting::Skin         => self.skin.label().into(),
             Setting::PerfLog      => if self.perf_log { "ON   (Documents/opendeck-perf.log)".into() } else { "OFF".into() },
         }
@@ -214,6 +220,9 @@ mod tests {
         let s = s.cycled(Setting::AutoCueLevel, 1); assert_eq!(s.auto_cue_level_db, -54.0);
         assert_eq!(Settings::range_label(1.0), "WIDE");
         assert_eq!(Settings::range_label(0.10), "±10");
+        let phone = Settings { phone: true, ..Settings::default() };
+        assert_eq!(phone.cycled(Setting::Skin, 1).skin, Skin::Xdj1000Mk2, "no CDJ-3000 screen on a phone yet");
+        assert!(phone.value(Setting::Skin).contains("iPad only"));
         let s = s.cycled(Setting::Skin, 1);        assert_eq!(s.skin, Skin::Cdj3000);
         let s = s.cycled(Setting::Skin, 1);        assert_eq!(s.skin, Skin::Xdj1000Mk2);
     }

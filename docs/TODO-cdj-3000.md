@@ -33,11 +33,12 @@ exceptions:
 | Item | Who | Size |
 |---|---|---|
 | ~~CDJ-3000 faceplate (buttons, jog, tempo), like the XDJ faceplate~~ done: `cdjface.rs`, the whole top panel on the iPad / `--faceplate`, key columns beside the screen on desktop | touch | ✓ |
-| Faceplate keys not drawn yet (nothing behind them): PLAYLIST, TRACK FILTER, SHORTCUT, KEY SYNC, TRACK SEARCH / SEARCH ◀◀ ▶▶, DIRECTION, TEMPO RESET / range | touch | S each |
-| Faceplate hot-cue delete (the XDJ uses PERFORM's DELETE mode; the CDJ face has no way yet) | touch | S |
-| Faceplate positions are placed by eye; check against the unit's dimensions | touch | S |
+| ~~Faceplate positions placed by eye~~ done: measured off cdj3k-emu's panel drawing; every key the unit has is on it | touch | ✓ |
+| ~~Hot-cue delete, TRACK SEARCH, SEARCH ◀◀ ▶▶, TIME MODE / AUTO CUE, 4 / 8 BEAT LOOP (1/2X, 2X), BEAT JUMP ◀ ▶, TEMPO RANGE / RESET~~ done, checked against the emulator (`docs/testing/cdj-3000-parity.md`) | touch | ✓ |
+| Faceplate keys drawn but inert (nothing behind them): PLAY LIST, TRACK FILTER, SHORTCUT, KEY SYNC; DIRECTION, VINYL SPEED ADJ and JOG ADJUST are not drawn | touch | S each |
+| The upper Bars row counts to a touched overview point on the unit (freedj: "--.-") | all | S |
 | Jog-centre display drawn in the on-screen jog (reference: `jog-artwork.png`, `jog-playing.png`) | touch | M |
-| Phone layout for the CDJ skin (the phone keeps the XDJ layout today) | touch | M |
+| Phone layout for the CDJ skin (the phone keeps the XDJ layout; MENU's SCREEN row says "CDJ-3000: iPad only" there) | touch | M |
 | Does Control Mode let the host draw the CDJ's jog LCD? | cdj | S (look) |
 
 ## BROWSE and library (`docs/design/cdj-3000-skin.md`, phase 3)

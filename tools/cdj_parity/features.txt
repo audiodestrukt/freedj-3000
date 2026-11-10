@@ -1,0 +1,102 @@
+# Every CDJ-3000 feature freedj has, one check each (tools/cdj_parity.py).
+# Both decks start paused on a freshly loaded track.
+
+check loaded
+
+# Lamped modes
+press QUANTIZE
+check quantize-off
+press QUANTIZE
+press SLIP
+check slip-on
+press SLIP
+press MASTER_TEMPO
+check master-tempo-off
+press MASTER_TEMPO
+press JOG_MODE
+check jog-mode
+press JOG_MODE
+
+# Readouts
+press TIME_MODE
+check time-mode
+press TIME_MODE
+press TEMPO_RANGE
+check tempo-range
+press TEMPO_RANGE
+press TEMPO_RANGE
+press TEMPO_RANGE
+
+# Playing, hot cues, memory
+press PLAY
+wait 3
+press HOT_A
+wait 2
+press HOT_B
+check hot-cues-set
+hold CALL_DELETE
+press HOT_A
+release CALL_DELETE
+check hot-cue-deleted
+press MEMORY
+check memory-cue
+
+# Loops
+press BEATLOOP_HALF
+check loop-4
+press BEATLOOP_HALF
+check loop-halved
+press BEATLOOP_2X
+press BEATLOOP_2X
+check loop-doubled
+press RELOOP
+check loop-exited
+press LOOP_IN
+wait 2
+press LOOP_OUT
+check loop-manual
+press RELOOP
+
+# Jumps
+press BEATJUMP_NEXT
+check beat-jump
+press TRACK_PREV
+check track-start
+
+# Screens
+press BROWSE
+check browse
+press TAG_LIST
+check tag-list
+press MENU:1500
+check utility
+press SOURCE
+check source
+press SEARCH_MENU
+check search
+press BACK
+press BACK
+check back
+press SEARCH_MENU
+check search-closed
+
+# SYNC and MASTER with no other player: both refuse with a pop-up (freedj is
+# on loopback only, so nothing reaches the LAN)
+press BEAT_SYNC
+check sync
+press BEAT_SYNC
+press PLAY
+check paused
+
+# Memory points, scanning, AUTO CUE
+press CALL_NEXT
+check memory-call
+press DELETE
+check memory-deleted
+press SEARCH_NEXT:2000
+check search-scan
+press TIME_MODE:1500
+check auto-cue-off
+press TIME_MODE:1500
+press MASTER
+check master

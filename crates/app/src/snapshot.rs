@@ -13,6 +13,9 @@ pub struct DeckSnapshot<'a> {
     /// A track being fetched / prepared on the loader thread, by name: the
     /// title bar shows a LOADING readout until it lands (`DeckApp::loading`).
     pub loading:      Option<&'a str>,
+    /// A message the CDJ-3000 screen shows in a pop-up for a few seconds
+    /// (lines split by `\n`), as the unit does ("No LINKED Players found.").
+    pub notice:       Option<&'a str>,
 
     /// Playhead in interleaved source samples — latency-compensated and
     /// phase-locked, i.e. what the listener is hearing right now.
@@ -106,6 +109,24 @@ pub struct DeckSnapshot<'a> {
     /// Waveform columns (of `HOP_SIZE` frames) across the enlarged waveform:
     /// the zoom, for turning a drag in points into samples.
     pub cols_visible: f32,
+}
+
+#[cfg(test)]
+impl<'a> DeckSnapshot<'a> {
+    /// A stopped, empty deck for unit tests; set the fields a test needs.
+    pub fn test(tags: &'a opendeck_decode::TrackTags) -> Self {
+        DeckSnapshot {
+            title: "", loading: None, notice: None, tags, file: "", position: 0, sample_rate: 44_100, channels: 2,
+            total_samples: 0, cue_point: 0, memory_cues: &[], hot_cues: [None; 8],
+            perform_mode: crate::input::PerformMode::HotCue, perform_bank: 0, perform_delete: false,
+            loop_active: false, loop_start: 0, loop_end: 0, loop_beats: 0.0, tempo_range: 10.0, quantize: false,
+            slip_shadow: None, playing: false, speed: 1.0, fader_speed: 1.0, key_lock: false, jog_vinyl: false,
+            remain_mode: true, auto_cue: false, slip: false, sync: false, master: false, zoom_grid_mode: false,
+            grid_edited: false, cue_set: false, sync_offset: 0.0, source_link: false, phase_ticks_view: false,
+            linked: false, master_player: 0, player: 1, link_addr: String::new(), link_peers: String::new(),
+            cols_visible: 1.0, beat_grid: None, beat2_bpm: 0.0, beat2_phase_beats: 0.0, beat2_beat_in_bar: 0,
+        }
+    }
 }
 
 impl DeckSnapshot<'_> {

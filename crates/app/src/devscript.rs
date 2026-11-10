@@ -17,7 +17,15 @@
 //! | `select=<n>` | BROWSE: highlight row n |
 //! | `category=<n>` | BROWSE on rekordbox: open category n (0 = ARTIST) |
 //! | `search=<text>` | open SEARCH and type the text |
+//! | `press=<BUTTON>` / `press=<BUTTON>:<ms>` | press a CDJ-3000 button by cdj3k-emu's name (`HOT_A`, `BEATLOOP_HALF`, `MENU`…), released after `ms` (200); 1000 ms or more is a long press |
+//! | `hold=<BUTTON>` / `release=<BUTTON>` | hold a button until released (CALL_DELETE + a pad deletes it) |
+//! | `rotary=<n>` | turn the rotary `n` detents (positive = down the list) |
+//! | `lamps=<path>` | write the faceplate's lamps as cdj3k-emu reports them (JSON) |
+//! | `shot=<path>` | save the next frame as a PNG and carry on |
 //! | `quit` | exit the process (status 0) |
+//!
+//! The button actions use the emulator's names on purpose: one scenario
+//! drives freedj and the emulated unit alike (`tools/cdj_parity.py`).
 
 /// One parsed action.
 #[derive(Debug, Clone, PartialEq)]
@@ -34,6 +42,12 @@ pub enum Action {
     Select(usize),
     Category(usize),
     Search(String),
+    Press { button: String, ms: u32 },
+    Hold(String),
+    Release(String),
+    Rotary(i32),
+    Lamps(String),
+    Shot(String),
     Quit,
 }
 
@@ -58,6 +72,19 @@ pub fn parse(src: &str) -> Result<Vec<(f64, Action)>, String> {
             _ if act.starts_with("open=") => Action::Open(act[5..].to_string()),
             _ if act.starts_with("search=") => Action::Search(act[7..].to_string()),
             _ if act.starts_with("select=") => Action::Select(act[7..].parse().map_err(|_| format!("{entry:?}: bad row"))?),
+            _ if act.starts_with("press=") => {
+                let spec = &act[6..];
+                let (button, ms) = match spec.split_once(':') {
+                    Some((b, ms)) => (b, ms.trim().parse().map_err(|_| format!("{entry:?}: bad hold time"))?),
+                    None => (spec, 200),
+                };
+                Action::Press { button: button.trim().to_ascii_uppercase(), ms }
+            }
+            _ if act.starts_with("hold=") => Action::Hold(act[5..].trim().to_ascii_uppercase()),
+            _ if act.starts_with("release=") => Action::Release(act[8..].trim().to_ascii_uppercase()),
+            _ if act.starts_with("rotary=") => Action::Rotary(act[7..].trim().parse().map_err(|_| format!("{entry:?}: bad detents"))?),
+            _ if act.starts_with("lamps=") => Action::Lamps(act[6..].trim().to_string()),
+            _ if act.starts_with("shot=") => Action::Shot(act[5..].trim().to_string()),
             _ if act.starts_with("category=") => Action::Category(act[9..].parse().map_err(|_| format!("{entry:?}: bad category"))?),
             _ => {
                 let spec = act.strip_prefix("jog=").ok_or_else(|| format!("{entry:?}: unknown action"))?;
@@ -88,6 +115,12 @@ impl Script {
             Ok(v) => { log::info!("script: {} actions", v.len()); Some(Self { pending: v.into(), jog: None }) }
             Err(e) => { log::error!("OPENDECK_SCRIPT: {e}"); None }
         }
+    }
+
+    /// Queue an action for `at` seconds after the start (a press's release).
+    pub fn later(&mut self, at: f64, a: Action) {
+        let i = self.pending.iter().position(|(t, _)| *t > at).unwrap_or(self.pending.len());
+        self.pending.insert(i, (at, a));
     }
 
     /// The actions due by `elapsed` seconds, plus this frame's jog delta.
@@ -134,6 +167,24 @@ mod tests {
         ]);
         assert!(parse("1:select=x").is_err());
         assert!(parse("1:category=").is_err());
+    }
+
+    #[test]
+    fn parses_the_button_actions() {
+        let v: Vec<Action> = parse("1:press=hot_a; 2:press=MENU:1500; 3:hold=CALL_DELETE; 4:release=call_delete; \
+                                    5:rotary=-3; 6:lamps=/tmp/l.json; 7:shot=/tmp/s.png")
+            .unwrap().into_iter().map(|(_, a)| a).collect();
+        assert_eq!(v, vec![
+            Action::Press { button: "HOT_A".into(), ms: 200 }, Action::Press { button: "MENU".into(), ms: 1500 },
+            Action::Hold("CALL_DELETE".into()), Action::Release("CALL_DELETE".into()), Action::Rotary(-3),
+            Action::Lamps("/tmp/l.json".into()), Action::Shot("/tmp/s.png".into()),
+        ]);
+        assert!(parse("1:press=PLAY:soon").is_err());
+        assert!(parse("1:rotary=x").is_err());
+        let mut s = Script { pending: parse("1:play; 3:quit").unwrap().into(), jog: None };
+        s.later(2.0, Action::Release("CUE".into()));
+        let order: Vec<f64> = s.pending.iter().map(|(t, _)| *t).collect();
+        assert_eq!(order, vec![1.0, 2.0, 3.0]);
     }
 
     #[test]

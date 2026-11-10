@@ -64,6 +64,9 @@ pub enum UiEvent {
     PhonePageFlip,
     /// Step a setting as its MENU row would (the CDJ's QUANTIZE key).
     CycleSetting(crate::settings::Setting),
+    /// TRACK SEARCH |◀◀ / ▶▶| (CDJ-3000 faceplate): back to the start of the
+    /// track, or load the next track in its folder.
+    TrackSearch { next: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -229,8 +229,12 @@ The deck's look is chosen in MENU → SCREEN, or at launch with
 `OPENDECK_SKIN=cdj3000` (or `xdj1000mk2`). The CDJ-3000 screen comes with
 its hardware buttons: on the desktop, SOURCE / BROWSE / TAG LIST / SEARCH /
 MENU and BACK / TAG TRACK / the rotary sit either side of the screen; on the
-iPad (and with `--faceplate`) it is the whole top panel, with hot-cue pads,
-loop and memory keys, jog, SYNC / MASTER and the tempo fader.
+iPad (and with `--faceplate`) it is the whole top panel, every key where the
+unit has it: the screen keys above the screen, hot cues under it (hold CALL /
+DELETE and press a pad to delete one), loops, BEAT JUMP, TRACK SEARCH and
+SEARCH down the left, CALL / DELETE / MEMORY over the jog, SYNC / MASTER,
+the tempo keys and the fader down the right. The phone keeps the XDJ
+layout for now.
 
 **USB sticks.** Mounted removable media appear as `USB: <label>` rows at the
 top of the browser (re-scanned once a second, so hot-plug works). A rekordbox
@@ -340,9 +344,10 @@ full hex, which is the reference for the packet-format work in
 ## Testing
 
 ```bash
-cargo test --workspace      # ~200 unit tests, no hardware or network needed
+cargo test --workspace      # ~215 unit tests, no hardware or network needed
 make perf                   # key-lock engines' real-time factors on this machine
 make test-shift-grid        # end-to-end: SYNC + SHIFT GRID against an emulated CDJ-3000
+tools/cdj_parity.py --track T --out DIR   # the CDJ-3000 skin against the emulated unit, key by key
 ```
 
 The unit tests are hermetic: they build their own fake USB sticks and
@@ -351,7 +356,10 @@ test needs a private Link bridge and the emulator (setup in
 [docs/design/cdj-grid-adjust.md](docs/design/cdj-grid-adjust.md)); without
 them it reports SKIP and exits 77. `OPENDECK_SCRIPT` drives the app from a
 timed script (`"1:play; 3:sync; 14:jog=3x20; 26:shiftsync; 36:quit"`) for
-tests like that one; see `crates/app/src/devscript.rs`.
+tests like that one; see `crates/app/src/devscript.rs`. Its `press=` actions
+take the emulator's button names, so `tools/cdj_parity.py` runs one scenario
+on freedj and the emulated CDJ-3000 and compares their screens and lamps
+([docs/testing/cdj-3000-parity.md](docs/testing/cdj-3000-parity.md)).
 
 ---
 

@@ -226,6 +226,9 @@ pub struct FaceLayout {
     pub back:      Option<Rect>,
     /// JOG MODE (VINYL) button — lit while in vinyl mode.
     pub jog_mode:  Option<Rect>,
+    /// Printed captions above their controls (the CDJ-3000 panel) rather
+    /// than under them (the XDJ's).
+    pub captions_above: bool,
     /// Printed-caption text size (points): the layouts pack differently.
     pub caption:   f32,
 }
@@ -267,6 +270,7 @@ pub fn faceplate_layout(base: Rect) -> (Rect, FaceLayout) {
         tag_track: Some(face_rect(base, 0.843, 0.094, 0.888, 0.126)),
         // The rectangular VINYL button right of the jog, under VINYL SPEED ADJUST.
         jog_mode:  Some(face_rect(base, 0.903, 0.427, 0.948, 0.450)),
+        captions_above: false,
         caption:   w * 0.011,
     };
     (screen, face)
@@ -337,6 +341,7 @@ pub fn portrait_layout(base: Rect) -> (Rect, FaceLayout) {
         back:      Some(face_rect(base, 0.892, 0.252, 0.996, 0.298)),
         // JOG MODE under the tempo fader (which ends ~0.818), bottom-right.
         jog_mode:  Some(face_rect(base, 0.884, 0.880, 0.952, 0.920)),
+        captions_above: false,
         caption:   w * 0.018,
     };
     (screen, face)
@@ -452,6 +457,7 @@ pub fn phone_controls_layout(win: Rect, ins: Insets) -> (FaceLayout, PhoneStrip)
         time_mode: None, auto_cue: None, tag_track: None, back: None,
         // JOG MODE: bottom right, between the jog's edge and the fader.
         jog_mode:  Some(face_rect(base, 0.745, 0.800, 0.840, 0.900)),
+        captions_above: false,
         caption:   w * 0.012,
     };
     let strip = PhoneStrip {
@@ -523,9 +529,15 @@ struct TouchTrack {
 /// (`false`: the lift reports `tapped`; movement under `TAP_PT` points still
 /// counts).  The choice is latched per finger at the moment it lands.
 pub fn second_touches(ui: &Ui, rects: &[(Rect, bool)]) -> Vec<SecondTouch> {
+    second_touches_in(ui, "second-touches", rects)
+}
+
+/// [`second_touches`] with its own finger tracker, for a second set of
+/// rects in the same frame (each tracker must see each event once).
+pub fn second_touches_in(ui: &Ui, tracker: &str, rects: &[(Rect, bool)]) -> Vec<SecondTouch> {
     use egui::{Event as E, TouchPhase as P};
     const TAP_PT: f32 = 12.0;
-    let key = Id::new("second-touches");
+    let key = Id::new(("second-touches", tracker));
     let mut st: TouchTrack = ui.data(|d| d.get_temp(key)).unwrap_or_default();
     let mut out = vec![SecondTouch::default(); rects.len()];
     ui.input(|i| for ev in &i.events {
@@ -822,7 +834,11 @@ pub(crate) fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, 
         }
     }
     // Printed captions under each control.
-    let cap = |r: Rect, s: &str| text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM);
+    let cap = |r: Rect, s: &str| if f.captions_above {
+        text(ui, Pos2::new(r.center().x, r.min.y - lbl * 0.6), Align2::CENTER_BOTTOM, s, lbl, DIM)
+    } else {
+        text(ui, Pos2::new(r.center().x, r.max.y + lbl), Align2::CENTER_TOP, s, lbl, DIM)
+    };
     cap(f.play,   "PLAY/PAUSE");
     cap(f.cue,    "CUE");
     if let Some(r) = f.browse { cap(r, "BROWSE"); }

@@ -302,13 +302,15 @@ impl Feed {
 }
 
 // ── socket transport (Unix only; the LAN/UDP path is separate) ────────────
-#[cfg(unix)]
+// Not in the iOS build: the session handshake presents as rekordbox, which
+// stays out of anything shipped until that is settled (docs/TODO-cdj-3000.md).
+#[cfg(all(unix, not(target_os = "ios")))]
 pub use imp::spawn_from_env;
 
-#[cfg(not(unix))]
+#[cfg(any(not(unix), target_os = "ios"))]
 pub fn spawn_from_env(_tx: std::sync::mpsc::Sender<Event>, _ind: Arc<super::Indicators>) {}
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_os = "ios")))]
 mod imp {
     use super::{map, status, Event, Feed, JogScaler};
     use crate::surface::Indicators;

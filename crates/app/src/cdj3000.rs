@@ -49,6 +49,13 @@ const PANEL_FACE:  Color32 = Color32::from_rgb(40, 40, 40);
 const PAGE2_EDGE:  Color32 = Color32::from_rgb(230, 230, 230);
 /// Hot-cue flag colour for a cue with no colour of its own.
 const CUE_GREEN:   Color32 = Color32::from_rgb(40, 226, 20);
+/// TEMPO range badges: ±6 green, ±10 orange-red, ±16 white (WIDE is red
+/// text, no badge), read off the emulated unit.
+const RANGE_6:     Color32 = Color32::from_rgb(0, 255, 0);
+const RANGE_16:    Color32 = Color32::WHITE;
+const POPUP:       Color32 = Color32::from_rgb(26, 26, 26);
+const POPUP_EDGE:  Color32 = Color32::from_rgb(170, 170, 170);
+const POPUP_TEXT:  Color32 = Color32::from_rgb(200, 200, 200);
 
 // ── Touch panels ─────────────────────────────────────────────────────────────
 
@@ -79,6 +86,9 @@ pub fn panel_from_env(ctx: &egui::Context) {
     };
     set_panel(ctx, p);
 }
+
+/// Open a panel from outside the screen (the faceplate's 4 / 8 loop keys).
+pub(crate) fn open_panel(ctx: &egui::Context, p: Panel) { set_panel(ctx, p); }
 
 fn set_panel(ctx: &egui::Context, p: Panel) {
     ctx.data_mut(|d| d.insert_temp(panel_id(), p));
@@ -209,7 +219,10 @@ pub struct Layout {
     // info block
     pub player:    Rect,
     pub track:     Rect,
+    pub a_hot_cue: Rect,
     pub auto_cue:  Rect,
+    pub quantize:  Rect,
+    pub beat_jump: Rect,
     pub time:      Rect,
     pub tempo:     Rect,
     pub range:     Rect,
@@ -257,7 +270,10 @@ pub fn layout(screen: Rect, panel_open: bool) -> Layout {
 
         player:    r(20.0, 488.0, 108.0, 576.0),
         track:     r(150.0, 488.0, 240.0, 576.0),
-        auto_cue:  r(283.0, 498.0, 385.0, 525.0),
+        a_hot_cue: r(283.0, 497.0, 385.0, 525.0),
+        auto_cue:  r(283.0, 537.0, 385.0, 565.0),
+        quantize:  r(20.0, 586.0, 108.0, 637.0),
+        beat_jump: r(20.0, 647.0, 108.0, 698.0),
         time:      r(430.0, 485.0, 740.0, 580.0),
         tempo:     r(840.0, 485.0, 1035.0, 580.0),
         range:     r(947.0, 488.0, 1029.0, 512.0),
@@ -317,6 +333,23 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &Scree
         }
         draw_info_block(ui, snap, lay, u, out);
     });
+    if let Some(msg) = snap.notice { draw_notice(ctx, lay, msg); }
+}
+
+/// The unit's pop-up: a dark box with a light edge over the middle of the
+/// screen, its lines left-aligned (measured off "No LINKED Players found.").
+fn draw_notice(ctx: &egui::Context, lay: &Layout, msg: &str) {
+    let p = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("cdj3k-notice")));
+    let (s, u) = (lay.screen, lay.screen.height() / ASPECT.y);
+    let at = |x: f32, y: f32| Pos2::new(s.min.x + x * u, s.min.y + y * u);
+    let lines: Vec<&str> = msg.lines().collect();
+    let h = 70.0 + 48.0 * lines.len() as f32;
+    let r = Rect::from_min_max(at(200.0, 160.0), at(1080.0, 160.0 + h));
+    p.rect_filled(r, 0.0, POPUP);
+    p.rect_stroke(r, 0.0, Stroke::new((2.0 * u).max(1.0), POPUP_EDGE));
+    for (i, l) in lines.iter().enumerate() {
+        p.text(at(257.0, 160.0 + 59.0 + 48.0 * i as f32), Align2::LEFT_CENTER, *l, FontId::proportional(31.0 * u), POPUP_TEXT);
+    }
 }
 
 /// Text sized in unit pixels; returns the drawn rect.
@@ -385,7 +418,7 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
 /// Bars.beats to the next point, as the countdown shows it ("--.-" if none).
 fn bars_text(v: Option<(u32, u32)>) -> String {
     match v {
-        Some((bars, beats)) => format!("{bars}.{beats}"),
+        Some((bars, beats)) => format!("{bars:02}.{beats}"),
         None => "--.-".into(),
     }
 }
@@ -393,11 +426,17 @@ fn bars_text(v: Option<(u32, u32)>) -> String {
 fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
     let p = ui.painter();
 
-    // Beat countdowns: orange to the next memory point, blue to the next hot cue.
+    // Beat countdowns. The lower (blue) row counts to the next memory point
+    // and reads a red 00.0 while the playhead sits on one; hot cues are not
+    // counted. The upper (orange) row stays "--.-" here (on the unit it
+    // counts to a touched overview point, which freedj has not got).
     let b = lay.bars;
-    let mem = bars_to_next(snap, snap.memory_cues.iter().copied());
-    let hot = bars_to_next(snap, snap.hot_cues.iter().flatten().copied());
-    for (row, v, c) in [(0.25, mem, BARS_ORANGE), (0.75, hot, BARS_BLUE)] {
+    let on_memory = snap.beat_grid.filter(|g| g.bpm > 0.0).is_some_and(|g| {
+        let half_beat = snap.sample_rate as f64 * 30.0 / g.bpm * snap.channels as f64;
+        snap.memory_cues.iter().any(|&m| (m as f64 - snap.position as f64).abs() < half_beat)
+    });
+    let mem = if on_memory { Some((0, 0)) } else { bars_to_next(snap, snap.memory_cues.iter().copied()) };
+    for (row, v, c) in [(0.25, None, BARS_ORANGE), (0.75, mem, if on_memory { RED } else { BARS_BLUE })] {
         let y = b.min.y + b.height() * row;
         let r = label(ui, Pos2::new(b.min.x + 62.0 * u, y), Align2::RIGHT_CENTER, bars_text(v), 22.0, u, c);
         label(ui, Pos2::new(r.max.x + 7.0 * u, y), Align2::LEFT_CENTER, "Bars", 15.0, u, c);
@@ -434,6 +473,40 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
                 let num = if k == here + 16 { "16" } else { "32" };
                 label(ui, Pos2::new(x, lay.ticks_bot.max.y + 8.0 * u), Align2::CENTER_CENTER, num, 17.0, u, TEXT);
             }
+        }
+    }
+
+    // Hot cues, memory points and the cue on the enlarged waveform: a green
+    // lettered box and a red ▼ over the top ticks, an orange ▲ under the
+    // bottom ones.
+    if snap.total_samples > 0 {
+        let hop = opendeck_analysis::waveform::HOP_SIZE as f64;
+        let ch = snap.channels.max(1) as f64;
+        let w = lay.wave;
+        let cols = snap.cols_visible.max(1.0) as f64;
+        let play_col = snap.position as f64 / ch / hop;
+        let x_of = |s: u64| w.min.x + ((s as f64 / ch / hop - play_col) / cols + 0.5) as f32 * w.width();
+        let on = |x: f32| x >= w.min.x - 20.0 * u && x <= w.max.x;
+        let top = lay.ticks_top.min.y - 6.0 * u;
+        for &m in snap.memory_cues {
+            let x = x_of(m);
+            if !on(x) { continue; }
+            p.add(Shape::convex_polygon(vec![Pos2::new(x - 8.0 * u, top), Pos2::new(x + 8.0 * u, top), Pos2::new(x, top + 14.0 * u)],
+                                        RED, Stroke::NONE));
+        }
+        for (i, c) in snap.hot_cues.iter().enumerate() {
+            let Some(pos) = c else { continue };
+            let x = x_of(*pos);
+            if !on(x) { continue; }
+            let b = Rect::from_min_size(Pos2::new(x, top), Vec2::new(17.0 * u, 16.0 * u));
+            p.rect_filled(b, 0.0, CUE_GREEN);
+            label(ui, b.center(), Align2::CENTER_CENTER, (b'A' + i as u8) as char, 13.0, u, Color32::BLACK);
+        }
+        let x = x_of(snap.cue_point);
+        if on(x) {
+            let y = lay.ticks_bot.max.y;
+            p.add(Shape::convex_polygon(vec![Pos2::new(x, y), Pos2::new(x + 9.0 * u, y + 16.0 * u), Pos2::new(x - 9.0 * u, y + 16.0 * u)],
+                                        BARS_ORANGE, Stroke::NONE));
         }
     }
 
@@ -510,7 +583,10 @@ mod helper_tests {
 
     #[test]
     fn readouts_format_like_the_unit() {
-        assert_eq!(bars_text(Some((4, 2))), "4.2");
+        // Two-digit bars: the unit reads "00.0" on a memory point.
+        assert_eq!(bars_text(Some((4, 2))), "04.2");
+        assert_eq!(bars_text(Some((0, 0))), "00.0");
+        assert_eq!(bars_text(Some((82, 2))), "82.2");
         assert_eq!(bars_text(None), "--.-");
         assert_eq!(size_text(768 << 20), ("0.8".to_string(), "GB"));
         assert_eq!(size_text(700_000_000), ("0.7".to_string(), "GB"));
@@ -1733,16 +1809,33 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
     label(ui, Pos2::new(r.center().x, r.min.y + 17.0 * u), Align2::CENTER_CENTER, "TRACK", 16.0, u, TEXT);
     label(ui, Pos2::new(r.center().x, r.min.y + 57.0 * u), Align2::CENTER_CENTER, "01", 56.0, u, TEXT);
 
-    // AUTO CUE caption
+    // A.HOT CUE (hot cues load with the track: always on here) and AUTO CUE.
+    let r = lay.a_hot_cue;
+    outline(ui, r, RED, u);
+    label(ui, r.center(), Align2::CENTER_CENTER, "A.HOT CUE", 17.0, u, RED);
     if snap.auto_cue {
         let r = lay.auto_cue;
-        outline(ui, r, RED, u);
-        label(ui, r.center(), Align2::CENTER_CENTER, "AUTO CUE", 17.0, u, RED);
+        outline(ui, r, TEXT, u);
+        label(ui, r.center(), Align2::CENTER_CENTER, "AUTO CUE", 17.0, u, TEXT);
     }
 
-    // Time: REMAIN / TIME, SINGLE, mm:ss + .msec
+    // QUANTIZE (shown only while on, as MT is) and the BEAT JUMP distance.
+    if snap.quantize {
+        let r = lay.quantize;
+        outline(ui, r, RED, u);
+        label(ui, Pos2::new(r.center().x, r.min.y + 14.0 * u), Align2::CENTER_CENTER, "QUANTIZE", 13.0, u, RED);
+        label(ui, Pos2::new(r.center().x, r.min.y + 36.0 * u), Align2::CENTER_CENTER, "1", 24.0, u, RED);
+    }
+    let r = lay.beat_jump;
+    outline(ui, r, TEXT, u);
+    label(ui, Pos2::new(r.center().x, r.min.y + 14.0 * u), Align2::CENTER_CENTER, "BEAT JUMP", 13.0, u, TEXT);
+    label(ui, Pos2::new(r.center().x, r.min.y + 36.0 * u), Align2::CENTER_CENTER, "16", 26.0, u, TEXT);
+
+    // Time: REMAIN (elapsed time has no caption), SINGLE, mm:ss + .msec
     let r = lay.time;
-    label(ui, Pos2::new(r.min.x + 11.0 * u, r.min.y + 8.0 * u), Align2::LEFT_CENTER, if snap.remain_mode { "REMAIN" } else { "TIME" }, 15.0, u, TEXT);
+    if snap.remain_mode {
+        label(ui, Pos2::new(r.min.x + 11.0 * u, r.min.y + 8.0 * u), Align2::LEFT_CENTER, "REMAIN", 15.0, u, TEXT);
+    }
     label(ui, Pos2::new(r.min.x + 266.0 * u, r.min.y + 9.0 * u), Align2::CENTER_CENTER, "SINGLE", 15.0, u, TEXT);
     let secs = if snap.remain_mode { snap.remaining_secs() } else { snap.elapsed_secs() };
     let (m, s) = ((secs / 60.0).floor() as u64, (secs % 60.0).floor() as u64);
@@ -1753,10 +1846,23 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
     // TEMPO: range badge, ±% readout
     let r = lay.tempo;
     label(ui, Pos2::new(r.min.x + 29.0 * u, r.min.y + 11.0 * u), Align2::CENTER_CENTER, "TEMPO", 15.0, u, TEXT);
-    p.rect_filled(lay.range, 0.0, ORANGE);
-    label(ui, lay.range.center(), Align2::CENTER_CENTER, Settings::range_label(snap.tempo_range), 22.0, u, TEXT);
+    let wide = snap.tempo_range >= 0.99;
+    let fill = if wide { None } else if snap.tempo_range < 0.08 { Some(RANGE_6) } else if snap.tempo_range < 0.13 { Some(ORANGE) } else { Some(RANGE_16) };
+    match fill {
+        Some(c) => {
+            p.rect_filled(lay.range, 0.0, c);
+            label(ui, lay.range.center(), Align2::CENTER_CENTER, Settings::range_label(snap.tempo_range), 22.0, u, Color32::BLACK);
+        }
+        None => { label(ui, lay.range.center(), Align2::CENTER_CENTER, "WIDE", 22.0, u, RED); }
+    }
+    // WIDE shows one decimal, the narrow ranges two.
     let pct = snap.tempo_percent();
-    let digits = if pct.abs() < 0.005 { "0.00".to_string() } else { format!("{:+.2}", pct) };
+    let digits = match (wide, pct.abs() < if wide { 0.05 } else { 0.005 }) {
+        (true, true) => "0.0".to_string(),
+        (true, false) => format!("{:+.1}", pct),
+        (false, true) => "0.00".to_string(),
+        (false, false) => format!("{:+.2}", pct),
+    };
     let pc = label(ui, Pos2::new(r.max.x - 2.0 * u, r.min.y + 80.0 * u), Align2::RIGHT_BOTTOM, "%", 22.0, u, TEXT);
     label(ui, Pos2::new(pc.min.x - 3.0 * u, r.min.y + 85.0 * u), Align2::RIGHT_BOTTOM, digits, 54.0, u, TEXT);
 
@@ -1793,27 +1899,49 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
         p.rect_filled(flag, 0.0, CUE_GREEN);
         label(ui, flag.center(), Align2::CENTER_CENTER, (b'A' + i as u8) as char, 12.0, u, Color32::BLACK);
     }
+    // Memory points: red ▼ over the overview.
+    for &m in snap.memory_cues {
+        let x = ov.min.x + m as f32 / total * ov.width();
+        let f = lay.flags;
+        p.add(Shape::convex_polygon(vec![Pos2::new(x - 7.0 * u, f.min.y), Pos2::new(x + 7.0 * u, f.min.y), Pos2::new(x, f.max.y)],
+                                    RED, Stroke::NONE));
+    }
     if snap.total_samples > 0 {
+        // The address bar: white where the track has played, red ahead.
         p.rect_filled(lay.address, 0.0, RED);
-        // Major ticks every minute counted back from the end, labelled −m:00;
-        // a grey tick at each half minute between them.
+        let a = lay.address;
+        let played = (snap.position as f32 / total).clamp(0.0, 1.0);
+        p.rect_filled(Rect::from_min_max(a.min, Pos2::new(a.min.x + played * a.width(), a.max.y)), 0.0, TEXT);
+        // Major ticks every minute with a grey tick at each half minute:
+        // counted back from the end (−m:00, the caption after the tick) in
+        // REMAIN, from the start (m:00, the caption before it) otherwise.
         let dur = snap.total_secs();
         let ru = lay.ruler;
         let x_at = |t: f64| ru.min.x + (t / dur) as f32 * ru.width();
         let mut half = 1u32;
         loop {
-            let t = dur - half as f64 * 30.0;
-            if t < 0.0 { break; }
+            let t = if snap.remain_mode { dur - half as f64 * 30.0 } else { half as f64 * 30.0 };
+            if t < 0.0 || t > dur { break; }
             let x = x_at(t);
             if half % 2 == 0 {
                 p.line_segment([Pos2::new(x, ru.min.y), Pos2::new(x, ru.max.y - 2.0 * u)], Stroke::new(3.0 * u, TEXT));
-                label(ui, Pos2::new(x + 6.0 * u, ru.center().y), Align2::LEFT_CENTER, format!("-{}:00", half / 2), 14.0, u, LABEL);
+                if snap.remain_mode {
+                    label(ui, Pos2::new(x + 6.0 * u, ru.center().y), Align2::LEFT_CENTER, format!("-{}:00", half / 2), 14.0, u, LABEL);
+                } else {
+                    label(ui, Pos2::new(x - 4.0 * u, ru.center().y), Align2::RIGHT_CENTER, format!("{}:00", half / 2), 14.0, u, LABEL);
+                }
             } else {
                 p.line_segment([Pos2::new(x, ru.min.y + 2.0 * u), Pos2::new(x, ru.max.y - 5.0 * u)], Stroke::new(1.0, DIM));
             }
             half += 1;
         }
-        p.line_segment([Pos2::new(ru.max.x, ru.min.y), Pos2::new(ru.max.x, ru.max.y - 2.0 * u)], Stroke::new(3.0 * u, TEXT));
+        for x in [ru.min.x, ru.max.x] {
+            p.line_segment([Pos2::new(x, ru.min.y), Pos2::new(x, ru.max.y - 2.0 * u)], Stroke::new(3.0 * u, TEXT));
+        }
+        // The cue point: an orange ▲ under the overview.
+        let x = ov.min.x + snap.cue_point as f32 / total * ov.width();
+        p.add(Shape::convex_polygon(vec![Pos2::new(x, ru.min.y), Pos2::new(x + 9.0 * u, ru.max.y), Pos2::new(x - 9.0 * u, ru.max.y)],
+                                    BARS_ORANGE, Stroke::NONE));
     }
 
     // MT, KEY

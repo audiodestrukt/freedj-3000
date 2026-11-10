@@ -318,6 +318,16 @@ struct DeckApp {
     /// Ending the action jumps there; a manual seek cancels it.
     slip_anchor:       Option<(f64, u64)>,
     exit_after_capture: bool,
+    /// Dev script: buttons held (`hold=`), and the lamp report / screenshot
+    /// due this frame (`lamps=`, `shot=`).
+    script_held: Vec<String>,
+    /// A pop-up message and when it goes (the CDJ-3000 screen's notices).
+    notice: Option<(String, Instant)>,
+    /// Where the loaded track parked its cue on load (the auto cue): TRACK
+    /// SEARCH |◀◀ goes back there.
+    load_cue: u64,
+    script_lamps: Option<String>,
+    script_shot: Option<String>,
 
     // Created on first `resumed` (winit) or by the SDL loop.
     host:        Option<Host>,
@@ -407,6 +417,7 @@ fn make_snapshot<'a>(
                        else { tags.title.as_deref()
                                 .unwrap_or_else(|| path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")) },
         loading:       None,
+        notice:        None,
         tags,
         file:          path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
         position:      pos,
@@ -623,6 +634,11 @@ impl DeckApp {
             loop_beats:        0.0,
             slip_anchor:       None,
             exit_after_capture: false,
+            script_held: Vec::new(),
+            notice: None,
+            load_cue: cue_point,
+            script_lamps: None,
+            script_shot: None,
             host:        None,
             renderer:    None,
             egui_ctx:    egui::Context::default(),
@@ -915,6 +931,13 @@ impl DeckApp {
             }
             Event::Deck(ControlEvent::SyncToggle) => {
                 let on = !self.link.sync.load(Ordering::Relaxed);
+                // The CDJ-3000 will not sync with nobody to follow: it says so
+                // and stays off.
+                if on && self.settings.skin == settings::Skin::Cdj3000 && self.link.peers.lock().map(|p| p.is_empty()).unwrap_or(true) {
+                    self.notify("No LINKED Players found.\nPlease check player connections.");
+                    log::info!("sync: no players to follow");
+                    return;
+                }
                 self.link.sync.store(on, Ordering::Relaxed);
                 if !on {
                     // Leaving SYNC: keep the tempo we ended on, drop any nudge.
@@ -924,6 +947,13 @@ impl DeckApp {
                 log::info!("sync {}", if on { "on" } else { "off" });
             }
             Event::Deck(ControlEvent::MasterRequest) => {
+                // As SYNC: the CDJ-3000 will not take master alone.
+                if self.settings.skin == settings::Skin::Cdj3000 && !self.link.master.load(Ordering::Relaxed)
+                    && self.link.peers.lock().map(|p| p.is_empty()).unwrap_or(true) {
+                    self.notify("No LINKED Players found.\nPlease check player connections.");
+                    log::info!("master: no players linked");
+                    return;
+                }
                 if self.link.master.load(Ordering::Relaxed) {
                     log::info!("already master");
                 } else {
@@ -1000,12 +1030,15 @@ impl DeckApp {
             }
             Event::Deck(ControlEvent::Back) => {
                 match self.screen_mode {
+                    // The CDJ-3000 stays in SEARCH on BACK (its SEARCH key leaves).
+                    ScreenMode::Browse if self.settings.skin == settings::Skin::Cdj3000 && self.browser.in_search() => {}
                     ScreenMode::Browse  => self.browser.back(),
                     ScreenMode::TagList | ScreenMode::Menu | ScreenMode::Source | ScreenMode::History => self.screen_mode = ScreenMode::Playback,
                     _ => {}
                 }
             }
             Event::Ui(UiEvent::CycleSetting(setting)) => self.cycle_setting(setting),
+            Event::Ui(UiEvent::TrackSearch { next }) => self.track_search(next),
             Event::Ui(UiEvent::MenuTap(i)) => {
                 if i < settings::MENU.len() {
                     self.menu_cursor = i;
@@ -1179,6 +1212,14 @@ impl DeckApp {
             Event::Ui(UiEvent::Search(edit)) => {
                 use input::SearchEdit as S;
                 match edit {
+                    // The CDJ-3000's SEARCH key toggles: pressed in SEARCH it
+                    // closes it (back to the list it came from) and goes to
+                    // the playback screen.
+                    S::Open if self.settings.skin == settings::Skin::Cdj3000
+                        && self.screen_mode == ScreenMode::Browse && self.browser.in_search() => {
+                        self.browser.back();
+                        self.screen_mode = ScreenMode::Playback;
+                    }
                     S::Open => {
                         if self.screen_mode != ScreenMode::Browse { self.browser.refresh(); }
                         self.screen_mode = ScreenMode::Browse;
@@ -1486,7 +1527,9 @@ impl DeckApp {
     fn run_script(&mut self) {
         use devscript::Action as A;
         let Some((script, t0)) = self.script.as_mut() else { return };
-        let (due, jog) = script.step(t0.elapsed().as_secs_f64());
+        let now = t0.elapsed().as_secs_f64();
+        let (due, jog) = script.step(now);
+        let mut later = Vec::new();
         for a in due {
             log::info!("script: {a:?}");
             match a {
@@ -1519,11 +1562,126 @@ impl DeckApp {
                     self.apply(Event::Ui(UiEvent::Search(input::SearchEdit::Open)));
                     for c in text.chars() { self.apply(Event::Ui(UiEvent::Search(input::SearchEdit::Char(c)))); }
                 }
+                A::Press { button, ms } => {
+                    if let Some(release) = self.script_press(&button, ms) {
+                        later.push((now + ms as f64 / 1000.0, release));
+                    }
+                }
+                A::Hold(b) => { if !self.script_held.contains(&b) { self.script_held.push(b); } }
+                A::Release(b) => {
+                    self.script_held.retain(|h| *h != b);
+                    match b.as_str() {
+                        "CUE" => self.apply(Event::Deck(ControlEvent::Cue { pressed: false })),
+                        _ if b.starts_with("HOT_") => {
+                            let slot = b.as_bytes()[4].wrapping_sub(b'A');
+                            self.apply(Event::Deck(ControlEvent::HotCueRelease { slot }));
+                        }
+                        _ => {}
+                    }
+                }
+                A::Rotary(n) => self.apply(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: n })),
+                A::Lamps(p) => self.script_lamps = Some(p),
+                A::Shot(p) => self.script_shot = Some(p),
                 A::Quit => { log::info!("script: quit"); log::logger().flush(); std::process::exit(0); }
             }
         }
+        if let Some((script, _)) = self.script.as_mut() {
+            for (at, a) in later { script.later(at, a); }
+        }
         if let Some(d) = jog {
             self.apply(Event::Deck(ControlEvent::JogDelta { delta: d, velocity_rpm: 0.0 }));
+        }
+    }
+
+    /// Dev script: press a CDJ-3000 button by cdj3k-emu's name, as the
+    /// faceplate would. Returns the release to send `ms` later, if the
+    /// button is momentary.
+    fn script_press(&mut self, button: &str, ms: u32) -> Option<devscript::Action> {
+        use devscript::Action as A;
+        let release = || Some(A::Release(button.to_string()));
+        match button {
+            "PLAY" => self.apply(Event::Deck(ControlEvent::PlayPause)),
+            "CUE" => { self.apply(Event::Deck(ControlEvent::Cue { pressed: true })); return release(); }
+            "MASTER_TEMPO" => self.apply(Event::Deck(ControlEvent::KeyLockToggle)),
+            "ROTARY_PRESS" => self.apply(Event::Deck(ControlEvent::Load)),
+            _ if button.starts_with("HOT_") && button.len() == 5 => {
+                let slot = button.as_bytes()[4].wrapping_sub(b'A');
+                let set = self.hot_cues.get(slot as usize).copied().flatten().is_some();
+                if set && self.script_held.iter().any(|h| h == "CALL_DELETE") {
+                    self.apply(Event::Deck(ControlEvent::HotCueDelete { slot }));
+                } else if set {
+                    self.apply(Event::Deck(ControlEvent::HotCueTrigger { slot, held: true }));
+                    return release();
+                } else {
+                    self.apply(Event::Deck(ControlEvent::HotCueSet { slot }));
+                }
+            }
+            _ => {
+                use cdjface::Key;
+                let Some(k) = Key::from_emu_name(button) else {
+                    log::warn!("script: no button {button:?}");
+                    return None;
+                };
+                match k {
+                    Key::CallDelete => { self.script_held.push(button.to_string()); return release(); }
+                    Key::SearchPrev | Key::SearchNext => {
+                        // Scan as far as the held key would.
+                        let total = self.audio.len().max(1) as f64;
+                        let per_sec = self.audio.sample_rate as f64 * self.audio.channels as f64;
+                        let dir = if k == Key::SearchNext { 1.0 } else { -1.0 };
+                        let at = (self.smoothed_pos + dir * cdjface::scan_distance(ms as f64 / 1000.0) * per_sec) / total;
+                        self.apply(Event::Deck(ControlEvent::NeedleSearch { position: at.clamp(0.0, 1.0) as f32 }));
+                    }
+                    _ => {
+                        let running = self.audio.loop_active.load(Ordering::Relaxed).then_some(self.loop_beats);
+                        let ev = if ms >= 1000 { k.long().or_else(|| k.tap(running)) } else { k.tap(running) };
+                        if matches!(k, Key::Loop4 | Key::Loop8) { cdj3000::open_panel(&self.egui_ctx, cdj3000::Panel::BeatLoop); }
+                        match ev { Some(e) => self.apply(e), None => log::info!("script: {button} does nothing yet") }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Show a pop-up on the CDJ-3000 screen for three seconds.
+    fn notify(&mut self, msg: &str) {
+        self.notice = Some((msg.to_string(), Instant::now() + Duration::from_secs(3)));
+    }
+
+    /// TRACK SEARCH: |◀◀ goes back to the start of the track (from more
+    /// than a second in), else to the previous track in the folder the
+    /// browser shows; ▶▶| loads the next one there. Both wrap round.
+    fn track_search(&mut self, next: bool) {
+        let ch = self.audio.channels.max(1) as f64;
+        let secs_in = self.smoothed_pos.max(0.0) / ch / self.audio.sample_rate.max(1) as f64;
+        if !next && secs_in > 1.0 {
+            // As the unit's reload: the loop goes, the deck stops at the
+            // track's start cue, and the BEAT LOOP panel closes.
+            self.exit_loop();
+            self.audio.loop_start.store(0, Ordering::Relaxed);
+            self.audio.loop_end.store(0, Ordering::Relaxed);
+            self.audio.set_playing(false);
+            self.transport.arrived_at_cue(self.load_cue);
+            self.cue_set = false;
+            self.seek_to(self.load_cue);
+            cdj3000::open_panel(&self.egui_ctx, cdj3000::Panel::None);
+            log::info!("track search: back to the start");
+            return;
+        }
+        let entries = self.browser.entries();
+        let Some(here) = self.loaded.as_ref().and_then(|l| entries.iter().position(|e| e.load() == Some(l))) else {
+            log::info!("track search: the loaded track is not in the list shown");
+            return;
+        };
+        // The next track row either way, wrapping round the list as the
+        // unit does (|◀◀ on the first track loads the last).
+        let n = entries.len();
+        let load = (1..n).map(|k| if next { (here + k) % n } else { (here + n - k) % n })
+            .find_map(|j| entries[j].load().cloned());
+        match load {
+            Some(l) => { if let Err(e) = self.load_selected(l) { log::warn!("track search: {e}"); } }
+            None => log::info!("track search: no {} track", if next { "next" } else { "previous" }),
         }
     }
 
@@ -1751,6 +1909,7 @@ impl DeckApp {
         self.prev_pos     = 0;
         self.transport.preview = false;
         self.transport.arrived_at_cue(p.cue_pt);
+        self.load_cue = p.cue_pt;
         self.cue_set = false;
         // Park the deck at the cue (a CDJ sits at the cue after load) so PLAY
         // starts there — with AUTO CUE that's the first sound, not the leader.
@@ -1793,6 +1952,8 @@ impl DeckApp {
                 ArrowUp             => Some(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: -1 })),
                 Enter | NumpadEnter => Some(Event::Deck(ControlEvent::Load)),
                 Backspace           => Some(Event::Ui(UiEvent::Search(input::SearchEdit::Backspace))),
+                // Esc leaves SEARCH: the SEARCH key's toggle on the CDJ skin.
+                Escape if self.settings.skin == settings::Skin::Cdj3000 => Some(Event::Ui(UiEvent::Search(input::SearchEdit::Open))),
                 Escape              => Some(Event::Deck(ControlEvent::Back)),
                 c => search_char(c).map(|ch| Event::Ui(UiEvent::Search(input::SearchEdit::Char(ch)))),
             };
@@ -2220,6 +2381,7 @@ impl DeckApp {
             snap.link_peers = self.link.peers_summary();
         }
         snap.loading = self.loading.as_deref();
+        snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
         perf_accum("make_snapshot", _t_snap.elapsed());
 
@@ -2240,6 +2402,7 @@ impl DeckApp {
         // A phone (or a phone-sized window) gets the two-page layout instead
         // of any faceplate: the LCD page or the controls page.
         let phone = self.phone || (cfg!(target_os = "ios") && win.width().min(win.height()) < 600.0);
+        self.settings.phone = phone;   // the CDJ-3000 screen is not offered on a phone yet
         let insets = host.insets(ppp, win);
         let phone_layout = phone.then(|| if self.phone_controls {
             let (f, strip) = screen::phone_controls_layout(win, insets);
@@ -2327,6 +2490,10 @@ impl DeckApp {
             ScreenMode::Source   => screen::ScreenView::Source(&self.browser, self.source_cursor, self.loaded.as_ref()),
             ScreenMode::History  => screen::ScreenView::History(&self.history, self.history_cursor),
         };
+        if let Some(path) = self.script_lamps.take() {
+            let report = cdjface::lamp_report(&snap, &view, false);
+            if let Err(e) = std::fs::write(&path, report) { log::warn!("script: lamps {path}: {e}"); }
+        }
         let face_ref = face.as_ref();
         let phone_ref = phone_layout.as_ref();
         let chrome = &mut self.chrome;
@@ -2414,11 +2581,13 @@ impl DeckApp {
             snap.link_peers = self.link.peers_summary();
         }
         snap.loading = self.loading.as_deref();
+        snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
 
         // Dev: OPENDECK_SCREENSHOT=path captures frame 90 (or
         // OPENDECK_SCREENSHOT_FRAME=n) and exits.
         self.frame_count += 1;
+        if let Some(path) = self.script_shot.take() { renderer.request_capture(path.into()); }
         if self.frame_count == std::env::var("OPENDECK_SCREENSHOT_FRAME").ok().and_then(|v| v.parse().ok()).unwrap_or(90) {
             if let Ok(path) = std::env::var("OPENDECK_SCREENSHOT") {
                 renderer.request_capture(path.into());
