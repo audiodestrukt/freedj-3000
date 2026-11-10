@@ -193,9 +193,10 @@ impl Key {
             Key::Browse => ui(UiEvent::Screen(TopScreen::Browse)),
             Key::TagList => ui(UiEvent::Screen(TopScreen::TagList)),
             Key::Search => ui(UiEvent::Search(SearchEdit::Open)),
-            // A short press shows nothing on the unit; UTILITY is its long
-            // press. On a touch panel a tap opening UTILITY is kinder.
-            Key::Menu => ui(UiEvent::Screen(TopScreen::Menu)),
+            // A short press opens LOAD PREVIOUS TRACK (the manual, p.24; it
+            // shows nothing on the emulator until a track has been played
+            // before); UTILITY is the long press.
+            Key::Menu => ui(UiEvent::Screen(TopScreen::History)),
             Key::Back => deck(ControlEvent::Back),
             Key::TagTrack => ui(UiEvent::TagTrack),
             Key::TimeMode => ui(UiEvent::TimeMode),
@@ -760,6 +761,7 @@ mod tests {
         assert_eq!(beats(Key::Loop8.tap(Some(16.0))), 32.0);
         assert_eq!(beats(Key::Loop4.tap(Some(0.0))), 4.0);   // a manual loop of unknown length
         assert!(matches!(Key::Menu.long(), Some(Event::Ui(UiEvent::Screen(TopScreen::Menu)))));
+        assert!(matches!(Key::Menu.tap(None), Some(Event::Ui(UiEvent::Screen(TopScreen::History)))));
         assert!(matches!(Key::TimeMode.long(), Some(Event::Ui(UiEvent::AutoCue))));
         assert!(matches!(Key::Quantize.tap(None), Some(Event::Ui(UiEvent::CycleSetting(Setting::Quantize)))));
         for k in [Key::Playlist, Key::TrackFilter, Key::Shortcut, Key::KeySync] { assert!(k.tap(None).is_none()); }
@@ -839,7 +841,7 @@ mod tests {
             out
         };
         let out = click(Key::Menu);
-        assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::Screen(TopScreen::Menu))]), "{out:?}");
+        assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::Screen(TopScreen::History))]), "{out:?}");
         let out = click(Key::Back);
         assert!(matches!(out.as_slice(), [Event::Deck(ControlEvent::Back)]), "{out:?}");
     }

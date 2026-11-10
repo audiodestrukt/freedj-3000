@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **CDJ-3000 phase meter.** The slot beside the Bars rows shows the
+  master's player number in an orange badge and the phase meter: the
+  master's beats on an orange line and this deck's on a blue one, red ticks
+  on bar starts, a tap hides it (the unit's WAVEFORM / PHASE METER switch).
+  Measured off the emulated unit; it draws the master's beats from the Link
+  beat packets, where the emulator (following freedj) drew a bare line.
+
+### Changed
+- CDJ-3000 faceplate: a short MENU press opens LOAD PREVIOUS TRACK, as the
+  manual says; UTILITY is the long press.
+
 ## [0.3.2] — 2026-11-09
 
 ### Fixed

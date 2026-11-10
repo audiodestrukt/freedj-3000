@@ -206,6 +206,10 @@ pub struct Layout {
     pub keys:      [Rect; 3],
     // waveform field
     pub bars:      Rect,
+    /// The master's player-number badge left of the Bars rows, and the slot
+    /// right of them that shows the phase meter (callout 11).
+    pub master_badge: Rect,
+    pub meter:     Rect,
     pub field:     Rect,
     pub ticks_top: Rect,
     pub wave:      Rect,   // enlarged waveform (shader)
@@ -259,6 +263,8 @@ pub fn layout(screen: Rect, panel_open: bool) -> Layout {
         keys:      [r(898.0, 0.0, 1010.0, 90.0), r(1022.0, 0.0, 1135.0, 90.0), r(1146.0, 0.0, 1260.0, 90.0)],
 
         bars:      r(160.0, 110.0, 340.0, 185.0),
+        master_badge: r(124.0, 117.0, 145.0, 138.0),
+        meter:     r(272.0, 110.0, 1008.0, 182.0),
         field:     if panel_open { r(0.0, 205.0, 1280.0, 346.0) } else { r(0.0, 205.0, 1280.0, 440.0) },
         ticks_top: r(0.0, 211.0, 1280.0, 227.0),
         wave:      if panel_open { r(0.0, 228.0, 1280.0, 318.0) } else { r(0.0, 228.0, 1280.0, 416.0) },
@@ -442,6 +448,8 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         label(ui, Pos2::new(r.max.x + 7.0 * u, y), Align2::LEFT_CENTER, "Bars", 15.0, u, c);
     }
 
+    draw_phase_meter(ui, snap, lay, u);
+
     wave_touch(ui, snap, lay.wave, out);
 
     // Grid ticks above and below the waveform, red on downbeats, with the
@@ -550,6 +558,62 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         label(ui, z.center(), Align2::CENTER_CENTER, "ZOOM", 15.0, u, ZOOM_BLUE);
         label(ui, Pos2::new(z.max.x + 9.0 * u, z.center().y), Align2::LEFT_CENTER, "– GRID", 15.0, u, DIM);
     }
+}
+
+/// Whether the phase-meter slot shows the meter (the unit's PHASE METER view)
+/// or is left to the waveform view. Screen state, like the panels; a tap on
+/// the slot switches, as on the unit.
+fn meter_shown(ctx: &egui::Context) -> bool {
+    !ctx.data(|d| d.get_temp::<bool>(Id::new("cdj3k-meter-off"))).unwrap_or(false)
+}
+
+/// The master's player number in an orange badge beside the Bars rows, and
+/// the phase meter (callout 11), measured off the emulated unit: an orange
+/// line for the master and a blue one for this deck, about 73 px a beat
+/// (five beats either side of the white centre line), white beat ticks above
+/// each line and red ones through it on the first beat of a bar. On the
+/// emulator the master's line carried no ticks, most likely because freedj
+/// as master sends no CDJ-3000 position packets; freedj draws the master's
+/// beats from its Link beat packets so the meter shows the phase.
+fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
+    let p = ui.painter();
+    let other_master = snap.master_player != 0 && snap.master_player != snap.player && !snap.master;
+    if other_master {
+        let b = lay.master_badge;
+        p.rect_filled(b, 0.0, BARS_ORANGE);
+        label(ui, b.center(), Align2::CENTER_CENTER, snap.master_player, 17.0, u, Color32::BLACK);
+    }
+    let r = lay.meter;
+    let resp = ui.interact(r, Id::new("cdj3k-meter"), egui::Sense::click());
+    if resp.clicked() {
+        let off = !meter_shown(ui.ctx());
+        ui.ctx().data_mut(|d| d.insert_temp(Id::new("cdj3k-meter-off"), !off));
+    }
+    // Shown once there is another player to follow; the meter of a deck
+    // alone has nothing to measure against.
+    if !meter_shown(ui.ctx()) || !(snap.linked || snap.beat2_bpm > 0.0) { return; }
+    let beat_px = 73.0 * u;
+    let cx = r.center().x;
+    let master_bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
+    let our_bib = snap.beat_in_bar().unwrap_or(1) as i32;
+    let rows = [
+        (r.min.y + 19.0 * u, (!snap.master && snap.beat2_bpm > 0.0).then_some(snap.beat2_phase_beats), master_bib, BARS_ORANGE),
+        (r.min.y + 52.0 * u, snap.beat_phase(), our_bib, ZOOM_BLUE),
+    ];
+    for (y, phase, bib, col) in rows {
+        p.line_segment([Pos2::new(r.min.x, y), Pos2::new(r.max.x, y)], Stroke::new(4.0 * u, col));
+        let Some(ph) = phase else { continue };
+        for i in -6..=6i32 {
+            let x = cx + (i as f32 - ph) * beat_px;
+            if x < r.min.x || x > r.max.x { continue; }
+            if (i + bib - 1).rem_euclid(4) == 0 {
+                p.line_segment([Pos2::new(x, y - 15.0 * u), Pos2::new(x, y + 15.0 * u)], Stroke::new(2.0 * u, RED));
+            } else {
+                p.line_segment([Pos2::new(x, y - 14.0 * u), Pos2::new(x, y - 2.0 * u)], Stroke::new(2.0 * u, TEXT));
+            }
+        }
+    }
+    p.line_segment([Pos2::new(cx, r.min.y + 6.0 * u), Pos2::new(cx, r.max.y - 4.0 * u)], Stroke::new(3.0 * u, TEXT));
 }
 
 /// Which GRID ADJUST keys are lit: SNAP GRID, SHIFT GRID, ◀◀ 1/2, ▶▶ 1/2,
