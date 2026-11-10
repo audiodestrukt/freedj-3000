@@ -18,6 +18,13 @@ TestFlight. You can also run it from the Actions tab (**workflow_dispatch**).
 - **Build number** is the Unix epoch (always increasing, never a duplicate), so
   no manual bump — `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` are injected
   by the workflow (the `Info.plist` references them).
+- **The .ipa is kept.** Each run also exports the signed `.ipa` and zips the
+  dSYMs into an artifact named `OpenDeck-DJ-ios-<version>-<build>`. Download
+  it from the run's page, or with `gh run download <run-id>`. Artifacts expire
+  after GitHub's retention period (90 days by default). The `.ipa` is App
+  Store signed (`ios/ExportOptionsIPA.plist`). It can be re-uploaded with
+  Transporter or kept for the record, but it can't be side-loaded onto a
+  device.
 
 ## After the upload
 

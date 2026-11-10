@@ -125,6 +125,39 @@ jobs:
             MARKETING_VERSION=${{ steps.ver.outputs.version }} \
             CURRENT_PROJECT_VERSION=${{ steps.ver.outputs.build }}
 
+      # Keep the signed .ipa (and the dSYMs) as a build artifact.  A second
+      # export with destination=export writes it to disk; the upload below
+      # signs the same archive again and sends it to App Store Connect.
+      # Exported before the upload so a failed upload still leaves the .ipa.
+      - name: Export .ipa
+        env:
+          KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
+          ISSUER_ID: ${{ secrets.APP_STORE_CONNECT_ISSUER_ID }}
+        run: |
+          xcodebuild -exportArchive \
+            -archivePath build/freedj.xcarchive \
+            -exportOptionsPlist ios/ExportOptionsIPA.plist \
+            -exportPath build/ipa \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath ~/private_keys/AuthKey_${KEY_ID}.p8 \
+            -authenticationKeyID "$KEY_ID" \
+            -authenticationKeyIssuerID "$ISSUER_ID"
+          IPA="build/ipa/OpenDeck-DJ-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.build }}.ipa"
+          mv build/ipa/*.ipa "$IPA"
+          if [ -d build/freedj.xcarchive/dSYMs ]; then
+            (cd build/freedj.xcarchive && zip -qr "$GITHUB_WORKSPACE/build/ipa/dSYMs-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.build }}.zip" dSYMs)
+          fi
+          ls -la build/ipa
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenDeck-DJ-ios-${{ steps.ver.outputs.version }}-${{ steps.ver.outputs.build }}
+          path: |
+            build/ipa/*.ipa
+            build/ipa/dSYMs-*.zip
+          if-no-files-found: error
+
       - name: Export and upload to TestFlight
         env:
           KEY_ID: ${{ secrets.APP_STORE_CONNECT_KEY_ID }}
