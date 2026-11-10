@@ -27,6 +27,8 @@ opendeck-rekordbox   = { path = "../rekordbox" }
 opendeck-nfs         = { path = "../nfs" }
 opendeck-dbserver    = { path = "../dbserver" }
 opendeck-mediaserver = { path = "../mediaserver" }
+opendeck-stems       = { path = "../stems" }
+sha2                 = "0.10"   # stems: check the original against its prepared hash
 opendeck-timestretch = { workspace = true }
 cpal              = { workspace = true }
 rtrb              = { workspace = true }
@@ -58,3 +60,6 @@ default = []
 # waveform rasteriser, for boards wgpu cannot drive (VideoCore IV, KMSDRM).
 # Selected at run time with OPENDECK_RENDERER=sdl.
 renderer-sdl = ["dep:sdl2"]
+
+[dev-dependencies]
+tempfile = "3"

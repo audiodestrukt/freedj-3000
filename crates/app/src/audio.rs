@@ -20,6 +20,7 @@
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
+use crate::stems::{Mixer, StemControl};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use opendeck_decode::{SymphoniaDecoder, TrackTags};
 use opendeck_timestretch::Stretcher;
@@ -152,6 +153,8 @@ pub struct AudioHandle {
     pub seek_request: Arc<AtomicU64>,
     /// Paused jog scrub: what the processor reads toward (see `scrub_to`).
     scrub:           ScrubShared,
+    /// Stems: the loaded bank and the three stem levels (`stems.rs`).
+    pub stems:       Arc<StemControl>,
     /// Real-time glitch counters (underruns / dropped frames).
     pub stats:       Arc<AudioStats>,
     pub sample_rate: u32,
@@ -248,6 +251,7 @@ impl AudioHandle {
             );
         }
         self.playing.store(false, Ordering::Relaxed);
+        self.stems.reset();
         self.samples.store(new);
         self.in_flight.store(0, Ordering::Relaxed);
         self.position.store(0, Ordering::Relaxed);
@@ -350,6 +354,8 @@ impl AudioHandle {
         let proc_seek       = Arc::clone(&seek_request);
         let proc_stats      = Arc::clone(&stats);
         let proc_scrub      = scrub.clone();
+        let stems           = Arc::new(StemControl::default());
+        let proc_stems      = Arc::clone(&stems);
 
         let processor = thread::Builder::new()
             .name("audio-proc".into())
@@ -365,6 +371,7 @@ impl AudioHandle {
                     proc_in_flight,
                     proc_seek,
                     proc_scrub,
+                    proc_stems,
                     file_sr,
                     file_ch,
                     device_ch,
@@ -445,6 +452,7 @@ impl AudioHandle {
             in_flight,
             seek_request,
             scrub,
+            stems,
             stats,
             sample_rate: file_sr,
             channels: file_ch as u8,
@@ -594,20 +602,28 @@ fn read_block<'a>(
     samples: &'a [f32], pos: usize, want: usize,
     lp: Option<(usize, usize)>, scratch: &'a mut Vec<f32>,
 ) -> (&'a [f32], usize) {
+    let (r, end) = block_ranges(samples.len(), pos, want, lp);
+    if r[1].is_empty() { return (&samples[r[0].clone()], end); }
+    scratch.clear();
+    scratch.extend_from_slice(&samples[r[0].clone()]);
+    scratch.extend_from_slice(&samples[r[1].clone()]);
+    (scratch.as_slice(), end)
+}
+
+/// Where [`read_block`]'s samples come from: one range, or the loop's
+/// tail then its head (the second range empty when there is no wrap), and
+/// the cursor after.  The stem mix reads the same ranges.
+fn block_ranges(len: usize, pos: usize, want: usize, lp: Option<(usize, usize)>) -> ([std::ops::Range<usize>; 2], usize) {
     if let Some((ls, le)) = lp {
         let pos = if pos >= le { ls } else { pos };
         if pos + want > le {
-            let tail = le - pos;
-            let head = (want - tail).min(le - ls);
-            scratch.clear();
-            scratch.extend_from_slice(&samples[pos..le]);
-            scratch.extend_from_slice(&samples[ls..ls + head]);
-            return (scratch.as_slice(), ls + head);
+            let head = (want - (le - pos)).min(le - ls);
+            return ([pos..le, ls..ls + head], ls + head);
         }
-        return (&samples[pos..pos + want], pos + want);
+        return ([pos..pos + want, 0..0], pos + want);
     }
-    let end = (pos + want).min(samples.len());
-    (&samples[pos..end], end)
+    let end = (pos + want).min(len);
+    ([pos.min(end)..end, 0..0], end)
 }
 
 #[cfg(test)]
@@ -766,10 +782,17 @@ const SCRUB_IDLE: Duration = Duration::from_millis(150);
 /// wheel plays as a short burst that slows into place, at most 8× either
 /// way. Linear
 /// interpolation between frames. Returns the new cursor and speed.
-#[allow(clippy::too_many_arguments)]
-fn scrub_block(samples: &[f32], ch: usize, mut cur: f64, mut vel: f64, goal: f64, sample_rate: u32,
+#[allow(clippy::too_many_arguments, dead_code)]
+fn scrub_block(samples: &[f32], ch: usize, cur: f64, vel: f64, goal: f64, sample_rate: u32,
                n: usize, out: &mut Vec<f32>) -> (f64, f64) {
-    let frames = samples.len() / ch.max(1);
+    scrub_block_from(&|i| samples[i], samples.len(), ch, cur, vel, goal, sample_rate, n, out)
+}
+
+/// [`scrub_block`] reading through `src` (the stem mix while stems play).
+#[allow(clippy::too_many_arguments)]
+fn scrub_block_from(src: &dyn Fn(usize) -> f32, len: usize, ch: usize, mut cur: f64, mut vel: f64, goal: f64,
+                    sample_rate: u32, n: usize, out: &mut Vec<f32>) -> (f64, f64) {
+    let frames = len / ch.max(1);
     if frames < 2 { return (cur, 0.0); }
     let last = (frames - 1) as f64;
     // First order toward the goal (the gap closes with a 40 ms time
@@ -786,8 +809,8 @@ fn scrub_block(samples: &[f32], ch: usize, mut cur: f64, mut vel: f64, goal: f64
         let j = (i + 1).min(frames - 1);
         let t = (cur - i as f64) as f32;
         for c in 0..ch {
-            let a = samples[i * ch + c];
-            let b = samples[j * ch + c];
+            let a = src(i * ch + c);
+            let b = src(j * ch + c);
             out.push(a + (b - a) * t);
         }
     }
@@ -813,6 +836,7 @@ fn processor_loop(
     in_flight:  Arc<AtomicU64>,
     seek_request: Arc<AtomicU64>,
     scrub:      ScrubShared,
+    stems:      Arc<StemControl>,
     sample_rate: u32,
     file_ch:    usize,
     device_ch:  usize,
@@ -852,6 +876,10 @@ fn processor_loop(
     let mut scrub_moved = std::time::Instant::now();
     let mut scrub_buf: Vec<f32> = Vec::with_capacity(SCRUB_BLOCK * file_ch);
 
+    // Stems: the ramp state and the mixed source block.
+    let mut mixer = Mixer::default();
+    let mut mix_buf: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch);
+
     loop {
         // ── Paused jog scrub ──────────────────────────────────────────────────
         // Read straight from the track toward the wheel's position (no
@@ -878,7 +906,9 @@ fn processor_loop(
                     continue;
                 }
                 scrub_buf.clear();
-                let (c, v) = scrub_block(&current, file_ch, cur, scrub_vel, goal, sample_rate, SCRUB_BLOCK, &mut scrub_buf);
+                let bank = stems.bank().filter(|b| b.is_for(&current));
+                let src = |i: usize| mixer.at(&current, bank.as_deref(), i);
+                let (c, v) = scrub_block_from(&src, current.len(), file_ch, cur, scrub_vel, goal, sample_rate, SCRUB_BLOCK, &mut scrub_buf);
                 scrub_cur = Some(c);
                 scrub_vel = v;
                 for f in scrub_buf.chunks(file_ch) {
@@ -1007,6 +1037,15 @@ fn processor_loop(
         let looping  = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
         let (src_block, src_end) = read_block(samples, proc_pos as usize, want,
                                               looping.then_some((ls, le)), &mut loop_buf);
+
+        // Stems: the same ranges through the stem mix, before the stretcher
+        // (one stretcher whatever the stems do).  Untouched when no bank is
+        // loaded for this track or every stem is at full.
+        let bank = stems.bank().filter(|b| b.is_for(&current));
+        let src_block: &[f32] = if bank.is_some() || mixer.active() {
+            let (ranges, _) = block_ranges(samples.len(), proc_pos as usize, want, looping.then_some((ls, le)));
+            if mixer.mix(samples, bank.as_deref(), stems.gains(), &ranges, &mut mix_buf) { &mix_buf } else { src_block }
+        } else { src_block };
 
         lp.consumed.fetch_add(src_block.len() as u64, Ordering::Relaxed);
 

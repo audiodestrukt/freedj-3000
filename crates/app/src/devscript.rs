@@ -48,6 +48,8 @@ pub enum Action {
     Rotary(i32),
     Lamps(String),
     Shot(String),
+    /// Stem levels: drums, vocal, harmonics (0..1).
+    Stems([f32; 3]),
     Quit,
 }
 
@@ -85,6 +87,12 @@ pub fn parse(src: &str) -> Result<Vec<(f64, Action)>, String> {
             _ if act.starts_with("rotary=") => Action::Rotary(act[7..].trim().parse().map_err(|_| format!("{entry:?}: bad detents"))?),
             _ if act.starts_with("lamps=") => Action::Lamps(act[6..].trim().to_string()),
             _ if act.starts_with("shot=") => Action::Shot(act[5..].trim().to_string()),
+            _ if act.starts_with("stems=") => {
+                let g: Vec<f32> = act[6..].split(',').map(|v| v.trim().parse::<f32>()).collect::<Result<_, _>>()
+                    .map_err(|_| format!("{entry:?}: want stems=<drums>,<vocal>,<harmonics>"))?;
+                let g: [f32; 3] = g.try_into().map_err(|_| format!("{entry:?}: want three stem levels"))?;
+                Action::Stems(g)
+            }
             _ if act.starts_with("category=") => Action::Category(act[9..].parse().map_err(|_| format!("{entry:?}: bad category"))?),
             _ => {
                 let spec = act.strip_prefix("jog=").ok_or_else(|| format!("{entry:?}: unknown action"))?;

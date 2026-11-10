@@ -1,7 +1,9 @@
 # Stems: reading OverCue-prepared media
 
-Status, 2026-11-10: phase 1 (the reader crate, `crates/stems`) is built.
-Phases 0 and 2–6 are not started.
+Status, 2026-11-10: phases 1 (the reader crate, `crates/stems`) and 2 (the
+engine, `crates/app/src/stems.rs`) are built. They play stems from local
+sticks; for now the levels can only be set from a dev script
+(`stems=<drums>,<vocal>,<harmonics>`). Phases 0 and 3–6 are not started.
 
 ## What OverCue is, and what we take from it
 
@@ -147,7 +149,7 @@ preallocated stem buffer. A per-page "ready" bitmap is published atomically.
 |---|---|---|---|
 | 0 | Test media | Dan runs OverCue Desktop on his Mac on a spare stick with a few tracks: a LAME MP3, an ffmpeg-tagged (Beatport) MP3, a FLAC, a WAV. We also build synthetic banks in tests (our own writer, as the spec's tests do), so CI needs no music | S |
 | 1 ✓ | `opendeck-stems` crate | Pure, no audio thread. Parses `index.json` and `index-v2`. Reads `.pgz` header and page table. Validates every field and hash the spec lists, and keeps index paths inside the USB root. Decodes FLAC and zlib pages. Decimates 96 → 48 kHz. Reads through a `ReadAt` trait so local files and NFS share the code | M |
-| 2 | Engine | A `StemBank` behind an `ArcSwap` in `AudioHandle`, with three atomic gains, the stem mix in `read_block`, original/stems crossfade, the page bitmap, and the same source for scrub. A loader stage after `Prepared` fills pages and runs the alignment check. Tests: sum of stems at gain 1 ≈ original; a mute ramp has no click; loop wrap; seek; scrub | M |
+| 2 ✓ | Engine | A `StemBank` behind an `ArcSwap` in `AudioHandle`, with three atomic gains, the stem mix in `read_block`, original/stems crossfade, the page bitmap, and the same source for scrub. A loader stage after `Prepared` fills pages and runs the alignment check. Tests: sum of stems at gain 1 ≈ original; a mute ramp has no click; loop wrap; seek; scrub | M |
 | 3 | UI | **CDJ skin:** STEMS tab and panel as on the unit (TOGGLE/VOLUME, FULL MIX, DRUMS/VOCAL/HARMONICS, grey while loading, blue underline when changed), stem-tinted waveform, S badge in BROWSE. **XDJ skin:** no screen element, per the screen-fidelity rule; stems go on the faceplate/CONTROLS side. **Controllers:** `stem_mute`/`stem_level` actions in `controllers.toml` (DJ2Go preset, I2C). Gains reset to full mix on every load | M |
 | 4 | LINK | On a dbserver/NFS load, look the track ID up in the peer's `CDJMODS/index-v2` (or `index.json` by path), then fetch pages over NFS ahead of the playhead in priority order. A lost page means the original plays there. Works with any player whose stick was prepared, stock or modded, because we only read files | M |
 | 5 | Serve | freedj's media server exports `CDJMODS/` when the stick it serves has one, so OverCue players can load stems from freedj. Open question: how an OverCue player decides "the media owner runs OverCue". Testing it needs an OverCue player (see the questions below) | S–?|
@@ -181,6 +183,48 @@ What the tests cover:
   matches the spec, and with it what the reader is tested against.
 - Still to do: a run against a stick from OverCue Desktop itself (phase 0;
   the Wine route is blocked by a Wine `ole32` bug).
+
+## Phase 2 as built
+
+- **Bank:** `StemBank` stores three i16 stems at the deck rate, shifted onto
+  the deck's own decode. It keeps a `Weak` to the sample buffer it was built
+  for, and the processor uses it only with that buffer. A LOAD resets
+  `StemControl` (no bank, full mix).
+- **Mixing:** `Mixer::mix` runs on the same index ranges as `read_block`
+  (`block_ranges`), so loops wrap identically. Gains and the
+  original↔stems blend ramp linearly across each block (about 12 ms). With
+  every stem at full, the block is the original buffer, untouched. The
+  paused scrub reads through `Mixer::at`.
+- **Loading:** `start_stems` runs after each local LOAD on a `stems-load`
+  thread.
+  1. `find_stick` finds the nearest `CDJMODS/index.json` above the file.
+  2. The track is looked up by path; a mismatched `source_sha256` is
+     refused.
+  3. Each role is read with every hash checked, then converted to the deck
+     rate: the decimator at 96 → 48 kHz, rubato otherwise.
+  4. `align` cross-correlates the full-mix copy with the deck's decode at
+     25 / 50 / 75 % of the track. All three must give correlation ≥ 0.9 and
+     agree within one frame, or the bank is refused.
+
+  `OPENDECK_STEMS=0` turns stems off.
+
+End-to-end test, headless on a null sink:
+
+- **Stick:** 90 s of `amplificate.mp3`, split by FFT into three bands that
+  sum exactly (stand-ins for drums, vocal and harmonics), padded the way
+  OverCue pads an MP3 and written as FLAC pages. OverCue's validator accepts
+  it.
+- **Load:** stems were ready 1.9 s after LOAD (release build). On the
+  44.1 kHz deck, alignment found **1152 frames**, exactly the MP3 metadata
+  frame from the spec's `native-mp3-header` notes, with correlation
+  0.97–0.98 at all three points.
+- **Playback:**
+  - Muting drums took the low band to zero.
+  - FULL MIX restored the same spectrum.
+  - Drums only left only the low band.
+- **Mute delay:** heard about 70–120 ms after the command with R3. That's
+  the frame, the ~93 ms output buffer and the stretcher latency. Bungee
+  still needs measuring.
 
 ## Open questions for Dan
 

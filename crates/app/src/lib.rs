@@ -26,6 +26,7 @@ mod nav;
 mod sdl_backend;
 mod waveform_cpu;
 mod settings;
+mod stems;
 mod snapshot;
 mod taglist;
 
@@ -285,6 +286,8 @@ struct DeckApp {
     /// A network load in progress: the fetch thread's result channel and the
     /// name being loaded.  The deck keeps running until the bytes arrive.
     fetch_rx:          Option<mpsc::Receiver<Result<Prepared>>>,
+    /// The stems job for the loaded track (see `stems.rs`).
+    stems_rx:          Option<mpsc::Receiver<Result<Option<stems::StemBank>>>>,
     pub loading:       Option<String>,
     play_on_load:      bool,      // dev autoload: start playback once the load lands
     /// VINYL-mode drag began while playing: resume on release.
@@ -619,6 +622,7 @@ impl DeckApp {
             event_rx,
             indicators,
             fetch_rx: None,
+            stems_rx: None,
             loading: None,
             play_on_load: false,
             jog_offset:        0.0,
@@ -1601,6 +1605,7 @@ impl DeckApp {
                 A::Rotary(n) => self.apply(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: n })),
                 A::Lamps(p) => self.script_lamps = Some(p),
                 A::Shot(p) => self.script_shot = Some(p),
+                A::Stems(g) => { for (i, v) in g.iter().enumerate() { self.audio.stems.set_gain(i, *v); } log::info!("script: stems {g:?}"); }
                 A::Quit => { log::info!("script: quit"); log::logger().flush(); std::process::exit(0); }
             }
         }
@@ -1912,6 +1917,41 @@ impl DeckApp {
         }
     }
 
+    /// Look for prepared stems for the track just loaded, off the UI
+    /// thread.  Local files only for now; LINK loads come in phase 4.
+    /// `OPENDECK_STEMS=0` turns stems off.
+    fn start_stems(&mut self, track: &Arc<Vec<f32>>, ch: usize) {
+        self.stems_rx = None;
+        if std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") || !self.path.is_file() { return; }
+        let (tx, rx) = mpsc::channel();
+        let (path, track, sr) = (self.path.clone(), Arc::clone(track), self.audio.sample_rate);
+        let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
+            let _ = tx.send(stems::load_local(&path, &track, sr, ch));
+        });
+        if spawned.is_ok() { self.stems_rx = Some(rx); }
+    }
+
+    /// Hand a finished stems job to the processor, if its track is still
+    /// the one playing.
+    fn poll_stems(&mut self) {
+        let Some(rx) = &self.stems_rx else { return };
+        let got = match rx.try_recv() {
+            Ok(r) => r,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("stems thread died")),
+        };
+        self.stems_rx = None;
+        match got {
+            Ok(Some(bank)) if bank.is_for(&self.audio.current()) => {
+                self.audio.stems.set_bank(Some(Arc::new(bank)));
+                self.request_redraw();
+            }
+            Ok(Some(_)) => log::info!("stems: ready for a track no longer loaded; dropped"),
+            Ok(None) => {}
+            Err(e) => log::warn!("stems refused: {e:#}"),
+        }
+    }
+
     /// The UI-thread tail of a load: hand the prepared samples to the audio
     /// thread, upload the waveform, reset transport to the cue.  Cheap; every
     /// heavy step happened in [`Prep::finish`].
@@ -1943,6 +1983,7 @@ impl DeckApp {
         // Park the deck at the cue (a CDJ sits at the cue after load) so PLAY
         // starts there — with AUTO CUE that's the first sound, not the leader.
         if p.cue_pt > 0 { self.seek_to(p.cue_pt); }
+        self.start_stems(&p.samples, p.ch);
         log::info!(
             "loaded {} in {:.1}s ({} BPM, {} grid, cue {:.2}s)",
             p.name, p.t0.elapsed().as_secs_f32(),
@@ -2554,6 +2595,7 @@ impl DeckApp {
             self.apply(ev);
         }
         self.poll_fetch();
+        self.poll_stems();
         self.browser.poll_media();   // USB inserted / removed → source rows
         // Jog nudge snap-back: once the wheel has been still past the window,
         // return to the pitch-fader speed.
