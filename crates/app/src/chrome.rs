@@ -542,6 +542,20 @@ pub fn paint(p: &egui::Painter, ctx: &egui::Context, cache: &mut ChromeCache, wh
     p.image(tex.id(), dst, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), Color32::WHITE);
 }
 
+/// As `paint`, turned by `angle` radians (clockwise on screen) about its
+/// centre: the jog platter turning under the finger.
+pub fn paint_rotated(p: &egui::Painter, ctx: &egui::Context, cache: &mut ChromeCache, what: Sprite, r: egui::Rect, angle: f32) {
+    let ppp = ctx.pixels_per_point();
+    let px = (r.height() * ppp).round() as usize;
+    let tex = cache.get(ctx, what, px);
+    let size = tex.size_vec2() / ppp;
+    let dst = egui::Rect::from_center_size(r.center(), size);
+    let mut mesh = egui::Mesh::with_texture(tex.id());
+    mesh.add_rect_with_uv(dst, egui::Rect::from_min_max(egui::Pos2::ZERO, egui::Pos2::new(1.0, 1.0)), Color32::WHITE);
+    mesh.rotate(egui::emath::Rot2::from_angle(angle), r.center());
+    p.add(egui::Shape::mesh(mesh));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

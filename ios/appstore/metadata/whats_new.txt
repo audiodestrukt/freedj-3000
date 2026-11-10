@@ -4,6 +4,6 @@ MENU → SCREEN now offers a second player layout alongside the original: its ow
 
 On iPad it comes with its own full faceplate: eight hot cues under the screen (hold CALL/DELETE and tap a pad to delete one), 4 and 8 beat loops that halve and double a running loop, beat jump, track search, fast search, time mode, tempo range and reset, and keys that light the way the hardware's do.
 
-Turn the jog while paused and you now hear the track under the playhead, its pitch following the wheel. The new layout also has a phase meter showing your beats and bars against the master's.
+The jog wheel now turns under your finger and follows a circular motion, and turning it while paused plays the track under the playhead, its pitch following the wheel. The tempo fader reaches its very ends without dead spots. The new layout also has a phase meter showing your beats and bars against the master's.
 
 Loading a track from another player over Pro DJ Link works again: BROWSE no longer drops to ALL TRACKS after a load.

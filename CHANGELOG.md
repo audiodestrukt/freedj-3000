@@ -18,6 +18,19 @@ All notable changes to this project will be documented in this file.
   starts from where it left off. Read straight from the track (no
   stretcher), at most 8× either way, about 50 ms ahead of the device.
 
+- **The jog turns.** The platter is drawn turning under the finger, and it
+  follows a circular motion: the finger's angle about the centre moves it
+  (clockwise = forward), wherever on the platter the finger is, as on a
+  real platter. A sideways swipe across it still works, as a turn.
+
+### Fixed
+- **Tempo fader dead spots at max and min.** The handle overhangs the slot
+  at either end and that overhang took no touches, and the fader was read
+  absolutely, so grabbing the handle at an end did nothing until the finger
+  reached the slot. The touch area now covers the handle's whole travel
+  (trimmed at MASTER TEMPO), and a drag moves the fader by how far the
+  finger moves from where it took hold.
+
 ### Changed
 - CDJ-3000 faceplate: a short MENU press opens LOAD PREVIOUS TRACK, as the
   manual says; UTILITY is the long press.

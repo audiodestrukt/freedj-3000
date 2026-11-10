@@ -760,6 +760,44 @@ fn fader_knob(p: &egui::Painter, ctx: &egui::Context, chrome: &mut ChromeCache, 
     );
 }
 
+/// Jog units sent per radian of turn, per point of platter radius: chosen so
+/// a turn moves the track about as far as a sideways drag of the same arc at
+/// half the radius did before.
+const JOG_UNITS_PER_RAD_R: f32 = 0.5;
+
+/// The platter turn (radians, clockwise on screen positive) between two
+/// finger positions about `center`, or None near the middle (inside 12 % of
+/// `radius`), where the angle swings wildly for a tiny movement.
+pub(crate) fn jog_turn(center: Pos2, radius: f32, prev: Pos2, cur: Pos2) -> Option<f32> {
+    let (a, b) = (prev - center, cur - center);
+    if a.length().min(b.length()) < radius * 0.12 { return None; }
+    let mut d = b.angle() - a.angle();
+    if d > std::f32::consts::PI { d -= std::f32::consts::TAU; }
+    if d < -std::f32::consts::PI { d += std::f32::consts::TAU; }
+    Some(d)
+}
+
+/// Where the tempo fader takes touches: the slot, widened to the handle and
+/// lengthened by half the handle at each end, where it overhangs.
+/// Trimmed at any control in `avoid` it would reach above or below the slot.
+pub(crate) fn fader_touch(ft: Rect, avoid: &[Rect]) -> Rect {
+    let kh = ft.width() * 1.9 / crate::chrome::KNOB_ASPECT;
+    let mut t = ft.expand2(Vec2::new(ft.width() * 0.45, kh * 0.5));
+    for r in avoid {
+        if !t.intersects(*r) { continue; }
+        if r.center().y < ft.min.y { t.min.y = t.min.y.max(r.max.y); }
+        else if r.center().y > ft.max.y { t.max.y = t.max.y.min(r.min.y); }
+    }
+    t
+}
+
+/// The fader position after dragging from `y0` (where the finger took hold,
+/// with the fader at `p0`) to `y`, over a travel of `height` points; up is
+/// faster. Relative, so it never jumps and reaches both ends.
+pub(crate) fn fader_drag(p0: f32, y0: f32, y: f32, height: f32) -> f32 {
+    (p0 - (y - y0) / height.max(1.0)).clamp(0.0, 1.0)
+}
+
 /// BROWSE rotary touch behaviour: drag up/down steps the list, tap = LOAD.
 pub(crate) fn browse_knob(ui: &Ui, r: Rect, out: &mut Vec<Event>) {
     let brr = ui.interact(r, Id::new("fp-browse"), Sense::click_and_drag());
@@ -802,8 +840,10 @@ pub(crate) fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, 
 
     // ── Chrome sprites ───────────────────────────────────────────────────────
     {
+        // The platter turns with the finger (its angle is kept below).
+        let jog_angle: f32 = ctx.data(|d| d.get_temp(Id::new("fp-jog-angle"))).unwrap_or(0.0);
+        crate::chrome::paint_rotated(p, ctx, chrome, Sprite::Jog, f.jog, jog_angle);
         let mut sprite = |what: Sprite, r: Rect| crate::chrome::paint(p, ctx, chrome, what, r);
-        sprite(Sprite::Jog, f.jog);
         sprite(Sprite::Round(RoundKind::Silver, play_lamp), f.play);
         sprite(Sprite::Round(RoundKind::Silver, cue_lit.then_some(Lamp::Orange)), f.cue);
         if let Some(r) = f.browse { sprite(Sprite::Round(RoundKind::Knob, None), r); }
@@ -856,9 +896,27 @@ pub(crate) fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, 
     let jr = ui.interact(f.jog, Id::new("fp-jog"), Sense::drag());
     if jr.drag_started() { out.push(Event::Deck(ControlEvent::JogTouch { touched: true })); }
     if jr.drag_stopped() { out.push(Event::Deck(ControlEvent::JogTouch { touched: false })); }
+    // Turning, as a platter turns: the finger's angle about the centre
+    // (clockwise = forward), so a circular motion moves it and the radius
+    // the finger is at does not matter. The platter's drawn angle follows.
     if jr.dragged() {
-        let dx = jr.drag_delta().x;
-        if dx.abs() > 0.01 { out.push(Event::Deck(ControlEvent::JogDelta { delta: dx as i32, velocity_rpm: dx * 2.0 })); }
+        if let Some(pp) = jr.interact_pointer_pos() {
+            if let Some(turn) = jog_turn(f.jog.center(), r, pp - jr.drag_delta(), pp) {
+                let (ang_id, rem_id) = (Id::new("fp-jog-angle"), Id::new("fp-jog-rem"));
+                let ang: f32 = ctx.data(|d| d.get_temp(ang_id)).unwrap_or(0.0);
+                ctx.data_mut(|d| d.insert_temp(ang_id, (ang + turn) % std::f32::consts::TAU));
+                // Jog units: a turn of one radian is JOG_UNITS_PER_RAD, about
+                // what a sideways drag of that arc at mid radius used to send.
+                // Fractions carry over so slow turns are not lost.
+                let rem: f32 = ctx.data(|d| d.get_temp(rem_id)).unwrap_or(0.0);
+                let units = rem + turn * r * JOG_UNITS_PER_RAD_R;
+                let whole = units.trunc();
+                ctx.data_mut(|d| d.insert_temp(rem_id, units - whole));
+                let dt = ui.input(|i| i.stable_dt).max(1e-3);
+                let rpm = turn / std::f32::consts::TAU / dt * 60.0;
+                if whole != 0.0 { out.push(Event::Deck(ControlEvent::JogDelta { delta: whole as i32, velocity_rpm: rpm })); }
+            }
+        }
     }
 
     // ── Tempo fader: slot + silver handle at the live pitch ──────────────────
@@ -867,8 +925,22 @@ pub(crate) fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, 
     let hy  = ft.max.y - pos * ft.height();
     fader_slot(p, ft);
     fader_knob(p, ctx, chrome, ft, hy);
-    let fr = ui.interact(ft, Id::new("fp-fader"), Sense::click_and_drag());
-    if fr.dragged() || fr.clicked() {
+    // The handle overhangs the slot by half its height at either end, so the
+    // touch area covers the handle's whole travel; and a drag moves the
+    // fader by how far the finger moves from where it took hold, so grabbing
+    // the handle anywhere (its overhanging edge at max or min included) does
+    // not jump it. A tap off the handle sets the fader there.
+    let fr = ui.interact(fader_touch(ft, &[f.mt]), Id::new("fp-fader"), Sense::click_and_drag());
+    let grab_id = Id::new("fp-fader-grab");
+    if fr.drag_started() {
+        if let Some(pp) = fr.interact_pointer_pos() { ctx.data_mut(|d| d.insert_temp(grab_id, (pp.y, pos))); }
+    }
+    if fr.dragged() {
+        if let (Some(pp), Some((y0, p0))) = (fr.interact_pointer_pos(), ctx.data(|d| d.get_temp::<(f32, f32)>(grab_id))) {
+            let np = fader_drag(p0, y0, pp.y, ft.height());
+            out.push(Event::Deck(ControlEvent::TempoFader { position: np }));
+        }
+    } else if fr.clicked() {
         if let Some(pp) = fr.interact_pointer_pos() {
             let np = ((ft.max.y - pp.y) / ft.height()).clamp(0.0, 1.0);
             out.push(Event::Deck(ControlEvent::TempoFader { position: np }));
@@ -2155,5 +2227,109 @@ mod wave_drag_tests {
         assert_eq!(wave_drag_samples(-1.0, 600.0, 700.0, 2), -(all / 700.0_f64).round() as i64);
         // Zooming in (fewer columns visible) makes a point worth less audio.
         assert!(wave_drag_samples(10.0, 300.0, 700.0, 2) < wave_drag_samples(10.0, 600.0, 700.0, 2));
+    }
+}
+
+#[cfg(test)]
+mod jog_fader_tests {
+    use super::*;
+    use std::f32::consts::FRAC_PI_2;
+
+    /// A quarter turn clockwise (on screen, y down) is +π/2 at any radius;
+    /// across the ±π seam it stays a small turn; the middle is ignored.
+    #[test]
+    fn jog_turn_follows_the_finger_round_the_centre() {
+        let c = Pos2::new(100.0, 100.0);
+        let t = jog_turn(c, 80.0, Pos2::new(160.0, 100.0), Pos2::new(100.0, 160.0)).unwrap();
+        assert!((t - FRAC_PI_2).abs() < 1e-4, "{t}");
+        let t = jog_turn(c, 80.0, Pos2::new(130.0, 100.0), Pos2::new(100.0, 130.0)).unwrap();
+        assert!((t - FRAC_PI_2).abs() < 1e-4, "radius does not matter: {t}");
+        let t = jog_turn(c, 80.0, Pos2::new(40.0, 101.0), Pos2::new(40.0, 99.0)).unwrap();
+        assert!(t.abs() < 0.1, "across the seam: {t}");
+        assert!(jog_turn(c, 80.0, Pos2::new(101.0, 100.0), Pos2::new(100.0, 105.0)).is_none());
+        // A sideways swipe through the top of the platter still turns it.
+        let t = jog_turn(c, 80.0, Pos2::new(90.0, 40.0), Pos2::new(110.0, 40.0)).unwrap();
+        assert!(t > 0.0);
+    }
+
+    /// The fader reaches both ends from a grab anywhere and never jumps.
+    #[test]
+    fn fader_drag_is_relative_and_reaches_the_ends() {
+        assert_eq!(fader_drag(0.5, 200.0, 200.0, 400.0), 0.5);
+        assert_eq!(fader_drag(0.5, 200.0, 100.0, 400.0), 0.75);
+        assert_eq!(fader_drag(0.9, 10.0, -300.0, 400.0), 1.0);
+        assert_eq!(fader_drag(0.1, 390.0, 800.0, 400.0), 0.0);
+    }
+
+    /// The fader's touch area, overhang included, takes no other control's
+    /// spot in any XDJ faceplate.
+    #[test]
+    fn fader_touch_stays_clear_of_other_controls() {
+        let ins = (0.0, 0.0, 0.0, 0.0);
+        let faces = [
+            ("landscape", faceplate_layout(Rect::from_min_size(Pos2::ZERO, Vec2::new(1600.0, 1000.0))).1),
+            ("portrait", portrait_layout(Rect::from_min_size(Pos2::ZERO, Vec2::new(1032.0, 1376.0))).1),
+            ("phone", phone_controls_layout(Rect::from_min_size(Pos2::ZERO, Vec2::new(932.0, 430.0)), ins).0),
+        ];
+        for (name, f) in faces {
+            let t = fader_touch(f.fader, &[f.mt]);
+            let mut others = vec![("jog", f.jog), ("play", f.play), ("cue", f.cue), ("mt", f.mt)];
+            for (n, r) in [("loop_in", f.loop_in), ("loop_out", f.loop_out), ("reloop", f.reloop), ("browse", f.browse),
+                           ("time", f.time_mode), ("auto_cue", f.auto_cue), ("tag", f.tag_track), ("back", f.back), ("jog_mode", f.jog_mode)] {
+                if let Some(r) = r { others.push((n, r)); }
+            }
+            for (n, r) in others {
+                let o = t.intersect(r);
+                assert!(!(t.intersects(r) && o.area() > 1.0), "{name}: fader touch overlaps {n}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod jog_touch_tests {
+    use super::*;
+    use egui::{Event as E, PointerButton, RawInput};
+
+    /// A finger circling the platter clockwise sends forward jog moves and
+    /// turns the drawn platter; counter-clockwise sends them backward.
+    #[test]
+    fn circling_the_platter_turns_it() {
+        let base = Rect::from_min_size(Pos2::ZERO, Vec2::new(1032.0, 1376.0));
+        let (_, f) = portrait_layout(base);
+        let ctx = egui::Context::default();
+        let tags = opendeck_decode::TrackTags::default();
+        let snap = crate::snapshot::DeckSnapshot::test(&tags);
+        let mut chrome = crate::chrome::ChromeCache::default();
+        let c = f.jog.center();
+        let rad = f.jog.width() * 0.35;
+        let at = |deg: f32| c + Vec2::angled(deg.to_radians()) * rad;
+        let mut run = |events: Vec<E>| {
+            let mut out = Vec::new();
+            let _ = ctx.run(RawInput { events, screen_rect: Some(base), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::none())
+                    .show(ctx, |ui| draw_faceplate(ui, ctx, &snap, &f, false, &mut chrome, &mut out));
+            });
+            out
+        };
+        let btn = |pos, pressed| E::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let sweep = |run: &mut dyn FnMut(Vec<E>) -> Vec<Event>, from: f32, step: f32| {
+            run(vec![E::PointerMoved(at(from))]);
+            let mut total = 0;
+            for e in run(vec![btn(at(from), true)]) { if let Event::Deck(ControlEvent::JogDelta { delta, .. }) = e { total += delta; } }
+            for i in 1..=30 {
+                for e in run(vec![E::PointerMoved(at(from + step * i as f32))]) {
+                    if let Event::Deck(ControlEvent::JogDelta { delta, .. }) = e { total += delta; }
+                }
+            }
+            run(vec![btn(at(from + step * 30.0), false)]);
+            total
+        };
+        let fwd = sweep(&mut run, 0.0, 6.0);     // +180° on screen = clockwise
+        let angle: f32 = ctx.data(|d| d.get_temp(Id::new("fp-jog-angle"))).unwrap_or(0.0);
+        assert!(fwd > 0, "clockwise goes forward: {fwd}");
+        assert!(angle > 2.0, "the platter turned: {angle}");
+        let back = sweep(&mut run, 180.0, -6.0);
+        assert!(back < 0, "counter-clockwise goes back: {back}");
     }
 }
