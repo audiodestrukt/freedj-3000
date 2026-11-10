@@ -1,9 +1,9 @@
 # Stems: reading OverCue-prepared media
 
-Status, 2026-11-10: phases 1 (the reader crate, `crates/stems`) and 2 (the
-engine, `crates/app/src/stems.rs`) are built. They play stems from local
-sticks; for now the levels can only be set from a dev script
-(`stems=<drums>,<vocal>,<harmonics>`). Phases 0 and 3–6 are not started.
+Status, 2026-11-10: phases 1–3 are built: the reader crate
+(`crates/stems`), the engine (`crates/app/src/stems.rs`) and the on-screen
+controls. Stems play from local sticks. They're behind MENU → STEMS, off by
+default. Phases 0 and 4–6 are not started.
 
 ## What OverCue is, and what we take from it
 
@@ -150,7 +150,7 @@ preallocated stem buffer. A per-page "ready" bitmap is published atomically.
 | 0 | Test media | Dan runs OverCue Desktop on his Mac on a spare stick with a few tracks: a LAME MP3, an ffmpeg-tagged (Beatport) MP3, a FLAC, a WAV. We also build synthetic banks in tests (our own writer, as the spec's tests do), so CI needs no music | S |
 | 1 ✓ | `opendeck-stems` crate | Pure, no audio thread. Parses `index.json` and `index-v2`. Reads `.pgz` header and page table. Validates every field and hash the spec lists, and keeps index paths inside the USB root. Decodes FLAC and zlib pages. Decimates 96 → 48 kHz. Reads through a `ReadAt` trait so local files and NFS share the code | M |
 | 2 ✓ | Engine | A `StemBank` behind an `ArcSwap` in `AudioHandle`, with three atomic gains, the stem mix in `read_block`, original/stems crossfade, the page bitmap, and the same source for scrub. A loader stage after `Prepared` fills pages and runs the alignment check. Tests: sum of stems at gain 1 ≈ original; a mute ramp has no click; loop wrap; seek; scrub | M |
-| 3 | UI | **CDJ skin:** STEMS tab and panel as on the unit (TOGGLE/VOLUME, FULL MIX, DRUMS/VOCAL/HARMONICS, grey while loading, blue underline when changed), stem-tinted waveform, S badge in BROWSE. **XDJ skin:** no screen element, per the screen-fidelity rule; stems go on the faceplate/CONTROLS side. **Controllers:** `stem_mute`/`stem_level` actions in `controllers.toml` (DJ2Go preset, I2C). Gains reset to full mix on every load | M |
+| 3 ✓ | UI | **CDJ skin:** STEMS tab and panel as on the unit (TOGGLE/VOLUME, FULL MIX, DRUMS/VOCAL/HARMONICS, grey while loading, blue underline when changed), stem-tinted waveform, S badge in BROWSE. **XDJ skin:** no screen element, per the screen-fidelity rule; stems go on the faceplate/CONTROLS side. **Controllers:** `stem_mute`/`stem_level` actions in `controllers.toml` (DJ2Go preset, I2C). Gains reset to full mix on every load | M |
 | 4 | LINK | On a dbserver/NFS load, look the track ID up in the peer's `CDJMODS/index-v2` (or `index.json` by path), then fetch pages over NFS ahead of the playhead in priority order. A lost page means the original plays there. Works with any player whose stick was prepared, stock or modded, because we only read files | M |
 | 5 | Serve | freedj's media server exports `CDJMODS/` when the stick it serves has one, so OverCue players can load stems from freedj. Open question: how an OverCue player decides "the media owner runs OverCue". Testing it needs an OverCue player (see the questions below) | S–?|
 | 6 | Make stems (optional) | Separation in the desktop media server (HTDemucs via ONNX, offline), writing the same format so the output stays interchangeable. Covers non-rekordbox libraries (lookup by `file_path`). Ties into analysis scope (#46) and the sampler-deck vision | L |
@@ -225,6 +225,43 @@ End-to-end test, headless on a null sink:
 - **Mute delay:** heard about 70–120 ms after the command with R3. That's
   the frame, the ~93 ms output buffer and the stretcher latency. Bungee
   still needs measuring.
+
+## Phase 3 as built
+
+**The setting.** Dan's call: stems are a MENU setting, **STEMS**, off by
+default, so the XDJ and CDJ skins stay what the stock units are.
+- Turning it on looks up the loaded track's stems.
+- Turning it off drops the stems, back to the plain track.
+- The engine loads no stems while it's off.
+
+**CDJ-3000 skin** (`cdj3000.rs`):
+- A **STEMS** key at (774,0)–(886,90) on the unit grid, left of BEAT LOOP.
+  The title is clipped short of it. Grey while loading or when the track
+  has none; a blue underline while the mix is changed and the panel is
+  closed.
+- `Panel::Stems` uses the panel row like BEAT LOOP / BEAT JUMP: FULL MIX,
+  the TOGGLE / VOLUME selector, then DRUMS, VOCAL and HARMONICS, two slots
+  wide each.
+  - TOGGLE: a tap mutes or unmutes a stem (dark = muted).
+  - VOLUME: each stem is a horizontal fader with a blue fill and a %.
+  - The selector goes back to TOGGLE only when every stem is fully on or
+    off, as OverCue's does.
+- `OPENDECK_CDJ_PANEL=stems` opens the panel at startup.
+
+**XDJ skin** (`screen.rs`):
+- A **STEMS** key under BANK switches the PERFORM pads to stem mode.
+- Pads 1–3 are the stems: tap to toggle, drag up or down for a level, with
+  the fill rising from the bottom. Pad 4 is FULL MIX.
+- DELETE and BANK rest in this mode.
+- Dev script: `screen=perform-stems`.
+
+**Shared widget:** `screen::stem_touch`. A drag moves the level from where
+it is (with 6 pt of slop), so a touch never jumps it; a tap toggles.
+
+**Not yet:**
+- The enlarged waveform doesn't follow the stem mix. OverCue redraws it
+  from the stems you're playing; ours still shows the full mix.
+- Controller actions (`controllers.toml`) for the hardware deck.
 
 ## Open questions for Dan
 

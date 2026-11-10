@@ -7,6 +7,33 @@
 
 use opendeck_types::BeatGrid;
 
+/// Where stems stand for the loaded track.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum StemsState {
+    /// The MENU's STEMS setting is off: no stem controls anywhere.
+    #[default]
+    Off,
+    /// On, but this track has no prepared stems (or they were refused).
+    None,
+    /// On; the stems are being read and aligned.  Controls are greyed.
+    Loading,
+    /// On and playable.
+    Ready,
+}
+
+/// The stem controls' view: state plus drums / vocal / harmonics levels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StemsView { pub state: StemsState, pub gains: [f32; 3] }
+
+impl Default for StemsView { fn default() -> Self { StemsView { state: StemsState::Off, gains: [1.0; 3] } } }
+
+impl StemsView {
+    /// Any stem off full: the panel's key shows its "changed" underline.
+    pub fn changed(&self) -> bool { self.gains.iter().any(|g| *g < 1.0) }
+    /// Every stem fully on or fully off (TOGGLE mode can show it).
+    pub fn all_on_or_off(&self) -> bool { self.gains.iter().all(|g| *g <= 0.0 || *g >= 1.0) }
+}
+
 pub struct DeckSnapshot<'a> {
     /// Track name shown in the title bar (tag title, else file name).
     pub title:        &'a str,
@@ -16,6 +43,8 @@ pub struct DeckSnapshot<'a> {
     /// A message the CDJ-3000 screen shows in a pop-up for a few seconds
     /// (lines split by `\n`), as the unit does ("No LINKED Players found.").
     pub notice:       Option<&'a str>,
+    /// Stems: whether their controls show, and their state and levels.
+    pub stems:        StemsView,
 
     /// Playhead in interleaved source samples — latency-compensated and
     /// phase-locked, i.e. what the listener is hearing right now.
@@ -116,7 +145,7 @@ impl<'a> DeckSnapshot<'a> {
     /// A stopped, empty deck for unit tests; set the fields a test needs.
     pub fn test(tags: &'a opendeck_decode::TrackTags) -> Self {
         DeckSnapshot {
-            title: "", loading: None, notice: None, tags, file: "", position: 0, sample_rate: 44_100, channels: 2,
+            title: "", loading: None, notice: None, stems: StemsView::default(), tags, file: "", position: 0, sample_rate: 44_100, channels: 2,
             total_samples: 0, cue_point: 0, memory_cues: &[], hot_cues: [None; 8],
             perform_mode: crate::input::PerformMode::HotCue, perform_bank: 0, perform_delete: false,
             loop_active: false, loop_start: 0, loop_end: 0, loop_beats: 0.0, tempo_range: 10.0, quantize: false,

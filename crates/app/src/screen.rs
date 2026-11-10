@@ -18,7 +18,7 @@ use crate::input::{ControlEvent, Event, Screen as TopScreen, Source, UiEvent};
 use crate::browser::Browser;
 use crate::taglist::TagList;
 use crate::settings::{Settings, MENU};
-use crate::snapshot::DeckSnapshot;
+use crate::snapshot::{DeckSnapshot, StemsState};
 use crate::chrome::{ChromeCache, Lamp, RoundKind, Sprite};
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Sense, Stroke, Ui, Vec2};
 
@@ -136,6 +136,8 @@ pub struct PerformLayout {
     pub mode_hotcue:   Rect,
     pub mode_beatjump: Rect,
     pub delete_call:   Rect,
+    /// STEMS pad mode, under BANK; drawn only with the MENU's STEMS setting on.
+    pub mode_stems:    Rect,
     pub bank:          Rect,
     pub phase:         Rect,
     pub bars:          Rect,
@@ -173,6 +175,7 @@ pub fn perform_layout(screen: Rect) -> PerformLayout {
         mode_beatjump: r(0.004, 0.092, lc - 0.004, 0.147),
         delete_call:   r(0.004, 0.176, lc - 0.004, 0.289),
         bank:          r(0.004, 0.333, lc - 0.004, 0.440),
+        mode_stems:    r(0.004, 0.452, lc - 0.004, 0.530),
         phase:         r(0.305, 0.030, 0.595, 0.115),
         bars:          r(0.610, 0.030, 0.805, 0.115),
         wave:          r(0.190, 0.175, 0.785, 0.300),
@@ -1467,6 +1470,37 @@ pub(crate) fn tap(ui: &Ui, r: Rect, name: &str) -> (bool, bool) {
     (resp.clicked(), resp.is_pointer_button_down_on())
 }
 
+/// A stem's touch control, shared by both skins.  A drag along the control
+/// (`horizontal`, else upward) moves the level from where it is, so a touch
+/// never jumps it; a tap with no drag toggles it full ↔ off when
+/// `tap_toggles`.  Returns the new level, if it changed.  Inert unless
+/// `enabled` (stems still loading, or none for this track).
+pub(crate) fn stem_touch(ui: &Ui, r: Rect, name: &str, gain: f32, horizontal: bool, tap_toggles: bool, enabled: bool) -> Option<f32> {
+    let resp = ui.interact(r, Id::new(name), Sense::drag());
+    if !enabled { return None; }
+    let toggled = || Some(if gain > 0.0 { 0.0 } else { 1.0 });
+    let moved_id = Id::new((name, "stem-moved"));
+    if resp.drag_started() { ui.ctx().data_mut(|d| d.insert_temp(moved_id, 0.0f32)); }
+    let moved: f32 = ui.ctx().data(|d| d.get_temp(moved_id)).unwrap_or(0.0);
+    if resp.dragged() {
+        let d = resp.drag_delta();
+        let moved = moved + d.length();
+        ui.ctx().data_mut(|dd| dd.insert_temp(moved_id, moved));
+        // A few points of slop before a touch counts as a drag, so a tap
+        // that wobbles still toggles.
+        if moved > 6.0 {
+            let along = if horizontal { d.x / r.width() } else { -d.y / (r.height() * 1.5) };
+            let g = (gain + along).clamp(0.0, 1.0);
+            return (g != gain).then_some(g);
+        }
+    }
+    if tap_toggles && ((resp.drag_stopped() && moved <= 6.0) || same_frame_tap(ui, r)) { return toggled(); }
+    None
+}
+
+/// The stems' names, in the deck's order.
+pub(crate) const STEM_NAMES: [&str; 3] = ["DRUMS", "VOCAL", "HARMONICS"];
+
 /// Touch key: slate face, main label, optional "– SUB" line.  `lit` is the
 /// engaged state; the face also brightens while the finger is down.
 fn key(ui: &Ui, r: Rect, name: &str, main: &str, sub: &str, h: f32, lit: Option<Color32>) -> bool {
@@ -1590,6 +1624,39 @@ fn expand_glyph(ui: &Ui, key_rect: Rect, h: f32) {
     p.line_segment([Pos2::new(c.x - d, c.y + d), Pos2::new(c.x - d, c.y + d * 0.2)], st);
 }
 
+/// PERFORM in STEMS mode: pads 1–3 are DRUMS / VOCAL / HARMONICS (tap to
+/// mute or bring back, drag up or down to set a level; the fill shows it),
+/// pad 4 is FULL MIX (every stem back to full: the original track).
+fn draw_stem_pad(ui: &Ui, snap: &DeckSnapshot, i: usize, r: Rect, h: f32, out: &mut Vec<Event>) {
+    let ready = snap.stems.state == StemsState::Ready;
+    let p = ui.painter();
+    if i == 3 {
+        let (clicked, down) = tap(ui, r, "pf-stem-full");
+        let changed = ready && snap.stems.changed();
+        p.rect_filled(r, 3.0, if down && ready { KEY_HI } else if changed { KEY } else { KEY_LO });
+        text(ui, r.center(), Align2::CENTER_CENTER, "FULL MIX", h * 0.030, if changed { TEXT } else { DIM });
+        if clicked && ready { out.push(Event::Ui(UiEvent::StemsFullMix)); }
+        return;
+    }
+    let g = snap.stems.gains[i];
+    if let Some(gain) = stem_touch(ui, r, &format!("pf-stem{i}"), g, false, true, ready) {
+        out.push(Event::Ui(UiEvent::StemGain { stem: i, gain }));
+    }
+    p.rect_filled(r, 3.0, KEY_LO);
+    if ready && g > 0.0 {
+        let fill = Rect::from_min_max(Pos2::new(r.min.x, r.max.y - r.height() * g), r.max);
+        p.rect_filled(fill, 3.0, tint(BLUE, 200));
+    }
+    let c = if !ready { FAINT } else if g > 0.0 { TEXT } else { DIM };
+    text(ui, Pos2::new(r.center().x, r.center().y - h * 0.010), Align2::CENTER_CENTER, STEM_NAMES[i], h * 0.030, c);
+    let sub = match snap.stems.state {
+        StemsState::Ready => format!("{:.0}%", g * 100.0),
+        StemsState::Loading => "LOADING".into(),
+        _ => "NO STEMS".into(),
+    };
+    text(ui, Pos2::new(r.center().x, r.max.y - h * 0.018), Align2::CENTER_CENTER, sub, h * 0.016, c);
+}
+
 /// PERFORM screen: left-column controls (HOT CUE / BEAT JUMP mode pair,
 /// DELETE –CALL, BANK), the phase meter at the top, a compact waveform strip
 /// (the shader viewport moves there), and four pads — hot cues A–D or E–H
@@ -1608,19 +1675,29 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
     let light = Color32::from_rgb(0xd8, 0xdc, 0xe2);
     for (r, name, label, sel, mode) in [
         (pl.mode_hotcue,   "pf-hotcue",   "HOT CUE",   hot,  PM::HotCue),
-        (pl.mode_beatjump, "pf-beatjump", "BEAT JUMP", !hot, PM::BeatJump),
+        (pl.mode_beatjump, "pf-beatjump", "BEAT JUMP", snap.perform_mode == PM::BeatJump, PM::BeatJump),
     ] {
         let (clicked, down) = tap(ui, r, name);
         p.rect_filled(r, 2.0, if sel { light } else if down { KEY_HI } else { KEY });
         text(ui, r.center(), Align2::CENTER_CENTER, label, h * 0.019, if sel { Color32::BLACK } else { TEXT });
         if clicked { out.push(Event::Ui(UiEvent::PerformMode(mode))); }
     }
-    if key(ui, pl.delete_call, "pf-delete", "DELETE", "CALL", h, snap.perform_delete.then_some(RED)) {
+    let stems = snap.perform_mode == PM::Stems;
+    // DELETE and BANK act on hot cues; in STEMS mode they rest.
+    if key(ui, pl.delete_call, "pf-delete", "DELETE", "CALL", h, snap.perform_delete.then_some(RED)) && !stems {
         out.push(Event::Ui(UiEvent::PerformDelete));
     }
     if key(ui, pl.bank, "pf-bank", "BANK", if snap.perform_bank == 0 { "A–D" } else { "E–H" }, h,
-           (snap.perform_bank == 1).then_some(BLUE)) {
+           (snap.perform_bank == 1).then_some(BLUE)) && !stems {
         out.push(Event::Ui(UiEvent::PerformBank));
+    }
+    // STEMS (MENU → STEMS on): the pads become the stem controls; tap
+    // again to go back to hot cues.
+    if snap.stems.state != StemsState::Off {
+        let sub = match snap.stems.state { StemsState::Loading => "LOADING", StemsState::None => "NONE", _ => "" };
+        if key(ui, pl.mode_stems, "pf-stems", "STEMS", sub, h, stems.then_some(BLUE)) {
+            out.push(Event::Ui(UiEvent::PerformMode(if stems { PM::HotCue } else { PM::Stems })));
+        }
     }
 
     // ── Phase meter + Bars, moved to the top ─────────────────────────────────
@@ -1670,6 +1747,7 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
                     out.push(Event::Deck(ControlEvent::HotCueRelease { slot }));
                 }
             }
+            PM::Stems => draw_stem_pad(ui, snap, i, *r, h, out),
             PM::BeatJump => {
                 let (label, beats) = [("◀ 4", -4.0f32), ("◀ 1", -1.0), ("1 ▶", 1.0), ("4 ▶", 4.0)][i];
                 p.rect_filled(*r, 3.0, if down { KEY_HI } else { KEY });
@@ -2333,5 +2411,67 @@ mod jog_touch_tests {
         assert!(angle > 2.0, "the platter turned: {angle}");
         let back = sweep(&mut run, 180.0, -6.0);
         assert!(back < 0, "counter-clockwise goes back: {back}");
+    }
+}
+
+#[cfg(test)]
+mod stem_touch_tests {
+    use super::*;
+    use egui::{Event as E, PointerButton, RawInput};
+
+    /// Feed pointer events to `stem_touch` over a 200×60 control, one frame
+    /// per event list, carrying the level across frames as the deck would.
+    fn drive(frames: Vec<Vec<E>>, mut gain: f32, horizontal: bool, toggles: bool, enabled: bool) -> (f32, usize) {
+        let ctx = egui::Context::default();
+        let r = Rect::from_min_size(Pos2::new(100.0, 100.0), Vec2::new(200.0, 60.0));
+        let mut changes = 0;
+        for events in frames {
+            let _ = ctx.run(RawInput { events, screen_rect: Some(Rect::from_min_size(Pos2::ZERO, Vec2::splat(500.0))), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
+                    if let Some(g) = stem_touch(ui, r, "t", gain, horizontal, toggles, enabled) { gain = g; changes += 1; }
+                });
+            });
+        }
+        (gain, changes)
+    }
+
+    fn btn(at: Pos2, pressed: bool) -> E {
+        E::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() }
+    }
+
+    fn tap() -> Vec<Vec<E>> {
+        let at = Pos2::new(200.0, 130.0);
+        vec![vec![E::PointerMoved(at)], vec![btn(at, true)], vec![btn(at, false)], vec![]]
+    }
+
+    #[test]
+    fn a_tap_toggles_full_and_off() {
+        assert_eq!(drive(tap(), 1.0, true, true, true), (0.0, 1));
+        assert_eq!(drive(tap(), 0.0, true, true, true), (1.0, 1));
+        assert_eq!(drive(tap(), 0.4, true, true, true).0, 0.0, "a partial level taps to off");
+    }
+
+    #[test]
+    fn inert_while_stems_are_not_ready_or_taps_are_off() {
+        assert_eq!(drive(tap(), 1.0, true, true, false), (1.0, 0));
+        assert_eq!(drive(tap(), 1.0, true, false, true), (1.0, 0), "VOLUME mode: a tap does nothing");
+    }
+
+    #[test]
+    fn a_drag_moves_the_level_from_where_it_is() {
+        // Right by 60 points across a 200-point control from 0.5: about
+        // +0.3, less the few points of slop.  No toggle on release.
+        let mut f = vec![vec![E::PointerMoved(Pos2::new(150.0, 130.0))], vec![btn(Pos2::new(150.0, 130.0), true)]];
+        for x in (155..=210).step_by(5) { f.push(vec![E::PointerMoved(Pos2::new(x as f32, 130.0))]); }
+        f.push(vec![btn(Pos2::new(210.0, 130.0), false)]);
+        f.push(vec![]);
+        let (g, _) = drive(f.clone(), 0.5, true, true, true);
+        assert!((0.74..=0.81).contains(&g), "{g}");
+        // Vertical control: dragging right does little; dragging up raises it.
+        let mut up = vec![vec![E::PointerMoved(Pos2::new(200.0, 150.0))], vec![btn(Pos2::new(200.0, 150.0), true)]];
+        for y in (110..=145).rev().step_by(5) { up.push(vec![E::PointerMoved(Pos2::new(200.0, y as f32))]); }
+        up.push(vec![btn(Pos2::new(200.0, 110.0), false)]);
+        let (g, _) = drive(up, 0.2, false, true, true);
+        assert!(g > 0.5 && g < 0.7, "{g}");
     }
 }

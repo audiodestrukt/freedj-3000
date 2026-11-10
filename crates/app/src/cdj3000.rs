@@ -19,9 +19,9 @@ use crate::input::{ControlEvent, Event, Screen as TopScreen, UiEvent};
 use crate::screen::ScreenView;
 use crate::settings::MENU;
 use crate::taglist::TagList;
-use crate::screen::{bars_to_next, cover, needle_touch, tap, wave_touch};
+use crate::screen::{bars_to_next, cover, needle_touch, stem_touch, tap, wave_touch, STEM_NAMES};
 use crate::settings::Settings;
-use crate::snapshot::DeckSnapshot;
+use crate::snapshot::{DeckSnapshot, StemsState};
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Shape, Stroke, Ui, Vec2};
 
 /// The unit's screen: 1280×720.
@@ -67,6 +67,8 @@ pub enum Panel {
     None,
     BeatLoop,
     BeatJump,
+    /// Stems (MENU → STEMS on): FULL MIX, TOGGLE / VOLUME, and the stems.
+    Stems,
 }
 
 fn panel_id() -> Id { Id::new("cdj3k-panel") }
@@ -82,6 +84,7 @@ pub fn panel_from_env(ctx: &egui::Context) {
     let p = match std::env::var("OPENDECK_CDJ_PANEL").as_deref() {
         Ok("loop") => Panel::BeatLoop,
         Ok("jump") => Panel::BeatJump,
+        Ok("stems") => Panel::Stems,
         _ => return,
     };
     set_panel(ctx, p);
@@ -204,6 +207,8 @@ pub struct Layout {
     pub track_row: Rect,
     pub info_btn:  Rect,
     pub keys:      [Rect; 3],
+    /// STEMS key, left of BEAT LOOP (only with the MENU's STEMS setting on).
+    pub stems_key: Rect,
     // waveform field
     pub bars:      Rect,
     /// The master's player-number badge left of the Bars rows, and the slot
@@ -261,6 +266,7 @@ pub fn layout(screen: Rect, panel_open: bool) -> Layout {
         track_row: r(190.0, 50.0, 890.0, 90.0),
         info_btn:  r(534.0, 56.0, 562.0, 84.0),
         keys:      [r(898.0, 0.0, 1010.0, 90.0), r(1022.0, 0.0, 1135.0, 90.0), r(1146.0, 0.0, 1260.0, 90.0)],
+        stems_key: r(774.0, 0.0, 886.0, 90.0),
 
         bars:      r(160.0, 110.0, 340.0, 185.0),
         master_badge: r(124.0, 117.0, 145.0, 138.0),
@@ -329,7 +335,8 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &Scree
                     _ if snap.zoom_grid_mode => draw_grid_keys(ui, snap, lay, u, out),
                     Panel::BeatLoop => draw_loop_panel(ui, ctx, snap, lay, u, out),
                     Panel::BeatJump => draw_jump_panel(ui, ctx, lay, u, out),
-                    Panel::None => {}
+                    Panel::Stems if snap.stems.state != StemsState::Off => draw_stems_panel(ui, ctx, snap, lay, u, out),
+                    Panel::Stems | Panel::None => {}
                 }
                 if let ScreenView::History(items, cursor) = view {
                     draw_info_block(ui, snap, lay, u, out);
@@ -381,7 +388,10 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
     draw_art(ui, ctx, snap.tags, "deck", lay.art);
 
     // Title, then length · BPM · key.
-    let clip = ui.painter().with_clip_rect(lay.title.union(lay.track_row));
+    let stems_on = snap.stems.state != StemsState::Off;
+    let mut title_area = lay.title.union(lay.track_row);
+    if stems_on { title_area.max.x = lay.stems_key.min.x - 8.0 * u; }
+    let clip = ui.painter().with_clip_rect(title_area);
     let t = lay.title;
     clip.text(Pos2::new(t.min.x, t.center().y), Align2::LEFT_CENTER, format!("♪ {}", snap.title), FontId::proportional(33.0 * u), TEXT);
     let row = lay.track_row;
@@ -418,6 +428,22 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
         p.rect_filled(bar, 0.0, KEY_EDGE);
         label(ui, Pos2::new(k.center().x, k.min.y + 33.0 * u), Align2::CENTER_CENTER, a, 21.0, u, TEXT);
         label(ui, Pos2::new(k.center().x, k.min.y + 57.0 * u), Align2::CENTER_CENTER, b, 21.0, u, TEXT);
+    }
+
+    // STEMS (MENU → STEMS on): opens the stems panel.  Grey while the
+    // track's stems load or when it has none; a blue underline while the
+    // mix is changed and the panel is closed.
+    if stems_on {
+        let k = lay.stems_key;
+        if tap(ui, k, "cdj-key-stems").0 {
+            set_panel(ctx, if open == Panel::Stems { Panel::None } else { Panel::Stems });
+        }
+        let ready = snap.stems.state == StemsState::Ready;
+        p.rect_filled(k, 0.0, if open == Panel::Stems { KEY_LIT } else { KEY_FACE });
+        let changed = ready && snap.stems.changed() && open != Panel::Stems;
+        let bar = Rect::from_center_size(Pos2::new(k.center().x, k.max.y - 3.0 * u), Vec2::new(if changed { 90.0 } else { 56.0 } * u, 3.0 * u));
+        p.rect_filled(bar, 0.0, if changed { KEY_LIT } else { KEY_EDGE });
+        label(ui, Pos2::new(k.center().x, k.min.y + 45.0 * u), Align2::CENTER_CENTER, "STEMS", 21.0, u, if ready { TEXT } else { DIM });
     }
 }
 
@@ -817,6 +843,70 @@ fn page_switch(ui: &Ui, ctx: &egui::Context, which: Panel, r: Rect, u: f32) {
 fn tap_pos(ui: &Ui, r: Rect, name: &str) -> Option<Pos2> {
     let resp = ui.interact(r, Id::new(name), egui::Sense::click());
     resp.clicked().then(|| resp.interact_pointer_pos()).flatten()
+}
+
+fn stems_volume_id() -> Id { Id::new("cdj3k-stems-volume") }
+
+/// STEMS: FULL MIX, the TOGGLE / VOLUME selector, then DRUMS, VOCAL and
+/// HARMONICS two slots wide each.  TOGGLE: a tap mutes a stem or brings it
+/// back (dark = muted).  VOLUME: each stem is a horizontal fader; a drag
+/// moves its level from where it is.  The selector goes back to TOGGLE
+/// only when every stem is fully on or off.  Everything is grey and inert
+/// until the track's stems are ready.
+fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
+    let ready = snap.stems.state == StemsState::Ready;
+    let mut volume: bool = ctx.data(|d| d.get_temp(stems_volume_id())).unwrap_or(false);
+    if !snap.stems.all_on_or_off() { volume = true; }
+    let text_c = if ready { TEXT } else { DIM };
+
+    // FULL MIX
+    let full = lay.panel[0];
+    if tap(ui, full, "cdj-stems-full").0 && ready { out.push(Event::Ui(UiEvent::StemsFullMix)); }
+    ui.painter().rect_filled(full, 0.0, PANEL_FACE);
+    outline(ui, full, DIM, u);
+    label(ui, Pos2::new(full.center().x, full.center().y - 12.0 * u), Align2::CENTER_CENTER, "FULL", 22.0, u, text_c);
+    label(ui, Pos2::new(full.center().x, full.center().y + 14.0 * u), Align2::CENTER_CENTER, "MIX", 22.0, u, text_c);
+
+    // TOGGLE / VOLUME: a tap anywhere flips it.
+    let sel = lay.panel[1];
+    if tap(ui, sel, "cdj-stems-mode").0 && ready && (!volume || snap.stems.all_on_or_off()) {
+        ctx.data_mut(|d| d.insert_temp(stems_volume_id(), !volume));
+    }
+    ui.painter().rect_filled(sel, 0.0, PANEL_FACE);
+    outline(ui, sel, DIM, u);
+    for (i, (name, on)) in [("TOGGLE", !volume), ("VOLUME", volume)].into_iter().enumerate() {
+        let half = Rect::from_min_max(Pos2::new(sel.min.x, sel.min.y + sel.height() * i as f32 / 2.0),
+                                      Pos2::new(sel.max.x, sel.min.y + sel.height() * (i + 1) as f32 / 2.0)).shrink(4.0 * u);
+        if on { ui.painter().rect_filled(half, 0.0, if ready { KEY_LIT } else { KEY_FACE }); }
+        label(ui, half.center(), Align2::CENTER_CENTER, name, 17.0, u, if on { TEXT } else { DIM });
+    }
+
+    // DRUMS / VOCAL / HARMONICS
+    for (i, name) in STEM_NAMES.iter().enumerate() {
+        let r = lay.panel[2 + 2 * i].union(lay.panel[3 + 2 * i]);
+        let g = snap.stems.gains[i];
+        if let Some(gain) = stem_touch(ui, r, &format!("cdj-stem{i}"), g, true, !volume, ready) {
+            // TOGGLE takes taps only; a drag there changes nothing.
+            if volume || gain == 0.0 || gain == 1.0 { out.push(Event::Ui(UiEvent::StemGain { stem: i, gain })); }
+        }
+        let p = ui.painter();
+        p.rect_filled(r, 0.0, PANEL_FACE);
+        if ready && g > 0.0 {
+            let fill = if volume { Rect::from_min_max(r.min, Pos2::new(r.min.x + r.width() * g, r.max.y)) } else { r };
+            p.rect_filled(fill.shrink(2.0 * u), 0.0, KEY_LIT);
+        }
+        outline(ui, r, if ready && g > 0.0 { KEY_LIT } else { DIM }, u);
+        let c = if !ready { DIM } else if g > 0.0 { TEXT } else { LABEL };
+        let lift = if volume || !ready { 10.0 } else { 0.0 };
+        label(ui, Pos2::new(r.center().x, r.center().y - lift * u), Align2::CENTER_CENTER, *name, 24.0, u, c);
+        let sub = match snap.stems.state {
+            StemsState::Ready if volume => format!("{:.0}%", g * 100.0),
+            StemsState::Ready => String::new(),
+            StemsState::Loading => "LOADING".into(),
+            _ => "NO STEMS".into(),
+        };
+        if !sub.is_empty() { label(ui, Pos2::new(r.center().x, r.center().y + 20.0 * u), Align2::CENTER_CENTER, sub, 17.0, u, c); }
+    }
 }
 
 /// BEAT LOOP: eight lengths per page; the running loop's key is lit, and
@@ -2017,5 +2107,57 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
     label(ui, Pos2::new(k.center().x, k.min.y + 15.0 * u), Align2::CENTER_CENTER, "KEY", 15.0, u, TEXT);
     if let Some(key) = snap.tags.key.as_deref() {
         label(ui, Pos2::new(k.center().x, k.min.y + 50.0 * u), Align2::CENTER_CENTER, key, 34.0, u, TEXT);
+    }
+}
+
+#[cfg(test)]
+mod stems_panel_tests {
+    use super::*;
+    use crate::snapshot::StemsView;
+    use egui::{Event as E, PointerButton, RawInput};
+
+    /// One frame of the header and, when open, the stems panel.
+    fn frame(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, events: Vec<E>) -> Vec<Event> {
+        let mut out = Vec::new();
+        let u = lay.screen.height() / ASPECT.y;
+        let _ = ctx.run(RawInput { events, screen_rect: Some(lay.screen), ..Default::default() }, |ctx| {
+            egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| {
+                draw_header(ui, ctx, snap, lay, u, &mut out);
+                if panel(ctx) == Panel::Stems { draw_stems_panel(ui, ctx, snap, lay, u, &mut out); }
+            });
+        });
+        out
+    }
+
+    fn click(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, at: Pos2) -> Vec<Event> {
+        let btn = |pressed| E::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        frame(ctx, snap, lay, vec![E::PointerMoved(at)]);
+        let mut out = frame(ctx, snap, lay, vec![btn(true)]);
+        out.extend(frame(ctx, snap, lay, vec![btn(false)]));
+        out.extend(frame(ctx, snap, lay, vec![]));
+        out
+    }
+
+    #[test]
+    fn the_stems_key_shows_only_with_the_setting_on() {
+        let tags = opendeck_decode::TrackTags::default();
+        let lay = layout(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0)), true);
+        let ctx = egui::Context::default();
+        let mut snap = DeckSnapshot::test(&tags);
+        // Off (the default): the key is not there; a tap on its spot opens nothing.
+        click(&ctx, &snap, &lay, lay.stems_key.center());
+        assert_eq!(panel(&ctx), Panel::None);
+        // On and ready: it opens the panel, and a tap on DRUMS mutes them.
+        snap.stems = StemsView { state: StemsState::Ready, gains: [1.0; 3] };
+        click(&ctx, &snap, &lay, lay.stems_key.center());
+        assert_eq!(panel(&ctx), Panel::Stems);
+        let drums = lay.panel[2].union(lay.panel[3]).center();
+        let out = click(&ctx, &snap, &lay, drums);
+        assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::StemGain { stem: 0, gain })] if *gain == 0.0), "{out:?}");
+        let out = click(&ctx, &snap, &lay, lay.panel[0].center());
+        assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::StemsFullMix)]), "{out:?}");
+        // While loading, the stems are inert.
+        snap.stems.state = StemsState::Loading;
+        assert!(click(&ctx, &snap, &lay, drums).is_empty());
     }
 }

@@ -9,14 +9,15 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, PerfLog }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, Stems, PerfLog }
 
-pub const MENU: [(Setting, &str); 6] = [
+pub const MENU: [(Setting, &str); 7] = [
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
+    (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
 ];
 
@@ -79,6 +80,11 @@ pub struct Settings {
     pub perf_log: bool,
     /// Which unit's screens to show.
     pub skin: Skin,
+    /// Play prepared stems (OverCue's open USB format) and show their
+    /// controls: a STEMS key and panel on the CDJ-3000 screen, a STEMS pad
+    /// mode in the XDJ's PERFORM screen.  Off by default, so both skins look
+    /// and behave as the stock units do.
+    pub stems: bool,
     /// Which player-number seeding this file has had (0 = written before
     /// 0.2.1, when every iOS device was seeded to 3).  Lets a later default
     /// re-seed a device once without touching a number the user chose.
@@ -94,7 +100,7 @@ const SEED: u8 = 1;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, perf_log: false, skin: Skin::Xdj1000Mk2, seed: 0, phone: false }
+        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, perf_log: false, skin: Skin::Xdj1000Mk2, stems: false, seed: 0, phone: false }
     }
 }
 
@@ -164,6 +170,7 @@ impl Settings {
             Setting::Player       => c.player = step(&[1u8, 2, 3, 4], c.player, dir),
             Setting::Skin if c.phone => {}
             Setting::Skin         => c.skin = step(&[Skin::Xdj1000Mk2, Skin::Cdj3000], c.skin, dir),
+            Setting::Stems        => c.stems = !c.stems,
             Setting::PerfLog      => c.perf_log = !c.perf_log,
         }
         c
@@ -178,6 +185,7 @@ impl Settings {
             Setting::Player       => format!("{}   (applies at next launch)", self.player),
             Setting::Skin if self.phone => format!("{}   (CDJ-3000: iPad only)", Skin::Xdj1000Mk2.label()),
             Setting::Skin         => self.skin.label().into(),
+            Setting::Stems        => if self.stems { "ON   (prepared stems)".into() } else { "OFF".into() },
             Setting::PerfLog      => if self.perf_log { "ON   (Documents/opendeck-perf.log)".into() } else { "OFF".into() },
         }
     }
@@ -191,6 +199,19 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stems_are_off_until_turned_on() {
+        let s = Settings::default();
+        assert!(!s.stems, "stock units have no stems: off by default");
+        assert!(MENU.iter().any(|(m, n)| *m == Setting::Stems && *n == "STEMS"));
+        let on = s.cycled(Setting::Stems, 1);
+        assert!(on.stems);
+        assert!(!on.cycled(Setting::Stems, -1).stems);
+        // A settings file from before the row existed reads as off.
+        let old: Settings = serde_json::from_str(r#"{"quantize":true}"#).unwrap();
+        assert!(!old.stems);
+    }
 
     #[test]
     fn skin_switch_names_toggles_and_persists() {

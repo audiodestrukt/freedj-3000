@@ -40,6 +40,10 @@ pub enum UiEvent {
     PerformMode(PerformMode),
     /// PERFORM: BANK — flip the pads between hot cues A–D and E–H.
     PerformBank,
+    /// Stems: set one stem's level (0 drums, 1 vocal, 2 harmonics; 0..1).
+    StemGain { stem: usize, gain: f32 },
+    /// Stems: FULL MIX — every stem back to full (the original plays).
+    StemsFullMix,
     /// PERFORM: DELETE –CALL — arm/disarm "the next pad tap deletes that hot cue".
     PerformDelete,
     /// TAG TRACK / REMOVE: in BROWSE, tag/untag the highlighted track; on the
@@ -97,7 +101,7 @@ pub enum Screen { Browse, TagList, Info, Menu, Perform, Source, History }
 
 /// PERFORM pad mode: the pads are hot cues, or beat jumps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PerformMode { HotCue, BeatJump }
+pub enum PerformMode { HotCue, BeatJump, Stems }
 
 /// Zoom levels for the enlarged waveform, in waveform columns across the
 /// field.  Index 2 is the default the display has always used.

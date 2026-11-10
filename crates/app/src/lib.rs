@@ -421,6 +421,7 @@ fn make_snapshot<'a>(
                                 .unwrap_or_else(|| path.file_name().and_then(|n| n.to_str()).unwrap_or("unknown")) },
         loading:       None,
         notice:        None,
+        stems:         snapshot::StemsView::default(),
         tags,
         file:          path.file_name().and_then(|n| n.to_str()).unwrap_or(""),
         position:      pos,
@@ -1316,6 +1317,10 @@ impl DeckApp {
                     log::info!("screen → {:?}", self.screen_mode);
                 }
             },
+            Event::Ui(UiEvent::StemGain { stem, gain }) => {
+                if self.settings.stems && stem < 3 { self.audio.stems.set_gain(stem, gain); }
+            }
+            Event::Ui(UiEvent::StemsFullMix) => self.audio.stems.full_mix(),
             Event::Ui(UiEvent::PerformMode(m)) => {
                 self.perform_mode   = m;
                 self.perform_delete = false;
@@ -1570,6 +1575,8 @@ impl DeckApp {
                         "menu" => ScreenMode::Menu,
                         "source" => ScreenMode::Source,
                         "history" => ScreenMode::History,
+                        "perform" => ScreenMode::Perform,
+                        "perform-stems" => { self.perform_mode = PerformMode::Stems; ScreenMode::Perform }
                         _ => ScreenMode::Playback,
                     };
                 }
@@ -1860,6 +1867,28 @@ impl DeckApp {
     fn cycle_setting(&mut self, s: settings::Setting) {
         self.settings.cycle(s, 1);
         cpumeter::set_file_log(self.settings.perf_log);
+        if s == settings::Setting::Stems {
+            // On: look for the loaded track's stems now.  Off: drop them,
+            // back to the plain track, and leave the STEMS pad mode.
+            if self.settings.stems {
+                let track = self.audio.current();
+                if !track.is_empty() { self.start_stems(&track, self.audio.channels as usize); }
+            } else {
+                self.stems_rx = None;
+                self.audio.stems.reset();
+                if self.perform_mode == input::PerformMode::Stems { self.perform_mode = input::PerformMode::HotCue; }
+            }
+        }
+    }
+
+    /// The stem controls' state for the snapshot.
+    fn stems_view(&self) -> snapshot::StemsView {
+        use snapshot::StemsState as S;
+        let state = if !self.settings.stems { S::Off }
+            else if self.audio.stems.ready_for(&self.audio.current()) { S::Ready }
+            else if self.stems_rx.is_some() { S::Loading }
+            else { S::None };
+        snapshot::StemsView { state, gains: self.audio.stems.gains() }
     }
 
     /// Let go of anything a finger was holding when the phone page flips.
@@ -1922,7 +1951,7 @@ impl DeckApp {
     /// `OPENDECK_STEMS=0` turns stems off.
     fn start_stems(&mut self, track: &Arc<Vec<f32>>, ch: usize) {
         self.stems_rx = None;
-        if std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") || !self.path.is_file() { return; }
+        if !self.settings.stems || std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") || !self.path.is_file() { return; }
         let (tx, rx) = mpsc::channel();
         let (path, track, sr) = (self.path.clone(), Arc::clone(track), self.audio.sample_rate);
         let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
@@ -2452,6 +2481,7 @@ impl DeckApp {
         }
         snap.loading = self.loading.as_deref();
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
+        snap.stems = self.stems_view();
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
         perf_accum("make_snapshot", _t_snap.elapsed());
 
@@ -2595,6 +2625,12 @@ impl DeckApp {
             self.apply(ev);
         }
         self.poll_fetch();
+        // The track given at launch never went through a LOAD: look for its
+        // stems once, on the first frame.
+        if self.frame_count == 1 && self.loading.is_none() {
+            let track = self.audio.current();
+            if !track.is_empty() { self.start_stems(&track, self.audio.channels as usize); }
+        }
         self.poll_stems();
         self.browser.poll_media();   // USB inserted / removed → source rows
         // Jog nudge snap-back: once the wheel has been still past the window,
@@ -2610,6 +2646,7 @@ impl DeckApp {
 
         let platform_output = std::mem::take(&mut output.platform_output);
         let slip_shadow = self.slip_shadow().map(|v| v as u64);
+        let stems_view = self.stems_view();
         let (renderer, host) = match (self.renderer.as_mut(), self.host.as_mut()) {
             (Some(r), Some(h)) => (r, h),
             _ => return,
@@ -2653,6 +2690,7 @@ impl DeckApp {
         }
         snap.loading = self.loading.as_deref();
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
+        snap.stems = stems_view;
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
 
         // Dev: OPENDECK_SCREENSHOT=path captures frame 90 (or

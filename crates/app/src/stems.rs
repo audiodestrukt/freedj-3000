@@ -59,7 +59,6 @@ impl StemControl {
     pub fn set_bank(&self, b: Option<Arc<StemBank>>) { self.bank.store(b); }
     pub fn bank(&self) -> Option<Arc<StemBank>> { self.bank.load_full() }
     /// Stems are ready for this track (the STEMS panel greys out until then).
-    #[allow(dead_code)] // the STEMS panel (phase 3)
     pub fn ready_for(&self, track: &Arc<Vec<f32>>) -> bool { self.bank.load().as_ref().is_some_and(|b| b.is_for(track)) }
     pub fn set_gain(&self, i: usize, g: f32) { self.gains[i].store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed); }
     pub fn gains(&self) -> [f32; 3] { std::array::from_fn(|i| f32::from_bits(self.gains[i].load(Ordering::Relaxed))) }

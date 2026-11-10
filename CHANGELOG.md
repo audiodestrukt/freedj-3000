@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Stems.** MENU → STEMS turns on playback of stems prepared with OverCue
+  Desktop (its open USB format: drums, vocal, harmonics). It's off by
+  default, so both skins look and behave like the stock units.
+  - **Loading:** a track loaded from a prepared stick finds its stems in
+    the background. Each load is checked against the stick's hashes and
+    lined up with the deck's own decode. Stems that don't match are
+    refused, and the original keeps playing.
+  - **CDJ-3000 skin:** a STEMS key beside BEAT LOOP opens a panel with
+    FULL MIX, TOGGLE / VOLUME, and the three stems. TOGGLE mutes a stem
+    with a tap; VOLUME turns each stem into a fader you drag.
+  - **XDJ skin:** PERFORM gets a STEMS pad mode. Tap a pad to mute or
+    unmute a stem, drag up or down to set its level; the fourth pad is
+    FULL MIX.
+  - **Playback:** stems are mixed before the time-stretcher, so they cost
+    almost no CPU. With every stem at full, the original track plays
+    untouched.
+
 - **CDJ-3000 phase meter.** The slot beside the Bars rows shows the
   master's player number in an orange badge and the phase meter: the
   master's beats on an orange line and this deck's on a blue one, red ticks

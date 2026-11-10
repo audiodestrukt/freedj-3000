@@ -12,7 +12,8 @@
 //! | `jogmode=cdj` / `jogmode=vinyl` | JOG MODE (not saved) |
 //! | `jog=<delta>x<frames>` | one jog delta per frame for that many frames |
 //! | `shiftsync` / `snapgrid` / `gridreset` | the GRID ADJUST actions |
-//! | `screen=browse` (`taglist`, `menu`, `source`, `history`, `playback`) | open that screen |
+//! | `screen=browse` (`taglist`, `menu`, `source`, `history`, `perform`, `perform-stems`, `playback`) | open that screen (`perform-stems`: PERFORM with the STEMS pads) |
+//! | `stems=<drums>,<vocal>,<harmonics>` | set the stem levels (0..1) |
 //! | `open=<row name>` | BROWSE: highlight the row with that name and enter it |
 //! | `select=<n>` | BROWSE: highlight row n |
 //! | `category=<n>` | BROWSE on rekordbox: open category n (0 = ARTIST) |
