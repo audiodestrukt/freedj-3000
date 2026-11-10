@@ -150,6 +150,8 @@ pub struct AudioHandle {
     /// from `position` so a seek can't be clobbered by the processor's own
     /// per-block progress store and lost.
     pub seek_request: Arc<AtomicU64>,
+    /// Paused jog scrub: what the processor reads toward (see `scrub_to`).
+    scrub:           ScrubShared,
     /// Real-time glitch counters (underruns / dropped frames).
     pub stats:       Arc<AudioStats>,
     pub sample_rate: u32,
@@ -168,8 +170,33 @@ impl AudioHandle {
     /// which parks while paused instead of polling — every PLAY path must
     /// come through here or the first block waits for the park timeout.
     pub fn set_playing(&self, on: bool) {
+        if on { self.end_scrub(); }
         self.playing.store(on, Ordering::Relaxed);
         if on { self.proc_thread.unpark(); }
+    }
+
+    /// Paused jog: let the listener hear the track under the moving
+    /// playhead. The processor reads from where the scrub began toward `to`
+    /// (interleaved samples), its pitch following the wheel's speed as a
+    /// record's does, and stops there once the wheel has been still for a
+    /// moment. `position` moves to `to` at once for the UI. `from` is where
+    /// the playhead was before this move (used when a scrub starts).
+    pub fn scrub_to(&self, from: u64, to: u64) {
+        if self.scrub.target.load(Ordering::Acquire) == NO_SEEK {
+            self.scrub.from.store(from, Ordering::Relaxed);
+        }
+        self.scrub.target.store(to, Ordering::Release);
+        self.scrub.seq.fetch_add(1, Ordering::Relaxed);
+        self.position.store(to, Ordering::Relaxed);
+        self.in_flight.store(0, Ordering::Relaxed);
+        self.proc_thread.unpark();
+    }
+
+    /// Hand a scrub over to the transport: PLAY (or a seek) starts from
+    /// where the scrub was heading.
+    fn end_scrub(&self) {
+        let t = self.scrub.target.swap(NO_SEEK, Ordering::AcqRel);
+        if t != NO_SEEK { self.seek_request.store(t, Ordering::Release); }
     }
 
     /// Move the playhead.  The processor acts on `seek_request`; `position`
@@ -180,6 +207,7 @@ impl AudioHandle {
     /// cursor — which is what made a released CUE sometimes stick on screen
     /// where the preview stopped instead of snapping back.
     pub fn seek(&self, pos: u64) {
+        self.scrub.target.store(NO_SEEK, Ordering::Release);
         self.seek_request.store(pos, Ordering::Release);
         self.position.store(pos, Ordering::Relaxed);
         self.in_flight.store(0, Ordering::Relaxed);
@@ -294,6 +322,10 @@ impl AudioHandle {
         let drain_flag = Arc::new(AtomicBool::new(false));
         let in_flight  = Arc::new(AtomicU64::new(0));
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
+        let scrub = ScrubShared {
+            target: Arc::new(AtomicU64::new(NO_SEEK)), from: Arc::new(AtomicU64::new(0)),
+            seq: Arc::new(AtomicU64::new(0)), live: Arc::new(AtomicBool::new(false)),
+        };
 
         // ── 4. Ring buffer ─────────────────────────────────────────────────────
         let ring_len = ring_samples(device_sr, device_ch);
@@ -317,6 +349,7 @@ impl AudioHandle {
         let proc_in_flight  = Arc::clone(&in_flight);
         let proc_seek       = Arc::clone(&seek_request);
         let proc_stats      = Arc::clone(&stats);
+        let proc_scrub      = scrub.clone();
 
         let processor = thread::Builder::new()
             .name("audio-proc".into())
@@ -331,6 +364,7 @@ impl AudioHandle {
                     proc_drain_flag,
                     proc_in_flight,
                     proc_seek,
+                    proc_scrub,
                     file_sr,
                     file_ch,
                     device_ch,
@@ -357,6 +391,7 @@ impl AudioHandle {
             config: stream_config, device_ch, device_sr,
             consumer: Arc::clone(&consumer), playing: Arc::clone(&playing), stats: Arc::clone(&stats),
             drain_flag: Arc::clone(&drain_flag), failed: Arc::clone(&failed),
+            scrub_live: Arc::clone(&scrub.live),
         };
         #[cfg(target_os = "linux")]
         let stream = {
@@ -409,6 +444,7 @@ impl AudioHandle {
             source_consumed,
             in_flight,
             seek_request,
+            scrub,
             stats,
             sample_rate: file_sr,
             channels: file_ch as u8,
@@ -435,6 +471,8 @@ struct StreamParts {
     stats:      Arc<AudioStats>,
     drain_flag: Arc<AtomicBool>,
     failed:     Arc<AtomicBool>,
+    /// A paused jog scrub is feeding the ring: play it, as if playing.
+    scrub_live: Arc<AtomicBool>,
 }
 
 /// Who holds the cpal stream: the supervisor thread (Linux) or the handle.
@@ -451,6 +489,7 @@ fn build_stream(device: &cpal::Device, p: &StreamParts) -> Result<cpal::Stream> 
     let consumer     = Arc::clone(&p.consumer);
     let drain_flag   = Arc::clone(&p.drain_flag);
     let failed       = Arc::clone(&p.failed);
+    let scrub_live   = Arc::clone(&p.scrub_live);
     let device_ch    = p.device_ch;
     // Stop fade: cutting to silence mid-waveform is a step, and a step is
     // the click heard on every CUE release / pause.  On stop the callback
@@ -472,7 +511,7 @@ fn build_stream(device: &cpal::Device, p: &StreamParts) -> Result<cpal::Stream> 
                 // Only ever contended for the instant a replacement stream
                 // takes over; silence is the right answer then.
                 let Ok(mut consumer) = consumer.try_lock() else { out.fill(0.0); return; };
-                if !cpal_playing.load(Ordering::Relaxed) {
+                if !cpal_playing.load(Ordering::Relaxed) && !scrub_live.load(Ordering::Relaxed) {
                     if gain > 0.0 {
                         // Fading out: ring audio × a falling gain, frame by
                         // frame.  A flush requested meanwhile waits until
@@ -657,6 +696,37 @@ mod loop_read_tests {
     }
 
     #[test]
+    fn scrub_reaches_the_wheel_and_stops_there() {
+        // A mono ramp: the sample value is its frame number, so the output
+        // shows where the cursor read.
+        use super::scrub_block;
+        let s: Vec<f32> = (0..48_000).map(|i| i as f32).collect();
+        let mut out: Vec<f32> = Vec::new();
+        let (mut cur, mut vel): (f64, f64) = (1000.0, 0.0);
+        // The wheel jumps 0.1 s ahead: the cursor heads there, forward only.
+        for _ in 0..200 {
+            let before = out.len();
+            (cur, vel) = scrub_block(&s, 1, cur, vel, 5800.0, 48_000, 128, &mut out);
+            assert!(out[before..].windows(2).all(|w| w[1] >= w[0] - 1e-3), "it never runs backwards on the way");
+        }
+        assert!((cur - 5800.0).abs() < 2.0, "arrived: {cur}");
+        assert!(vel.abs() < 0.05, "and stopped: {vel}");
+        assert_eq!(out.len(), 200 * 128);
+        // Heard audio, not a jump: the first block starts where the scrub began.
+        assert!((out[0] - 1000.0).abs() < 1.0);
+        // Never faster than 8× however far the wheel goes.
+        let mut out: Vec<f32> = Vec::new();
+        let (c, v) = scrub_block(&s, 1, 0.0, 0.0, 40_000.0, 48_000, 1024, &mut out);
+        assert!(v <= 8.0 + 1e-9 && c <= 8.0 * 1024.0);
+        // Stereo stays interleaved; reading clamps at the ends.
+        let st: Vec<f32> = (0..200).flat_map(|i| [i as f32, -(i as f32)]).collect();
+        let mut out: Vec<f32> = Vec::new();
+        let (c, _) = scrub_block(&st, 2, 10.0, 0.0, -50.0, 48_000, 64, &mut out);
+        assert!(c >= 0.0);
+        assert!(out.chunks(2).all(|f| (f[0] + f[1]).abs() < 1e-3));
+    }
+
+    #[test]
     fn a_loop_shorter_than_a_block_never_overreads_the_head() {
         // Loop [100, 120) (20 samples), want 50 from 110: tail 10, head capped
         // at the loop length (20) — never more than one loop of head.
@@ -668,6 +738,60 @@ mod loop_read_tests {
         assert_eq!(&b[..10], &ramp(1000)[110..120]);
         assert_eq!(&b[10..], &ramp(1000)[100..120]);
     }
+}
+
+/// Paused jog scrub, shared by the handle and the processor.
+#[derive(Clone)]
+struct ScrubShared {
+    /// Where the wheel has put the playhead (interleaved samples), or NO_SEEK.
+    target: Arc<AtomicU64>,
+    /// Where the playhead was when this scrub began.
+    from:   Arc<AtomicU64>,
+    /// Bumped on every wheel movement.
+    seq:    Arc<AtomicU64>,
+    /// The ring holds scrub audio: the callback plays while paused.
+    live:   Arc<AtomicBool>,
+}
+
+/// Frames rendered per scrub step, and how far ahead of the device the scrub
+/// stays: little, so the sound follows the hand, but more than a device
+/// period (PipeWire pulls ~1024 frames at a time; less starved the scrub).
+const SCRUB_BLOCK: usize = 128;
+const SCRUB_AHEAD_S: f64 = 0.050;
+/// How long the wheel must be still before the scrub lets go.
+const SCRUB_IDLE: Duration = Duration::from_millis(150);
+
+/// Render `n` frames of scrub audio from `samples` (`ch` interleaved),
+/// moving the read cursor `cur` (frames) toward `goal`, so a flick of the
+/// wheel plays as a short burst that slows into place, at most 8× either
+/// way. Linear
+/// interpolation between frames. Returns the new cursor and speed.
+#[allow(clippy::too_many_arguments)]
+fn scrub_block(samples: &[f32], ch: usize, mut cur: f64, mut vel: f64, goal: f64, sample_rate: u32,
+               n: usize, out: &mut Vec<f32>) -> (f64, f64) {
+    let frames = samples.len() / ch.max(1);
+    if frames < 2 { return (cur, 0.0); }
+    let last = (frames - 1) as f64;
+    // First order toward the goal (the gap closes with a 40 ms time
+    // constant, so it cannot overshoot and hover), with the speed allowed to
+    // change by at most full speed in 10 ms, so a flick ramps rather than
+    // clicks.
+    let lag = sample_rate as f64 * 0.040;
+    let accel = 8.0 / (sample_rate as f64 * 0.010);
+    for _ in 0..n {
+        let want = ((goal - cur) / lag).clamp(-8.0, 8.0);
+        vel += (want - vel).clamp(-accel, accel);
+        cur = (cur + vel).clamp(0.0, last);
+        let i = cur.floor() as usize;
+        let j = (i + 1).min(frames - 1);
+        let t = (cur - i as f64) as f32;
+        for c in 0..ch {
+            let a = samples[i * ch + c];
+            let b = samples[j * ch + c];
+            out.push(a + (b - a) * t);
+        }
+    }
+    (cur, vel)
 }
 
 /// The processor's view of the loop state (see `AudioHandle::loop_*`).
@@ -688,6 +812,7 @@ fn processor_loop(
     drain_flag: Arc<AtomicBool>,
     in_flight:  Arc<AtomicU64>,
     seek_request: Arc<AtomicU64>,
+    scrub:      ScrubShared,
     sample_rate: u32,
     file_ch:    usize,
     device_ch:  usize,
@@ -719,7 +844,65 @@ fn processor_loop(
     // Scratch for a source block that wraps the loop boundary (tail + head).
     let mut loop_buf: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch);
 
+    // Paused jog scrub: the read cursor (frames), its speed (frames per
+    // output frame), the last scrub request seen and when it came.
+    let mut scrub_cur: Option<f64> = None;
+    let mut scrub_vel = 0.0f64;
+    let mut scrub_seen = 0u64;
+    let mut scrub_moved = std::time::Instant::now();
+    let mut scrub_buf: Vec<f32> = Vec::with_capacity(SCRUB_BLOCK * file_ch);
+
     loop {
+        // ── Paused jog scrub ──────────────────────────────────────────────────
+        // Read straight from the track toward the wheel's position (no
+        // stretcher: the pitch follows the wheel, as on a record), a couple of
+        // blocks ahead of the device. Ends when the wheel has been still for
+        // SCRUB_IDLE and the cursor has arrived, or at once on PLAY / a seek.
+        let target = scrub.target.load(Ordering::Acquire);
+        if target != NO_SEEK && !playing.load(Ordering::Relaxed) && seek_request.load(Ordering::Acquire) == NO_SEEK {
+            let current = samples.load_full();
+            let frames = current.len() / file_ch.max(1);
+            if frames > 1 {
+                let cur = *scrub_cur.get_or_insert_with(|| {
+                    scrub.live.store(true, Ordering::Release);
+                    scrub_vel = 0.0;
+                    log::debug!("proc: scrub from {}", scrub.from.load(Ordering::Relaxed));
+                    (scrub.from.load(Ordering::Relaxed) / file_ch as u64) as f64
+                });
+                let seq = scrub.seq.load(Ordering::Relaxed);
+                if seq != scrub_seen { scrub_seen = seq; scrub_moved = std::time::Instant::now(); }
+                let goal = (target / file_ch as u64) as f64;
+                let queued = (ring_len - producer.slots()) / device_ch;
+                if queued as f64 >= SCRUB_AHEAD_S * sample_rate as f64 {
+                    thread::sleep(Duration::from_millis(1));
+                    continue;
+                }
+                scrub_buf.clear();
+                let (c, v) = scrub_block(&current, file_ch, cur, scrub_vel, goal, sample_rate, SCRUB_BLOCK, &mut scrub_buf);
+                scrub_cur = Some(c);
+                scrub_vel = v;
+                for f in scrub_buf.chunks(file_ch) {
+                    for d in 0..device_ch { let _ = producer.push(f[d.min(file_ch - 1)]); }
+                }
+                let arrived = (goal - c).abs() < 2.0 && v.abs() < 0.05;
+                if log::log_enabled!(log::Level::Trace) { log::trace!("proc: scrub gap {:.1} vel {v:.4} queued {queued} seq {seq}", goal - c); }
+                if !(arrived && scrub_moved.elapsed() > SCRUB_IDLE) { continue; }
+                // Still and there: park on the spot, ready for PLAY.
+                let _ = scrub.target.compare_exchange(target, NO_SEEK, Ordering::AcqRel, Ordering::Relaxed);
+            }
+        }
+        if let Some(c) = scrub_cur.take() {
+            // The scrub is over (arrived, PLAY, or a seek). PLAY and seeks
+            // bring their own seek_request; an arrival parks the processor
+            // where the wheel left the playhead.
+            scrub.live.store(false, Ordering::Release);
+            log::debug!("proc: scrub ends at frame {c:.0}");
+            if seek_request.load(Ordering::Acquire) == NO_SEEK {
+                let at = ((c.round().max(0.0)) as u64 * file_ch as u64).min(samples.load().len() as u64);
+                seek_request.store(at, Ordering::Release);
+            }
+        }
+
         // ── Pause handling ────────────────────────────────────────────────────
         // Park rather than poll: `AudioHandle::set_playing(true)` unparks us,
         // so PLAY/CUE still start within a block, and a paused deck costs no

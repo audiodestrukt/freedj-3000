@@ -12,6 +12,12 @@ All notable changes to this project will be documented in this file.
   Measured off the emulated unit; it draws the master's beats from the Link
   beat packets, where the emulator (following freedj) drew a bare line.
 
+- **Scrub audio.** Turning the jog while paused (or scratching in VINYL
+  mode) now plays the audio under the playhead, its pitch following the
+  wheel as a record's does, and stops 150 ms after the wheel does; PLAY
+  starts from where it left off. Read straight from the track (no
+  stretcher), at most 8× either way, about 50 ms ahead of the device.
+
 ### Changed
 - CDJ-3000 faceplate: a short MENU press opens LOAD PREVIOUS TRACK, as the
   manual says; UTILITY is the long press.

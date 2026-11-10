@@ -733,15 +733,20 @@ impl DeckApp {
                     self.audio.speed.store(spd.to_bits(), Ordering::Relaxed);
                     log::debug!("jog nudge {delta:+} → {spd:.3}×");
                 } else {
-                    // PAUSED, or VINYL while playing → the wheel scrubs the
-                    // playhead through the track (no scrub-audio yet — position
-                    // + waveform only; a playing deck keeps playing from wherever
-                    // the wheel leaves it).
+                    // PAUSED, or VINYL while playing (the platter holds the
+                    // transport) → the wheel scrubs the playhead through the
+                    // track, and you hear the audio under it, its pitch
+                    // following the wheel; a playing deck carries on from
+                    // wherever the wheel leaves it.
                     let sr_ch = self.audio.sample_rate as f64 * self.audio.channels as f64;
                     let step  = (sr_ch * crate::input::JOG_SECS_PER_TICK) as i64;
                     let cur   = self.audio.position.load(Ordering::Relaxed) as i64;
                     let new   = (cur + delta as i64 * step).clamp(0, self.audio.len() as i64) as u64;
-                    self.seek_to(new);
+                    if self.audio.playing.load(Ordering::Relaxed) {
+                        self.seek_to(new);
+                    } else {
+                        self.scrub_to(cur as u64, new);
+                    }
                     self.transport.searched();
                     log::debug!("jog vinyl {delta:+} → {:.2}s", new as f64 / sr_ch);
                 }
@@ -1457,6 +1462,20 @@ impl DeckApp {
             self.seek_to(target);
             log::info!("slip: back to {:.2}s", target as f64 / (self.audio.sample_rate as f64 * ch as f64));
         }
+    }
+
+    /// A paused jog move: as `seek_to`, but the audio scrubs to the spot
+    /// (audible, pitch following the wheel) instead of jumping there.
+    fn scrub_to(&mut self, from: u64, pos: u64) {
+        let pos = pos.min(self.audio.len() as u64);
+        if self.audio.loop_active.load(Ordering::Relaxed) {
+            let (s, e) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
+            if pos < s || pos >= e { self.exit_loop(); }
+        }
+        self.slip_anchor = None;
+        self.audio.scrub_to(from, pos);
+        self.smoothed_pos = pos as f64;
+        self.prev_pos     = pos;
     }
 
     fn seek_to(&mut self, pos: u64) {
