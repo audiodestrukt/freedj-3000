@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-11-09
+
+### Fixed
+- iPhone UTILITY: with the new SCREEN row the last setting ran into the
+  version footer; the rows now fit above it.
+
 ## [0.3.0] — 2026-11-09
 
 iOS release; carries everything since 0.2.9.
