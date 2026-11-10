@@ -1185,7 +1185,9 @@ fn draw_menu(ui: &Ui, settings: &Settings, cursor: usize, lay: &Layout, h: f32, 
     p.rect_filled(body, 0.0, BG);
 
     let pad   = h * 0.025;
-    let row_h = h * 0.062;
+    // Rows shrink to stay clear of the footer (the phone's band is short).
+    let footer = h * 0.030 + h * 0.022 + h * 0.012;
+    let row_h = (h * 0.062).min((body.height() - 2.0 * pad - footer) / MENU.len() as f32);
     for (i, (setting, label)) in MENU.iter().enumerate() {
         let y0  = body.min.y + pad + i as f32 * row_h;
         let row = Rect::from_min_max(Pos2::new(body.min.x + pad, y0), Pos2::new(body.max.x - pad, y0 + row_h - h * 0.006));
