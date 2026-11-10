@@ -760,10 +760,10 @@ fn fader_knob(p: &egui::Painter, ctx: &egui::Context, chrome: &mut ChromeCache, 
     );
 }
 
-/// Jog units sent per radian of turn, per point of platter radius: chosen so
-/// a turn moves the track about as far as a sideways drag of the same arc at
-/// half the radius did before.
-const JOG_UNITS_PER_RAD_R: f32 = 0.5;
+/// Jog units sent per radian of platter turn: a revolution moves the track
+/// 1.8 s (a record at 33⅓ rpm, which is also how fast the centre display's
+/// marker turns), at `JOG_SECS_PER_TICK` seconds a unit.
+const JOG_UNITS_PER_RAD: f32 = (60.0 / (100.0 / 3.0) / std::f64::consts::TAU / crate::input::JOG_SECS_PER_TICK) as f32;
 
 /// The platter turn (radians, clockwise on screen positive) between two
 /// finger positions about `center`, or None near the middle (inside 12 % of
@@ -842,7 +842,8 @@ pub(crate) fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, 
     {
         // The platter turns with the finger (its angle is kept below).
         let jog_angle: f32 = ctx.data(|d| d.get_temp(Id::new("fp-jog-angle"))).unwrap_or(0.0);
-        crate::chrome::paint_rotated(p, ctx, chrome, Sprite::Jog, f.jog, jog_angle);
+        crate::chrome::paint(p, ctx, chrome, Sprite::JogShadow, f.jog);   // the light is fixed
+        crate::chrome::paint_rotated(p, ctx, chrome, Sprite::JogPlatter, f.jog, jog_angle);
         let mut sprite = |what: Sprite, r: Rect| crate::chrome::paint(p, ctx, chrome, what, r);
         sprite(Sprite::Round(RoundKind::Silver, play_lamp), f.play);
         sprite(Sprite::Round(RoundKind::Silver, cue_lit.then_some(Lamp::Orange)), f.cue);
@@ -905,11 +906,12 @@ pub(crate) fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, 
                 let (ang_id, rem_id) = (Id::new("fp-jog-angle"), Id::new("fp-jog-rem"));
                 let ang: f32 = ctx.data(|d| d.get_temp(ang_id)).unwrap_or(0.0);
                 ctx.data_mut(|d| d.insert_temp(ang_id, (ang + turn) % std::f32::consts::TAU));
-                // Jog units: a turn of one radian is JOG_UNITS_PER_RAD, about
-                // what a sideways drag of that arc at mid radius used to send.
-                // Fractions carry over so slow turns are not lost.
+                // One turn of the platter is one turn of a record at 33⅓ rpm
+                // (1.8 s of track), so the centre display's marker and the
+                // platter turn together. Fractions carry over so slow turns
+                // are not lost.
                 let rem: f32 = ctx.data(|d| d.get_temp(rem_id)).unwrap_or(0.0);
-                let units = rem + turn * r * JOG_UNITS_PER_RAD_R;
+                let units = rem + turn * JOG_UNITS_PER_RAD;
                 let whole = units.trunc();
                 ctx.data_mut(|d| d.insert_temp(rem_id, units - whole));
                 let dt = ui.input(|i| i.stable_dt).max(1e-3);

@@ -276,6 +276,25 @@ pub fn render_jog(diam_px: usize) -> ColorImage {
     bake(w, w, scale, JOG_MARGIN * 0.9, &move |x, y| jog_field(x, y, scale))
 }
 
+/// The jog platter alone, no drop shadow: the part that turns.
+pub fn render_jog_platter(diam_px: usize) -> ColorImage {
+    let scale = diam_px as f32 * 0.5;
+    let w = (diam_px as f32 * (1.0 + 2.0 * JOG_MARGIN)).ceil() as usize;
+    bake(w, w, scale, 0.0, &move |x, y| jog_field(x, y, scale))
+}
+
+/// The jog's drop shadow alone (the same as `render_jog` casts): it stays
+/// put under the platter while the platter turns, the light being fixed.
+pub fn render_jog_shadow(diam_px: usize) -> ColorImage {
+    let scale = diam_px as f32 * 0.5;
+    let w = (diam_px as f32 * (1.0 + 2.0 * JOG_MARGIN)).ceil() as usize;
+    bake(w, w, scale, JOG_MARGIN * 0.9, &move |x, y| {
+        let mut s = jog_field(x, y, scale);
+        s.cover = 0.0;
+        s
+    })
+}
+
 // ── Round buttons ────────────────────────────────────────────────────────────
 
 /// Button look.  The silver transport buttons (CUE, PLAY/PAUSE), the small
@@ -481,6 +500,9 @@ pub fn render_fader_knob(h_px: usize) -> ColorImage {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Sprite {
     Jog,
+    /// The jog in two layers: the platter (turns) and its shadow (does not).
+    JogPlatter,
+    JogShadow,
     Round(RoundKind, /* lit */ Option<Lamp>),
     Square(/* lit */ bool),
     FaderKnob,
@@ -516,6 +538,8 @@ impl ChromeCache {
             let t = std::time::Instant::now();
             let img = match what {
                 Sprite::Jog => render_jog(px),
+                Sprite::JogPlatter => render_jog_platter(px),
+                Sprite::JogShadow => render_jog_shadow(px),
                 Sprite::Round(kind, lit) => render_round(px, kind, lit.map(Lamp::linear)),
                 Sprite::Square(lit) => render_square(px, LOOP_ASPECT, [1.0, 0.62, 0.10], lit),
                 Sprite::FaderKnob => render_fader_knob(px),
@@ -527,7 +551,7 @@ impl ChromeCache {
 
     /// The margin a sprite carries around the control, as a fraction of its size.
     pub fn margin(what: Sprite) -> f32 {
-        match what { Sprite::Jog => JOG_MARGIN, _ => BTN_MARGIN }
+        match what { Sprite::Jog | Sprite::JogPlatter | Sprite::JogShadow => JOG_MARGIN, _ => BTN_MARGIN }
     }
 }
 
@@ -559,6 +583,21 @@ pub fn paint_rotated(p: &egui::Painter, ctx: &egui::Context, cache: &mut ChromeC
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Platter + shadow layers make up the one-piece jog: the platter has no
+    /// shadow outside its rim, the shadow layer has nothing else.
+    #[test]
+    fn jog_layers_split_the_platter_from_its_shadow() {
+        let (full, plat, shad) = (render_jog(200), render_jog_platter(200), render_jog_shadow(200));
+        let w = full.size[0];
+        // Outside the platter, where the full sprite has only shadow: the
+        // shadow layer has it, the platter layer does not.
+        let shadow_only: Vec<usize> = (0..w * w).filter(|&i| plat.pixels[i].a() == 0 && full.pixels[i].a() > 0).collect();
+        assert!(!shadow_only.is_empty(), "the full jog casts a shadow beyond the platter");
+        assert!(shadow_only.iter().all(|&i| shad.pixels[i].a() == full.pixels[i].a()), "the shadow layer carries it");
+        let c = (w / 2) * w + w / 2;
+        assert_eq!(plat.pixels[c], full.pixels[c], "the platter is the same platter");
+    }
 
     #[test]
     fn jog_bakes_with_transparent_corners_and_opaque_centre() {

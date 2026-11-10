@@ -21,7 +21,11 @@ All notable changes to this project will be documented in this file.
 - **The jog turns.** The platter is drawn turning under the finger, and it
   follows a circular motion: the finger's angle about the centre moves it
   (clockwise = forward), wherever on the platter the finger is, as on a
-  real platter. A sideways swipe across it still works, as a turn.
+  real platter. A sideways swipe across it still works, as a turn. The
+  shadow under it stays put (the platter and its shadow are two layers
+  now), and one turn of the platter moves the track 1.8 s, a record's turn
+  at 33⅓ rpm, so the centre display's marker turns with the finger (it ran
+  about ten times faster on the iPad).
 
 ### Fixed
 - **Tempo fader dead spots at max and min.** The handle overhangs the slot
