@@ -4,7 +4,47 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-11-09
+
+iOS release; carries everything since 0.2.9.
+
 ### Added
+- **A CDJ-3000 screen beside the XDJ-1000MK2 one.** MENU → SCREEN switches
+  the deck's screens: playback with the CDJ's waveform look, BEAT LOOP / BEAT
+  JUMP panels, INFO, SOURCE, BROWSE with rekordbox categories and the track
+  table, TAG LIST, UTILITY, SEARCH with the on-screen keyboard, LOAD PREVIOUS
+  TRACK, and GRID ADJUST with SNAP / SHIFT GRID. Both screens drive the same
+  deck. The phone keeps the XDJ layout for now ("CDJ-3000: iPad only").
+- **The CDJ-3000 faceplate on the iPad** (and `--faceplate` on a computer):
+  every key the unit has, where the unit has it, measured off cdj3k-emu's
+  panel drawing. Hot cues under the screen (hold CALL / DELETE and press a
+  pad to delete one), 4 / 8 BEAT LOOP that halve and double a running loop,
+  BEAT JUMP, TRACK SEARCH, SEARCH that speeds up as you hold it, TIME MODE
+  (hold: AUTO CUE), TEMPO RANGE and TEMPO RESET, and MENU (hold: UTILITY).
+  Lamps follow the unit's: screen keys glow dimly and light on their screen,
+  IN / OUT blink in a loop, RELOOP lights once a loop is stored. On a
+  computer the screen keys and BACK sit either side of the screen.
+- **Checked against the emulated unit.** `tools/cdj_parity.py` drives
+  freedj and a cdj3k-emu slot through the same button presses
+  (`tools/cdj_parity/features.txt`) and compares screens and lamps; all 31
+  checks match (`docs/testing/cdj-3000-parity.md`). The dev script gained
+  `press=`, `hold=`, `release=`, `rotary=`, `lamps=` and `shot=` for it.
+
+### Changed
+- CDJ-3000 screen details from that comparison: QUANTIZE and BEAT JUMP
+  boxes, A.HOT CUE and AUTO CUE badges, no caption on elapsed time and a
+  count-up ruler, tempo-range badge colours (±6 green, ±10 orange, ±16 white,
+  WIDE red text with one decimal), hot-cue / memory / cue markers on both
+  waveforms, the played part of the address bar in white, and the Bars
+  countdown to the next memory point (red 00.0 on one).
+- CDJ-3000 skin: SYNC and MASTER with no other player show "No LINKED
+  Players found." and stay off, as the unit does; the SEARCH key closes
+  SEARCH and BACK leaves it open; TRACK SEARCH |◀◀ stops at the track's
+  start cue and wraps round the folder.
+- The CDJ session handshake (HID over LINK) is not compiled into the iOS
+  build.
+
+### Added (desktop, Pi and tools)
 - Linux release builds: `.github/workflows/linux.yml` publishes `OpenDeck-<version>-linux-{x86_64,aarch64}.tar.gz` on a `linux-v*` tag (vendored Rubber Band + Bungee, SDL backend included, glibc 2.36); `deploy/linux/package.sh` builds the tarball locally.
 - SDL backend on KMSDRM (no compositor): `OPENDECK_FULLSCREEN=1` picks the closest display mode and letterboxes 1:1. Pi Zero W: 49 fps playing with WSOLA, no underruns.
 - SDL backend: the enlarged waveform scrolls in whole pixels through two GPU render targets (shift by copy, upload only the new columns); `OPENDECK_WAVE_SCROLL=smooth` keeps the sub-pixel scroll. Pi Zero W: 17.9 fps playing / 26 fps idle.

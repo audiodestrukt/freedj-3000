@@ -1,9 +1,5 @@
-Tighter transport, smoother Link, and a draggable waveform.
+A second screen, and a whole new faceplate on iPad.
 
-CUE and PLAY act the instant your finger lands. Hold CUE to preview, hit PLAY with another finger to lock playback in, and release in either order. Pause, then press CUE, to set the cue where you stopped.
+MENU → SCREEN now offers a second player layout alongside the original: its own playback screen with BEAT LOOP and BEAT JUMP panels, SOURCE and BROWSE screens with category browsing and a track table, SEARCH with an on-screen keyboard, LOAD PREVIOUS TRACK, and GRID ADJUST.
 
-Drag the big waveform to move through the track, at any zoom.
-
-Link is steadier: the other deck's beat meter runs smoothly over Wi-Fi, a deck that vanishes is forgotten so MASTER can be taken again, and the app recovers its network after sitting in the background. INFO shows your Link address and the players heard.
-
-On iPhone, turning the BROWSE knob no longer opens Control Center, and the deck starts paused at the cue.
+On iPad it comes with its own full faceplate: eight hot cues under the screen (hold CALL/DELETE and tap a pad to delete one), 4 and 8 beat loops that halve and double a running loop, beat jump, track search, fast search, time mode, tempo range and reset, and keys that light the way the hardware's do.
