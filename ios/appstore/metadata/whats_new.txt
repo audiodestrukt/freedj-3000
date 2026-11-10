@@ -3,3 +3,5 @@ A second screen, and a whole new faceplate on iPad.
 MENU → SCREEN now offers a second player layout alongside the original: its own playback screen with BEAT LOOP and BEAT JUMP panels, SOURCE and BROWSE screens with category browsing and a track table, SEARCH with an on-screen keyboard, LOAD PREVIOUS TRACK, and GRID ADJUST.
 
 On iPad it comes with its own full faceplate: eight hot cues under the screen (hold CALL/DELETE and tap a pad to delete one), 4 and 8 beat loops that halve and double a running loop, beat jump, track search, fast search, time mode, tempo range and reset, and keys that light the way the hardware's do.
+
+Loading a track from another player over Pro DJ Link works again: BROWSE no longer drops to ALL TRACKS after a load.
