@@ -1771,12 +1771,22 @@ impl DeckApp {
         let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
         let title = title.to_string();
         let prep = self.prep();
+        // Ask on the browser's session when it is open to this player: a
+        // second session from our player number makes a CDJ drop the first,
+        // which left BROWSE on a dead session (only ALL TRACKS) and could
+        // cut a download short when BROWSE reconnected.
+        let known = self.browser.db_track_file(ip, slot, id);
         self.start_fetch(title.clone(), move || {
             let t0 = Instant::now();
-            let mut db = Client::discover(ip, device)?;
-            let path = db.file_path(slot, id)?
-                .ok_or_else(|| anyhow::anyhow!("LINK {ip}: no file path for track {id}"))?;
-            let beats = match db.beat_grid(slot, id) {
+            let (path, grid) = match known {
+                Some(r) => r?,
+                None => {
+                    let mut db = Client::discover(ip, device)?;
+                    (db.file_path(slot, id)?, db.beat_grid(slot, id))
+                }
+            };
+            let path = path.ok_or_else(|| anyhow::anyhow!("LINK {ip}: no file path for track {id}"))?;
+            let beats = match grid {
                 Ok(blob) => parse_beat_grid(&blob),
                 Err(e) => { log::info!("LINK {ip} beat grid {id}: {e:#}"); Vec::new() }
             };

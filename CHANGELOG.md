@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.2] — 2026-11-09
+
+### Fixed
+- **Loading a track from a linked player** broke BROWSE (only ALL TRACKS
+  left) and could fail the download. The LOAD opened a second dbserver
+  session from the same player number, and a CDJ drops the first one when
+  that happens (checked on the emulated CDJ-3000:
+  `examples/dbserver_two_sessions`). A LOAD now asks on BROWSE's own
+  session, and BROWSE reconnects once if its session has gone. freedj's own
+  server takes two sessions, which is why LINK loads between OpenDeck decks
+  never showed it.
+
 ## [0.3.1] — 2026-11-09
 
 ### Fixed

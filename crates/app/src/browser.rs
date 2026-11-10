@@ -38,6 +38,9 @@ fn is_audio(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// A linked track's file path (if the server has one) and its beat-grid blob.
+pub type DbTrackFile = (Option<String>, anyhow::Result<Vec<u8>>);
+
 /// Where a track to load lives.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Load {
@@ -472,12 +475,11 @@ impl Browser {
     /// descend, the rest are shown but inert.  A source without a root menu
     /// (older servers) falls back to PLAYLIST view with ALL TRACKS on top.
     fn db_root_entries(&mut self) -> Vec<Entry> {
-        let Some((_, c, slot)) = self.db.as_mut() else { return Vec::new() };
-        let slot = *slot;
-        let items = match c.root_menu(slot) {
-            Ok(items) if !items.is_empty() => items,
-            Ok(_) => { log::info!("LINK: empty category menu; showing playlists"); return self.db_folder_entries(0); }
-            Err(e) => { log::info!("LINK: no category menu ({e:#}); showing playlists"); return self.db_folder_entries(0); }
+        let items = match self.db_call(|c, slot| c.root_menu(slot)) {
+            None => return Vec::new(),
+            Some(Ok(items)) if !items.is_empty() => items,
+            Some(Ok(_)) => { log::info!("LINK: empty category menu; showing playlists"); return self.db_folder_entries(0); }
+            Some(Err(e)) => { log::info!("LINK: no category menu ({e:#}); showing playlists"); return self.db_folder_entries(0); }
         };
         items.into_iter().map(|i| {
             let kind = match i.type_name() {
@@ -493,9 +495,9 @@ impl Browser {
     }
 
     /// A list of names (artists, albums) that each open as a track list.
-    fn db_name_entries(&mut self, fetch: impl FnOnce(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>, loc: fn(u32) -> Loc) -> Vec<Entry> {
-        let Some((_, c, slot)) = self.db.as_mut() else { return Vec::new() };
-        match fetch(c, *slot) {
+    fn db_name_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>, loc: fn(u32) -> Loc) -> Vec<Entry> {
+        let Some(r) = self.db_call(fetch) else { return Vec::new() };
+        match r {
             Ok(items) => items.into_iter().map(|i| Entry {
                 name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(loc(i.id)),
             }).collect(),
@@ -506,14 +508,13 @@ impl Browser {
     /// A playlist folder of a dbserver library (0 = the tree's root, which for
     /// a source without a category menu also lists ALL TRACKS on top).
     fn db_folder_entries(&mut self, folder: u32) -> Vec<Entry> {
-        let Some((_, c, slot)) = self.db.as_mut() else { return Vec::new() };
-        let slot = *slot;
+        if self.db.is_none() { return Vec::new(); }
         let mut out = Vec::new();
         if folder == 0 && !matches!(self.stack.last(), Some(Loc::DbFolder(0))) {
             out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None, key: None, art: None,
                              kind: EntryKind::Descend(Loc::DbAllTracks) });
         }
-        match c.playlist(slot, folder, true) {
+        match self.db_call(|c, slot| c.playlist(slot, folder, true)).unwrap_or_else(|| Ok(Vec::new())) {
             Ok(items) => for i in items {
                 let is_folder = i.type_name() == "folder";
                 out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None, key: None, art: None,
@@ -525,10 +526,11 @@ impl Browser {
     }
 
     /// A track list: a playlist, a category's tracks, or the whole collection.
-    fn db_track_entries(&mut self, fetch: impl FnOnce(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>) -> Vec<Entry> {
-        let Some((ip, c, slot)) = self.db.as_mut() else { return Vec::new() };
+    fn db_track_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>) -> Vec<Entry> {
+        let Some(r) = self.db_call(fetch) else { return Vec::new() };
+        let Some((ip, _, slot)) = self.db.as_ref() else { return Vec::new() };
         let (ip, slot) = (*ip, *slot);
-        match fetch(c, slot) {
+        match r {
             Ok(items) => items.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
                 name: i.label.clone(), is_dir: false,
                 artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None, art: None,
@@ -536,6 +538,39 @@ impl Browser {
             }).collect(),
             Err(e) => { log::warn!("LINK tracks: {e:#}"); Vec::new() }
         }
+    }
+
+    /// Run a request on the open dbserver session. A player drops a session
+    /// when another opens from the same player number (seen on a CDJ-3000:
+    /// the first then reads EOF), so on an error reconnect once and retry.
+    /// `None` when no session is open.
+    fn db_call<T>(&mut self, mut f: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<T>) -> Option<anyhow::Result<T>> {
+        let (ip, c, slot) = self.db.as_mut()?;
+        let (ip, slot) = (*ip, *slot);
+        match f(c, slot) {
+            Ok(v) => Some(Ok(v)),
+            Err(e) => {
+                log::info!("LINK {ip}: request failed ({e:#}); reconnecting");
+                self.db = None;
+                if let Err(e) = self.connect_db(ip, slot) { return Some(Err(e)); }
+                let (_, c, slot) = self.db.as_mut()?;
+                Some(f(c, *slot))
+            }
+        }
+    }
+
+    /// For a LOAD from a linked player: the track's file path and beat-grid
+    /// blob, asked on the browser's own session when it is open to that
+    /// player and slot. Opening a second session would cost the browser its
+    /// own (see `db_call`). `None` when no such session is open.
+    pub fn db_track_file(&mut self, ip: Ipv4Addr, slot: Slot, id: u32) -> Option<anyhow::Result<DbTrackFile>> {
+        if !matches!(&self.db, Some((cur, _, s)) if *cur == ip && *s == slot) { return None; }
+        let path = match self.db_call(|c, s| c.file_path(s, id))? {
+            Ok(p) => p,
+            Err(e) => return Some(Err(e)),
+        };
+        let grid = self.db_call(|c, s| c.beat_grid(s, id)).unwrap_or_else(|| Err(anyhow::anyhow!("session closed")));
+        Some(Ok((path, grid)))
     }
 
     /// Open a dbserver session to a peer (a player's USB slot, or rekordbox's
