@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- **CDJ-3000 skin: MENU opens UTILITY on a tap** (the settings, STEMS
+  included). LOAD PREVIOUS TRACK moved to the hold. The unit has it the
+  other way round, but on a touchscreen the settings must be one tap away.
+  The floating "— UTILITY" caption above the key is gone.
+
 ### Added
 - **USB drives on iOS and Android.** A rekordbox stick (or any drive)
   plugged into an iPhone, iPad or Android device now browses like it does on

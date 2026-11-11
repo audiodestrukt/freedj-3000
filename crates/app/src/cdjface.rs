@@ -41,8 +41,8 @@ pub const DECK_ASPECT: Vec2 = Vec2::new(1255.0, 1721.0);
 pub const SIDE_ASPECT: Vec2 = Vec2::new(1280.0 + 2.0 * SIDE_W, 720.0);
 const SIDE_W: f32 = 170.0;
 
-/// How long a press must last to count as a long press (MENU → UTILITY,
-/// TIME MODE → AUTO CUE).
+/// How long a press must last to count as a long press (MENU → LOAD
+/// PREVIOUS TRACK, TIME MODE → AUTO CUE).
 const LONG_PRESS_S: f64 = 1.0;
 /// Small round keys take touches within at least this radius (reference
 /// px), so a fingertip finds them on the iPad.
@@ -193,10 +193,11 @@ impl Key {
             Key::Browse => ui(UiEvent::Screen(TopScreen::Browse)),
             Key::TagList => ui(UiEvent::Screen(TopScreen::TagList)),
             Key::Search => ui(UiEvent::Search(SearchEdit::Open)),
-            // A short press opens LOAD PREVIOUS TRACK (the manual, p.24; it
-            // shows nothing on the emulator until a track has been played
-            // before); UTILITY is the long press.
-            Key::Menu => ui(UiEvent::Screen(TopScreen::History)),
+            // A tap opens UTILITY (the deck's settings, STEMS among them).
+            // The unit has it the other way round (tap: LOAD PREVIOUS TRACK,
+            // the manual p.24; hold: UTILITY), but on a touchscreen the
+            // settings must be one tap away; LOAD PREVIOUS TRACK is the hold.
+            Key::Menu => ui(UiEvent::Screen(TopScreen::Menu)),
             Key::Back => deck(ControlEvent::Back),
             Key::TagTrack => ui(UiEvent::TagTrack),
             Key::TimeMode => ui(UiEvent::TimeMode),
@@ -231,7 +232,7 @@ impl Key {
     /// What a long press sends instead of the tap, if the key has one.
     pub fn long(self) -> Option<Event> {
         match self {
-            Key::Menu => Some(Event::Ui(UiEvent::Screen(TopScreen::Menu))),
+            Key::Menu => Some(Event::Ui(UiEvent::Screen(TopScreen::History))),
             Key::TimeMode => Some(Event::Ui(UiEvent::AutoCue)),
             _ => None,
         }
@@ -412,7 +413,6 @@ pub fn deck_layout(base: Rect) -> (Rect, CdjFace) {
     let c = |x: f32, y: f32, a: Align2, s: &'static str| (at(x, y), a, s);
     let mid = Align2::CENTER_CENTER;
     let captions = vec![
-        c(1021.0, 57.0, Align2::RIGHT_CENTER, "— UTILITY"),
         c(52.0, 440.0, mid, "TIME"), c(52.0, 454.0, mid, "MODE"),
         c(140.0, 440.0, mid, "AUTO"), c(140.0, 454.0, mid, "CUE"),
         c(30.0, 601.0, Align2::LEFT_CENTER, "• CALL / DELETE"),
@@ -760,8 +760,8 @@ mod tests {
         assert_eq!(beats(Key::Loop8.tap(Some(4.0))), 8.0);
         assert_eq!(beats(Key::Loop8.tap(Some(16.0))), 32.0);
         assert_eq!(beats(Key::Loop4.tap(Some(0.0))), 4.0);   // a manual loop of unknown length
-        assert!(matches!(Key::Menu.long(), Some(Event::Ui(UiEvent::Screen(TopScreen::Menu)))));
-        assert!(matches!(Key::Menu.tap(None), Some(Event::Ui(UiEvent::Screen(TopScreen::History)))));
+        assert!(matches!(Key::Menu.long(), Some(Event::Ui(UiEvent::Screen(TopScreen::History)))));
+        assert!(matches!(Key::Menu.tap(None), Some(Event::Ui(UiEvent::Screen(TopScreen::Menu)))));
         assert!(matches!(Key::TimeMode.long(), Some(Event::Ui(UiEvent::AutoCue))));
         assert!(matches!(Key::Quantize.tap(None), Some(Event::Ui(UiEvent::CycleSetting(Setting::Quantize)))));
         for k in [Key::Playlist, Key::TrackFilter, Key::Shortcut, Key::KeySync] { assert!(k.tap(None).is_none()); }
@@ -841,7 +841,7 @@ mod tests {
             out
         };
         let out = click(Key::Menu);
-        assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::Screen(TopScreen::History))]), "{out:?}");
+        assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::Screen(TopScreen::Menu))]), "{out:?}");
         let out = click(Key::Back);
         assert!(matches!(out.as_slice(), [Event::Deck(ControlEvent::Back)]), "{out:?}");
     }
