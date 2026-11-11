@@ -220,3 +220,14 @@ phone core), so if the device still warms while `cpu:` stays low the load is
 the GPU and the display: the waveform shader redraws the whole LCD at the
 panel rate for as long as audio runs. That is the next thing to cut
 (render the static overview once per track, pace ProMotion iPads at 60).
+
+## USB drives (rekordbox sticks)
+
+iOS gives an app no access to a plugged-in drive until the user picks it.
+BROWSE → **USB: ADD DRIVE…** (or that row on the CDJ-3000 SOURCE screen)
+opens the system folder picker: choose the drive itself (under Locations),
+not a folder inside it, so `PIONEER/rekordbox/export.pdb` is at its root.
+`ios/freedj/main.m` holds access for the session and saves a bookmark
+(Application Support/opendeck/usb-bookmarks.plist, up to 8 drives), so the
+drive is listed again whenever it is plugged in, without asking. USB-C
+devices take the stick directly; Lightning needs the camera adapter.

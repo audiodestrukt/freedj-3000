@@ -193,3 +193,34 @@ fn system_property(name: &str) -> String {
     if n <= 0 { return String::new(); }
     unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
 }
+
+/// Whether the app may read USB drives under /storage.  Android 11+ needs
+/// "All files access" (MANAGE_EXTERNAL_STORAGE) for anything that is not a
+/// media file — export.pdb and the ANLZ files are not.  Before 11 the
+/// storage permission asked for at launch covers it.
+pub(crate) fn all_files_access() -> bool {
+    let Some(app) = APP.get() else { return false };
+    if app.config().sdk_version() < 30 { return true; }
+    with_activity(app, |env, _| {
+        Ok(env.call_static_method("android/os/Environment", "isExternalStorageManager", "()Z", &[])?.z()?)
+    }).unwrap_or(false)
+}
+
+/// Open this app's "All files access" page in Settings; the user flips the
+/// switch and comes back, and the next media scan lists the drive.
+pub(crate) fn request_all_files_access() {
+    let Some(app) = APP.get() else { return };
+    let r = with_activity(app, |env, act| {
+        let action = env.new_string("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION")?;
+        let pkg = env.call_method(act, "getPackageName", "()Ljava/lang/String;", &[])?.l()?;
+        let pkg: String = env.get_string(&pkg.into())?.into();
+        let uri_s = env.new_string(format!("package:{pkg}"))?;
+        let uri = env.call_static_method("android/net/Uri", "parse", "(Ljava/lang/String;)Landroid/net/Uri;",
+                                         &[JValue::Object(&uri_s)])?.l()?;
+        let intent = env.new_object("android/content/Intent", "(Ljava/lang/String;Landroid/net/Uri;)V",
+                                    &[JValue::Object(&action), JValue::Object(&uri)])?;
+        env.call_method(act, "startActivity", "(Landroid/content/Intent;)V", &[JValue::Object(&intent)])?;
+        Ok(())
+    });
+    if let Err(e) = r { log::warn!("all files access settings: {e}"); }
+}

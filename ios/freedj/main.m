@@ -29,6 +29,167 @@ bool freedj_is_phone(void) {
     return [UIDevice currentDevice].userInterfaceIdiom == UIUserInterfaceIdiomPhone;
 }
 
+// ── USB drives (rekordbox sticks) ────────────────────────────────────────────
+//
+// iOS shows a plugged-in drive in the Files app but gives no app access to it
+// until the user picks it in the folder picker.  The pick hands back a
+// security-scoped URL; we hold access to it for the life of the process and
+// keep a bookmark (Application Support/opendeck/usb-bookmarks.plist) so the
+// same drive opens again without asking, whenever it is plugged in.
+//
+// Rust (crates/app/src/media.rs) calls freedj_usb_pick from the browser's
+// "USB: ADD DRIVE…" row and freedj_usb_paths from its once-a-second media
+// scan.  Resolving a bookmark for an absent drive can block, so that runs on a
+// background queue and freedj_usb_paths only reads the cached answer.
+
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
+
+@interface FreedjUsbPicker : NSObject <UIDocumentPickerDelegate>
+@end
+
+static FreedjUsbPicker *gUsbPicker;
+static NSMutableDictionary<NSString *, NSURL *> *gUsbActive;   // path → URL we hold access to
+static NSString *gUsbPaths = @"";
+static dispatch_queue_t gUsbQueue;
+static CFAbsoluteTime gUsbLastRefresh;
+static const NSUInteger kUsbMaxBookmarks = 8;
+
+static void freedj_usb_init(void) {
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        gUsbActive = [NSMutableDictionary dictionary];
+        gUsbQueue = dispatch_queue_create("opendeck.usb", DISPATCH_QUEUE_SERIAL);
+    });
+}
+
+static NSURL *freedj_usb_store(void) {
+    NSURL *dir = [[[NSFileManager defaultManager] URLsForDirectory:NSApplicationSupportDirectory
+                                                         inDomains:NSUserDomainMask].firstObject
+                  URLByAppendingPathComponent:@"opendeck" isDirectory:YES];
+    [[NSFileManager defaultManager] createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    return [dir URLByAppendingPathComponent:@"usb-bookmarks.plist"];
+}
+
+static NSMutableArray<NSData *> *freedj_usb_load(void) {
+    NSArray *a = [NSArray arrayWithContentsOfURL:freedj_usb_store()];
+    NSMutableArray<NSData *> *out = [NSMutableArray array];
+    for (id d in a) if ([d isKindOfClass:[NSData class]]) [out addObject:d];
+    return out;
+}
+
+static void freedj_usb_save(NSArray<NSData *> *bookmarks) {
+    [bookmarks writeToURL:freedj_usb_store() atomically:YES];
+}
+
+static void freedj_usb_publish(void) {
+    @synchronized (gUsbActive) {
+        gUsbPaths = [[gUsbActive.allKeys sortedArrayUsingSelector:@selector(compare:)] componentsJoinedByString:@"\n"];
+    }
+}
+
+// Background queue: drop drives that went away, open bookmarked ones that
+// came back, refresh stale bookmarks.
+static void freedj_usb_refresh(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    @synchronized (gUsbActive) {
+        for (NSString *p in gUsbActive.allKeys) {
+            if (![fm fileExistsAtPath:p]) {
+                [gUsbActive[p] stopAccessingSecurityScopedResource];
+                [gUsbActive removeObjectForKey:p];
+            }
+        }
+    }
+    NSMutableArray<NSData *> *bookmarks = freedj_usb_load();
+    BOOL changed = NO;
+    for (NSUInteger i = 0; i < bookmarks.count; i++) {
+        BOOL stale = NO;
+        NSURL *url = [NSURL URLByResolvingBookmarkData:bookmarks[i] options:0 relativeToURL:nil
+                                   bookmarkDataIsStale:&stale error:nil];
+        if (!url) continue;   // drive not plugged in
+        NSString *p = url.path;
+        @synchronized (gUsbActive) { if (gUsbActive[p]) continue; }
+        if (![url startAccessingSecurityScopedResource]) continue;
+        if (![fm fileExistsAtPath:p]) { [url stopAccessingSecurityScopedResource]; continue; }
+        @synchronized (gUsbActive) { gUsbActive[p] = url; }
+        if (stale) {
+            NSData *fresh = [url bookmarkDataWithOptions:0 includingResourceValuesForKeys:nil relativeToURL:nil error:nil];
+            if (fresh) { bookmarks[i] = fresh; changed = YES; }
+        }
+    }
+    if (changed) freedj_usb_save(bookmarks);
+    freedj_usb_publish();
+}
+
+@implementation FreedjUsbPicker
+- (void)documentPicker:(UIDocumentPickerViewController *)controller didPickDocumentsAtURLs:(NSArray<NSURL *> *)urls {
+    NSURL *url = urls.firstObject;
+    if (!url || ![url startAccessingSecurityScopedResource]) return;
+    NSData *bm = [url bookmarkDataWithOptions:0 includingResourceValuesForKeys:nil relativeToURL:nil error:nil];
+    NSString *path = url.path;
+    @synchronized (gUsbActive) { gUsbActive[path] = url; }
+    freedj_usb_publish();
+    if (!bm) return;
+    dispatch_async(gUsbQueue, ^{
+        // One bookmark per drive: replace any that resolves to the same path.
+        NSMutableArray<NSData *> *bookmarks = freedj_usb_load();
+        NSMutableArray<NSData *> *keep = [NSMutableArray arrayWithObject:bm];
+        for (NSData *d in bookmarks) {
+            BOOL stale = NO;
+            NSURL *u = [NSURL URLByResolvingBookmarkData:d options:NSURLBookmarkResolutionWithoutUI
+                                           relativeToURL:nil bookmarkDataIsStale:&stale error:nil];
+            if (u && [u.path isEqualToString:path]) continue;
+            if (keep.count < kUsbMaxBookmarks) [keep addObject:d];
+        }
+        freedj_usb_save(keep);
+    });
+}
+- (void)documentPickerWasCancelled:(UIDocumentPickerViewController *)controller {}
+@end
+
+static UIViewController *freedj_top_controller(void) {
+    UIWindow *key = nil;
+    for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
+        if (![scene isKindOfClass:[UIWindowScene class]]) continue;
+        for (UIWindow *w in ((UIWindowScene *)scene).windows) {
+            if (w.isKeyWindow) { key = w; break; }
+            if (!key) key = w;
+        }
+    }
+    UIViewController *vc = key.rootViewController;
+    while (vc.presentedViewController) vc = vc.presentedViewController;
+    return vc;
+}
+
+void freedj_usb_pick(void) {
+    freedj_usb_init();
+    dispatch_async(dispatch_get_main_queue(), ^{
+        UIViewController *top = freedj_top_controller();
+        if (!top) return;
+        if (!gUsbPicker) gUsbPicker = [FreedjUsbPicker new];
+        UIDocumentPickerViewController *picker =
+            [[UIDocumentPickerViewController alloc] initForOpeningContentTypes:@[UTTypeFolder]];
+        picker.delegate = gUsbPicker;
+        picker.allowsMultipleSelection = NO;
+        picker.directoryURL = nil;
+        [top presentViewController:picker animated:YES completion:nil];
+    });
+}
+
+size_t freedj_usb_paths(char *buf, size_t cap) {
+    freedj_usb_init();
+    CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+    if (now - gUsbLastRefresh > 3.0) {
+        gUsbLastRefresh = now;
+        dispatch_async(gUsbQueue, ^{ freedj_usb_refresh(); });
+    }
+    NSString *paths;
+    @synchronized (gUsbActive) { paths = gUsbPaths; }
+    const char *utf8 = paths.UTF8String;
+    size_t n = strlen(utf8);
+    if (buf && cap) memcpy(buf, utf8, n < cap ? n : cap);
+    return n;
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
         freedj_ios_main();

@@ -17,7 +17,7 @@ use crate::prodj::LinkState;
 use opendeck_dbserver::{Client as DbClient, MenuItem, Slot};
 use opendeck_nfs::Nfs;
 use opendeck_rekordbox::{read_export, read_export_from, RbExport};
-use crate::media::{self, Mount};
+use crate::media::{self, Access, Mount};
 use std::time::{Duration, Instant};
 
 // What the decoder actually plays (symphonia: no Opus decoder exists).
@@ -89,6 +89,9 @@ enum EntryKind {
     /// A category the source offers that this browser cannot walk yet
     /// (BPM, KEY, SEARCH, …): shown, but LOAD does nothing.
     Unsupported,
+    /// A drive the OS must open up first, or iOS's ADD DRIVE: asks the OS
+    /// (`media::request_access`) and stays put.
+    Grant,
 }
 
 #[derive(Clone)]
@@ -394,9 +397,16 @@ impl Browser {
             // "USB: CDJ1" (the volume label), marked when it is a rekordbox stick.
             for m in &self.media {
                 if m.path == *dir { continue; }   // already browsing it as the root
-                let name = if m.rekordbox { format!("USB: {}   rekordbox", m.label) } else { format!("USB: {}", m.label) };
-                out.push(Entry { name, is_dir: true, artist: None, bpm: None, key: None, art: None,
-                    kind: EntryKind::Descend(Loc::Fs(m.path.clone())) });
+                let (name, kind) = match m.access {
+                    Access::NeedsGrant => (format!("USB: {}   ALLOW ACCESS", m.label), EntryKind::Grant),
+                    Access::Ready if m.rekordbox => (format!("USB: {}   rekordbox", m.label), EntryKind::Descend(Loc::Fs(m.path.clone()))),
+                    Access::Ready => (format!("USB: {}", m.label), EntryKind::Descend(Loc::Fs(m.path.clone()))),
+                };
+                out.push(Entry { name, is_dir: true, artist: None, bpm: None, key: None, art: None, kind });
+            }
+            if let Some(add) = media::ADD_DRIVE {
+                out.push(Entry { name: format!("USB: {add}"), is_dir: true, artist: None, bpm: None, key: None, art: None,
+                    kind: EntryKind::Grant });
             }
         }
         // A rekordbox export at this folder (the local root, or a stick entered
@@ -807,6 +817,7 @@ impl Browser {
         let (sel_name, kind) = (sel.name.clone(), sel.kind.clone());
         match kind {
             EntryKind::Unsupported => { log::info!("BROWSE: {:?} is not browsable here yet", sel_name); Enter::Nothing }
+            EntryKind::Grant => { media::request_access(); Enter::Nothing }
             EntryKind::Descend(loc) => {
                 if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_)) { self.db_title = sel_name.clone(); }
                 self.stack.push(loc);
@@ -859,11 +870,16 @@ impl Browser {
             kind: SourceKind::Local, label: name, player: None,
             path: Some(self.home.clone()), ip: None, rekordbox: media::has_rekordbox(&self.home),
         }];
+        // A row with no path asks the OS for access when opened.
         for m in &self.media {
-            out.push(SourceRow {
-                kind: SourceKind::Usb, label: format!("USB: {}", m.label), player: None,
-                path: Some(m.path.clone()), ip: None, rekordbox: m.rekordbox,
-            });
+            let (label, path) = match m.access {
+                Access::Ready      => (format!("USB: {}", m.label), Some(m.path.clone())),
+                Access::NeedsGrant => (format!("USB: {} (ALLOW ACCESS)", m.label), None),
+            };
+            out.push(SourceRow { kind: SourceKind::Usb, label, player: None, path, ip: None, rekordbox: m.rekordbox });
+        }
+        if let Some(add) = media::ADD_DRIVE {
+            out.push(SourceRow { kind: SourceKind::Usb, label: format!("USB: {add}"), player: None, path: None, ip: None, rekordbox: false });
         }
         for e in self.link_entries() {
             let (ip, rekordbox) = match e.kind {
@@ -890,6 +906,7 @@ impl Browser {
     pub fn open_source(&mut self, i: usize) -> bool {
         let rows = self.sources();
         let Some(row) = rows.get(i) else { return false };
+        if row.kind == SourceKind::Usb && row.path.is_none() { media::request_access(); return false; }
         self.stack = vec![Loc::Fs(self.home.clone())];
         self.selected = 0;
         match row.kind {
@@ -943,7 +960,8 @@ impl Browser {
     /// rekordbox tree is the first row), else back to the local root folder.
     pub fn go_root(&mut self) {
         self.stack.truncate(1);
-        if let [m] = self.media.as_slice() {
+        let ready: Vec<&Mount> = self.media.iter().filter(|m| m.access == Access::Ready).collect();
+        if let [m] = ready.as_slice() {
             if !matches!(self.stack.first(), Some(Loc::Fs(r)) if *r == m.path) {
                 self.stack.push(Loc::Fs(m.path.clone()));
             }
@@ -1031,6 +1049,34 @@ mod tests {
     // the root.  The "stick" is the rekordcrate demo export copied under a
     // fake media root that OPENDECK_MEDIA_DIRS points at (process-wide env:
     // this is the only test that sets it).
+    // A drive the OS has not opened up yet (Android before "All files
+    // access") is a row that asks for access, in the browser and on SOURCE,
+    // and never browses into the unreadable folder.
+    #[test]
+    fn a_drive_needing_access_asks_for_it_instead_of_opening() {
+        let link = crate::prodj::LinkState::new(1);
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-grant");
+        let mut b = Browser::new(home.path(), link);
+        b.media = vec![Mount { path: PathBuf::from("/storage/1A2B-3C4D"), label: "1A2B-3C4D".into(),
+                               rekordbox: false, access: Access::NeedsGrant }];
+        b.media_at = Some(Instant::now());   // keep poll_media from rescanning
+        b.rebuild();
+        let i = b.entries().iter().position(|e| e.name == "USB: 1A2B-3C4D   ALLOW ACCESS").expect("grant row");
+        let before = crate::media::REQUESTS.load(std::sync::atomic::Ordering::Relaxed);
+        b.selected = i;
+        assert!(matches!(b.enter(), Enter::Nothing));
+        assert_eq!(b.stack.len(), 1, "stayed at the top");
+        assert!(crate::media::REQUESTS.load(std::sync::atomic::Ordering::Relaxed) > before, "asked the OS");
+
+        let rows = b.sources();
+        let r = rows.iter().position(|r| r.kind == SourceKind::Usb).expect("SOURCE row");
+        assert!(rows[r].path.is_none() && rows[r].label.contains("ALLOW ACCESS"));
+        assert!(!b.open_source(r), "opening it asks, does not browse");
+        // USB key with only a locked drive stays on the local root.
+        b.go_root();
+        assert_eq!(b.stack.len(), 1);
+    }
+
     #[test]
     fn usb_stick_is_detected_entered_and_survives_removal() {
         let _env = MEDIA_ENV.lock().unwrap_or_else(|e| e.into_inner());

@@ -258,7 +258,9 @@ x86_64-linux-android`. Release builds are signed with
 `ANDROID_KEYSTORE_PASSWORD` secrets); never replace that key, or installed
 copies stop accepting updates. Dev switches that are env vars on the desktop
 go in a system property: `adb shell setprop debug.opendeck.env "OPENDECK_IDLE_FPS=0"`.
-USB MIDI controllers are not supported on Android yet.
+USB MIDI controllers are not supported on Android yet. A USB drive (rekordbox
+stick) shows as `USB: XXXX-XXXX ALLOW ACCESS` until the app has "All files
+access" (Android 11+); opening the row goes to that setting.
 
 ### Keyboard
 

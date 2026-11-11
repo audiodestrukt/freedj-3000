@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **USB drives on iOS and Android.** A rekordbox stick (or any drive)
+  plugged into an iPhone, iPad or Android device now browses like it does on
+  the desktop: USB row, rekordbox categories, cues and grids, and served to
+  other decks over Link.
+  - **iOS:** BROWSE → "USB: ADD DRIVE…" (also on the CDJ-3000 SOURCE
+    screen) opens the system folder picker; pick the drive once. It is
+    remembered and comes back whenever it is plugged in.
+  - **Android:** the drive shows as "USB: XXXX-XXXX ALLOW ACCESS"; opening it
+    goes to the "All files access" setting (needed on Android 11+ to read
+    export.pdb). Flip it on and come back.
 - **Android.** An APK for phones and tablets (Android 8.0+), from
   `deploy/android/build.sh` and `.github/workflows/android.yml`. Same deck as
   iOS: two landscape pages on a phone, the portrait deck on a tablet; tracks
