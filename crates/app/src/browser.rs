@@ -857,8 +857,10 @@ impl Browser {
                 Err(e) => {
                     log::info!("LINK {ip}: no dbserver ({e:#}); trying export.pdb over NFS");
                     match self.connect_link(ip) {
+                        // Its export opens on the categories, as a USB
+                        // stick does (it went straight to PLAYLIST before).
                         Ok(()) => {
-                            self.stack.push(Loc::RbTree(0));
+                            self.stack.push(Loc::RbRoot);
                             self.selected = 0;
                             self.rebuild();
                             Enter::Folder
