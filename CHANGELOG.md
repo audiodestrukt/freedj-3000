@@ -12,6 +12,11 @@ All notable changes to this project will be documented in this file.
   should.
 
 ### Changed
+- **A rekordbox stick opens on its categories** (ARTIST, ALBUM, TRACK,
+  KEY, PLAYLIST, HISTORY, FOLDER) from the USB row and the USB key too, not
+  only from the CDJ-3000 SOURCE screen, as on the units. Folder lists no
+  longer show a stick's system folders (PIONEER, CDJMODS, System Volume
+  Information, $RECYCLE.BIN, LOST.DIR).
 - **CDJ-3000 skin: MENU opens UTILITY on a tap** (the settings, STEMS
   included). LOAD PREVIOUS TRACK moved to the hold. The unit has it the
   other way round, but on a touchscreen the settings must be one tap away.

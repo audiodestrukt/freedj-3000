@@ -27,7 +27,12 @@ const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif",
 /// iOS app bundle (the browse root there), `__MACOSX` resource forks, and the
 /// bundle's localisation / framework folders.
 fn is_housekeeping_dir(name: &str) -> bool {
-    name.starts_with('_')
+    // A stick's system and library folders: a player's FOLDER view never
+    // lists them (the rekordbox export, OverCue's stems, Windows / Android
+    // housekeeping).
+    const SYSTEM: [&str; 5] = ["PIONEER", "CDJMODS", "System Volume Information", "$RECYCLE.BIN", "LOST.DIR"];
+    SYSTEM.iter().any(|s| name.eq_ignore_ascii_case(s))
+        || name.starts_with('_')
         || name.ends_with(".lproj")
         || (cfg!(target_os = "ios") && matches!(name, "Frameworks" | "PlugIns" | "SC_Info"))
 }
@@ -820,9 +825,13 @@ impl Browser {
             EntryKind::Grant => { media::request_access(); Enter::Nothing }
             EntryKind::Descend(loc) => {
                 if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_)) { self.db_title = sel_name.clone(); }
+                let from_usb_row = sel_name.starts_with("USB: ");
                 self.stack.push(loc);
                 self.selected = 0;
                 self.rebuild();
+                // A rekordbox stick opens on its categories, as on the units;
+                // its files stay one row away under FOLDER.
+                if from_usb_row { self.into_rb_root(); }
                 Enter::Folder
             }
             EntryKind::ConnectDb(ip) => match self.connect_db(ip, Slot::Collection) {
@@ -956,8 +965,19 @@ impl Browser {
         self.rebuild();
     }
 
-    /// The USB source key: onto the stick when exactly one is mounted (its
-    /// rekordbox tree is the first row), else back to the local root folder.
+    /// Standing on a stick's root folder that holds a rekordbox export: step
+    /// into the category list (ARTIST, ALBUM, TRACK, … FOLDER).
+    fn into_rb_root(&mut self) {
+        if self.entries.iter().any(|e| matches!(e.kind, EntryKind::Descend(Loc::RbRoot))) {
+            self.stack.push(Loc::RbRoot);
+            self.selected = 0;
+            self.rebuild();
+        }
+    }
+
+    /// The USB source key: onto the stick when exactly one is mounted (on
+    /// its rekordbox categories when it has an export), else back to the
+    /// local root folder.
     pub fn go_root(&mut self) {
         self.stack.truncate(1);
         let ready: Vec<&Mount> = self.media.iter().filter(|m| m.access == Access::Ready).collect();
@@ -968,6 +988,7 @@ impl Browser {
         }
         self.selected = 0;
         self.rebuild();
+        if self.stack.len() > 1 { self.into_rb_root(); }
     }
 
     /// Re-scan removable media at most once a second.  A new stick shows up
@@ -1049,6 +1070,35 @@ mod tests {
     // the root.  The "stick" is the rekordcrate demo export copied under a
     // fake media root that OPENDECK_MEDIA_DIRS points at (process-wide env:
     // this is the only test that sets it).
+    /// Dev: what the browser lists for a real stick at each level.
+    /// `OPENDECK_REAL_STICK=/run/media/$USER/CDJ2 cargo test -p opendeck-app real_stick -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_stick_listing() {
+        let Ok(stick) = std::env::var("OPENDECK_REAL_STICK") else { return };
+        let link = crate::prodj::LinkState::new(1);
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-real");
+        let mut b = Browser::new(home.path(), link);
+        b.media = vec![Mount { path: PathBuf::from(&stick), label: "STICK".into(), rekordbox: media::has_rekordbox(Path::new(&stick)), access: Access::Ready }];
+        b.media_at = Some(Instant::now());
+        b.rebuild();
+        let show = |b: &Browser, what: &str| println!("{what} [{}]: {:?}", b.title(), b.entries().iter().map(|e| e.name.clone()).collect::<Vec<_>>());
+        show(&b, "top");
+        assert!(Path::new(&stick).join("PIONEER").is_dir(), "{stick} is not mounted");
+        let rows = b.sources();
+        let i = rows.iter().position(|r| r.kind == SourceKind::Usb).unwrap();
+        assert!(b.open_source(i));
+        show(&b, "SOURCE → USB");
+        b.back();
+        show(&b, "back");
+        b.back();
+        show(&b, "back");
+        b.stack.truncate(1); b.rebuild();
+        let u = b.entries().iter().position(|e| e.name.starts_with("USB:")).unwrap();
+        b.selected = u; b.enter();
+        show(&b, "USB row");
+    }
+
     // A drive the OS has not opened up yet (Android before "All files
     // access") is a row that asks for access, in the browser and on SOURCE,
     // and never browses into the unreadable folder.
@@ -1090,12 +1140,23 @@ mod tests {
         assert!(b.entries()[usb].name.contains("rekordbox"), "row marks the export: {}", b.entries()[usb].name);
         assert!(b.entries().iter().all(|e| e.name != "rekordbox"), "no rekordbox row at the home folder");
 
+        // A rekordbox stick opens straight on its categories, as on the units.
         b.selected = usb;
         assert!(matches!(b.enter(), Enter::Folder));
-        assert_eq!(b.title(), "CDJ1");
-        let rb = b.entries().iter().position(|e| e.name == "rekordbox").expect("rekordbox row on the stick");
-        b.selected = rb;
+        assert_eq!(b.title(), "REKORDBOX");
+        // FOLDER shows its files, without the system folders a player hides.
+        std::fs::create_dir_all(stick.join("CDJMODS")).unwrap();
+        std::fs::create_dir_all(stick.join("System Volume Information")).unwrap();
+        std::fs::create_dir_all(stick.join("Contents")).unwrap();
+        let f = b.entries().iter().position(|e| e.name == "FOLDER").expect("FOLDER category");
+        b.selected = f;
         assert!(matches!(b.enter(), Enter::Folder));
+        let names: Vec<&str> = b.entries().iter().map(|e| e.name.as_str()).collect();
+        assert!(names.contains(&"Contents"), "{names:?}");
+        for hidden in ["PIONEER", "CDJMODS", "System Volume Information"] {
+            assert!(!names.contains(&hidden), "{hidden} hidden: {names:?}");
+        }
+        b.back();
         assert_eq!(b.title(), "REKORDBOX");
         // The demo export has no playlists, but PLAYLIST is listed anyway (a
         // CDJ-3000 always shows it); TRACK lists both tracks.
@@ -1113,7 +1174,8 @@ mod tests {
 
         // The USB source key lands on the stick when it is the only one.
         b.go_root();
-        assert!(matches!(b.stack.last(), Some(Loc::Fs(p)) if *p == stick));
+        assert!(matches!(b.stack.last(), Some(Loc::RbRoot)), "on its categories");
+        assert!(matches!(b.stack.get(1), Some(Loc::Fs(p)) if *p == stick));
 
         // Pull the stick: the row vanishes and the browser is back at home.
         std::fs::remove_dir_all(&stick).unwrap();
