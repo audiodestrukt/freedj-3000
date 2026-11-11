@@ -108,6 +108,9 @@ pub fn app_data_dir() -> PathBuf {
             if old.is_file() && !new.exists() { let _ = std::fs::rename(&old, &new); }
         }
         dir
+    } else if cfg!(target_os = "android") {
+        // android_main points HOME at the app's internal files dir.
+        home.join("opendeck")
     } else if cfg!(windows) {
         // Windows sets no HOME; the per-user app-data root is %LOCALAPPDATA%
         // (…\AppData\Local), derived from %USERPROFILE% when it is missing.
@@ -129,6 +132,18 @@ pub fn app_data_dir() -> PathBuf {
 pub fn documents_dir() -> PathBuf {
     let home = std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     let dir = home.join("Documents");
+    let _ = std::fs::create_dir_all(&dir);
+    dir
+}
+
+/// Android: the music folder android_main chose (shared Music/OpenDeck when
+/// storage access is granted, else the app's own external files dir).
+#[cfg(target_os = "android")]
+pub static ANDROID_MUSIC: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "android")]
+pub fn documents_dir() -> PathBuf {
+    let dir = ANDROID_MUSIC.get().cloned().unwrap_or_else(|| PathBuf::from("/sdcard/Music"));
     let _ = std::fs::create_dir_all(&dir);
     dir
 }

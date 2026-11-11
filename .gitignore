@@ -37,3 +37,4 @@ dist/
 
 # CDJ HID host identity (secret; never commit the real one)
 cdj_hid_identity.conf
+build/

@@ -132,7 +132,7 @@ pub fn report(prev: &Sample, cur: &Sample, dt: Duration) -> String {
 
 // ── Linux: /proc ──────────────────────────────────────────────────────────────
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 pub fn sample() -> Sample {
     let tick = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as f64;
     let tick = if tick > 0.0 { tick } else { 100.0 };
@@ -215,7 +215,7 @@ pub fn sample() -> Sample {
     s
 }
 
-#[cfg(not(any(target_os = "linux", target_os = "ios", target_os = "macos")))]
+#[cfg(not(any(target_os = "linux", target_os = "android", target_os = "ios", target_os = "macos")))]
 pub fn sample() -> Sample { Sample::default() }
 
 #[cfg(test)]
@@ -244,7 +244,7 @@ mod tests {
         }
         assert!(x != 1);
         let s = sample();
-        if cfg!(any(target_os = "linux", target_os = "ios", target_os = "macos")) {
+        if cfg!(any(target_os = "linux", target_os = "android", target_os = "ios", target_os = "macos")) {
             assert!(!s.threads.is_empty());
             assert!(s.process > 0.0);
         }

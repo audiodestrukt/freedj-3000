@@ -8,11 +8,16 @@
 //!
 //! `RUST_LOG=opendeck_app::surface=debug` logs every message with the
 //! surface name — the way to find a controller's note and CC numbers.
+//!
+//! Android: midir has no backend there (USB MIDI is a Java API), so
+//! `port_names` is empty and no surface ever connects; the mapping and the
+//! decoder are shared.
 
 use super::config::{Deck, Surface};
 use super::map::Mapper;
 use super::Indicators;
 use crate::input::Event;
+#[cfg(not(target_os = "android"))]
 use midir::{MidiInput, MidiInputConnection, MidiOutput, MidiOutputConnection};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
@@ -25,14 +30,30 @@ pub struct MidiSurface {
     ind: Arc<Indicators>,
     leds: Vec<super::config::Led>,
     led_state: Vec<Option<bool>>,
-    input: Option<MidiInputConnection<()>>,
-    output: Option<MidiOutputConnection>,
+    input: Option<InConn>,
+    output: Option<OutConn>,
     /// Port name we are connected to, to notice it vanishing.
     connected_to: Option<String>,
     announced_missing: bool,
 }
 
+#[cfg(not(target_os = "android"))]
+type InConn = MidiInputConnection<()>;
+#[cfg(not(target_os = "android"))]
+type OutConn = MidiOutputConnection;
+#[cfg(target_os = "android")]
+type InConn = ();
+#[cfg(target_os = "android")]
+struct OutConn;
+#[cfg(target_os = "android")]
+impl OutConn { fn send(&mut self, _msg: &[u8]) -> Result<(), &'static str> { Err("no MIDI on Android") } }
+
 /// Every MIDI input port name on the system right now.
+#[cfg(target_os = "android")]
+pub fn port_names() -> Vec<String> { Vec::new() }
+
+/// Every MIDI input port name on the system right now.
+#[cfg(not(target_os = "android"))]
 pub fn port_names() -> Vec<String> {
     let Ok(mi) = MidiInput::new("opendeck-scan") else { return Vec::new() };
     mi.ports().iter().filter_map(|p| mi.port_name(p).ok()).collect()
@@ -66,6 +87,14 @@ impl MidiSurface {
             return;
         };
         let name = name.clone();
+        self.connect(name);
+    }
+
+    #[cfg(target_os = "android")]
+    fn connect(&mut self, _name: String) {}
+
+    #[cfg(not(target_os = "android"))]
+    fn connect(&mut self, name: String) {
         // Input.
         let Ok(mi) = MidiInput::new("opendeck") else { return };
         let Some(port) = mi.ports().into_iter().find(|p| mi.port_name(p).ok().as_deref() == Some(&name)) else { return };

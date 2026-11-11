@@ -256,7 +256,7 @@ impl Browser {
             }
         };
         let mut b = Browser {
-            floor: if cfg!(target_os = "ios") { Some(start.clone()) } else { None },
+            floor: if cfg!(any(target_os = "ios", target_os = "android")) { Some(start.clone()) } else { None },
             stack: vec![Loc::Fs(start.clone())],
             entries: Vec::new(),
             selected: 0,

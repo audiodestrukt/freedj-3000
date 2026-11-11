@@ -29,6 +29,8 @@ mod settings;
 mod stems;
 mod snapshot;
 mod taglist;
+#[cfg(target_os = "android")]
+mod android;
 
 use anyhow::{bail, Context, Result};
 use audio::AudioHandle;
@@ -659,14 +661,14 @@ impl DeckApp {
             // callback is on time and turns a freeze into a self-driven frame.
             hybrid_pace: std::env::var("OPENDECK_PACE")
                 .map(|v| v == "hybrid")
-                .unwrap_or(cfg!(target_os = "ios")),
+                .unwrap_or(cfg!(any(target_os = "ios", target_os = "android"))),
             prev_underruns: 0,
             prev_drops:     0,
             occluded:       false,
             idle_fps: match std::env::var("OPENDECK_IDLE_FPS").ok().and_then(|v| v.parse::<f32>().ok()) {
                 Some(f) if f > 0.0 => Some(f),
                 Some(_)            => None,
-                None               => cfg!(target_os = "ios").then_some(10.0),
+                None               => cfg!(any(target_os = "ios", target_os = "android")).then_some(10.0),
             },
             full_rate:      true,
             last_input:     Instant::now(),
@@ -2501,7 +2503,7 @@ impl DeckApp {
         // window instead of stretching to it, and the transport stays reachable.
         // A phone (or a phone-sized window) gets the two-page layout instead
         // of any faceplate: the LCD page or the controls page.
-        let phone = self.phone || (cfg!(target_os = "ios") && win.width().min(win.height()) < 600.0);
+        let phone = self.phone || (cfg!(any(target_os = "ios", target_os = "android")) && win.width().min(win.height()) < 600.0);
         self.settings.phone = phone;   // the CDJ-3000 screen is not offered on a phone yet
         let insets = host.insets(ppp, win);
         let phone_layout = phone.then(|| if self.phone_controls {
@@ -2519,7 +2521,7 @@ impl DeckApp {
                 // leave a thin letterbox border whenever the device aspect isn't
                 // exactly PORTRAIT_ASPECT.  On desktop, letterbox to the iPad
                 // aspect so the preview stays true to the device.
-                if cfg!(target_os = "ios") { win } else { fit_contain(screen::PORTRAIT_ASPECT, win) }
+                if cfg!(any(target_os = "ios", target_os = "android")) { win } else { fit_contain(screen::PORTRAIT_ASPECT, win) }
             } else {
                 fit_contain(screen::FACE_ASPECT, win)
             }
@@ -2531,7 +2533,7 @@ impl DeckApp {
         let cdj = self.settings.skin == settings::Skin::Cdj3000 && !phone;
         let cdj_face = cdj.then(|| {
             if chrome {
-                let b = if cfg!(target_os = "ios") { win } else { fit_contain(cdjface::DECK_ASPECT, win) };
+                let b = if cfg!(any(target_os = "ios", target_os = "android")) { win } else { fit_contain(cdjface::DECK_ASPECT, win) };
                 cdjface::deck_layout(b)
             } else {
                 cdjface::side_layout(fit_contain(cdjface::SIDE_ASPECT, win))
@@ -2575,7 +2577,7 @@ impl DeckApp {
         let mut raw = host.take_egui_input();
         // egui-winit sizes its screen rect from `inner_size`, which on iOS is
         // the safe area; hit-testing must cover the whole view like the layout.
-        if cfg!(target_os = "ios") { raw.screen_rect = Some(win); }
+        if cfg!(any(target_os = "ios", target_os = "android")) { raw.screen_rect = Some(win); }
         let mut touch = Vec::new();
         let _t_run = Instant::now();
         let view = match self.screen_mode {
@@ -2861,7 +2863,14 @@ fn first_sound(samples: &[f32], ch: usize, level_db: f32) -> u64 {
 impl ApplicationHandler for DeckApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.host.is_some() {
-            return; // already initialised (e.g. Android resume)
+            // Android: back from the background with a new native window.
+            #[cfg(target_os = "android")]
+            if let (Some(r), Some(h)) = (&mut self.renderer, &self.host) {
+                r.resume_surface();
+                self.occluded = false;
+                h.request_redraw();
+            }
+            return;
         }
 
         let (win_w, win_h) = self.initial_window_size();
@@ -2943,6 +2952,16 @@ impl ApplicationHandler for DeckApp {
     // stale frame.  Background handling instead hangs off WindowEvent::Occluded
     // (applicationDidEnterBackground/willEnterForeground), which is the true,
     // stable foreground/background signal; see the Occluded arm below.
+    //
+    // Android is the other way round: Suspended is the native window being
+    // destroyed, and a surface left on it is dead.  Drop it and stop drawing;
+    // `resumed` builds a new one on the window that comes back.
+    #[cfg(target_os = "android")]
+    fn suspended(&mut self, _event_loop: &ActiveEventLoop) {
+        log::info!("suspended: dropping the surface");
+        self.occluded = true;
+        if let Some(r) = &mut self.renderer { r.suspend_surface(); }
+    }
 
     fn window_event(
         &mut self,
@@ -3093,7 +3112,7 @@ impl ApplicationHandler for DeckApp {
 /// `outer_size` is the view.  Desktop windows have decorations in their outer
 /// size, so they keep `inner_size`.
 pub(crate) fn window_px(window: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
-    if cfg!(target_os = "ios") { window.outer_size() } else { window.inner_size() }
+    if cfg!(any(target_os = "ios", target_os = "android")) { window.outer_size() } else { window.inner_size() }
 }
 
 /// Safe-area insets in points (left, top, right, bottom).  On iOS winit reports
@@ -3377,7 +3396,14 @@ pub fn run(cfg: Config) -> Result<()> {
     #[cfg(not(feature = "renderer-sdl"))]
     if want_sdl { log::warn!("OPENDECK_RENDERER=sdl but this build has no SDL backend (cargo feature renderer-sdl); using wgpu"); }
 
+    #[cfg(not(target_os = "android"))]
     let event_loop = EventLoop::new().context("failed to create event loop")?;
+    #[cfg(target_os = "android")]
+    let event_loop = {
+        use winit::platform::android::EventLoopBuilderExtAndroid;
+        let app = android::APP.get().context("android_main did not store the activity")?.clone();
+        EventLoop::builder().with_android_app(app).build().context("failed to create event loop")?
+    };
     event_loop.set_control_flow(ControlFlow::Wait);
     event_loop.run_app(&mut app).context("event loop error")?;
 
@@ -3575,7 +3601,7 @@ pub extern "C" fn freedj_ios_main() {
 fn bundled_track(bundle: &std::path::Path) -> Option<PathBuf> { first_audio_in(bundle) }
 
 /// First playable audio file in `dir`, sorted for a stable pick.
-#[cfg(target_os = "ios")]
+#[cfg(any(target_os = "ios", target_os = "android"))]
 fn first_audio_in(dir: &std::path::Path) -> Option<PathBuf> {
     const EXTS: [&str; 6] = ["mp3", "m4a", "aac", "wav", "aiff", "flac"];
     let mut found: Vec<PathBuf> = std::fs::read_dir(dir)

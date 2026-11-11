@@ -100,6 +100,12 @@ pub trait Renderer {
     /// The surface size in pixels, as the backend last configured it.
     #[allow(dead_code)]   // the SDL loop's resize path; unused without the feature
     fn surface_size(&self) -> (u32, u32);
+    /// Android: the native window is gone (app backgrounded).  Drop the
+    /// surface before the OS frees the window; nothing renders until
+    /// `resume_surface`.  The device, pipelines and egui textures stay.
+    fn suspend_surface(&mut self) {}
+    /// Android: a new native window exists; build a surface on it.
+    fn resume_surface(&mut self) {}
 }
 
 /// Display gain for a set of packed columns: brings the track's loudest column
@@ -165,7 +171,10 @@ impl WaveformParams {
 // ── wgpu renderer ─────────────────────────────────────────────────────────────
 
 pub struct WgpuRenderer {
-    surface:        wgpu::Surface<'static>,
+    /// None while suspended (Android drops its native window in the background).
+    surface:        Option<wgpu::Surface<'static>>,
+    instance:       wgpu::Instance,
+    adapter:        wgpu::Adapter,
     surface_config: wgpu::SurfaceConfiguration,
     device:         wgpu::Device,
     queue:          wgpu::Queue,
@@ -447,7 +456,9 @@ impl WgpuRenderer {
         };
 
         Ok(Self {
-            surface,
+            surface: Some(surface),
+            instance,
+            adapter,
             surface_config,
             device,
             queue,
@@ -474,6 +485,31 @@ impl Renderer for WgpuRenderer {
     fn set_color_mode(&mut self, mode: ColorMode) { self.color_mode = mode; }
     fn set_cols_visible(&mut self, cols: f32) { self.cols_visible = cols; }
     fn surface_size(&self) -> (u32, u32) { (self.surface_config.width, self.surface_config.height) }
+
+    fn suspend_surface(&mut self) {
+        if self.surface.take().is_some() { log::info!("surface dropped (suspended)"); }
+    }
+
+    fn resume_surface(&mut self) {
+        let surface = match self.instance.create_surface(Arc::clone(&self.window)) {
+            Ok(s)  => s,
+            Err(e) => { log::error!("resume: cannot create surface: {e}"); return; }
+        };
+        let caps = surface.get_capabilities(&self.adapter);
+        if !caps.formats.contains(&self.surface_config.format) {
+            // The pipelines were built for this format; a window that cannot
+            // take it would need them rebuilt.  Not seen on Android.
+            log::error!("resume: surface lost format {:?} (has {:?})", self.surface_config.format, caps.formats);
+            return;
+        }
+        let size = crate::window_px(&self.window);
+        self.surface_config.width  = size.width.clamp(1, self.max_dim);
+        self.surface_config.height = size.height.clamp(1, self.max_dim);
+        surface.configure(&self.device, &self.surface_config);
+        self.egui_screen.size_in_pixels = [self.surface_config.width, self.surface_config.height];
+        log::info!("surface recreated {}x{}", self.surface_config.width, self.surface_config.height);
+        self.surface = Some(surface);
+    }
 
     /// Replace the waveform on the GPU with a freshly-analysed track: rebuild
     /// the storage buffer, recompute the display gain, and rebind.  Called by
@@ -513,7 +549,7 @@ impl Renderer for WgpuRenderer {
         let height = height.min(self.max_dim);
         self.surface_config.width  = width;
         self.surface_config.height = height;
-        self.surface.configure(&self.device, &self.surface_config);
+        if let Some(s) = &self.surface { s.configure(&self.device, &self.surface_config); }
         self.egui_screen.size_in_pixels = [width, height];
     }
 
@@ -542,7 +578,8 @@ impl Renderer for WgpuRenderer {
         // "timer-paced with a compositor guessing".  Acquire is where a Fifo
         // swapchain blocks when it is genuinely throttling to the display.
         let t_acquire = std::time::Instant::now();
-        let output = match self.surface.get_current_texture() {
+        let Some(surface) = &self.surface else { return };
+        let output = match surface.get_current_texture() {
             Ok(t)  => t,
             // A Lost/Outdated surface is recoverable — reconfigure and skip this
             // frame; the next acquire succeeds.  This self-heals a surface the OS
@@ -550,7 +587,7 @@ impl Renderer for WgpuRenderer {
             // didn't already reconfigure it, so we never spin on a dead surface.
             Err(e @ (wgpu::SurfaceError::Lost | wgpu::SurfaceError::Outdated)) => {
                 log::warn!("surface {e} — reconfiguring");
-                self.surface.configure(&self.device, &self.surface_config);
+                surface.configure(&self.device, &self.surface_config);
                 return;
             }
             Err(e) => { log::warn!("surface error: {e}"); return; }
