@@ -1943,6 +1943,13 @@ fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings,
         let rr = Rect::from_min_size(Pos2::new(pane.min.x, pane.min.y + 60.0 * u + ROW_H * u * i as f32), Vec2::new(pane.width(), ROW_H * u));
         if tap(ui, rr, &format!("cdj-util-{i}")).0 { out.push(Event::Ui(UiEvent::MenuTap(i))); }
     }
+    // Version and support, as the XDJ skin's UTILITY footer (and the unit's
+    // own UTILITY, which shows its firmware version).
+    let foot = Color32::from_rgb(170, 170, 170);   // DIM is lost on the row stripes
+    let x = pane.min.x + 16.0 * u;
+    label(ui, Pos2::new(x, pane.max.y - 40.0 * u), Align2::LEFT_BOTTOM,
+          format!("OpenDeck DJ  {}", crate::screen::APP_VERSION), 18.0, u, foot);
+    label(ui, Pos2::new(x, pane.max.y - 14.0 * u), Align2::LEFT_BOTTOM, crate::screen::SUPPORT_LINE, 18.0, u, foot);
     draw_status_strip(ui, snap, lay, u, out);
 }
 

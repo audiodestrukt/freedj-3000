@@ -1248,7 +1248,7 @@ pub const APP_VERSION: &str = match option_env!("OPENDECK_VERSION") {
     Some(v) => v,
     None => env!("CARGO_PKG_VERSION"),
 };
-const SUPPORT_LINE: &str = "support@audiodestrukt.com   ·   audiodestrukt.com/opendeck";
+pub const SUPPORT_LINE: &str = "support@audiodestrukt.com   ·   audiodestrukt.com/opendeck";
 
 fn draw_menu(ui: &Ui, settings: &Settings, cursor: usize, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     let p = ui.painter();

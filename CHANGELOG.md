@@ -19,6 +19,8 @@ All notable changes to this project will be documented in this file.
   should.
 
 ### Changed
+- **CDJ-3000 skin: UTILITY shows the version** and support address at the
+  bottom, as the XDJ skin's MENU always has.
 - **A rekordbox stick opens on its categories** (ARTIST, ALBUM, TRACK,
   KEY, PLAYLIST, HISTORY, FOLDER) from the USB row and the USB key too, not
   only from the CDJ-3000 SOURCE screen, as on the units. Folder lists no
