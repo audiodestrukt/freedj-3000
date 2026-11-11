@@ -35,16 +35,13 @@ TestFlight. You can also run it from the Actions tab (**workflow_dispatch**).
 - **The .ipa is kept.** Each run also exports the signed `.ipa` and zips the
   dSYMs into an artifact named `OpenDeck-DJ-ios-<version>-<build>` (90-day
   retention). Download it with `gh run download <run-id>`.
-- **Side-loading release.** On an `ios-v*` tag, the `.ipa` is also published
-  on a GitHub Release, "OpenDeck DJ x.y.z (iOS)". It isn't marked latest,
-  so the desktop releases stay the main download.
+- **Side-loading release.** The `.ipa` is published only on the
+  all-platform GitHub release that a `v*` tag makes (`release.yml`), next to
+  the Linux, Windows, macOS and Android downloads. An `ios-v*` tag uploads
+  to TestFlight and keeps the `.ipa` as a run artifact, but publishes nothing.
   - The `.ipa` isn't FairPlay-encrypted, and the shipped app has no
     entitlements, so AltStore, SideStore and Sideloadly can re-sign it with
     a user's own Apple ID. With a free Apple ID it expires after 7 days.
-  - **For a version tagged before releases existed:** run the workflow from
-    main with `release_tag=ios-vX.Y.Z` and `testflight` off. It builds that
-    tag's code and attaches the `.ipa` without uploading to TestFlight:
-    `gh workflow run ios.yml --ref main -f release_tag=ios-v0.3.5 -f testflight=false`
 
 ## After the upload
 

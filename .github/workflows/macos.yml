@@ -3,7 +3,7 @@ name: macOS build
 # Builds the desktop app for macOS as one universal OpenDeck.app (Apple
 # Silicon + Intel) and publishes it, the same way windows.yml does for Windows.
 #
-#   git tag mac-v0.3.0 && git push origin mac-v0.3.0   →  GitHub Release with the zip
+#   git tag mac-v0.3.0 && git push origin mac-v0.3.0   →  build only: zip
 #   Actions tab → "macOS build" → Run workflow          →  zip as a run artifact only
 #   release.yml (tag v*) calls this with `version`       →  artifact only; release.yml publishes
 #
@@ -29,7 +29,7 @@ on:
         required: true
 
 permissions:
-  contents: write   # softprops/action-gh-release creates the release on a tag
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -229,10 +229,3 @@ jobs:
           path: ${{ steps.pkg.outputs.zip }}
           if-no-files-found: error
 
-      - name: GitHub Release
-        if: startsWith(github.ref, 'refs/tags/mac-v')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: OpenDeck ${{ needs.version.outputs.version }} (macOS)
-          files: ${{ steps.pkg.outputs.zip }}
-          generate_release_notes: true

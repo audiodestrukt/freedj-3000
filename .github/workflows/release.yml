@@ -8,11 +8,16 @@ name: Release
 #   Actions tab → "Release" → Run workflow     →  every platform built, run artifacts only
 #                                                 (TestFlight only if ticked; no release)
 #
-# Each platform's own workflow does the building; this one calls them as
-# reusable workflows with the version, and publishes their artifacts once all
-# have passed. Called like this they only upload artifacts: their own
-# per-platform release steps look for their own tag prefix (linux-v*, win-v*,
-# mac-v*, ios-v*), which still work on their own exactly as before.
+# This is the ONLY workflow that publishes a GitHub release, so every release
+# carries every platform: Linux (x86_64, aarch64), Windows, macOS, Android and
+# iOS. Each platform's own workflow does the building; this one calls them as
+# reusable workflows with the version and publishes once all have passed. The
+# per-platform tags (linux-v*, win-v*, mac-v*, android-v*, ios-v*) still build
+# (ios-v* still uploads to TestFlight) but publish nothing.
+#
+# A release for a tag that already exists (pushed before this workflow, or a
+# failed run):  gh workflow run release.yml --ref v0.3.8
+# (a dispatch on a tag ref publishes too; TestFlight only if ticked).
 #
 # The release takes every file from every artifact named OpenDeck-*, so a
 # new platform needs only to name its artifact (and files) OpenDeck-*:

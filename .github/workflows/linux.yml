@@ -3,7 +3,7 @@ name: Linux build
 # Builds the desktop binary for Linux (x86_64 and aarch64) and publishes it,
 # the same way windows.yml does for Windows.
 #
-#   git tag linux-v0.3.0 && git push origin linux-v0.3.0   →  GitHub Release with both tarballs
+#   git tag linux-v0.3.0 && git push origin linux-v0.3.0   →  build only: both tarballs as artifacts
 #   Actions tab → "Linux build" → Run workflow            →  tarballs as run artifacts only
 #   release.yml (tag v*) calls this with `version`         →  artifacts only; release.yml publishes
 #
@@ -29,7 +29,7 @@ on:
         required: true
 
 permissions:
-  contents: write   # softprops/action-gh-release creates the release on a tag
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -147,21 +147,3 @@ jobs:
           name: OpenDeck-${{ needs.version.outputs.version }}-linux-aarch64
           path: ${{ steps.pkg.outputs.tarball }}
           if-no-files-found: error
-
-  release:
-    if: startsWith(github.ref, 'refs/tags/linux-v')
-    needs: [version, x86_64, aarch64]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download tarballs
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-          merge-multiple: true
-
-      - name: GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          name: OpenDeck ${{ needs.version.outputs.version }} (Linux)
-          files: dist/*.tar.gz
-          generate_release_notes: true

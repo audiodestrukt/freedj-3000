@@ -2,7 +2,7 @@ name: Windows build
 
 # Builds the desktop binary for Windows x64 and publishes it.
 #
-#   git tag win-v0.3.0 && git push origin win-v0.3.0   →  GitHub Release with the zip
+#   git tag win-v0.3.0 && git push origin win-v0.3.0   →  build only: zip
 #   Actions tab → "Windows build" → Run workflow        →  zip as a run artifact only
 #   release.yml (tag v*) calls this with `version`       →  artifact only; release.yml publishes
 #
@@ -23,7 +23,7 @@ on:
         required: true
 
 permissions:
-  contents: write   # softprops/action-gh-release creates the release on a tag
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -120,10 +120,3 @@ jobs:
           path: ${{ steps.pkg.outputs.zip }}
           if-no-files-found: error
 
-      - name: GitHub Release
-        if: startsWith(github.ref, 'refs/tags/win-v')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: OpenDeck ${{ steps.ver.outputs.version }} (Windows)
-          files: ${{ steps.pkg.outputs.zip }}
-          generate_release_notes: true

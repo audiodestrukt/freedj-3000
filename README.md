@@ -171,9 +171,11 @@ git tag v0.4.0 && git push origin v0.4.0
 
 That release has the Linux tarballs, the Windows zip, the macOS zip, the
 Android `.apk` and the iOS `.ipa`, and the same run uploads the iOS build to TestFlight (the version
-must be higher than the last TestFlight upload). The per-platform tags below
-(`linux-v*`, `win-v*`, `mac-v*`, `android-v*`, `ios-v*`) still work for a one-platform
-release.
+must be higher than the last TestFlight upload). It is the only way a release
+is published, so every release carries every platform. The per-platform tags
+below (`linux-v*`, `win-v*`, `mac-v*`, `android-v*`, `ios-v*`) only build (and
+`ios-v*` uploads to TestFlight); they publish nothing. For a tag that already
+exists: `gh workflow run release.yml --ref v0.3.8`.
 
 ### Linux (prebuilt)
 
@@ -189,8 +191,8 @@ newer:
 sudo apt install libasound2 libsdl2-2.0-0 mesa-vulkan-drivers
 ```
 
-Built by `.github/workflows/linux.yml` on every `linux-v*` tag (a manual run
-from the Actions tab leaves the tarballs as run artifacts):
+Built by `.github/workflows/linux.yml` for every `v*` release; a `linux-v*`
+tag or a manual run builds the tarballs as run artifacts only:
 
 ```bash
 git tag linux-v0.3.0 && git push origin linux-v0.3.0
@@ -205,7 +207,8 @@ stays local: `deploy/pi/cross/build.sh armv6` (see
 Prebuilt: the [Releases page](https://github.com/audiodestrukt/freedj-3000/releases)
 has `OpenDeck-<version>-windows-x64.zip` (unzip, run `opendeck.exe track.mp3`;
 details in the bundled `README-WINDOWS.txt`). It is built by
-`.github/workflows/windows.yml` on every `win-v*` tag:
+`.github/workflows/windows.yml` for every `v*` release (a `win-v*` tag builds
+it as a run artifact only):
 
 ```bash
 git tag win-v0.3.0 && git push origin win-v0.3.0
@@ -224,8 +227,8 @@ the first launch needs right-click → Open (or
 `xattr -dr com.apple.quarantine OpenDeck.app`). Double-clicking opens an empty
 deck; to open a track straight away run
 `OpenDeck.app/Contents/MacOS/opendeck track.mp3` from Terminal. Details in the
-bundled `README-MAC.txt`. It is built by `.github/workflows/macos.yml` on
-every `mac-v*` tag:
+bundled `README-MAC.txt`. It is built by `.github/workflows/macos.yml` for
+every `v*` release (a `mac-v*` tag builds it as a run artifact only):
 
 ```bash
 git tag mac-v0.4.0 && git push origin mac-v0.4.0
@@ -242,8 +245,8 @@ for the emulator; Android 8.0 or newer, Vulkan or GLES 3.1). Install it from
 the device; it is not on Google Play. Tracks go in the shared **Music** folder
 (the app asks for music access on first launch); the demo track is seeded into
 `Music/OpenDeck`. A phone gets the two landscape pages, a tablet the portrait
-deck, as on iOS. Built by `.github/workflows/android.yml` on every
-`android-v*` tag:
+deck, as on iOS. Built by `.github/workflows/android.yml` for every `v*`
+release (an `android-v*` tag builds it as a run artifact only):
 
 ```bash
 git tag android-v0.4.0 && git push origin android-v0.4.0

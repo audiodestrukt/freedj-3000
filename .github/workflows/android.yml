@@ -3,7 +3,7 @@ name: Android build
 # Builds the Android APK (arm64-v8a phones/tablets + x86_64 emulators) and
 # publishes it, the same way windows.yml / linux.yml do.
 #
-#   git tag android-v0.4.0 && git push origin android-v0.4.0  →  GitHub Release with the .apk
+#   git tag android-v0.4.0 && git push origin android-v0.4.0  →  build only: .apk
 #   git tag v0.4.0 (release.yml)                              →  the .apk on the all-platform release
 #   Actions tab → "Android build" → Run workflow              →  .apk as a run artifact only
 #
@@ -29,7 +29,7 @@ on:
         required: true
 
 permissions:
-  contents: write   # softprops/action-gh-release creates the release on a tag
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -101,10 +101,3 @@ jobs:
           path: ${{ steps.apk.outputs.apk }}
           if-no-files-found: error
 
-      - name: GitHub Release
-        if: startsWith(github.ref, 'refs/tags/android-v')
-        uses: softprops/action-gh-release@v2
-        with:
-          name: OpenDeck ${{ steps.ver.outputs.version }} (Android)
-          files: ${{ steps.apk.outputs.apk }}
-          generate_release_notes: true
