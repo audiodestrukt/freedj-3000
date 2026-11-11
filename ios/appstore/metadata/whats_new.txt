@@ -1,9 +1,11 @@
-A second screen, and a whole new faceplate on iPad.
+USB drives, stems, and a second screen with its own faceplate on iPad.
 
-MENU → SCREEN now offers a second player layout alongside the original: its own playback screen with BEAT LOOP and BEAT JUMP panels, SOURCE and BROWSE screens with category browsing and a track table, SEARCH with an on-screen keyboard, LOAD PREVIOUS TRACK, and GRID ADJUST.
+USB DRIVES: plug in a USB stick and pick it once from BROWSE → USB: ADD DRIVE…. A stick exported from rekordbox opens on its categories (artist, album, track, key, playlist, history, folder), with its cues and beat grids, and is remembered whenever it is plugged in again. Other players on Pro DJ Link can browse it too.
 
-On iPad it comes with its own full faceplate: eight hot cues under the screen (hold CALL/DELETE and tap a pad to delete one), 4 and 8 beat loops that halve and double a running loop, beat jump, track search, fast search, time mode, tempo range and reset, and keys that light the way the hardware's do.
+STEMS: tracks prepared with OverCue Desktop's open stems format play with their drums, vocal and harmonics under your control. Turn it on in MENU → STEMS, load a prepared track, and mute or ride each part from the STEMS panel or the PERFORM pads.
 
-The jog wheel now turns under your finger and follows a circular motion, and turning it while paused plays the track under the playhead, its pitch following the wheel. The tempo fader reaches its very ends without dead spots. The new layout also has a phase meter showing your beats and bars against the master's.
+A SECOND SCREEN: MENU → SCREEN offers a second player layout: its own playback screen with BEAT LOOP and BEAT JUMP panels, SOURCE and BROWSE screens with category browsing and a track table, SEARCH with an on-screen keyboard, LOAD PREVIOUS TRACK, and GRID ADJUST. On iPad it comes with its own full faceplate: eight hot cues, 4 and 8 beat loops, beat jump, track search, fast search, time mode, tempo range and reset. In this layout MENU opens the settings with a single tap.
 
-Loading a track from another player over Pro DJ Link works again: BROWSE no longer drops to ALL TRACKS after a load.
+The jog wheel turns under your finger and follows a circular motion, and turning it while paused plays the track under the playhead. The tempo fader reaches its very ends. A phase meter shows your beats and bars against the master's.
+
+FIXES: CUE now starts right on the transient it was set on (the first instant of a kick was being lost after a cue). Loading a track from another player over Pro DJ Link no longer drops BROWSE to ALL TRACKS.
