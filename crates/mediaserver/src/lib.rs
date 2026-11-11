@@ -217,7 +217,8 @@ pub fn grid_beats(anchor: u64, bpm: f64, downbeat_offset: u8, sr: u32, frames: u
 
 const CACHE_MAGIC: &[u8; 4] = b"ODLA";
 // 2: MP3s decode with the encoder delay kept (the rekordbox / player timeline).
-const CACHE_VERSION: u16 = 2;
+// 3: tempo + phase fitted together, grids on rekordbox's timing.
+const CACHE_VERSION: u16 = 3;
 
 fn cache_key(path: &Path) -> Option<String> {
     let md = std::fs::metadata(path).ok()?;

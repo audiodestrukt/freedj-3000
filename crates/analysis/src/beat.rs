@@ -87,14 +87,14 @@ impl BeatAnalyzerImpl {
         // to maximise onset energy summed over grid positions spanning the
         // track, so it best-fits every beat rather than one 6 s window.
         let onset = onset_strength(window, sr);
-        let anchor_sample = estimate_anchor(&onset, bpm, sr, 0);
+        let (bpm, anchor_sample) = fit_grid(&onset, bpm, sr);
 
         // ── Stage 3: downbeat ─────────────────────────────────────────────────
         // TODO: implement bar-level autocorrelation
 
         // MiniBPM doesn't return a confidence score; use a fixed value.
         const CONFIDENCE: f32 = 0.8;
-        let mut grid = BeatGrid::new_constant(anchor_sample as u64, bpm as f64);
+        let mut grid = BeatGrid::new_constant(anchor_sample as u64, bpm);
         grid.confidence = CONFIDENCE;
 
         self.stable = self.seconds_accumulated() >= STABLE_SEC;
@@ -207,30 +207,70 @@ fn onset_strength(samples: &[f32], sr: f32) -> Vec<f32> {
     onset
 }
 
-/// Find the beat anchor sample by maximising onset energy at grid positions.
-fn estimate_anchor(onset: &[f32], bpm: f32, sr: f32, sample_offset: usize) -> usize {
+/// Tempo and phase together: the constant grid that collects the most onset
+/// energy over the whole analysed span, searched within ±0.4 BPM of
+/// MiniBPM's estimate, to a thousandth of a BPM and a tenth of a hop.
+/// MiniBPM alone reads a little off (124.032 for an exact 124; 125.75 where
+/// rekordbox says 126.00), which drifts a long track off its grid.
+///
+/// The anchor is then moved `REKORDBOX_LEAD_MS` later: rekordbox (whose grids
+/// the players and SYNC use) puts a beat ~6 ms before the attack, and our
+/// flux peak lands ~12 ms before it (the 1024-sample window sees an attack
+/// half a window early).  Measured on a 226-track stick: tempo exact on
+/// 222 (was 198), grid within 10 ms of rekordbox's on ~198 (was 164).
+/// Returns (BPM, anchor sample).
+fn fit_grid(onset: &[f32], bpm0: f32, sr: f32) -> (f64, usize) {
     const HOP: usize = 512;
-    let hop_rate = sr / HOP as f32;
-    let period = hop_rate * 60.0 / bpm;
+    let hop_rate = sr as f64 / HOP as f64;
+    if onset.len() < 8 { return (bpm0 as f64, 0); }
+    // A little smoothing so a beat a few ms off its hop still scores.
+    let sm: Vec<f32> = (0..onset.len()).map(|i| {
+        let g = |d: isize| onset.get((i as isize + d).max(0) as usize).copied().unwrap_or(0.0);
+        0.25 * g(-2) + 0.5 * g(-1) + g(0) + 0.5 * g(1) + 0.25 * g(2)
+    }).collect();
+    let at = |x: f64| -> f32 {
+        let i = x.floor() as usize;
+        if i + 1 >= sm.len() { return 0.0; }
+        let f = (x - i as f64) as f32;
+        sm[i] * (1.0 - f) + sm[i + 1] * f
+    };
+    let score = |bpm: f64, phase: f64| -> f32 {
+        let period = hop_rate * 60.0 / bpm;
+        let mut s = 0f32;
+        let mut pos = phase;
+        while pos + 1.0 < sm.len() as f64 { s += at(pos); pos += period; }
+        s
+    };
+    // Best phase for one tempo, to `step` hops.
+    let best_phase = |bpm: f64, lo: f64, hi: f64, step: f64| -> (f64, f32) {
+        let mut best = (lo, f32::NEG_INFINITY);
+        let mut ph = lo;
+        while ph < hi { let sc = score(bpm, ph); if sc > best.1 { best = (ph, sc); } ph += step; }
+        best
+    };
+    let period0 = |bpm: f64| hop_rate * 60.0 / bpm;
 
-    let n_phases = period as usize;
-    let mut best_phase = 0;
-    let mut best_score = f32::NEG_INFINITY;
-
-    for phase in 0..n_phases {
-        let mut score = 0f32;
-        let mut pos = phase as f32;
-        while (pos as usize) < onset.len() {
-            score += onset[pos as usize];
-            pos += period;
-        }
-        if score > best_score {
-            best_score = score;
-            best_phase = phase;
-        }
+    // Coarse: ±0.4 BPM in 0.01, phase in half hops.
+    let b0 = bpm0 as f64;
+    let mut best = (b0, 0.0, f32::NEG_INFINITY);
+    let mut b = b0 - 0.4;
+    while b <= b0 + 0.4 + 1e-9 {
+        let (ph, sc) = best_phase(b, 0.0, period0(b), 0.5);
+        if sc > best.2 { best = (b, ph, sc); }
+        b += 0.01;
     }
-
-    sample_offset + best_phase * HOP
+    // Fine: ±0.01 BPM in 0.001, phase ±1 hop in 0.1.
+    let (cb, cp) = (best.0, best.1);
+    let mut b = cb - 0.01;
+    while b <= cb + 0.01 + 1e-9 {
+        let (ph, sc) = best_phase(b, cp - 1.0, cp + 1.0, 0.1);
+        if sc > best.2 { best = (b, ph, sc); }
+        b += 0.001;
+    }
+    const REKORDBOX_LEAD_MS: f64 = 6.0;
+    let period = period0(best.0);
+    let phase = (best.1 + REKORDBOX_LEAD_MS / 1000.0 * hop_rate).rem_euclid(period);
+    (best.0, (phase * HOP as f64).round() as usize)
 }
 
 #[cfg(test)]
@@ -292,7 +332,8 @@ mod tests {
     fn finds_tempo_and_phase_of_a_plain_kick_loop() {
         for bpm in [96.0, 124.0, 128.0, 140.0] {
             let g = analyse(&groove(bpm, 0.25, 40.0, 0.0));
-            assert!((g.bpm - bpm).abs() < 0.1, "{bpm}: got {}", g.bpm);
+            // MiniBPM alone was up to ~0.3 off; the grid fit pins it.
+            assert!((g.bpm - bpm).abs() < 0.02, "{bpm}: got {}", g.bpm);
             assert!(phase_err_ms(&g, 0.25) < 15.0, "{bpm}: phase {} ms off", phase_err_ms(&g, 0.25));
         }
     }

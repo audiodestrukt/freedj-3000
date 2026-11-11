@@ -13,6 +13,14 @@ All notable changes to this project will be documented in this file.
   Against rekordbox's grids on a 226-track stick: off-beat grids 50 → 27,
   grids within 10 ms of rekordbox's at 60 s in 164 → 186 of 222. The
   analysis has tests now (it had none), including the off-beat case.
+- **BPM a hair off, grids drifting.** The deck's own analysis now fits tempo
+  and phase together over the whole analysed span, to a thousandth of a BPM,
+  and places beats where rekordbox does (6 ms before the attack). Against
+  rekordbox on the same stick: tempo exact on 222 of 226 tracks (was 198;
+  the rest read 0.1–0.3 low, so long tracks drifted), grid median 1.3 ms
+  from rekordbox's (p90 6.3 ms), off-beat grids 27 → 12. Load time is
+  unchanged. Still wrong: four tracks read at 4/5 or 2/3 tempo, and drum &
+  bass at half tempo.
 - **MP3s were 24 ms off from rekordbox and the players.** The decoder trimmed
   the MP3 encoder delay; rekordbox and Pioneer players keep it, so every
   rekordbox beat grid and cue on an MP3 sat ~24 ms late against our audio (a
