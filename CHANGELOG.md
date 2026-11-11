@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Android.** An APK for phones and tablets (Android 8.0+), from
+  `deploy/android/build.sh` and `.github/workflows/android.yml`. Same deck as
+  iOS: two landscape pages on a phone, the portrait deck on a tablet; tracks
+  from the shared Music folder; Pro DJ Link over Wi-Fi or ethernet. USB MIDI
+  controllers are not supported there yet.
+- **Releases for every platform.** One `v*` tag publishes Linux, Windows,
+  macOS (new: a universal `OpenDeck.app`), Android and iOS (`.ipa` for
+  side-loading) on one GitHub release.
+
 - **Stems.** MENU → STEMS turns on playback of stems prepared with OverCue
   Desktop (its open USB format: drums, vocal, harmonics). It's off by
   default, so both skins look and behave like the stock units.

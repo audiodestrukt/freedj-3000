@@ -78,7 +78,7 @@ is listed in [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md).
 | iPad / iPhone app (OpenDeck DJ) | ✅ On the App Store |
 | Raspberry Pi 5 | ✅ 60 fps, ~0.6 of one core playing |
 | Raspberry Pi Zero W / older GPUs (SDL backend, WSOLA key lock) | ✅ Plays cleanly; 49 fps on KMSDRM |
-| Linux (x86_64, aarch64), Windows, macOS and iOS (.ipa) prebuilt releases | ✅ [Releases](https://github.com/audiodestrukt/freedj-3000/releases) |
+| Linux (x86_64, aarch64), Windows, macOS, Android (.apk) and iOS (.ipa) prebuilt releases | ✅ [Releases](https://github.com/audiodestrukt/freedj-3000/releases) |
 | Control surfaces: any USB MIDI controller, PCF8574 I2C boards on the Pi, mapped in `controllers.toml` with LED feedback | ✅ MIDI on a DJ2Go; I2C path built and unit-tested, first board pending ([docs/hardware/control-surfaces.md](docs/hardware/control-surfaces.md)) |
 | Sampler-deck: auto one-shots, quantized triggers, cue sequencing | 📋 Roadmap ([#24](https://github.com/audiodestrukt/freedj-3000/issues/24)) |
 | A CDJ-3000 as freedj's control surface and screen (HID over LINK, Control Mode) | 🧪 Experimental, emulator only ([docs/design/cdj-hid-display.md](docs/design/cdj-hid-display.md)) |
@@ -169,10 +169,10 @@ One tag builds every platform and publishes them together on one release,
 git tag v0.4.0 && git push origin v0.4.0
 ```
 
-That release has the Linux tarballs, the Windows zip, the macOS zip and the
-iOS `.ipa`, and the same run uploads the iOS build to TestFlight (the version
+That release has the Linux tarballs, the Windows zip, the macOS zip, the
+Android `.apk` and the iOS `.ipa`, and the same run uploads the iOS build to TestFlight (the version
 must be higher than the last TestFlight upload). The per-platform tags below
-(`linux-v*`, `win-v*`, `mac-v*`, `ios-v*`) still work for a one-platform
+(`linux-v*`, `win-v*`, `mac-v*`, `android-v*`, `ios-v*`) still work for a one-platform
 release.
 
 ### Linux (prebuilt)
@@ -233,6 +233,32 @@ git tag mac-v0.4.0 && git push origin mac-v0.4.0
 
 Building locally needs only rustup and the Xcode command-line tools; then
 `cargo build --release -p opendeck-app`.
+
+### Android
+
+Prebuilt: the [Releases page](https://github.com/audiodestrukt/freedj-3000/releases)
+has `OpenDeck-DJ-<version>-android.apk` (arm64 phones and tablets, plus x86_64
+for the emulator; Android 8.0 or newer, Vulkan or GLES 3.1). Install it from
+the device; it is not on Google Play. Tracks go in the shared **Music** folder
+(the app asks for music access on first launch); the demo track is seeded into
+`Music/OpenDeck`. A phone gets the two landscape pages, a tablet the portrait
+deck, as on iOS. Built by `.github/workflows/android.yml` on every
+`android-v*` tag:
+
+```bash
+git tag android-v0.4.0 && git push origin android-v0.4.0
+```
+
+There is no Gradle project: it is a NativeActivity (`crates/app/src/android.rs`)
+and `deploy/android/build.sh [VERSION] [ABI...]` builds the APK with cargo-ndk
+and the SDK's aapt2 / zipalign / apksigner. Locally it needs the Android SDK +
+NDK, `cargo install cargo-ndk` and `rustup target add aarch64-linux-android
+x86_64-linux-android`. Release builds are signed with
+`~/private_keys/android-release.jks` (in CI, the `ANDROID_KEYSTORE_BASE64` /
+`ANDROID_KEYSTORE_PASSWORD` secrets); never replace that key, or installed
+copies stop accepting updates. Dev switches that are env vars on the desktop
+go in a system property: `adb shell setprop debug.opendeck.env "OPENDECK_IDLE_FPS=0"`.
+USB MIDI controllers are not supported on Android yet.
 
 ### Keyboard
 
