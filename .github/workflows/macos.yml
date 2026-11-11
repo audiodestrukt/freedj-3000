@@ -1,0 +1,238 @@
+name: macOS build
+
+# Builds the desktop app for macOS as one universal OpenDeck.app (Apple
+# Silicon + Intel) and publishes it, the same way windows.yml does for Windows.
+#
+#   git tag mac-v0.3.0 && git push origin mac-v0.3.0   →  GitHub Release with the zip
+#   Actions tab → "macOS build" → Run workflow          →  zip as a run artifact only
+#   release.yml (tag v*) calls this with `version`       →  artifact only; release.yml publishes
+#
+# Each architecture builds natively on its own runner (macos-15 is arm64,
+# macos-15-intel is x86_64), so both binaries get a real `--version` smoke
+# test; a last job glues them together with lipo. No system libraries are
+# needed: cpal uses CoreAudio, wgpu uses Metal, midir uses CoreMIDI, and
+# crates/timestretch/build.rs always vendors Rubber Band on Apple (vDSP FFT,
+# so it links the Accelerate framework).
+#
+# The app is ad-hoc signed only (no Developer ID, not notarized), so the
+# first launch needs right-click → Open; see README-MAC.txt below.
+on:
+  push:
+    tags:
+      - 'mac-v*'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Version to bake in and name the zip after (e.g. 0.4.0)
+        type: string
+        required: true
+
+permissions:
+  contents: write   # softprops/action-gh-release creates the release on a tag
+
+env:
+  CARGO_TERM_COLOR: always
+  # Oldest macOS the binary (and the vendored C++) is built for.
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+
+jobs:
+  # Called with `version` → that; mac-v0.3.0 → 0.3.0; a manual run gets
+  # 0.0.0-<sha>. Baked into the binary through OPENDECK_VERSION (see
+  # crates/app/build.rs + screen.rs).
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Compute version
+        id: ver
+        run: |
+          IN="${{ inputs.version }}"
+          REF="${{ github.ref_name }}"
+          if [[ -n "$IN" ]]; then
+            VERSION="$IN"
+          elif [[ "$REF" == mac-v* ]]; then
+            VERSION="${REF#mac-v}"
+          else
+            VERSION="0.0.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $VERSION"
+
+  build:
+    needs: version
+    strategy:
+      matrix:
+        include:
+          - runner: macos-15
+            arch: aarch64
+          - runner: macos-15-intel
+            arch: x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the channel; `rustup show` materialises it
+      # for this runner's native darwin host (the Linux targets it lists are
+      # just extra std downloads here).
+      - name: Set up Rust toolchain
+        run: rustup show
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.arch }}
+
+      - name: Build opendeck
+        env:
+          OPENDECK_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cargo build --release -p opendeck-app --bin opendeck
+          strip target/release/opendeck
+
+      # Must start, resolve its dylibs/frameworks and report the baked version
+      # on a bare runner (no audio device or GPU needed on this path).
+      - name: Smoke test
+        run: |
+          ./target/release/opendeck --version | tee /tmp/v
+          grep -q "opendeck ${{ needs.version.outputs.version }}" /tmp/v
+          file target/release/opendeck
+          echo "linked libraries:"
+          otool -L target/release/opendeck
+          mkdir -p out && cp target/release/opendeck "out/opendeck-${{ matrix.arch }}"
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: opendeck-macos-${{ matrix.arch }}
+          path: out/opendeck-${{ matrix.arch }}
+          if-no-files-found: error
+          retention-days: 1
+
+  bundle:
+    needs: [version, build]
+    runs-on: macos-15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: opendeck-macos-*
+          path: bin
+          merge-multiple: true
+
+      - name: Universal binary
+        run: |
+          lipo -create bin/opendeck-aarch64 bin/opendeck-x86_64 -output bin/opendeck
+          chmod +x bin/opendeck
+          lipo -info bin/opendeck
+          ./bin/opendeck --version
+
+      - name: Package
+        id: pkg
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          NAME="OpenDeck-$VERSION-macos-universal"
+          D="dist/$NAME"
+          APP="$D/OpenDeck.app"
+          mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$D/surfaces"
+          cp bin/opendeck "$APP/Contents/MacOS/opendeck"
+
+          # App icon from the iOS app's 1024 px icon.
+          ICONSET="$RUNNER_TEMP/OpenDeck.iconset"
+          SRC=ios/freedj/Assets.xcassets/AppIcon.appiconset/icon-1024.png
+          mkdir -p "$ICONSET"
+          for s in 16 32 128 256 512; do
+            sips -z $s $s "$SRC" --out "$ICONSET/icon_${s}x${s}.png" >/dev/null
+            sips -z $((s*2)) $((s*2)) "$SRC" --out "$ICONSET/icon_${s}x${s}@2x.png" >/dev/null
+          done
+          iconutil -c icns "$ICONSET" -o "$APP/Contents/Resources/OpenDeck.icns"
+
+          cat > "$APP/Contents/Info.plist" <<PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+              <key>CFBundleName</key><string>OpenDeck</string>
+              <key>CFBundleDisplayName</key><string>OpenDeck</string>
+              <key>CFBundleIdentifier</key><string>com.audiodestrukt.opendeck.desktop</string>
+              <key>CFBundleExecutable</key><string>opendeck</string>
+              <key>CFBundleIconFile</key><string>OpenDeck</string>
+              <key>CFBundlePackageType</key><string>APPL</string>
+              <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+              <key>CFBundleShortVersionString</key><string>$VERSION</string>
+              <key>CFBundleVersion</key><string>$VERSION</string>
+              <key>LSMinimumSystemVersion</key><string>$MACOSX_DEPLOYMENT_TARGET</string>
+              <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
+              <key>NSHighResolutionCapable</key><true/>
+              <key>NSLocalNetworkUsageDescription</key><string>OpenDeck talks Pro DJ Link with the other decks on your network to sync tempo and share tracks.</string>
+          </dict>
+          </plist>
+          PLIST
+          plutil -lint "$APP/Contents/Info.plist"
+
+          # Ad-hoc signature: Apple Silicon refuses to run an unsigned binary,
+          # and the bundle must be sealed after Info.plist + icon are in place.
+          codesign --force --deep -s - "$APP"
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          "$APP/Contents/MacOS/opendeck" --version
+
+          cp README.md CHANGELOG.md "$D/"
+          # Controller mapping examples (see README "Controller input").
+          cp crates/app/surfaces/dj2go.toml docs/hardware/surfaces/generic-midi.toml "$D/surfaces/"
+          # Demo track: an original production by the author, also bundled in the iOS app.
+          cp amplificate.mp3 "$D/"
+          cat > "$D/README-MAC.txt" <<'TXT'
+          OpenDeck for macOS (universal: Apple Silicon and Intel, macOS 11 or newer)
+
+          First launch: the app is not signed with an Apple Developer ID or
+          notarized (it carries only an ad-hoc signature), so macOS blocks a
+          plain double-click. Either right-click OpenDeck.app → Open → Open
+          (on macOS 15+: try to open it once, then System Settings → Privacy &
+          Security → "Open Anyway"), or clear the download quarantine once:
+
+                    xattr -dr com.apple.quarantine OpenDeck.app
+
+          Double-clicking opens an empty deck. Press B to browse: Finder starts
+          apps in /, so the browser opens at the top of the disk; go to
+          Users → <you> → Music (or drop amplificate.mp3 somewhere handy).
+
+          Run from Terminal (opens a track straight away, and shows the log):
+                    OpenDeck.app/Contents/MacOS/opendeck amplificate.mp3
+                    OpenDeck.app/Contents/MacOS/opendeck ~/Music/track.mp3
+          Version:  OpenDeck.app/Contents/MacOS/opendeck --version
+          Controls: see README.md, "Controls (MVP)".
+
+          Settings, tag list and grids live in ~/.local/share/opendeck.
+          Pro DJ Link needs the Mac on the same wired network as the decks
+          (UDP 50000-50002). Allow "find devices on local networks" when macOS
+          asks (System Settings → Privacy & Security → Local Network), and
+          allow incoming connections if the firewall asks.
+          TXT
+          mkdir -p out
+          # ditto keeps the bundle's symlinks, permissions and signature intact.
+          ditto -c -k --sequesterRsrc --keepParent "$D" "out/$NAME.zip"
+          ls -l out/*.zip
+          echo "zip=out/$NAME.zip" >> "$GITHUB_OUTPUT"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenDeck-${{ needs.version.outputs.version }}-macos-universal
+          path: ${{ steps.pkg.outputs.zip }}
+          if-no-files-found: error
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/mac-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OpenDeck ${{ needs.version.outputs.version }} (macOS)
+          files: ${{ steps.pkg.outputs.zip }}
+          generate_release_notes: true
