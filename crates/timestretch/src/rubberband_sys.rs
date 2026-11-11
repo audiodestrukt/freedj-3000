@@ -71,5 +71,10 @@ extern "C" {
 
     pub fn rubberband_get_latency(state: RubberBandState) -> c_uint;
 
+    /// Silent frames to feed after a reset, before the real input (v3.0+).
+    pub fn rubberband_get_preferred_start_pad(state: RubberBandState) -> c_uint;
+    /// Output frames to drop after that pad, so output lines up with input.
+    pub fn rubberband_get_start_delay(state: RubberBandState) -> c_uint;
+
     pub fn rubberband_set_max_process_size(state: RubberBandState, samples: c_uint);
 }

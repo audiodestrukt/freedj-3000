@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **CUE lost the transient it was set on** (Rubber Band, the default
+  key-lock engine). After a seek, R3 swallowed the first ~30–50 ms of what
+  followed, so a CUE on a kick played the kick's tail. The stretcher now
+  gets Rubber Band's start pad and drops its start delay after every reset,
+  so playback from a cue starts on the attack, on time. Measured through
+  the deck: the first kick after CUE went from silent for 29 ms to present
+  from the first millisecond.
 - **Stems from OverCue Desktop were refused** ("unsupported sample_rate
   96000"): OverCue writes its default 96 kHz rate into the index, and only
   a missing rate was read as 96 kHz. Checked on a real prepared stick: all

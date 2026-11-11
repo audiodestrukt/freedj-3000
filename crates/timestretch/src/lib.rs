@@ -197,6 +197,12 @@ pub struct TimestretechStage {
     channels:        usize,
     speed:           f32,
     pitch_semitones: f32,
+    /// Silent frames still to feed before the next real input, and output
+    /// frames still to drop, after a reset (Rubber Band's start pad and start
+    /// delay).  Without them R3 swallowed the start of whatever followed a
+    /// reset: a CUE on a kick lost its first ~29 ms.
+    pad_pending:     usize,
+    trim_pending:    usize,
     // Deinterleaved input scratch buffers (one per channel).
     in_bufs:         Vec<Vec<f32>>,
     in_ptrs:         Vec<*const f32>,
@@ -242,6 +248,8 @@ impl TimestretechStage {
             channels: ch,
             speed: 1.0,
             pitch_semitones: 0.0,
+            pad_pending: 0,
+            trim_pending: 0,
             in_bufs,
             in_ptrs,
             out_bufs,
@@ -304,8 +312,30 @@ impl TimestretechStage {
     }
 }
 
+impl TimestretechStage {
+    /// After a reset the next input starts a fresh stream: pad and trim it
+    /// as Rubber Band's real-time mode asks, so the first output frame is
+    /// the first input frame at full level.  The ratios must already be set;
+    /// they are (`set_speed` runs before every block).
+    fn arm_start(&mut self) {
+        unsafe {
+            self.pad_pending  = rb::rubberband_get_preferred_start_pad(self.rb.state) as usize;
+            self.trim_pending = rb::rubberband_get_start_delay(self.rb.state) as usize;
+        }
+    }
+}
+
 impl PipelineStage for TimestretechStage {
     fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
+        let first_new = output.len();
+        if self.pad_pending > 0 {
+            let silence = vec![0.0f32; BLOCK_FRAMES * self.channels];
+            while self.pad_pending > 0 {
+                let n = self.pad_pending.min(BLOCK_FRAMES);
+                self.push_block(&silence[..n * self.channels], output);
+                self.pad_pending -= n;
+            }
+        }
         // Feed input in BLOCK_FRAMES-sized chunks.
         let stride = BLOCK_FRAMES * self.channels;
         let mut offset = 0;
@@ -313,6 +343,12 @@ impl PipelineStage for TimestretechStage {
             let end = (offset + stride).min(input.len());
             self.push_block(&input[offset..end], output);
             offset = end;
+        }
+        if self.trim_pending > 0 {
+            let have = (output.len() - first_new) / self.channels;
+            let drop = self.trim_pending.min(have);
+            output.drain(first_new..first_new + drop * self.channels);
+            self.trim_pending -= drop;
         }
     }
 
@@ -341,6 +377,7 @@ impl PipelineStage for TimestretechStage {
 
     fn reset(&mut self) {
         unsafe { rb::rubberband_reset(self.rb.state); }
+        self.arm_start();
     }
 }
 
@@ -671,8 +708,47 @@ mod perf {
         }
     }
 
-    /// `in / speed` frames per push, real audio, and after a reset nothing
-    /// until the latency is covered — then full level from the seek point.
+    /// A CUE on a kick: after a reset the stream starts on a hard attack at
+    /// its very first frame (no history).  The output's first 5 ms must carry
+    /// that attack at full level and on time, at the speeds a DJ plays at.
+    /// Before the start pad / trim, R3 output nothing for the first ~53 ms.
+    #[test]
+    fn rubberband_keeps_the_transient_at_a_cue() {
+        let kick = |n: usize| -> Vec<f32> {
+            (0..n).flat_map(|i| {
+                let t = i as f32 / SR as f32;
+                let f = 55.0 + 120.0 * (-t * 40.0).exp();
+                let v = 0.7 * (2.0 * std::f32::consts::PI * f * t).sin() * (-t * 12.0).exp()
+                      + if i < 40 { 0.4 * (1.0 - i as f32 / 40.0) } else { 0.0 };
+                [v, v]
+            }).collect()
+        };
+        let input = kick(SR as usize / 2);
+        let peak_in = input[..(SR as usize / 200) * CH].iter().fold(0f32, |m, x| m.max(x.abs()));
+        for speed in [0.92f32, 1.0, 1.08] {
+            let mut stage = TimestretechStage::new(SR, CH as u8);
+            // Something else played first, then CUE: set speed, reset, play.
+            stage.set_speed(speed);
+            let mut junk = Vec::new();
+            stage.process(&signal(0.5), &mut junk);
+            stage.reset();
+            let mut out = Vec::new();
+            for chunk in input.chunks(BLOCK * CH) {
+                stage.set_speed(speed);
+                stage.process(chunk, &mut out);
+            }
+            let head = &out[..(SR as usize / 200) * CH];   // first 5 ms
+            let peak = head.iter().fold(0f32, |m, x| m.max(x.abs()));
+            // R3 softens any attack a little (~0.75× here, as mid-track);
+            // the bug was losing it outright (silence for the first 50 ms).
+            assert!(peak > 0.6 * peak_in, "@{speed}x: attack peak {peak:.3} vs input {peak_in:.3}");
+            let onset = out.iter().position(|x| x.abs() > 0.5 * peak_in).unwrap() / CH;
+            assert!(onset < SR as usize / 500, "@{speed}x: attack {onset} frames late");
+        }
+    }
+
+    /// `in / speed` frames per push, real audio, and after a reset full
+    /// level from the seek point.
     fn frame_accounting_and_signal(stage: &mut dyn PipelineStage, speed: f32) {
         {
             stage.set_speed(speed);
@@ -704,7 +780,6 @@ mod perf {
             let latency = stage.latency_frames();
             let mut after = Vec::new();
             stage.process(&input[..BLOCK * CH], &mut after);
-            assert!(after.is_empty(), "@{speed}x: output right after reset");
             let mut fed = BLOCK;
             while fed < latency + 4 * BLOCK {
                 stage.process(&input[fed * CH..(fed + BLOCK) * CH], &mut after);

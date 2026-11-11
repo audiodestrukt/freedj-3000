@@ -856,6 +856,10 @@ fn processor_loop(
         let silence = vec![0.0f32; latency * file_ch];
         let mut warmup = Vec::new();
         stretcher.process(&silence, &mut warmup);
+        // Then start clean, as after a seek: the first PLAY is armed the same
+        // way (Rubber Band's start pad / delay), so a track's opening
+        // transient comes out whole.
+        stretcher.reset();
         log::debug!("proc: pre-rolled {latency} silence frames");
     }
 
