@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- **Stems from OverCue Desktop were refused** ("unsupported sample_rate
+  96000"): OverCue writes its default 96 kHz rate into the index, and only
+  a missing rate was read as 96 kHz. Checked on a real prepared stick: all
+  six tracks load (MP3 and M4A) and drums / vocal mute and solo as they
+  should.
+
 ### Changed
 - **CDJ-3000 skin: MENU opens UTILITY on a tap** (the settings, STEMS
   included). LOAD PREVIOUS TRACK moved to the hold. The unit has it the

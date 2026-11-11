@@ -92,7 +92,14 @@ impl Entry {
         if o.get("page_bytes").and_then(Value::as_u64) != Some(PAGE_BYTES as u64) { bail!("page_bytes must be {PAGE_BYTES}"); }
         let sample_rate = match o.get("sample_rate") {
             None => 96_000,
-            Some(v) => match v.as_u64() { Some(44_100) => 44_100, _ => bail!("unsupported sample_rate {v}") },
+            // OverCue Desktop writes the 96 kHz default out explicitly
+            // ("sample_rate": 96000, page_codec "flac-96k"), as seen on a
+            // real prepared stick; older writers leave it out.
+            Some(v) => match v.as_u64() {
+                Some(96_000) => 96_000,
+                Some(44_100) => 44_100,
+                _ => bail!("unsupported sample_rate {v}"),
+            },
         };
         let layout = if o.get("page_codec").and_then(Value::as_str) == Some("wav-44k1") { Layout::Wav } else { Layout::Pages };
         if layout == Layout::Wav && sample_rate != 44_100 { bail!("WAV roles must be 44.1 kHz"); }
@@ -226,6 +233,22 @@ mod tests {
         let mut s = format!(r#"{{"bundle":"{bundle}","file_path":"{path}","frames":1000,"three_part":2,"page_bytes":131072"#);
         for r in Role::ALL { s += &format!(r#","{k}_sha256":"{h}","{k}_page_table_sha256":"{h}""#, k = r.key()); }
         s + "}"
+    }
+
+    /// The fields OverCue Desktop wrote for a track on a real stick
+    /// (CDJ2, 2026-11-10): an explicit 96 kHz rate and its codec tags.
+    #[test]
+    fn parses_an_explicit_96k_entry_as_overcue_writes_it() {
+        let e = entry_json("e3b4246cea36a5e5", "/Contents/Davani/Brand New Funk/002 - Davani - Brand New Funk.mp3");
+        let e = e.trim_end_matches('}').to_string()
+            + r#","sample_rate":96000,"page_codec":"flac-96k","preparation_profile":"cdj3000-96k/1","separation":"bs-roformer/overcue-stems-v2","title":"Brand New Funk"}"#;
+        let j = format!(r#"{{"schema":"overcue-index/1","keyed_by":"export.pdb","tracks":{{"2":{e}}},"tracks_onelibrary":{{}}}}"#);
+        let ix = Index::parse(j.as_bytes()).unwrap();
+        let got = ix.by_id(Namespace::DeviceLibrary, 2).unwrap();
+        assert_eq!(got.sample_rate, 96_000);
+        assert_eq!(got.layout, Layout::Pages);
+        let bad = j.replace("96000", "48000");
+        assert!(Index::parse(bad.as_bytes()).is_err(), "other rates are still refused");
     }
 
     #[test]
