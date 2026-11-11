@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **MP3s were 24 ms off from rekordbox and the players.** The decoder trimmed
+  the MP3 encoder delay; rekordbox and Pioneer players keep it, so every
+  rekordbox beat grid and cue on an MP3 sat ~24 ms late against our audio (a
+  cue on a kick started after the attack), a synced deck next to a CDJ ran
+  ~24 ms early, and grids we served over LINK were ~24 ms early on the
+  players. MP3s now decode with the delay kept, like rekordbox. Measured over
+  a 226-track rekordbox stick (`examples/analysis_vs_rekordbox`): the deck's
+  own grids moved from a median 22.7 ms off rekordbox's to 0.7 ms, and
+  OverCue stems now line up within 1 ms without correction. The Link
+  analysis cache is rebuilt once. Grids hand-adjusted with GRID ADJUST on an
+  MP3 before this sit ~24 ms early: SNAP GRID them again.
 - **CUE lost the transient it was set on** (Rubber Band, the default
   key-lock engine). After a seek, R3 swallowed the first ~30–50 ms of what
   followed, so a CUE on a kick played the kick's tail. The stretcher now

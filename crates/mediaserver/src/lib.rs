@@ -216,7 +216,8 @@ pub fn grid_beats(anchor: u64, bpm: f64, downbeat_offset: u8, sr: u32, frames: u
 // or replaced file re-analyses and a moved library does not.
 
 const CACHE_MAGIC: &[u8; 4] = b"ODLA";
-const CACHE_VERSION: u16 = 1;
+// 2: MP3s decode with the encoder delay kept (the rekordbox / player timeline).
+const CACHE_VERSION: u16 = 2;
 
 fn cache_key(path: &Path) -> Option<String> {
     let md = std::fs::metadata(path).ok()?;

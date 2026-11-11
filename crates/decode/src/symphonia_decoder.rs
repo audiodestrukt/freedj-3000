@@ -105,7 +105,12 @@ impl SymphoniaDecoder {
 
     fn from_source(mss: MediaSourceStream, hint: Hint) -> Result<Self, DecodeError> {
         let meta_opts = MetadataOptions::default();
-        let fmt_opts = FormatOptions { enable_gapless: true, ..Default::default() };
+        // Keep the MP3 encoder delay (no gapless trim): rekordbox and the
+        // players decode MP3s that way, so their beat grids and cues are on
+        // that timeline. Trimmed, every rekordbox grid and cue sat ~24 ms
+        // late against our audio (measured over a 226-track stick: median
+        // -22.7 ms trimmed, 0.7 ms untrimmed; AAC was already untrimmed).
+        let fmt_opts = FormatOptions { enable_gapless: false, ..Default::default() };
 
         let mut probed = symphonia::default::get_probe()
             .format(&hint, mss, &fmt_opts, &meta_opts)
