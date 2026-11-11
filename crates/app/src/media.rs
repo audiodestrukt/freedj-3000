@@ -39,7 +39,8 @@ pub struct Mount {
 pub enum Access {
     Ready,
     /// Seen, but the OS has to grant the app access first: opening the row
-    /// asks for it (`request_access`) instead of browsing.
+    /// asks for it (`request_access`) instead of browsing.  Android only.
+    #[cfg_attr(not(target_os = "android"), allow(dead_code))]
     NeedsGrant,
 }
 
@@ -94,6 +95,7 @@ fn ios_drives() -> Vec<Mount> {
 /// Android: the volumes under `/storage` other than the internal one.
 /// Without all-files access they cannot be read, so they come back as
 /// `NeedsGrant` rows.
+#[cfg_attr(not(target_os = "android"), allow(dead_code))]
 pub fn android_drives(storage: &Path, granted: bool) -> Vec<Mount> {
     let mut out = scan(&[(storage.to_path_buf(), cfg!(test))]);
     out.retain(|m| m.label != "emulated" && m.label != "self");

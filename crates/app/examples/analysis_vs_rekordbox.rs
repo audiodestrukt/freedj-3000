@@ -74,6 +74,11 @@ fn one(root: &Path, t: &RbTrack) -> Row {
         else if (ours * 1.5 - theirs).abs() <= 0.5 || (ours / 1.5 - theirs).abs() <= 0.5 { "3:2" }
         else { "wrong" };
 
+    // Dev: OD_FOLD=<title substring> prints where the energy sits within the
+    // beat, folded over rekordbox's grid (0 = its beat), low / mid / high.
+    if std::env::var("OD_FOLD").is_ok_and(|f| row.title.contains(&f)) {
+        fold(&pcm, sr, &rb.beats, g.anchor_sample as f64 / sr as f64 * 1000.0, g.bpm, &row.title);
+    }
     // Phase: our nearest grid line to rekordbox beats near 0 / 60 / 120 s.
     if matches!(row.verdict, "exact" | "close") {
         let period_ms = 60_000.0 / ours;
@@ -140,4 +145,39 @@ fn main() -> anyhow::Result<()> {
         println!("wrote {p}");
     }
     Ok(())
+}
+
+/// Energy folded over rekordbox's beats in 16 slots per beat, per band.
+fn fold(pcm: &[f32], sr: u32, beats: &[opendeck_rekordbox::RbBeat], our_anchor_ms: f64, our_bpm: f64, title: &str) {
+    // One-pole band splits on the mono signal: low < ~150 Hz, high > ~5 kHz, mid between.
+    let mono: Vec<f32> = pcm.chunks(2).map(|f| 0.5 * (f[0] + f[1])).collect();
+    let a = |hz: f32| (-2.0 * std::f32::consts::PI * hz / sr as f32).exp();
+    let (al, ah) = (a(150.0), a(5000.0));
+    let (mut lp, mut lp2) = (0f32, 0f32);
+    let mut bands = vec![[0f32; 3]; mono.len()];
+    for (i, &x) in mono.iter().enumerate() {
+        lp = al * lp + (1.0 - al) * x;          // < 150
+        lp2 = ah * lp2 + (1.0 - ah) * x;        // < 5k
+        bands[i] = [lp.abs(), (lp2 - lp).abs(), (x - lp2).abs()];
+    }
+    const SLOTS: usize = 16;
+    let mut acc = [[0f64; SLOTS]; 3];
+    for w in beats.windows(2).take(400) {
+        let (t0, t1) = (w[0].time_ms as f64 / 1000.0 * sr as f64, w[1].time_ms as f64 / 1000.0 * sr as f64);
+        for k in 0..SLOTS {
+            let s0 = (t0 + (t1 - t0) * k as f64 / SLOTS as f64) as usize;
+            let s1 = (t0 + (t1 - t0) * (k + 1) as f64 / SLOTS as f64) as usize;
+            for b in 0..3 { acc[b][k] += bands[s0.min(bands.len())..s1.min(bands.len())].iter().map(|v| v[b] as f64).sum::<f64>(); }
+        }
+    }
+    let per = 60_000.0 / our_bpm;
+    let b0 = beats[0].time_ms as f64;
+    let ours = ((our_anchor_ms - b0).rem_euclid(per) / per * SLOTS as f64) as usize % SLOTS;
+    eprintln!("\nFOLD {title}  (slot 0 = rekordbox beat; ^ = our grid)");
+    for (b, name) in ["low ", "mid ", "high"].iter().enumerate() {
+        let m = acc[b].iter().cloned().fold(0f64, f64::max).max(1e-9);
+        let bars: String = acc[b].iter().map(|v| [' ', '.', ':', '-', '=', '+', '*', '#', '@'][((v / m) * 8.0).round() as usize]).collect();
+        eprintln!("  {name} |{bars}|");
+    }
+    eprintln!("        |{}^{}|", " ".repeat(ours), " ".repeat(SLOTS - 1 - ours));
 }

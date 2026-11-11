@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- **Beat grids on the off-beat.** The deck's own analysis (tracks without a
+  rekordbox grid) put a fifth of house / tech-house grids half a beat out,
+  on the open hats instead of the kick: the phase vote summed energy per
+  frequency bin, and the highs have ~60× the bins of the bass. Each band is
+  now normalised on its own and the mids (the kick's click) weigh most.
+  Against rekordbox's grids on a 226-track stick: off-beat grids 50 → 27,
+  grids within 10 ms of rekordbox's at 60 s in 164 → 186 of 222. The
+  analysis has tests now (it had none), including the off-beat case.
 - **MP3s were 24 ms off from rekordbox and the players.** The decoder trimmed
   the MP3 encoder delay; rekordbox and Pioneer players keep it, so every
   rekordbox beat grid and cue on an MP3 sat ~24 ms late against our audio (a

@@ -147,11 +147,22 @@ impl BeatAnalyzer for BeatAnalyzerImpl {
 /// spectral flux.  Operates on sub-bands so kick, snare, and hi-hat all
 /// contribute, making the result more robust than a single-band energy
 /// differentiator.  Returns ~86 values/sec at hop=512.
+/// Spectral-flux onset strength per 512-sample hop, for the beat-phase vote.
+///
+/// Three bands (bass < 300 Hz, mids to 3 kHz, highs above), each band's flux
+/// normalised by its own mean over the track, then weighted mids 2 : bass 1 :
+/// highs 0.25.  Summing raw per-bin flux instead let the highs win on bin
+/// count alone (~440 bins above 3 kHz against ~7 below 300 Hz), so the open
+/// hats on the off-beat out-voted the kick: measured against rekordbox on a
+/// 226-track stick, 50 grids sat half a beat out; with the bands normalised,
+/// 27 (examples/analysis_vs_rekordbox).  The kick's click lands in the mids,
+/// which is why they carry the most weight.
 fn onset_strength(samples: &[f32], sr: f32) -> Vec<f32> {
     use rustfft::{num_complex::Complex, FftPlanner};
 
     const HOP:    usize = 512;
     const WINDOW: usize = 1024;
+    const WEIGHTS: [f32; 3] = [1.0, 2.0, 0.25];   // bass, mids, highs
 
     let n_hops = samples.len().saturating_sub(WINDOW) / HOP;
     if n_hops == 0 {
@@ -160,21 +171,18 @@ fn onset_strength(samples: &[f32], sr: f32) -> Vec<f32> {
 
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(WINDOW);
-
-    // Hann window coefficients.
     let hann: Vec<f32> = (0..WINDOW)
         .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / (WINDOW - 1) as f32).cos()))
         .collect();
 
-    let bin_hz  = sr / WINDOW as f32;
-    // Divide spectrum into three sub-bands: bass, mid, high.
-    let bass_end = (300.0  / bin_hz) as usize;
-    let mid_end  = (3000.0 / bin_hz) as usize;
+    let bin_hz   = sr / WINDOW as f32;
     let n_bins   = WINDOW / 2;
+    let bass_end = ((300.0 / bin_hz) as usize).clamp(2, n_bins);
+    let mid_end  = ((3000.0 / bin_hz) as usize).clamp(bass_end + 1, n_bins);
+    let ranges   = [(1, bass_end), (bass_end, mid_end), (mid_end, n_bins)];
 
-    let mut onset     = vec![0f32; n_hops];
-    let mut prev_mag  = vec![0f32; n_bins];
-
+    let mut bands    = [vec![0f32; n_hops], vec![0f32; n_hops], vec![0f32; n_hops]];
+    let mut prev_mag = vec![0f32; n_bins];
     for h in 0..n_hops {
         let start = h * HOP;
         let mut buf: Vec<Complex<f32>> = samples[start..start + WINDOW]
@@ -182,32 +190,20 @@ fn onset_strength(samples: &[f32], sr: f32) -> Vec<f32> {
             .zip(hann.iter())
             .map(|(&s, &w)| Complex::new(s * w, 0.0))
             .collect();
-
         fft.process(&mut buf);
-
-        let mag: Vec<f32> = buf[..n_bins]
-            .iter()
-            .map(|c| c.norm() / WINDOW as f32)
-            .collect();
-
-        // Half-wave rectified spectral flux, weighted by sub-band.
-        // Bass gets 3× weight so the kick drum dominates as expected.
-        let flux: f32 = mag.iter()
-            .zip(prev_mag.iter())
-            .enumerate()
-            .map(|(bin, (&m, &p))| {
-                let diff = (m - p).max(0.0);
-                let weight = if bin < bass_end { 3.0 }
-                             else if bin < mid_end { 1.0 }
-                             else { 0.5 };
-                diff * weight
-            })
-            .sum();
-
-        onset[h]  = flux;
-        prev_mag  = mag;
+        let mag: Vec<f32> = buf[..n_bins].iter().map(|c| c.norm() / WINDOW as f32).collect();
+        for (band, &(lo, hi)) in bands.iter_mut().zip(&ranges) {
+            band[h] = (lo..hi).map(|b| (mag[b] - prev_mag[b]).max(0.0)).sum();
+        }
+        prev_mag = mag;
     }
 
+    let mut onset = vec![0f32; n_hops];
+    for (band, w) in bands.iter().zip(WEIGHTS) {
+        let mean = band.iter().sum::<f32>() / n_hops as f32;
+        if mean <= 0.0 { continue; }
+        for (o, x) in onset.iter_mut().zip(band) { *o += w * x / mean; }
+    }
     onset
 }
 
@@ -235,4 +231,99 @@ fn estimate_anchor(onset: &[f32], bpm: f32, sr: f32, sample_offset: usize) -> us
     }
 
     sample_offset + best_phase * HOP
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SR: u32 = 44_100;
+
+    /// `secs` of a four-on-the-floor loop at `bpm`, first kick at `first` s:
+    /// a kick (pitch-dropping sine + click) on every beat and, with
+    /// `hats`, a loud open hat (decaying noise) on every off-beat.
+    fn groove(bpm: f64, first: f64, secs: f64, hats: f32) -> Vec<f32> {
+        let n = (secs * SR as f64) as usize;
+        let mut x = vec![0f32; n];
+        let per = 60.0 / bpm;
+        let mut lcg: u32 = 7;
+        let mut k = 0;
+        loop {
+            let t0 = first + k as f64 * per;
+            if t0 + per >= secs { break; }
+            let s = (t0 * SR as f64).round() as usize;
+            for i in 0..(0.25 * SR as f64) as usize {
+                let t = i as f32 / SR as f32;
+                // Body: a pitch-dropping sine.  Knock: a short 1.5 kHz burst,
+                // where a real kick's click sits (not a broadband spike).
+                let v = (2.0 * std::f32::consts::PI * (50.0 + 110.0 * (-t * 35.0).exp()) * t).sin() * (-t * 14.0).exp()
+                      + 0.5 * (2.0 * std::f32::consts::PI * 1500.0 * t).sin() * (-t * 250.0).exp();
+                if s + i < n { x[s + i] += v; }
+            }
+            let h = ((t0 + per / 2.0) * SR as f64).round() as usize;
+            // Open hat: high-passed noise (first difference), ringing ~0.2 s.
+            let mut prev = 0f32;
+            for i in 0..(0.2 * SR as f64) as usize {
+                lcg = lcg.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                let noise = (lcg >> 9) as f32 / (1u32 << 23) as f32 - 0.5;
+                let hp = noise - prev;
+                prev = noise;
+                if h + i < n { x[h + i] += hats * hp * (-(i as f32) / SR as f32 * 15.0).exp(); }
+            }
+            k += 1;
+        }
+        x.into_iter().flat_map(|v| [0.5 * v, 0.5 * v]).collect()
+    }
+
+    fn analyse(pcm: &[f32]) -> BeatGrid {
+        let mut a = BeatAnalyzerImpl::new(SR);
+        a.push(pcm, SR);
+        (*a.beat_grid().expect("a grid")).clone()
+    }
+
+    /// Distance (ms) from the grid's nearest line to the true beat phase.
+    fn phase_err_ms(g: &BeatGrid, first: f64) -> f64 {
+        let per = 60_000.0 / g.bpm;
+        let d = (g.anchor_sample as f64 / SR as f64 * 1000.0 - first * 1000.0).rem_euclid(per);
+        d.min(per - d)
+    }
+
+    #[test]
+    fn finds_tempo_and_phase_of_a_plain_kick_loop() {
+        for bpm in [96.0, 124.0, 128.0, 140.0] {
+            let g = analyse(&groove(bpm, 0.25, 40.0, 0.0));
+            assert!((g.bpm - bpm).abs() < 0.1, "{bpm}: got {}", g.bpm);
+            assert!(phase_err_ms(&g, 0.25) < 15.0, "{bpm}: phase {} ms off", phase_err_ms(&g, 0.25));
+        }
+    }
+
+    /// Open hats on the off-beat, as loud as the kick: the grid stays on the
+    /// kick.  Before the per-band normalisation the hats' many high bins
+    /// out-voted it and the grid sat half a beat out.
+    #[test]
+    fn grid_stays_on_the_kick_under_loud_offbeat_hats() {
+        for bpm in [122.0, 126.0, 130.0] {
+            let g = analyse(&groove(bpm, 0.1, 40.0, 1.5));
+            let err = phase_err_ms(&g, 0.1);
+            assert!(err < 15.0, "{bpm}: grid {err:.1} ms from the kick (half a beat = {:.0})", 30_000.0 / bpm);
+        }
+    }
+
+    /// Known gap: drum & bass reads at half tempo (174 → 87), because the
+    /// tempo range is 60–200 and MiniBPM prefers the lower octave.  Rekordbox
+    /// shows 174.  Next on the BPM list (with the 4:5 and 2:3 misreads).
+    #[test]
+    #[ignore]
+    fn drum_and_bass_reads_at_full_tempo() {
+        let g = analyse(&groove(174.0, 0.25, 40.0, 0.0));
+        assert!((g.bpm - 174.0).abs() < 0.1, "got {}", g.bpm);
+    }
+
+    /// Under the warm-up (5 s) there is no grid yet; the deck shows none.
+    #[test]
+    fn too_short_for_a_grid() {
+        let mut a = BeatAnalyzerImpl::new(SR);
+        a.push(&groove(120.0, 0.0, 4.0, 0.0), SR);
+        assert!(a.beat_grid().is_none());
+    }
 }
