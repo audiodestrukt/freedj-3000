@@ -5,8 +5,17 @@ name: iOS TestFlight
 # dispatch from the Actions tab. The build number is the Unix epoch, so it is
 # always the latest — never a duplicate.
 #
-#   git tag ios-v0.1.0 && git push origin ios-v0.1.0   →  builds & uploads
+#   git tag ios-v0.1.0 && git push origin ios-v0.1.0   →  builds & uploads, .ipa on an iOS-only release
+#   release.yml (tag v*) calls this with `version`       →  builds & uploads, .ipa as an artifact only;
+#                                                           release.yml puts it on the unified release
 #
+# Event logic, since a called workflow sees the CALLER's github.event_name /
+# github.ref (push, refs/tags/v0.4.0) and only the workflow_call inputs:
+#   ios-v* push        version from the tag; TestFlight; own release
+#   workflow_dispatch  version 0.1 (or release_tag's); TestFlight if
+#                      `testflight`; own release only if `release_tag` is set
+#   workflow_call      version from `version` (if x.y.z); TestFlight unless the
+#                      caller was dispatched with testflight=false; no release
 on:
   push:
     tags:
@@ -21,6 +30,16 @@ on:
         description: Build this ios-v* tag's code and publish its .ipa on that tag's release (for a version tagged before releases existed)
         type: string
         default: ''
+  workflow_call:
+    inputs:
+      version:
+        description: Marketing version x.y.z (anything else falls back to 0.1)
+        type: string
+        required: true
+      testflight:
+        description: Upload to TestFlight (only consulted when the caller was manually dispatched)
+        type: boolean
+        default: true
 
 # A tag build publishes a GitHub Release with the .ipa for side-loading.
 permissions:
@@ -51,15 +70,19 @@ jobs:
       - name: Add iOS Rust target
         run: rustup target add aarch64-apple-ios
 
-      # Marketing version (x.y.z) from the tag (ios-v0.1.0 → 0.1.0), else the
+      # Marketing version (x.y.z): a caller's `version` if it is x.y.z (release.yml
+      # on v0.4.0 → 0.4.0), else from the tag (ios-v0.1.0 → 0.1.0), else the
       # project default. Build number = Unix epoch seconds: always large and
       # monotonically increasing, so an older manual upload can never outrank it
       # (TestFlight orders by build number).
       - name: Compute version + build number
         id: ver
         run: |
+          IN="${{ inputs.version }}"
           REF="${{ inputs.release_tag || github.ref_name }}"
-          if [[ "$REF" == ios-v* ]]; then
+          if [[ "$IN" =~ ^[0-9]+(\.[0-9]+){0,2}$ ]]; then
+            VERSION="$IN"
+          elif [[ "$REF" == ios-v* ]]; then
             VERSION="${REF#ios-v}"
           else
             VERSION="0.1"
@@ -194,9 +217,10 @@ jobs:
       # distributes), and the shipped app has no entitlements a free Apple
       # ID can't sign, so AltStore / SideStore / Sideloadly can re-sign it
       # with the user's own Apple ID.  Not marked "latest": the desktop
-      # releases keep that.
+      # releases keep that.  Never on a workflow_call (github.ref is then the
+      # caller's v* tag and release_tag is unset): release.yml publishes.
       - name: Release notes
-        if: startsWith(github.ref, 'refs/tags/ios-v') || inputs.release_tag != ''
+        if: startsWith(github.ref, 'refs/tags/ios-v') || (inputs.release_tag || '') != ''
         run: |
           cat > build/release-notes.md <<'NOTES'
           OpenDeck DJ for iPhone and iPad, version ${{ steps.ver.outputs.version }} (build ${{ steps.ver.outputs.build }}).
@@ -209,7 +233,7 @@ jobs:
           NOTES
 
       - name: Publish the .ipa on the release
-        if: startsWith(github.ref, 'refs/tags/ios-v') || inputs.release_tag != ''
+        if: startsWith(github.ref, 'refs/tags/ios-v') || (inputs.release_tag || '') != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.release_tag || github.ref_name }}

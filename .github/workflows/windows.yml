@@ -4,6 +4,7 @@ name: Windows build
 #
 #   git tag win-v0.3.0 && git push origin win-v0.3.0   →  GitHub Release with the zip
 #   Actions tab → "Windows build" → Run workflow        →  zip as a run artifact only
+#   release.yml (tag v*) calls this with `version`       →  artifact only; release.yml publishes
 #
 # Public repo, so Windows runner minutes are free. No system libraries are
 # needed on Windows: cpal uses WASAPI, wgpu uses DX12/Vulkan, midir uses WinMM,
@@ -14,6 +15,12 @@ on:
     tags:
       - 'win-v*'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Version to bake in and name the zip after (e.g. 0.4.0)
+        type: string
+        required: true
 
 permissions:
   contents: write   # softprops/action-gh-release creates the release on a tag
@@ -30,14 +37,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # win-v0.3.0 → 0.3.0; a manual run gets 0.0.0-<sha>. Baked into the
-      # binary through OPENDECK_VERSION (see crates/app/build.rs + screen.rs).
+      # Called with `version` → that; win-v0.3.0 → 0.3.0; a manual run gets
+      # 0.0.0-<sha>. Baked into the binary through OPENDECK_VERSION (see
+      # crates/app/build.rs + screen.rs).
       - name: Compute version
         id: ver
         shell: bash
         run: |
+          IN="${{ inputs.version }}"
           REF="${{ github.ref_name }}"
-          if [[ "$REF" == win-v* ]]; then
+          if [[ -n "$IN" ]]; then
+            VERSION="$IN"
+          elif [[ "$REF" == win-v* ]]; then
             VERSION="${REF#win-v}"
           else
             VERSION="0.0.0-$(git rev-parse --short HEAD)"

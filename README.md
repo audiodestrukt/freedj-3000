@@ -78,7 +78,7 @@ is listed in [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md).
 | iPad / iPhone app (OpenDeck DJ) | ✅ On the App Store |
 | Raspberry Pi 5 | ✅ 60 fps, ~0.6 of one core playing |
 | Raspberry Pi Zero W / older GPUs (SDL backend, WSOLA key lock) | ✅ Plays cleanly; 49 fps on KMSDRM |
-| Linux (x86_64, aarch64) and Windows prebuilt releases | ✅ [Releases](https://github.com/audiodestrukt/freedj-3000/releases) |
+| Linux (x86_64, aarch64), Windows, macOS and iOS (.ipa) prebuilt releases | ✅ [Releases](https://github.com/audiodestrukt/freedj-3000/releases) |
 | Control surfaces: any USB MIDI controller, PCF8574 I2C boards on the Pi, mapped in `controllers.toml` with LED feedback | ✅ MIDI on a DJ2Go; I2C path built and unit-tested, first board pending ([docs/hardware/control-surfaces.md](docs/hardware/control-surfaces.md)) |
 | Sampler-deck: auto one-shots, quantized triggers, cue sequencing | 📋 Roadmap ([#24](https://github.com/audiodestrukt/freedj-3000/issues/24)) |
 | A CDJ-3000 as freedj's control surface and screen (HID over LINK, Control Mode) | 🧪 Experimental, emulator only ([docs/design/cdj-hid-display.md](docs/design/cdj-hid-display.md)) |
@@ -160,6 +160,21 @@ make run TRACK=/path/to/track.mp3
 `make` on its own lists every target. The underlying commands are plain cargo —
 `make build` is `cargo build --release -p opendeck-app` and nothing more.
 
+### Releases (all platforms)
+
+One tag builds every platform and publishes them together on one release,
+"OpenDeck X.Y.Z" (marked latest), via `.github/workflows/release.yml`:
+
+```bash
+git tag v0.4.0 && git push origin v0.4.0
+```
+
+That release has the Linux tarballs, the Windows zip, the macOS zip and the
+iOS `.ipa`, and the same run uploads the iOS build to TestFlight (the version
+must be higher than the last TestFlight upload). The per-platform tags below
+(`linux-v*`, `win-v*`, `mac-v*`, `ios-v*`) still work for a one-platform
+release.
+
 ### Linux (prebuilt)
 
 The [Releases page](https://github.com/audiodestrukt/freedj-3000/releases)
@@ -199,6 +214,25 @@ git tag win-v0.3.0 && git push origin win-v0.3.0
 Building locally needs only rustup and the Visual Studio Build Tools
 ("Desktop development with C++" — MSVC compiles the vendored Rubber Band and
 MiniBPM); no other system libraries. Then `cargo build --release -p opendeck-app`.
+
+### macOS
+
+Prebuilt: the [Releases page](https://github.com/audiodestrukt/freedj-3000/releases)
+has `OpenDeck-<version>-macos-universal.zip`: one `OpenDeck.app` for Apple
+Silicon and Intel, macOS 11 or newer. It is ad-hoc signed, not notarized, so
+the first launch needs right-click → Open (or
+`xattr -dr com.apple.quarantine OpenDeck.app`). Double-clicking opens an empty
+deck; to open a track straight away run
+`OpenDeck.app/Contents/MacOS/opendeck track.mp3` from Terminal. Details in the
+bundled `README-MAC.txt`. It is built by `.github/workflows/macos.yml` on
+every `mac-v*` tag:
+
+```bash
+git tag mac-v0.4.0 && git push origin mac-v0.4.0
+```
+
+Building locally needs only rustup and the Xcode command-line tools; then
+`cargo build --release -p opendeck-app`.
 
 ### Keyboard
 

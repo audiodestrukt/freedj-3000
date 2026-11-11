@@ -5,6 +5,7 @@ name: Linux build
 #
 #   git tag linux-v0.3.0 && git push origin linux-v0.3.0   →  GitHub Release with both tarballs
 #   Actions tab → "Linux build" → Run workflow            →  tarballs as run artifacts only
+#   release.yml (tag v*) calls this with `version`         →  artifacts only; release.yml publishes
 #
 # Both binaries enable the SDL render backend next to wgpu, link only ALSA and
 # SDL2 from the system, and build the vendored Rubber Band + Bungee (no
@@ -20,6 +21,12 @@ on:
     tags:
       - 'linux-v*'
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Version to bake in and name the tarballs after (e.g. 0.4.0)
+        type: string
+        required: true
 
 permissions:
   contents: write   # softprops/action-gh-release creates the release on a tag
@@ -28,8 +35,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # linux-v0.3.0 → 0.3.0; a manual run gets 0.0.0-<sha>. Baked into the
-  # binary through OPENDECK_VERSION (see crates/app/build.rs + screen.rs).
+  # Called with `version` → that; linux-v0.3.0 → 0.3.0; a manual run gets
+  # 0.0.0-<sha>. Baked into the binary through OPENDECK_VERSION (see
+  # crates/app/build.rs + screen.rs).
   version:
     runs-on: ubuntu-latest
     outputs:
@@ -40,8 +48,11 @@ jobs:
       - name: Compute version
         id: ver
         run: |
+          IN="${{ inputs.version }}"
           REF="${{ github.ref_name }}"
-          if [[ "$REF" == linux-v* ]]; then
+          if [[ -n "$IN" ]]; then
+            VERSION="$IN"
+          elif [[ "$REF" == linux-v* ]]; then
             VERSION="${REF#linux-v}"
           else
             VERSION="0.0.0-$(git rev-parse --short HEAD)"

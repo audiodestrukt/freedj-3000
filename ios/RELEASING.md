@@ -9,12 +9,26 @@ TestFlight from GitHub Actions — no Mac needed. Same pattern as the other repo
 git tag ios-v0.1.1 && git push origin ios-v0.1.1
 ```
 
+Or, to release every platform at once, push a plain `v*` tag:
+
+```bash
+git tag v0.4.0 && git push origin v0.4.0
+```
+
+`.github/workflows/release.yml` calls `ios.yml` (and the Linux, Windows and
+macOS workflows) with version `0.4.0`. The iOS build goes to TestFlight as
+usual, but its `.ipa` goes on the one unified release, "OpenDeck 0.4.0", not
+an iOS-only one. TestFlight needs the version to be higher than the last one
+uploaded, so after `ios-v0.3.5` the next unified tag must be `v0.3.6` or
+higher. Running **Release** from the Actions tab builds everything as run
+artifacts only, and uploads to TestFlight only if `testflight` is ticked.
+
 The tag (`ios-v*`) triggers `.github/workflows/ios.yml` on a `macos-26` runner:
 adds the `aarch64-apple-ios` Rust target → archives (the Xcode "Build Rust"
 phase compiles the `opendeck-app` staticlib) → cloud-signs and uploads to
 TestFlight. You can also run it from the Actions tab (**workflow_dispatch**).
 
-- **Marketing version** comes from the tag: `ios-v0.1.1` → `0.1.1`.
+- **Marketing version** comes from the tag: `ios-v0.1.1` → `0.1.1`, `v0.4.0` → `0.4.0`.
 - **Build number** is the Unix epoch (always increasing, never a duplicate), so
   no manual bump — `MARKETING_VERSION` / `CURRENT_PROJECT_VERSION` are injected
   by the workflow (the `Info.plist` references them).

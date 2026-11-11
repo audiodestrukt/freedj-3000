@@ -1,0 +1,158 @@
+name: Release
+
+# One tag, one release with every platform on it.
+#
+#   git tag v0.4.0 && git push origin v0.4.0   →  "OpenDeck 0.4.0": Linux, Windows, macOS
+#                                                 and iOS downloads on one release (marked
+#                                                 latest), and the iOS build on TestFlight
+#   Actions tab → "Release" → Run workflow     →  every platform built, run artifacts only
+#                                                 (TestFlight only if ticked; no release)
+#
+# Each platform's own workflow does the building; this one calls them as
+# reusable workflows with the version, and publishes their artifacts once all
+# have passed. Called like this they only upload artifacts: their own
+# per-platform release steps look for their own tag prefix (linux-v*, win-v*,
+# mac-v*, ios-v*), which still work on their own exactly as before.
+#
+# The release takes every file from every artifact named OpenDeck-*, so a
+# new platform needs only to name its artifact (and files) OpenDeck-*:
+#   1. add a job  `android: { needs: version, uses: ./.github/workflows/android.yml,
+#      with: { version: "${{ needs.version.outputs.version }}" } }`
+#      (android.yml gets the same `workflow_call:` input `version` as the others);
+#   2. add `android` to the `release` job's `needs`.
+# The notes step adds a section for every kind of file it finds (.apk
+# included), so nothing else changes.
+#
+# iOS: the marketing version comes from the tag, and TestFlight only accepts
+# a version higher than the last one uploaded (ios-v0.3.5 at the time of
+# writing), so v0.4.0 is fine and v0.3.5 is not.
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      testflight:
+        description: Also upload the iOS build to TestFlight
+        type: boolean
+        default: false
+
+permissions:
+  contents: write   # the release job; the called workflows inherit it
+
+jobs:
+  # v0.4.0 → 0.4.0; a manual run gets 0.0.0-<sha> (iOS then falls back to 0.1).
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Compute version
+        id: ver
+        run: |
+          REF="${{ github.ref_name }}"
+          if [[ "${{ github.ref_type }}" == tag && "$REF" == v* ]]; then
+            VERSION="${REF#v}"
+          else
+            VERSION="0.0.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Releasing $VERSION"
+
+  linux:
+    needs: version
+    uses: ./.github/workflows/linux.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  windows:
+    needs: version
+    uses: ./.github/workflows/windows.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  macos:
+    needs: version
+    uses: ./.github/workflows/macos.yml
+    with:
+      version: ${{ needs.version.outputs.version }}
+
+  ios:
+    needs: version
+    uses: ./.github/workflows/ios.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+      # A v* tag push always uploads; ios.yml reads this only on a dispatch.
+      testflight: ${{ github.event_name != 'workflow_dispatch' || inputs.testflight }}
+
+  release:
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs: [version, linux, windows, macos, ios]
+    runs-on: ubuntu-latest
+    steps:
+      # Only the OpenDeck-* artifacts: this skips macos.yml's per-arch
+      # intermediates. The iOS artifact also holds a dSYMs-*.zip, which the
+      # files glob below leaves out.
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: OpenDeck-*
+          path: dist
+          merge-multiple: true
+
+      - name: Release notes
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          ls -l dist
+          has() { compgen -G "dist/$1" >/dev/null; }
+          N=dist/release-notes.md
+          echo "OpenDeck $VERSION for every platform. Changes: see [CHANGELOG.md](https://github.com/$REPO/blob/$TAG/CHANGELOG.md)." > $N
+          if has 'OpenDeck-*-linux-*.tar.gz'; then cat >> $N <<'MD'
+
+          ### Linux (x86_64, aarch64)
+          `…-linux-x86_64.tar.gz` for PCs, `…-linux-aarch64.tar.gz` for a Raspberry Pi 3 / 4 / 5 / Zero 2 W on a 64-bit OS. Unpack and run `./opendeck amplificate.mp3`. Needs `sudo apt install libasound2 libsdl2-2.0-0 mesa-vulkan-drivers` (Debian 12, Ubuntu 22.04, Raspberry Pi OS Bookworm or newer). Details in `README-LINUX.txt`.
+          MD
+          fi
+          if has 'OpenDeck-*-windows-*.zip'; then cat >> $N <<'MD'
+
+          ### Windows (x64)
+          Unzip and run `opendeck.exe amplificate.mp3`. The binary isn't code-signed, so SmartScreen asks the first time: More info → Run anyway. Details in `README-WINDOWS.txt`.
+          MD
+          fi
+          if has 'OpenDeck-*-macos-*.zip'; then cat >> $N <<'MD'
+
+          ### macOS (universal: Apple Silicon and Intel, macOS 11+)
+          Unzip and open `OpenDeck.app`. It isn't notarized, so the first time right-click it → Open (or run `xattr -dr com.apple.quarantine OpenDeck.app`). Details in `README-MAC.txt`.
+          MD
+          fi
+          if has 'OpenDeck-*.apk'; then cat >> $N <<'MD'
+
+          ### Android
+          Install the `.apk` on the device (allow installs from this source when Android asks).
+          MD
+          fi
+          if has 'OpenDeck-*.ipa'; then cat >> $N <<'MD'
+
+          ### iPhone and iPad
+          The same app is free on the App Store as **[OpenDeck DJ](https://apps.apple.com/app/id6807472453)**. That's the easy way to install it and keep it updated.
+
+          **Side-loading the .ipa:** use [AltStore](https://altstore.io), [SideStore](https://sidestore.io) or [Sideloadly](https://sideloadly.io) to install it signed with your own Apple ID. With a free Apple ID, Apple makes side-loaded apps expire after 7 days. Refresh it in the tool to keep using it.
+          MD
+          fi
+          cat $N
+
+      - name: GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OpenDeck ${{ needs.version.outputs.version }}
+          body_path: dist/release-notes.md
+          files: dist/OpenDeck-*
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true
