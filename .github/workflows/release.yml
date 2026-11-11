@@ -2,8 +2,8 @@ name: Release
 
 # One tag, one release with every platform on it.
 #
-#   git tag v0.4.0 && git push origin v0.4.0   →  "OpenDeck 0.4.0": Linux, Windows, macOS
-#                                                 and iOS downloads on one release (marked
+#   git tag v0.4.0 && git push origin v0.4.0   →  "OpenDeck 0.4.0": Linux, Windows, macOS,
+#                                                 Android and iOS downloads on one release (marked
 #                                                 latest), and the iOS build on TestFlight
 #   Actions tab → "Release" → Run workflow     →  every platform built, run artifacts only
 #                                                 (TestFlight only if ticked; no release)
@@ -79,6 +79,13 @@ jobs:
     with:
       version: ${{ needs.version.outputs.version }}
 
+  android:
+    needs: version
+    uses: ./.github/workflows/android.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+
   ios:
     needs: version
     uses: ./.github/workflows/ios.yml
@@ -90,7 +97,7 @@ jobs:
 
   release:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [version, linux, windows, macos, ios]
+    needs: [version, linux, windows, macos, android, ios]
     runs-on: ubuntu-latest
     steps:
       # Only the OpenDeck-* artifacts: this skips macos.yml's per-arch
@@ -134,7 +141,7 @@ jobs:
           if has 'OpenDeck-*.apk'; then cat >> $N <<'MD'
 
           ### Android
-          Install the `.apk` on the device (allow installs from this source when Android asks).
+          `…-android.apk` for phones and tablets on Android 8.0 or newer. Open it on the device and allow installs from that app when Android asks. Put tracks in the **Music** folder (allow music access on first launch); the demo track is in Music/OpenDeck. Phones get the two landscape pages, tablets the portrait deck. Not on Google Play.
           MD
           fi
           if has 'OpenDeck-*.ipa'; then cat >> $N <<'MD'

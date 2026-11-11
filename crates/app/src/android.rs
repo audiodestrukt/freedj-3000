@@ -40,6 +40,16 @@ fn android_main(app: AndroidApp) {
     );
     std::panic::set_hook(Box::new(|p| log::error!("panic: {p}")));
 
+    // Dev: Android launches apps with no environment of their own, so the
+    // desktop's OPENDECK_* / WGPU_* switches come in through a system property:
+    //   adb shell setprop debug.opendeck.env "WGPU_BACKEND=gl OPENDECK_IDLE_FPS=0"
+    for kv in system_property("debug.opendeck.env").split_whitespace() {
+        if let Some((k, v)) = kv.split_once('=') {
+            log::info!("env from debug.opendeck.env: {k}={v}");
+            std::env::set_var(k, v);
+        }
+    }
+
     // App data under the internal files dir: taglist::app_data_dir reads HOME.
     if let Some(dir) = app.internal_data_path() {
         std::env::set_var("HOME", &dir);
@@ -171,4 +181,15 @@ fn lock_orientation(env: &mut jni::JNIEnv, act: &JObject, app: &AndroidApp) -> J
     env.call_method(act, "setRequestedOrientation", "(I)V", &[JValue::Int(o)])?;
     log::info!("smallest width {sw} dp → {}", if o == SENSOR_LANDSCAPE { "landscape (phone)" } else { "portrait (tablet)" });
     Ok(())
+}
+
+/// An Android system property, or "" when unset.
+fn system_property(name: &str) -> String {
+    extern "C" { fn __system_property_get(name: *const std::ffi::c_char, value: *mut std::ffi::c_char) -> i32; }
+    let Ok(cname) = std::ffi::CString::new(name) else { return String::new() };
+    let mut buf = [0 as std::ffi::c_char; 92];   // PROP_VALUE_MAX
+    // SAFETY: buf is PROP_VALUE_MAX bytes, which is all the call ever writes.
+    let n = unsafe { __system_property_get(cname.as_ptr(), buf.as_mut_ptr()) };
+    if n <= 0 { return String::new(); }
+    unsafe { std::ffi::CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned()
 }

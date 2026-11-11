@@ -57,7 +57,10 @@ for abi in "${ABIS[@]}"; do
   mkdir -p "$OUT/stage/lib/$abi"
   "$STRIP" --strip-unneeded -o "$OUT/stage/lib/$abi/libopendeck_app.so" \
       "$ROOT/target/$triple/release/libopendeck_app.so"
-  ls -l "$OUT/stage/lib/$abi/libopendeck_app.so" >&2
+  # The vendored C++ (Rubber Band, Bungee, oboe) links the shared C++ runtime;
+  # the APK has to carry it next to the library.
+  cp "$(dirname "$STRIP")/../sysroot/usr/lib/$triple/libc++_shared.so" "$OUT/stage/lib/$abi/"
+  ls -l "$OUT/stage/lib/$abi/" >&2
 done
 
 # ── Resources, manifest, assets ──────────────────────────────────────────────

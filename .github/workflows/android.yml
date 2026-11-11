@@ -1,0 +1,110 @@
+name: Android build
+
+# Builds the Android APK (arm64-v8a phones/tablets + x86_64 emulators) and
+# publishes it, the same way windows.yml / linux.yml do.
+#
+#   git tag android-v0.4.0 && git push origin android-v0.4.0  →  GitHub Release with the .apk
+#   git tag v0.4.0 (release.yml)                              →  the .apk on the all-platform release
+#   Actions tab → "Android build" → Run workflow              →  .apk as a run artifact only
+#
+# No Gradle: deploy/android/build.sh links the Rust library with cargo-ndk and
+# packages it with the SDK's aapt2 / zipalign / apksigner (the app is a
+# NativeActivity; see crates/app/src/android.rs). The runner image ships the
+# SDK, an NDK and Java.
+#
+# Signing: secrets ANDROID_KEYSTORE_BASE64 + ANDROID_KEYSTORE_PASSWORD hold the
+# release key (~/private_keys/android-release.jks, alias "opendeck"). It must
+# never change: Android refuses an update signed with a different key. A tag
+# build without it fails; a manual run falls back to a throwaway debug key.
+on:
+  push:
+    tags:
+      - 'android-v*'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Version to build (x.y.z), from release.yml
+        type: string
+        required: true
+
+permissions:
+  contents: write   # softprops/action-gh-release creates the release on a tag
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # android-v0.4.0 → 0.4.0; called from release.yml → its version;
+      # a manual run gets 0.0.0-<sha>.
+      - name: Compute version
+        id: ver
+        run: |
+          REF="${{ github.ref_name }}"
+          if [[ -n "${{ inputs.version }}" ]]; then
+            VERSION="${{ inputs.version }}"
+          elif [[ "$REF" == android-v* ]]; then
+            VERSION="${REF#android-v}"
+          else
+            VERSION="0.0.0-$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building $VERSION"
+
+      - name: Set up Rust toolchain
+        run: |
+          rustup show
+          rustup target add aarch64-linux-android x86_64-linux-android
+
+      - name: Cache cargo build
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-bin: true
+
+      - name: Install cargo-ndk
+        run: command -v cargo-ndk || cargo install cargo-ndk --locked
+
+      - name: Signing key
+        env:
+          KS_B64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KS_PASS: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          if [[ -n "$KS_B64" && -n "$KS_PASS" ]]; then
+            echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
+            echo "ANDROID_KEYSTORE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "ANDROID_KEYSTORE_PASS=$KS_PASS" >> "$GITHUB_ENV"
+            echo "release key loaded"
+          elif [[ "${{ github.ref_type }}" == tag ]]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64 / ANDROID_KEYSTORE_PASSWORD are not set; a release APK must carry the release key"
+            exit 1
+          else
+            echo "::warning::no release key; this APK is debug-signed and will not update a release install"
+          fi
+
+      - name: Build the APK
+        id: apk
+        run: |
+          export ANDROID_NDK_HOME="$ANDROID_NDK_LATEST_HOME"
+          deploy/android/build.sh "${{ steps.ver.outputs.version }}" arm64-v8a x86_64
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenDeck-${{ steps.ver.outputs.version }}-android
+          path: ${{ steps.apk.outputs.apk }}
+          if-no-files-found: error
+
+      - name: GitHub Release
+        if: startsWith(github.ref, 'refs/tags/android-v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: OpenDeck ${{ steps.ver.outputs.version }} (Android)
+          files: ${{ steps.apk.outputs.apk }}
+          generate_release_notes: true
