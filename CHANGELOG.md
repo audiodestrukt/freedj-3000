@@ -26,7 +26,8 @@ All notable changes to this project will be documented in this file.
   (its layout differs from Beat Link's), our media answer put our IP where
   the owning player's number goes, and our status claimed an SD card. Our
   own media queries now use the player layout too, so OpenDeck learns what
-  is in a CDJ-3000's slots.
+  is in a CDJ-3000's slots. The CDJ-3000 browses OpenDeck's tracks (title,
+  BPM, art, preview waveform); loading one still stops at NOW LOADING.
 - **Other devices could not show OpenDeck's track title or position.** Our
   status packets carried a track ID left over from the captured packet they
   were built from, so Beat Link, ShowKontrol and the players asked our

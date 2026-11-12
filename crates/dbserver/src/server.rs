@@ -222,6 +222,12 @@ pub const DETAIL_LEAD: usize = 19;
 
 /// A blob reply: request type, 0, length, bytes (Beat Link's argument list
 /// for artwork, preview and detail; the beat grid adds a trailing 0).
+/// A cue list (0x4702) with no entries: request, 0, length 0, an empty blob,
+/// the entry size (36), zero hot cues, zero memory points.
+fn empty_cue_list(txid: u32) -> Message {
+    Message { txid, kind: kind::CUES_BLOB, args: vec![u(kind::CUES as u32), u(0), u(0), Field::Blob(Vec::new()), u(0x24), u(0), u(0)] }
+}
+
 fn blob_reply(txid: u32, want: u16, req: u16, blob: Vec<u8>, trailing_zero: bool) -> Message {
     let mut args = vec![u(req as u32), u(0), u(blob.len() as u32), Field::Blob(blob)];
     if trailing_zero { args.push(u(0)); }
@@ -290,7 +296,16 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
             }
             // Cue lists and raw ANLZ sections: nothing to serve (no memory
             // cues of our own yet; colour waveforms are not produced).
-            kind::CUES | kind::CUES_EXT | kind::ANLZ_TAG => {
+            // The plain cue list must be answered: a CDJ-3000 loading one of
+            // our tracks asked for it ~1,700 times when told "unavailable"
+            // and never left NOW LOADING.  We have no memory or hot cues, so
+            // the list is empty: no 36-byte entries, zero hot cues, zero
+            // memory points (Beat Link reads the counts at args 5 and 6).
+            kind::CUES => {
+                log::debug!("dbserver: {peer:?} cue list for track {} — empty", arg(1));
+                reply(&mut w, empty_cue_list(m.txid))?;
+            }
+            kind::CUES_EXT | kind::ANLZ_TAG => {
                 log::debug!("dbserver: {peer:?} 0x{:04x} for track {} — none", m.kind, arg(1));
                 unavailable(&mut w)?;
             }
@@ -408,6 +423,10 @@ mod tests {
     #[test]
     fn track_info_carries_the_path_in_row_type_zero() {
         let rows = items(menu_rows(&lib(), kind::TRACK_INFO, &[dmst(), u(2)]).unwrap());
+        let cues = super::empty_cue_list(7);
+        assert_eq!(cues.kind, kind::CUES_BLOB);
+        assert_eq!(cues.args.len(), 7, "Beat Link reads hot and memory counts at args 5 and 6");
+        assert!(cues.args[5].as_u32() == 0 && cues.args[6].as_u32() == 0);
         let path = rows.iter().find(|r| r.item_type & 0xffff == 0).unwrap();
         assert_eq!(path.label, "/a.mp3");
         assert!(menu_rows(&lib(), kind::TRACK_INFO, &[dmst(), u(9)]).is_none());
