@@ -157,6 +157,14 @@ pub struct AudioHandle {
     pub stems:       Arc<StemControl>,
     /// Real-time glitch counters (underruns / dropped frames).
     pub stats:       Arc<AudioStats>,
+    /// The buffer holds the whole track.  False while a streaming load is
+    /// still decoding: the processor waits at the end of `samples` instead
+    /// of ending the track there (see `load_streaming`).
+    pub complete:    Arc<AtomicBool>,
+    /// The track's expected length in samples while it streams in (from the
+    /// file's header), so the needle search, remaining time and seek clamps
+    /// see the whole track; 0 once complete.  See [`len`](Self::len).
+    total_hint:      Arc<AtomicU64>,
     pub sample_rate: u32,
     pub channels:    u8,
     /// Tags of the track decoded at open (the startup track); the deck copies
@@ -228,7 +236,13 @@ impl AudioHandle {
     }
 
     /// Number of interleaved samples in the currently-loaded track.
-    pub fn len(&self) -> usize { self.samples.load().len() }
+    /// The track's length in samples: while a streaming load is still
+    /// decoding, the length the file's header promises (the deck shows and
+    /// seeks across the whole track); otherwise the buffer's.
+    pub fn len(&self) -> usize { self.samples.load().len().max(self.total_hint.load(Ordering::Relaxed) as usize) }
+
+    /// Samples decoded so far (the buffer's length).
+    pub fn decoded_len(&self) -> usize { self.samples.load().len() }
     #[allow(dead_code)] // companion to len(); clippy expects it to exist
     pub fn is_empty(&self) -> bool { self.len() == 0 }
 
@@ -252,11 +266,36 @@ impl AudioHandle {
         }
         self.playing.store(false, Ordering::Relaxed);
         self.stems.reset();
+        self.complete.store(true, Ordering::Release);
+        self.total_hint.store(0, Ordering::Relaxed);
         self.samples.store(new);
         self.in_flight.store(0, Ordering::Relaxed);
         self.position.store(0, Ordering::Relaxed);
         self.seek_request.store(0, Ordering::Relaxed);
         Ok(())
+    }
+
+    /// Load the start of a track that is still decoding, as a CDJ plays a
+    /// track long before it has read the whole file.  `total` is the
+    /// expected length in samples (0 = unknown).  [`extend_samples`]
+    /// (Self::extend_samples) swaps in longer buffers as they arrive.
+    pub fn load_streaming(&self, prefix: Arc<Vec<f32>>, total: u64, sample_rate: u32, channels: u8) -> Result<()> {
+        self.load_samples(prefix, sample_rate, channels)?;
+        self.total_hint.store(total, Ordering::Relaxed);
+        self.complete.store(false, Ordering::Release);
+        Ok(())
+    }
+
+    /// More of a streaming track: `longer` starts with the samples already
+    /// loaded, so positions, loops and cues stay where they are; the
+    /// processor picks it up on its next block.  `done` = the whole track.
+    pub fn extend_samples(&self, longer: Arc<Vec<f32>>, done: bool) {
+        debug_assert!(longer.len() >= self.decoded_len(), "a streaming buffer only grows");
+        self.samples.store(longer);
+        if done {
+            self.total_hint.store(0, Ordering::Relaxed);
+            self.complete.store(true, Ordering::Release);
+        }
     }
 }
 
@@ -356,6 +395,8 @@ impl AudioHandle {
         let proc_scrub      = scrub.clone();
         let stems           = Arc::new(StemControl::default());
         let proc_stems      = Arc::clone(&stems);
+        let complete        = Arc::new(AtomicBool::new(true));
+        let proc_complete   = Arc::clone(&complete);
 
         let processor = thread::Builder::new()
             .name("audio-proc".into())
@@ -372,6 +413,7 @@ impl AudioHandle {
                     proc_seek,
                     proc_scrub,
                     proc_stems,
+                    proc_complete,
                     file_sr,
                     file_ch,
                     device_ch,
@@ -454,6 +496,8 @@ impl AudioHandle {
             scrub,
             stems,
             stats,
+            complete,
+            total_hint: Arc::new(AtomicU64::new(0)),
             sample_rate: file_sr,
             channels: file_ch as u8,
             tags,
@@ -628,7 +672,7 @@ fn block_ranges(len: usize, pos: usize, want: usize, lp: Option<(usize, usize)>)
 
 #[cfg(test)]
 mod loop_read_tests {
-    use super::{decode_file, pick_rate, read_block, resample_interleaved, to_stereo};
+    use super::{decode_file, pick_rate, read_block, resample_interleaved, to_stereo, StreamResampler};
 
     #[test]
     fn the_decoded_rate_wins_over_the_header() {
@@ -675,6 +719,27 @@ mod loop_read_tests {
         let t = std::time::Instant::now();
         let out = resample_interleaved(&s, 2, 48_000, 44_100).unwrap();
         println!("resample_speed: {} frames in {:.2}s", out.len() / 2, t.elapsed().as_secs_f32());
+    }
+
+    /// The loader feeds the resampler a decode packet at a time: odd sizes
+    /// in, the same samples out as one pass over the whole buffer.
+    #[test]
+    fn stream_resampler_matches_one_pass() {
+        let n = 48_000 * 3 + 777;
+        let s: Vec<f32> = (0..n * 2).map(|i| ((i as f32) * 0.013).sin() * 0.5).collect();
+        let whole = resample_interleaved(&s, 2, 48_000, 44_100).unwrap();
+        let mut rs = StreamResampler::new(48_000, 44_100, 2).unwrap();
+        let mut pieces = Vec::new();
+        let mut i = 0;
+        for step in [1152usize, 4096, 13, 20_000, 1].iter().cycle() {
+            if i >= s.len() { break; }
+            let e = (i + step * 2).min(s.len());
+            pieces.extend(rs.push(&s[i..e]).unwrap());
+            i = e;
+        }
+        pieces.extend(rs.finish().unwrap());
+        assert_eq!(pieces.len(), whole.len());
+        assert!(pieces.iter().zip(&whole).all(|(a, b)| (a - b).abs() < 1e-6));
     }
 
     #[test]
@@ -879,6 +944,7 @@ fn processor_loop(
     seek_request: Arc<AtomicU64>,
     scrub:      ScrubShared,
     stems:      Arc<StemControl>,
+    complete:   Arc<AtomicBool>,
     sample_rate: u32,
     file_ch:    usize,
     device_ch:  usize,
@@ -1064,6 +1130,20 @@ fn processor_loop(
             thread::sleep(Duration::from_millis(yield_ms));
         }
 
+        // ── Decode frontier ───────────────────────────────────────────────────
+        // A streaming load is still decoding past here: wait for more rather
+        // than ending the track (decode runs far ahead of real time, so this
+        // only happens right after a seek into undecoded audio).
+        let complete_now = complete.load(Ordering::Acquire);
+        if !complete_now {
+            let (ls, le) = (lp.start.load(Ordering::Relaxed) as usize, lp.end.load(Ordering::Relaxed) as usize);
+            let in_loop = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
+            if !in_loop && proc_pos as usize + BLOCK_FRAMES * file_ch > samples.len() {
+                thread::sleep(Duration::from_millis(2));
+                continue;
+            }
+        }
+
         // ── End of track ──────────────────────────────────────────────────────
         // The source is exhausted, but the ring buffer still holds already-
         // decoded audio that the device is playing out.  Keep publishing the
@@ -1095,7 +1175,7 @@ fn processor_loop(
 
         lp.consumed.fetch_add(src_block.len() as u64, Ordering::Relaxed);
 
-        let final_block = !looping && src_end >= samples.len();
+        let final_block = !looping && src_end >= samples.len() && complete_now;
 
         // Advance the shared position so the UI/renderer sees it — unless a
         // seek arrived during this block: then the UI already published the
@@ -1216,7 +1296,7 @@ fn true_rate(decoder: &SymphoniaDecoder, header_sr: u32) -> u32 {
 }
 
 /// The rule behind [`true_rate`]: decoded packets win over the header.
-fn pick_rate(header_sr: u32, decoded: Option<u32>) -> u32 {
+pub fn pick_rate(header_sr: u32, decoded: Option<u32>) -> u32 {
     match decoded {
         Some(r) if r != header_sr && r > 0 => {
             log::warn!("container says {header_sr} Hz but the audio decodes at {r} Hz; using {r}");
@@ -1228,6 +1308,8 @@ fn pick_rate(header_sr: u32, decoded: Option<u32>) -> u32 {
 
 /// Decode an audio file from an in-memory buffer (e.g. read over NFS from a
 /// linked player). `ext` primes the format probe.  Same output as decode_file.
+/// Loads stream through `Prep::stream`; this is for the NFS hardware test.
+#[cfg(test)]
 pub fn decode_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<(Vec<f32>, u32, usize, TrackTags)> {
     let mut decoder = SymphoniaDecoder::open_bytes(bytes, ext)
         .context("failed to open in-memory audio")?;
@@ -1253,69 +1335,108 @@ pub fn decode_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<(Vec<f32>, u32,
 /// a track recorded at a different rate than the deck's pipeline plays at the
 /// right pitch.  This is a one-time cost per load, not the real-time SRC that a
 /// 48 kHz *output device* would need (WORKSTREAMS A1) — that is still open.
+/// One pass of [`StreamResampler`].
 pub fn resample_interleaved(
     samples:  &[f32],
     channels: usize,
     src_sr:   u32,
     dst_sr:   u32,
 ) -> Result<Vec<f32>> {
-    use rubato::{FftFixedIn, Resampler};
     if src_sr == dst_sr || samples.is_empty() {
         return Ok(samples.to_vec());
     }
-    let ratio  = dst_sr as f64 / src_sr as f64;
-    let frames = samples.len() / channels;
-    let chunk  = 16_384;
-
-    // FFT resampling: the fixed ratio (147/160 for 48 → 44.1 kHz) as a
-    // band-limited FFT filter.  A 256-tap sinc did the same at ~10x the
-    // cost: a minute per track in cdj3k-emu (TCG) and on a Pi Zero.
-    let mut rs = FftFixedIn::<f32>::new(src_sr as usize, dst_sr as usize, chunk, 2, channels)
-        .context("failed to create resampler")?;
-    // The filter's group delay: output frames before the input's first frame.
-    let delay = rs.output_delay();
-
-    // De-interleave into per-channel planes.
-    let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); channels];
-    for f in 0..frames {
-        for c in 0..channels {
-            planar[c].push(samples[f * channels + c]);
-        }
-    }
-
-    let mut out_planar: Vec<Vec<f32>> = vec![Vec::new(); channels];
-    let mut pos = 0;
-    let mut inbuf: Vec<Vec<f32>> = vec![vec![0.0f32; chunk]; channels];
-    while pos + chunk <= frames {
-        for c in 0..channels {
-            inbuf[c].copy_from_slice(&planar[c][pos..pos + chunk]);
-        }
-        let out = rs.process(&inbuf, None).context("resample chunk failed")?;
-        for c in 0..channels { out_planar[c].extend_from_slice(&out[c]); }
-        pos += chunk;
-    }
-    if pos < frames {
-        let rem: Vec<Vec<f32>> = (0..channels).map(|c| planar[c][pos..].to_vec()).collect();
-        let out = rs.process_partial(Some(&rem), None).context("resample tail failed")?;
-        for c in 0..channels { out_planar[c].extend_from_slice(&out[c]); }
-    }
-    // Flush until the delayed output covers the whole input, then drop the
-    // leading delay and the padding after the end.
-    let want = (frames as f64 * ratio).round() as usize;
-    while out_planar[0].len() < want + delay {
-        let out = rs.process_partial::<Vec<f32>>(None, None).context("resample flush failed")?;
-        if out[0].is_empty() { break; }
-        for c in 0..channels { out_planar[c].extend_from_slice(&out[c]); }
-    }
-    for c in out_planar.iter_mut() { c.drain(..delay.min(c.len())); }
-
-    // Re-interleave.
-    let avail = out_planar.iter().map(|c| c.len()).min().unwrap_or(0);
-    let out_frames = want.min(avail);
-    let mut out = Vec::with_capacity(out_frames * channels);
-    for f in 0..out_frames {
-        for c in 0..channels { out.push(out_planar[c][f]); }
-    }
-    log::info!("resampled {}Hz → {}Hz ({} → {} frames)", src_sr, dst_sr, frames, out_frames);
+    let mut rs = StreamResampler::new(src_sr, dst_sr, channels)?;
+    let mut out = rs.push(samples)?;
+    out.extend(rs.finish()?);
+    log::info!("resampled {}Hz → {}Hz ({} → {} frames)", src_sr, dst_sr, samples.len() / channels, out.len() / channels);
     Ok(out)
+}
+
+/// Sample-rate conversion of a stream that arrives in pieces (a track as it
+/// decodes): interleaved in, interleaved out, the output aligned with the
+/// input (the filter's delay dropped) and exactly `round(in × ratio)` frames
+/// long once [`finish`](Self::finish)ed.
+///
+/// rubato's FFT resampler: the fixed ratio (147/160 for 48 → 44.1 kHz) as a
+/// band-limited FFT filter.  A 256-tap sinc did the same at ~3x the cost: a
+/// minute per track in cdj3k-emu (TCG) and on a Pi Zero.
+pub struct StreamResampler {
+    rs:        rubato::FftFixedIn<f32>,
+    channels:  usize,
+    ratio:     f64,
+    /// Input frames waiting for a whole chunk, per channel.
+    pending:   Vec<Vec<f32>>,
+    /// Output frames still to drop: the filter's delay.
+    skip:      usize,
+    in_frames:  u64,
+    out_frames: u64,
+}
+
+const RESAMPLE_CHUNK: usize = 16_384;
+
+impl StreamResampler {
+    pub fn new(src_sr: u32, dst_sr: u32, channels: usize) -> Result<Self> {
+        use rubato::Resampler;
+        let rs = rubato::FftFixedIn::<f32>::new(src_sr as usize, dst_sr as usize, RESAMPLE_CHUNK, 2, channels)
+            .context("failed to create resampler")?;
+        let skip = rs.output_delay();
+        Ok(Self { rs, channels, ratio: dst_sr as f64 / src_sr as f64,
+                  pending: vec![Vec::with_capacity(RESAMPLE_CHUNK); channels], skip, in_frames: 0, out_frames: 0 })
+    }
+
+    /// Feed interleaved input; returns whatever output is ready.
+    pub fn push(&mut self, interleaved: &[f32]) -> Result<Vec<f32>> {
+        use rubato::Resampler;
+        let ch = self.channels;
+        self.in_frames += (interleaved.len() / ch) as u64;
+        let mut out = Vec::new();
+        let mut i = 0;
+        let frames = interleaved.len() / ch;
+        while i < frames {
+            let room = RESAMPLE_CHUNK - self.pending[0].len();
+            let take = room.min(frames - i);
+            for f in i..i + take {
+                for c in 0..ch { self.pending[c].push(interleaved[f * ch + c]); }
+            }
+            i += take;
+            if self.pending[0].len() == RESAMPLE_CHUNK {
+                let planar = self.rs.process(&self.pending, None).context("resample chunk failed")?;
+                for p in self.pending.iter_mut() { p.clear(); }
+                self.emit(&planar, usize::MAX, &mut out);
+            }
+        }
+        Ok(out)
+    }
+
+    /// The rest: the last partial chunk and the filter's tail, cut so the
+    /// whole output is exactly `round(input frames × ratio)` long.
+    pub fn finish(&mut self) -> Result<Vec<f32>> {
+        use rubato::Resampler;
+        let want = (self.in_frames as f64 * self.ratio).round() as u64;
+        let mut out = Vec::new();
+        if !self.pending[0].is_empty() {
+            let rem = std::mem::replace(&mut self.pending, vec![Vec::new(); self.channels]);
+            let planar = self.rs.process_partial(Some(&rem), None).context("resample tail failed")?;
+            self.emit(&planar, (want - self.out_frames.min(want)) as usize, &mut out);
+        }
+        while self.out_frames < want {
+            let planar = self.rs.process_partial::<Vec<f32>>(None, None).context("resample flush failed")?;
+            if planar[0].is_empty() { break; }
+            self.emit(&planar, (want - self.out_frames) as usize, &mut out);
+        }
+        Ok(out)
+    }
+
+    /// Interleave planar output into `out`, dropping the delay first and
+    /// taking at most `limit` frames.
+    fn emit(&mut self, planar: &[Vec<f32>], limit: usize, out: &mut Vec<f32>) {
+        let n = planar[0].len();
+        let start = self.skip.min(n);
+        self.skip -= start;
+        let end = n.min(start.saturating_add(limit));
+        for f in start..end {
+            for c in 0..self.channels { out.push(planar[c][f]); }
+        }
+        self.out_frames += (end - start) as u64;
+    }
 }

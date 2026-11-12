@@ -81,6 +81,12 @@ impl WaveformBuilder {
         }
     }
 
+    /// The columns so far, as a cache (a track still decoding draws what
+    /// has arrived).
+    pub fn snapshot(&self) -> WaveformCache {
+        WaveformCache { columns: self.columns.clone(), sample_rate: self.sample_rate, hop_size: HOP_SIZE }
+    }
+
     pub fn finish(self) -> WaveformCache {
         WaveformCache {
             columns:     self.columns,

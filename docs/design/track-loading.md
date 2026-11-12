@@ -1,49 +1,66 @@
-# Track loading: one pipeline, off the UI thread
+# Track loading: playable first, the rest streams in
 
-Status: **as built** (2026-09-17, commit `8bf7e67`, issue #19). This page
-records how a track gets from "the DJ pressed LOAD" to "the deck is parked at
-the cue", where each step runs, and the nuances that are easy to forget when
-touching it next. Code: `crates/app/src/lib.rs`, search for `start_fetch`,
-`Prep`, `Prepared`, `apply_prepared`.
+Status: **as built** (streaming since 2026-11-12; the off-UI-thread pipeline
+since 2026-09-17, `8bf7e67`, #19). This page records how a track gets from
+"the DJ pressed LOAD" to "the deck is parked at the cue", where each step
+runs, and the nuances that are easy to forget when touching it next. Code:
+`crates/app/src/lib.rs`, search for `start_fetch`, `Prep::stream`,
+`LoadMsg`, `apply_prepared`, `apply_grow`.
+
+## What a CDJ does, and what we do
+
+A CDJ does no analysis at load: rekordbox already put the waveforms, grid,
+cues and phrases in the ANLZ files. It decodes the audio from the cue and is
+playable at once, whatever the track's length. We used to decode the whole
+file, resample it, build its waveform and detect a grid before the deck could
+play: about a second on a desktop, several on a phone, a minute in cdj3k-emu.
+Now the deck is playable once the audio a few seconds past the cue is in
+(`PLAYABLE_SECS`), and the rest decodes behind playback.
+
+Measured (desktop, debug build): an 8.8-minute MP3 is playable in 19 ms and
+fully in after 0.9 s; a 5.2-minute one with no grid: playable in 13 ms, fully
+in after 0.6 s, its grid detected 0.19 s later.
 
 ## The shape
 
-Every load, whatever the source, goes through the same three stages:
-
 ```
- UI thread                      track-load thread                     UI thread
- ─────────                      ─────────────────                     ─────────
+ UI thread                      track-load thread                      UI thread
+ ─────────                      ─────────────────                      ─────────
  load_selected(Load)
    └─ load_track / load_track_link / load_track_db
-        prep = self.prep()  ──▶  fetch bytes (disk / NFS / dbserver+NFS)
-        start_fetch(name, ‖)     decode  →  resample to deck rate
-                                 waveform build
-                                 grid: ANLZ | dbserver beats | our detector
-                                 auto cue (first_sound)
-                                 Ok(Prepared) ──▶ mpsc ──▶ poll_fetch (each frame)
-                                                            └─ apply_prepared
-                                                               audio.load_samples
-                                                               renderer.set_waveform
-                                                               cue / transport reset
+        prep = self.prep()  ──▶  open the decoder (disk, or bytes from NFS)
+        start_fetch(name, ‖)     grid + cues: ANLZ | dbserver | link cache
+                                 decode packet by packet:
+                                   stereo → StreamResampler → out, waveform
+                                 cue + PLAYABLE_SECS decoded:
+                                   LoadMsg::Ready(Prepared) ──▶ apply_prepared
+                                                                 audio.load_streaming
+                                 every 4x more: LoadMsg::Grow ──▶ apply_grow
+                                                                 audio.extend_samples
+                                 end of file: grid detection (if none),
+                                   served analysis, key thread
+                                   LoadMsg::Grow { done } ──▶ apply_grow: grid,
+                                                                 stems, LINK row
 ```
 
-- **Stage 1, UI thread, microseconds.** Capture what the loader needs from
-  the deck into a `Prep` (sample rate, channel count, AUTO CUE on/off and its
-  level) and spawn the thread. The deck keeps playing.
-- **Stage 2, loader thread, hundreds of ms to seconds.** Everything heavy.
-  `Prep::finish` is the shared tail; `Prep::complete` wraps it for network
-  loads that still have to decode from bytes. The result is a `Prepared`: the
-  samples in an `Arc`, the waveform cache, the resolved grid, the cues, the
-  cue point, the tags.
-- **Stage 3, UI thread, about 5 ms.** `poll_fetch` runs once per frame after
-  input events. When the channel has a result, `apply_prepared` hands the
-  `Arc` to the audio thread, uploads the waveform to the GPU, applies a
-  hand-adjusted grid from `grids.json` if there is one, pushes the grid to
-  the Link sender, and parks the deck at the cue.
-
-Measured headless (debug build, a full-length MP3): 1054 ms in stage 2 with frames
-rendering throughout and no frame-spike line; 5 ms in stage 3. Before this
-the same load froze the UI for the whole second, and several on a Pi.
+- **Stage 1, UI thread, microseconds.** Capture what the loader needs into a
+  `Prep` and spawn the thread. A repeated LOAD of the track already loading
+  is ignored; any other LOAD bumps the load counter, which stops the older
+  load at its next packet.
+- **Stage 2, loader thread.** `Prep::stream` decodes packet by packet. The
+  grid and cues are known before the first packet when rekordbox (or the link
+  cache) has them; otherwise AUTO CUE finds the first sound as it arrives. Once
+  the audio `PLAYABLE_SECS` past the cue is in, `Ready` carries a copy of what
+  is decoded, the waveform so far (padded with empty columns to the expected
+  length, so the overview keeps its scale) and the expected length from the
+  container. Then longer buffers follow at 4x steps (each is a copy of all so
+  far, so the copies add up to about a third of the track), and the last one
+  (`done`) carries what needed the whole track.
+- **Stage 3, UI thread.** `apply_prepared` swaps the start in with
+  `AudioHandle::load_streaming` and parks at the cue; `apply_grow` swaps in
+  each longer buffer with `extend_samples` (0.1 ms) and, at `done`, applies a
+  detected grid (unless `grids.json` has a hand-adjusted one), starts stems
+  and serves the analysis over LINK.
 
 ## Sources
 
@@ -72,17 +89,36 @@ audio thread's `load_samples` re-checks rate and channels as a last line of
 defence; both messages mention A1 because channel conversion is still not
 implemented.
 
-**Latest load wins.** `start_fetch` overwrites `fetch_rx`. An older thread
-still running finishes its work and its `send` fails silently because the
-receiver is gone. There is no cancellation, so a slow network load followed
-by a fast local one costs the network bytes anyway. Fine today; revisit if
-loads get expensive on the Pi.
+**Latest load wins, and the older one stops.** `start_fetch` overwrites
+`fetch_rx` and bumps `load_gen`; `Prep::check_current` fails at the older
+load's next packet, and a failed `send` also ends it. LOAD on the track that
+is already loading is ignored (on a slow CPU, a few presses used to stack up
+whole decodes and slow the one that counted).
 
-**AUTO CUE is decided on the loader thread.** `first_sound` scans the decoded
-samples, which is a full pass over the track. It runs in stage 2 with the
-AUTO CUE state captured in `Prep`, so toggling AUTO CUE mid-load applies to
-the next load, not this one. A rekordbox memory cue still wins over the auto
-cue; that is the DJ's choice.
+**The audio thread waits at the decode frontier.** While `complete` is false
+the processor does not treat the end of the buffer as the end of the track:
+a block that would cross it waits 2 ms and tries again, and the stretcher's
+tail is only flushed once the whole track is in. Decoding runs far ahead of
+real time, so this only happens after a seek into audio not decoded yet.
+`AudioHandle::len` is the expected length while streaming (the needle
+search, remaining time and seek clamps see the whole track);
+`decoded_len` is what is in the buffer.
+
+**A growing buffer only grows.** Each `Grow` starts with every sample sent
+before, so positions, loops and cues stay valid across the swap; the test
+`a_track_streams_in_playable_first` pins that.
+
+**A damaged tail.** If decoding fails after `Ready`, the track ends where
+decoding did (`LoadMsg::Failed` after the start played).
+
+**Dev: a slow CPU on a fast machine.** `OPENDECK_LOAD_DELAY_MS=n` sleeps n ms
+per decoded packet; 3 keeps a track streaming for several seconds.
+
+**AUTO CUE is decided on the loader thread.** `first_sound` scans each packet
+as it arrives, up to `AUTO_CUE_MAX_SECS`, and the deck is playable only once
+the cue is known. The AUTO CUE state is captured in `Prep`, so toggling it
+mid-load applies to the next load. A rekordbox memory cue still wins over the
+auto cue; that is the DJ's choice.
 
 **The cue is captured from prepared samples, not heard position.** Load is
 the one place where the cue is set from the sample buffer directly. Every
@@ -135,12 +171,15 @@ done, and the swap-in clears the name the same frame. The name is the file
 name for local loads and the menu title for Link loads. Capture it headless
 with `OPENDECK_SCREENSHOT_FRAME=175` alongside the autoload recipe below.
 
-**Memory.** The whole decoded track is in RAM as f32 (stereo 44.1 kHz is
-about 21 MB a minute; a 6-minute track is ~127 MB). Two tracks exist briefly during a load: the playing one and
-the prepared one, until the audio thread drops the old `Arc`. The streaming
-loader (WORKSTREAMS A4) is the answer if that ever matters; this pipeline is
-where it would plug in, since stage 2 is already the only producer of
-`samples`.
+**Memory.** The whole decoded track is still in RAM as f32 (stereo 44.1 kHz
+is about 21 MB a minute; a 6-minute track is ~127 MB), and during the load the
+loader's buffer and the last copy it sent exist side by side. Streaming from
+the file instead of holding it is the next step if memory ever matters.
+
+**Known: a frame spike when a detected grid first draws.** The first frame
+with a newly detected grid takes ~120–150 ms on a desktop (both skins). It
+predates streaming (the old loader showed 149 ms on the same file) and is
+not in the load path itself (`apply_grow` is 0.1 ms).
 
 ## Related
 

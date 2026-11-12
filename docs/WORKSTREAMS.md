@@ -144,7 +144,7 @@ tell.
 Cheapest useful slice: an xrun counter first, so the problem becomes visible
 before it becomes a rewrite.
 
-### A4. Streaming loader — **large**
+### A4. Streaming loader — **built 2026-11-12** (playable first; the whole track is still held in RAM)
 
 `samples: Arc<Vec<f32>>` holds the whole decoded track. A 6-minute 44.1 kHz
 stereo track is ~127 MB, and playback cannot start until the full decode

@@ -303,6 +303,80 @@ mod track_ref_tests {
 }
 
 #[cfg(test)]
+mod stream_load_tests {
+    use super::*;
+
+    /// A 16-bit stereo WAV: `lead` seconds of silence, then a 440 Hz tone.
+    fn wav(path: &std::path::Path, sr: u32, secs: f64, lead: f64) {
+        let n = (sr as f64 * secs) as u32;
+        let mut d = Vec::new();
+        for i in 0..n {
+            let t = i as f64 / sr as f64;
+            let v = if t < lead { 0 } else { ((t * 440.0 * std::f64::consts::TAU).sin() * 12_000.0) as i16 };
+            d.extend_from_slice(&v.to_le_bytes()); d.extend_from_slice(&v.to_le_bytes());
+        }
+        let mut f = Vec::new();
+        f.extend_from_slice(b"RIFF"); f.extend_from_slice(&(36 + d.len() as u32).to_le_bytes()); f.extend_from_slice(b"WAVEfmt ");
+        f.extend_from_slice(&16u32.to_le_bytes()); f.extend_from_slice(&1u16.to_le_bytes()); f.extend_from_slice(&2u16.to_le_bytes());
+        f.extend_from_slice(&sr.to_le_bytes()); f.extend_from_slice(&(sr * 4).to_le_bytes()); f.extend_from_slice(&4u16.to_le_bytes());
+        f.extend_from_slice(&16u16.to_le_bytes()); f.extend_from_slice(b"data"); f.extend_from_slice(&(d.len() as u32).to_le_bytes());
+        f.extend_from_slice(&d);
+        std::fs::write(path, f).unwrap();
+    }
+
+    /// The deck is playable long before the whole track is decoded, at the
+    /// first sound plus PLAYABLE_SECS, knowing the full length; every later
+    /// buffer starts with the earlier one; the last is the whole track at
+    /// the deck rate.
+    #[test]
+    fn a_track_streams_in_playable_first() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.wav");
+        wav(&path, 48_000, 30.0, 1.0);
+        let prep = Prep { deck_sr: 44_100, deck_ch: 2, auto_cue: true, auto_cue_level_db: -48.0,
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+        let (tx, rx) = mpsc::channel();
+        DeckApp::prepare_local(prep, path, None, &tx).unwrap();
+        drop(tx);
+        let msgs: Vec<LoadMsg> = rx.iter().collect();
+        let full = 30 * 44_100 * 2;
+        let LoadMsg::Ready(p) = &msgs[0] else { panic!("first message is the playable start") };
+        let cue_s = p.cue_pt as f64 / (44_100.0 * 2.0);
+        assert!((cue_s - 1.0).abs() < 0.01, "AUTO CUE at the first sound: {cue_s}");
+        let ready_s = p.samples.len() as f64 / (44_100.0 * 2.0);
+        assert!(ready_s >= 1.0 + PLAYABLE_SECS && ready_s < 10.0, "playable with {ready_s:.1}s decoded");
+        assert_eq!(p.total, full as u64, "full length known from the header");
+        let mut prev = Arc::clone(&p.samples);
+        let mut last = None;
+        for m in &msgs[1..] {
+            let LoadMsg::Grow(g) = m else { panic!("then only growth") };
+            assert_eq!(&g.samples[..prev.len()], &prev[..], "a growing buffer keeps what was played");
+            prev = Arc::clone(&g.samples);
+            last = Some(g);
+        }
+        let g = last.expect("a final buffer");
+        assert!(g.done);
+        assert_eq!(g.samples.len(), full);
+        assert!(g.grid.is_some() || g.link_analysis.is_some());
+    }
+
+    /// A newer LOAD stops an older one: it sends nothing more.
+    #[test]
+    fn a_superseded_load_stops() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("t.wav");
+        wav(&path, 44_100, 20.0, 0.0);
+        let gen = Arc::new(AtomicU64::new(1));
+        let prep = Prep { deck_sr: 44_100, deck_ch: 2, auto_cue: false, auto_cue_level_db: -48.0,
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::clone(&gen), gen: 0 };
+        let (tx, rx) = mpsc::channel();
+        assert!(DeckApp::prepare_local(prep, path, None, &tx).is_err(), "superseded");
+        drop(tx);
+        assert_eq!(rx.iter().count(), 0);
+    }
+}
+
+#[cfg(test)]
 mod history_tests {
     use super::*;
 
@@ -506,7 +580,7 @@ struct DeckApp {
     indicators:        Arc<surface::Indicators>,
     /// A network load in progress: the fetch thread's result channel and the
     /// name being loaded.  The deck keeps running until the bytes arrive.
-    fetch_rx:          Option<mpsc::Receiver<Result<Prepared>>>,
+    fetch_rx:          Option<mpsc::Receiver<LoadMsg>>,
     /// The stems job for the loaded track (see `stems.rs`).
     stems_rx:          Option<mpsc::Receiver<Result<Option<stems::StemBank>>>>,
     pub loading:       Option<String>,
@@ -2023,40 +2097,22 @@ impl DeckApp {
         let (path, analyze) = (path.to_path_buf(), analyze.map(|p| p.to_path_buf()));
         let prep = self.prep();
         let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| path.display().to_string());
-        self.start_fetch(name, move || Self::prepare_local(prep, path, analyze))
+        self.start_fetch(name, move |tx| Self::prepare_local(prep, path, analyze, tx))
     }
 
-    fn prepare_local(prep: Prep, path: std::path::PathBuf, analyze: Option<std::path::PathBuf>) -> Result<Prepared> {
+    fn prepare_local(prep: Prep, path: std::path::PathBuf, analyze: Option<std::path::PathBuf>, tx: &LoadTx) -> Result<()> {
         let t0 = Instant::now();
-        let (samples, sr, ch, tags) = audio::decode_file(&path)?;
-        log::info!("load: decoded in {} ms", t0.elapsed().as_millis());
-        prep.check_current()?;
+        log::info!("decoding {}", path.display());
+        let dec = opendeck_decode::SymphoniaDecoder::open(&path)
+            .with_context(|| format!("failed to open {}", path.display()))?;
         // Grid: the rekordbox ANLZ next to the file, else what the media
-        // server's analysis cached for it, else detect (and cache) it here.
+        // server's analysis cached for it, else detect (and cache) it once
+        // the whole track is in.  Known before a sample is decoded.
         let cached = opendeck_mediaserver::load_cached(&prep.cache_dir, &path).filter(|a| !a.beats.is_empty());
-        let grid_cue = analyze.and_then(|p| Self::grid_from_anlz(&p, prep.deck_sr, ch as u8))
-            .or_else(|| cached.as_ref().and_then(|a| Self::grid_from_analysis(a, prep.deck_sr, ch as u8)));
-        let (cache_dir, deck_sr) = (prep.cache_dir.clone(), prep.deck_sr);
-        let link = prep.link.clone();
-        let mut p = prep.finish(path.display().to_string(), path.clone(), samples, sr, ch, tags, grid_cue, t0)?;
-        if let Some(a) = cached {
-            p.grid_src = "cache";
-            p.link_analysis = Some(Arc::new(Mutex::new(a)));
-        } else {
-            let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let a = opendeck_mediaserver::Analysis::from_deck(&p.tags, p.beat_grid.as_ref(), &p.waveform, (p.samples.len() / p.ch.max(1)) as u64, deck_sr, bytes);
-            let shared = Arc::new(Mutex::new(a));
-            p.link_analysis = Some(Arc::clone(&shared));
-            // Key detection (untagged files) runs off the load path, then
-            // caches, and re-serves the row if the load has published it.
-            let (samples, ch) = (p.samples.clone(), p.ch);
-            std::thread::spawn(move || {
-                let a = { let mut g = shared.lock().unwrap(); g.detect_key_if_missing(&samples, ch, deck_sr); g.clone() };
-                if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, &path, &a) { log::info!("link cache: {e:#}"); }
-                if let Some(link) = link { refresh_served(&link, &path, &a); }
-            });
-        }
-        Ok(p)
+        let grid_cue = analyze.and_then(|p| Self::grid_from_anlz(&p, prep.deck_sr, prep.deck_ch))
+            .or_else(|| cached.as_ref().and_then(|a| Self::grid_from_analysis(a, prep.deck_sr, prep.deck_ch)));
+        let name = path.display().to_string();
+        prep.stream(name, path, dec, grid_cue, t0, tx, Some(cached))
     }
 
     /// A grid from a cached media-server analysis (our own detector's beats,
@@ -2076,7 +2132,7 @@ impl DeckApp {
         let (rel_path, analyze_rel) = (rel_path.to_string(), analyze_rel.to_string());
         let name = rel_path.rsplit('/').next().unwrap_or(&rel_path).to_string();
         let prep = self.prep();
-        self.start_fetch(name.clone(), move || {
+        self.start_fetch(name.clone(), move |tx| {
             let t0 = Instant::now();
             let mut nfs = opendeck_nfs::Nfs::connect_any(ip)?;
             let root = nfs.mount_usb()?;
@@ -2089,7 +2145,7 @@ impl DeckApp {
                 }
             };
             log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
-            prep.complete(Fetched { name, path: rel_path, audio, grid, t0 })
+            prep.complete(Fetched { name, path: rel_path, audio, grid, t0 }, tx)
         })
     }
 
@@ -2108,7 +2164,7 @@ impl DeckApp {
         // which left BROWSE on a dead session (only ALL TRACKS) and could
         // cut a download short when BROWSE reconnected.
         let known = self.browser.db_track_file(ip, slot, id);
-        self.start_fetch(title.clone(), move || {
+        self.start_fetch(title.clone(), move |tx| {
             let t0 = Instant::now();
             let (path, grid) = match known {
                 Some(r) => r?,
@@ -2137,7 +2193,7 @@ impl DeckApp {
             let audio = nfs.read_file(&fh, size)?;
             log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
             let name = if title.is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { title };
-            prep.complete(Fetched { name, path, audio, grid: FetchedGrid::Beats(beats), t0 })
+            prep.complete(Fetched { name, path, audio, grid: FetchedGrid::Beats(beats), t0 }, tx)
         })
     }
 
@@ -2223,7 +2279,7 @@ impl DeckApp {
     /// Run `load` on a thread and remember its result channel.  The deck keeps
     /// playing; the frame loop swaps the track in when it is ready.  A newer
     /// load supersedes an older one still in flight (its result is dropped).
-    fn start_fetch(&mut self, name: String, load: impl FnOnce() -> Result<Prepared> + Send + 'static) -> Result<()> {
+    fn start_fetch(&mut self, name: String, load: impl FnOnce(&LoadTx) -> Result<()> + Send + 'static) -> Result<()> {
         // LOAD again on the track already loading: keep the load in flight.
         if self.loading.as_deref() == Some(name.as_str()) {
             log::info!("loading {name:?}: already in progress");
@@ -2231,30 +2287,84 @@ impl DeckApp {
         }
         self.load_gen.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new().name("track-load".into()).spawn(move || { let _ = tx.send(load()); })?;
+        std::thread::Builder::new().name("track-load".into()).spawn(move || {
+            if let Err(e) = load(&tx) { let _ = tx.send(LoadMsg::Failed(e)); }
+        })?;
         log::info!("loading {name:?} in the background");
         self.loading = Some(name);
         self.fetch_rx = Some(rx);
         Ok(())
     }
 
-    /// Swap in a background load that has finished.
+    /// Take what the loader thread has sent: the playable start of the
+    /// track (swap it in), then longer buffers until the whole track is in.
     fn poll_fetch(&mut self) {
-        let Some(rx) = &self.fetch_rx else { return };
-        let got = match rx.try_recv() {
-            Ok(r) => r,
-            Err(mpsc::TryRecvError::Empty) => return,
-            Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("load thread died")),
-        };
-        self.fetch_rx = None;
-        self.loading = None;
-        match got.and_then(|p| self.apply_prepared(p)) {
-            Ok(()) => if std::mem::take(&mut self.play_on_load) {
-                self.audio.set_playing(true);
-                log::info!("autoload ok");
-            },
-            Err(e) => { self.play_on_load = false; log::warn!("load failed: {e:#}"); }
+        loop {
+            let Some(rx) = &self.fetch_rx else { return };
+            let msg = match rx.try_recv() {
+                Ok(m) => m,
+                Err(mpsc::TryRecvError::Empty) => return,
+                Err(mpsc::TryRecvError::Disconnected) => LoadMsg::Failed(anyhow::anyhow!("load thread died")),
+            };
+            match msg {
+                LoadMsg::Ready(p) => {
+                    self.loading = None;
+                    match self.apply_prepared(p) {
+                        Ok(()) => if std::mem::take(&mut self.play_on_load) {
+                            self.audio.set_playing(true);
+                            log::info!("autoload ok");
+                        },
+                        Err(e) => { self.fetch_rx = None; self.play_on_load = false; log::warn!("load failed: {e:#}"); }
+                    }
+                }
+                LoadMsg::Grow(g) => {
+                    let done = g.done;
+                    self.apply_grow(g);
+                    if done { self.fetch_rx = None; }
+                }
+                LoadMsg::Failed(e) => {
+                    self.fetch_rx = None;
+                    if self.loading.take().is_some() {
+                        self.play_on_load = false;
+                        log::warn!("load failed: {e:#}");
+                    } else if !self.audio.complete.load(Ordering::Relaxed) {
+                        // The start played; the rest would not decode (a
+                        // damaged tail).  The track ends where decoding did.
+                        log::warn!("load: decoding stopped early, track ends at {:.1}s: {e:#}",
+                                   self.audio.decoded_len() as f64 / (self.audio.sample_rate as f64 * self.audio.channels as f64));
+                        self.audio.extend_samples(self.audio.current(), true);
+                    }
+                }
+            }
         }
+    }
+
+    /// More of a streaming track; with `done`, the whole track and what
+    /// needed it: a detected grid, stems, the analysis we serve over LINK.
+    fn apply_grow(&mut self, g: Grow) {
+        self.audio.extend_samples(Arc::clone(&g.samples), g.done);
+        if let Some(r) = self.renderer.as_mut() { r.set_waveform(&g.waveform); }
+        self.waveform = g.waveform;
+        if !g.done { return; }
+        if let Some(grid) = g.grid {
+            // Detected now (no rekordbox or cached grid): a hand-adjusted
+            // grid from grids.json still wins.
+            self.grid_orig = Some(grid.clone());
+            if self.beat_grid.is_none() {
+                self.beat_grid = Some(grid);
+                self.link_grid.store(Arc::new(self.beat_grid.clone()));
+            }
+        }
+        self.start_stems(&g.samples, self.audio.channels as usize);
+        if let Some(a) = &g.link_analysis {
+            let a = a.lock().map(|g| g.clone()).unwrap_or_default();
+            serve_loaded(&self.link, &self.path, &a);
+            self.serve_deck_grid();
+        }
+        self.publish_track();
+        log::info!("load: whole track in ({:.1}s, {} BPM)",
+                   self.audio.len() as f64 / (self.audio.sample_rate as f64 * self.audio.channels as f64),
+                   self.beat_grid.as_ref().map(|g| format!("{:.1}", g.bpm)).unwrap_or_else(|| "?".into()));
     }
 
     /// Look for prepared stems for the track just loaded, off the UI
@@ -2316,7 +2426,8 @@ impl DeckApp {
         self.memory_cues    = p.memory_cues;
         self.hot_cues       = p.hot_cues;
         self.perform_delete = false;
-        self.audio.load_samples(Arc::clone(&p.samples), deck_sr, p.ch as u8)?;
+        if p.total > 0 { self.audio.load_streaming(Arc::clone(&p.samples), p.total, deck_sr, p.ch as u8)?; }
+        else { self.audio.load_samples(Arc::clone(&p.samples), deck_sr, p.ch as u8)?; }
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&p.waveform); }
         self.waveform     = p.waveform;
         self.grid_orig    = p.beat_grid.clone();
@@ -2337,18 +2448,15 @@ impl DeckApp {
         // Park the deck at the cue (a CDJ sits at the cue after load) so PLAY
         // starts there — with AUTO CUE that's the first sound, not the leader.
         if p.cue_pt > 0 { self.seek_to(p.cue_pt); }
-        self.start_stems(&p.samples, p.ch);
-        if let Some(a) = &p.link_analysis {
-            let a = a.lock().map(|g| g.clone()).unwrap_or_default();
-            serve_loaded(&self.link, &self.path, &a);
-            self.serve_deck_grid();
-        }
+        // Stems and the served analysis wait for the whole track (apply_grow).
+        self.stems_rx = None;
         self.publish_track();
         log::info!(
-            "loaded {} in {:.1}s ({} BPM, {} grid, cue {:.2}s)",
+            "loaded {} in {:.2}s ({} BPM, {} grid, cue {:.2}s){}",
             p.name, p.t0.elapsed().as_secs_f32(),
             self.beat_grid.as_ref().map(|g| format!("{:.1}", g.bpm)).unwrap_or_else(|| "?".into()),
             p.grid_src, p.cue_pt as f64 / (deck_sr as f64 * p.ch as f64),
+            if p.total > 0 { format!(", playable with {:.1}s decoded", p.samples.len() as f64 / (deck_sr as f64 * p.ch as f64)) } else { String::new() },
         );
         Ok(())
     }
@@ -3143,74 +3251,203 @@ struct Prepared {
     samples: Arc<Vec<f32>>, ch: usize, waveform: WaveformCache,
     beat_grid: Option<BeatGrid>, cue_pt: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8],
     grid_src: &'static str, t0: Instant,
+    /// Still decoding: the expected length in samples (the rest arrives as
+    /// [`Grow`]s).  0 = `samples` is the whole track.
+    total: u64,
+}
+
+/// What a loader thread sends: the playable start of the track, longer
+/// buffers as decoding goes on, or why it failed.
+enum LoadMsg { Ready(Prepared), Grow(Grow), Failed(anyhow::Error) }
+type LoadTx = mpsc::Sender<LoadMsg>;
+
+/// More of a streaming track.  `samples` starts with everything sent
+/// before.  The last one (`done`) is the whole track, with what needed it.
+struct Grow {
+    samples: Arc<Vec<f32>>,
+    waveform: WaveformCache,
+    done: bool,
+    /// Detected once the whole track was in (no rekordbox or cached grid).
+    grid: Option<BeatGrid>,
     /// A local file's analysis as we serve it (from the cache, or built from
     /// this load), for [`serve_loaded`].  Shared with the key-detection
     /// thread, which fills the key in when the file had no tag.
     link_analysis: Option<SharedAnalysis>,
 }
 
+/// Seconds decoded past the cue before the deck is playable.  Decoding runs
+/// many times faster than real time, so PLAY never catches up with it.
+const PLAYABLE_SECS: f64 = 4.0;
+/// How far AUTO CUE looks for the first sound before the deck is playable
+/// anyway (cue at 0).
+const AUTO_CUE_MAX_SECS: f64 = 60.0;
+
 impl Prep {
-    /// Decode fetched bytes and prepare them (loader thread).
-    fn complete(self, f: Fetched) -> Result<Prepared> {
-        let (samples, sr, ch, tags) = audio::decode_bytes(f.audio, f.path.rsplit('.').next())?;
+    /// Decode fetched bytes and stream them in (loader thread).
+    fn complete(self, f: Fetched, tx: &LoadTx) -> Result<()> {
+        let dec = opendeck_decode::SymphoniaDecoder::open_bytes(f.audio, f.path.rsplit('.').next())
+            .context("failed to open in-memory audio")?;
+        let ch = self.deck_ch;
         let grid_cue = match f.grid {
             FetchedGrid::None => None,
-            FetchedGrid::Anlz(bytes) => DeckApp::grid_from_anlz_bytes(&bytes, self.deck_sr, ch as u8),
+            FetchedGrid::Anlz(bytes) => DeckApp::grid_from_anlz_bytes(&bytes, self.deck_sr, ch),
             FetchedGrid::Beats(beats) if !beats.is_empty() => {
                 let a = opendeck_rekordbox::RbAnalysis {
                     beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
                     memory_cues: Vec::new(), hot_cues: Vec::new(), preview: Vec::new(),
                 };
-                DeckApp::anlz_to_grid(a, self.deck_sr, ch as u8)
+                DeckApp::anlz_to_grid(a, self.deck_sr, ch)
             }
             FetchedGrid::Beats(_) => None,
         };
-        self.finish(f.name, std::path::PathBuf::from(&f.path), samples, sr, ch, tags, grid_cue, f.t0)
+        self.stream(f.name, std::path::PathBuf::from(&f.path), dec, grid_cue, f.t0, tx, None)
     }
 
-    /// The heavy tail of every load, off the UI thread: resample to the deck
-    /// rate, build the waveform, take the given grid or detect one, place the
-    /// auto cue.
+    /// Decode a track as a CDJ plays one: the deck becomes playable once the
+    /// audio a few seconds past the cue is in ([`LoadMsg::Ready`]), and the
+    /// rest streams in behind it ([`LoadMsg::Grow`]).  Resampling to the
+    /// deck rate and the waveform run piece by piece as the audio arrives.
+    /// The cue comes from rekordbox (known before decoding) or AUTO CUE (the
+    /// first sound).  Work that needs the whole track — a grid detection
+    /// when there is no rekordbox or cached grid, the served analysis, key
+    /// detection, stems — runs once it is all in.
+    ///
+    /// `local`: a local file, with its cached analysis if any; its analysis
+    /// is built (or taken from the cache) and served over LINK.
     #[allow(clippy::too_many_arguments)]
-    fn finish(self, name: String, path: std::path::PathBuf, samples: Vec<f32>, sr: u32, ch: usize,
-              tags: opendeck_decode::TrackTags, grid_cue: Option<AnlzLoad>, t0: Instant) -> Result<Prepared> {
-        if ch as u8 != self.deck_ch {
-            bail!("track has {} channels but the deck runs {} — channel conversion not yet implemented",
-                  ch, self.deck_ch);
-        }
-        self.check_current()?;
-        // Offline SRC so a differently-sampled track plays at the right pitch.
-        let stage = Instant::now();
-        let samples = if sr != self.deck_sr {
-            audio::resample_interleaved(&samples, ch, sr, self.deck_sr)?
-        } else { samples };
-        if sr != self.deck_sr { log::info!("load: resampled in {} ms", stage.elapsed().as_millis()); }
-        self.check_current()?;
-        let samples = Arc::new(samples);
+    fn stream(&self, name: String, path: std::path::PathBuf, mut dec: opendeck_decode::SymphoniaDecoder,
+              grid_cue: Option<AnlzLoad>, t0: Instant, tx: &LoadTx,
+              local: Option<Option<opendeck_mediaserver::Analysis>>) -> Result<()> {
+        use opendeck_types::Decoder;
+        let (deck_sr, ch) = (self.deck_sr, self.deck_ch as usize);
+        if ch != 2 { bail!("the deck runs {ch} channels; tracks are converted to stereo"); }
+        let tags = dec.tags().clone();
+        let header_sr = dec.sample_rate();
+        let file_ch = dec.channels() as usize;
+        // Expected length at the deck rate, from the container (exact for
+        // most formats, an estimate for a VBR MP3 without a header).
+        let total_hint = dec.total_frames().map(|f| (f as f64 * deck_sr as f64 / header_sr.max(1) as f64).round() as u64 * ch as u64).unwrap_or(0);
+        let per_sec = (deck_sr as usize * ch) as f64;
 
-        let stage = Instant::now();
-        let mut wb = WaveformBuilder::new(self.deck_sr);
-        wb.push(&samples);
-        let waveform = wb.finish();
-        log::info!("load: waveform in {} ms", stage.elapsed().as_millis());
-        self.check_current()?;
-
-        // Prefer rekordbox's grid+cues; fall back to freedj's detector otherwise.
-        let (beat_grid, cue_pt, memory_cues, hot_cues, grid_src) = match grid_cue {
+        let (beat_grid, rb_cue, memory_cues, hot_cues, grid_src) = match grid_cue {
             Some(AnlzLoad { grid, cue, memory_cues, hot_cues }) => (Some(grid), cue, memory_cues, hot_cues, "rekordbox"),
-            None => {
-                let mut ba = BeatAnalyzerImpl::new(self.deck_sr);
-                ba.push(&samples, self.deck_sr);
-                (ba.beat_grid().map(|g| (*g).clone()), 0, Vec::new(), [None; 8], "freedj")
+            None => (None, 0, Vec::new(), [None; 8], "freedj"),
+        };
+        let grid_src = match (&local, grid_src) { (Some(Some(_)), "rekordbox") => "cache", (_, g) => g };
+        // AUTO CUE only when rekordbox gave no cue: then the first sound.
+        let auto = self.auto_cue && rb_cue == 0;
+        let mut cue_pt = rb_cue;
+        let mut cue_found = !auto;
+
+        let mut out: Vec<f32> = Vec::with_capacity(if total_hint > 0 { total_hint as usize + 4096 } else { per_sec as usize * 300 });
+        let mut buf = vec![0f32; 4096 * file_ch.max(1)];
+        let mut rs: Option<audio::StreamResampler> = None;
+        let mut src_sr: Option<u32> = None;
+        let mut wb = WaveformBuilder::new(deck_sr);
+        let mut sent_ready = false;
+        let mut next_grow = 0usize;
+        // The waveform so far, padded with empty columns to the expected
+        // length: the overview keeps its scale (playhead, cue, needle) and
+        // fills in left to right as the track decodes.
+        let total_cols = (total_hint as usize / ch) / opendeck_analysis::waveform::HOP_SIZE;
+        let partial = |wb: &WaveformBuilder| {
+            let mut w = wb.snapshot();
+            if w.columns.len() < total_cols { w.columns.resize(total_cols, [0; 4]); }
+            w
+        };
+        // Dev: OPENDECK_LOAD_DELAY_MS=n sleeps n ms per decoded packet, to
+        // see and test a slow CPU's streaming load on a fast machine.
+        let delay = std::env::var("OPENDECK_LOAD_DELAY_MS").ok().and_then(|v| v.parse::<u64>().ok()).map(Duration::from_millis);
+        loop {
+            self.check_current()?;
+            if let Some(d) = delay { std::thread::sleep(d); }
+            let n = dec.decode(&mut buf).map_err(|e| anyhow::anyhow!("decode: {e}"))?;
+            let eof = n == 0;
+            let piece = if !eof {
+                let (stereo, _) = audio::to_stereo(buf[..n * file_ch].to_vec(), file_ch);
+                if src_sr.is_none() {
+                    // The packets' rate wins over the header's (audio::true_rate).
+                    let r = audio::pick_rate(header_sr, dec.decoded_rate());
+                    src_sr = Some(r);
+                    if r != deck_sr { rs = Some(audio::StreamResampler::new(r, deck_sr, ch)?); }
+                }
+                match rs.as_mut() { Some(r) => r.push(&stereo)?, None => stereo }
+            } else {
+                match rs.as_mut() { Some(r) => r.finish()?, None => Vec::new() }
+            };
+            if !cue_found {
+                let at = out.len();
+                let f = first_sound(&piece, ch, self.auto_cue_level_db);
+                if f > 0 || piece.first().is_some_and(|&x| x.abs() > 10f32.powf(self.auto_cue_level_db / 20.0)) {
+                    cue_pt = at as u64 + f; cue_found = true;
+                } else if eof || out.len() as f64 >= AUTO_CUE_MAX_SECS * per_sec {
+                    cue_pt = 0; cue_found = true;
+                }
+            }
+            wb.push(&piece);
+            out.extend_from_slice(&piece);
+
+            if !sent_ready && cue_found && (eof || out.len() as f64 >= cue_pt as f64 + PLAYABLE_SECS * per_sec) {
+                let total = if eof { 0 } else { total_hint.max(out.len() as u64 + 1) };
+                let p = Prepared {
+                    name: name.clone(), path: path.clone(), tags: tags.clone(),
+                    samples: Arc::new(out.clone()), ch, waveform: if eof { wb.snapshot() } else { partial(&wb) },
+                    beat_grid: beat_grid.clone(), cue_pt, memory_cues: memory_cues.clone(), hot_cues,
+                    grid_src, t0, total,
+                };
+                log::info!("load: playable in {} ms ({:.1}s decoded)", t0.elapsed().as_millis(), out.len() as f64 / per_sec);
+                if tx.send(LoadMsg::Ready(p)).is_err() { return Ok(()); }
+                sent_ready = true;
+                next_grow = out.len() * 4;
+            } else if sent_ready && !eof && out.len() >= next_grow {
+                // Geometric steps: each is a copy of everything so far, so
+                // the copies add up to about a third of the track.
+                let g = Grow { samples: Arc::new(out.clone()), waveform: partial(&wb), done: false, grid: None, link_analysis: None };
+                if tx.send(LoadMsg::Grow(g)).is_err() { return Ok(()); }
+                next_grow = out.len() * 4;
+            }
+            if eof { break; }
+        }
+        log::info!("load: decoded in {} ms ({:.1}s{})", t0.elapsed().as_millis(), out.len() as f64 / per_sec,
+                   match src_sr { Some(r) if r != deck_sr => format!(", resampled from {r} Hz"), _ => String::new() });
+        let waveform = wb.finish();
+
+        // The whole track is in: what needed it.
+        let grid = if beat_grid.is_none() {
+            self.check_current()?;
+            let stage = Instant::now();
+            let mut ba = BeatAnalyzerImpl::new(deck_sr);
+            ba.push(&out, deck_sr);
+            let g = ba.beat_grid().map(|g| (*g).clone());
+            log::info!("load: beat grid detected in {} ms", stage.elapsed().as_millis());
+            g
+        } else { None };
+        let samples = Arc::new(out);
+        let link_analysis = match local {
+            None => None,
+            Some(Some(cached)) => Some(Arc::new(Mutex::new(cached))),
+            Some(None) => {
+                let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                let frames = (samples.len() / ch) as u64;
+                let a = opendeck_mediaserver::Analysis::from_deck(&tags, beat_grid.as_ref().or(grid.as_ref()), &waveform, frames, deck_sr, bytes);
+                let shared = Arc::new(Mutex::new(a));
+                // Key detection (untagged files) runs off the load path, then
+                // caches, and re-serves the row once the load has published it.
+                let (samples, cache_dir, link, path, sh) = (Arc::clone(&samples), self.cache_dir.clone(), self.link.clone(), path.clone(), Arc::clone(&shared));
+                std::thread::spawn(move || {
+                    let a = { let mut g = sh.lock().unwrap(); g.detect_key_if_missing(&samples, ch, deck_sr); g.clone() };
+                    if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, &path, &a) { log::info!("link cache: {e:#}"); }
+                    if let Some(link) = link { refresh_served(&link, &path, &a); }
+                });
+                Some(shared)
             }
         };
-        // AUTO CUE: with no rekordbox memory cue, cue at the first audible sound
-        // rather than 0:00 (the unit's behaviour; the A.CUE badge).  A memory
-        // cue still wins — that is the DJ's own choice.
-        let cue_pt = if self.auto_cue && cue_pt == 0 { first_sound(&samples, ch, self.auto_cue_level_db) } else { cue_pt };
-        if grid_src == "freedj" { log::info!("load: beat grid detected"); }
-        log::info!("prepared {name:?} in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
-        Ok(Prepared { name, path, tags, samples, ch, waveform, beat_grid, cue_pt, memory_cues, hot_cues, grid_src, t0, link_analysis: None })
+        if !sent_ready {
+            // Never playable early (an empty file): one message with it all.
+            bail!("{name}: no audio decoded");
+        }
+        let _ = tx.send(LoadMsg::Grow(Grow { samples, waveform, done: true, grid, link_analysis }));
+        Ok(())
     }
 }
 

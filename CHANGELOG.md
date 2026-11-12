@@ -67,6 +67,14 @@ All notable changes to this project will be documented in this file.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
 ### Changed
+- **Tracks are playable almost at once, as on a CDJ.** A load used to
+  decode the whole file, resample it, build its waveform and detect its grid
+  before the deck could play. Now the deck is playable once the audio four
+  seconds past the cue is decoded, and the rest streams in behind playback:
+  an 8.8-minute MP3 is playable in 19 ms (fully in after 0.9 s) on a desktop,
+  where the deck used to wait for all of it. The full length shows at once,
+  and the overview fills in as the track decodes. A grid we detect ourselves
+  (no rekordbox data) arrives once the whole track is in.
 - **The CDJ-3000 screen is the default** on the desktop, iPad, Android
   tablets and the Pi. An install still on the old default (XDJ-1000MK2)
   moves to it once; MENU → SCREEN switches back, and stays switched.
