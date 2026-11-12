@@ -85,6 +85,14 @@ All notable changes to this project will be documented in this file.
   database serves it under, one loaded from a player or rekordbox over LINK
   by that player, slot and ID, as a CDJ reports it. With no track loaded,
   status says so.
+- **rekordbox shows OpenDeck as a player.** Tested with rekordbox 7 (free
+  plan) on a Mac: OpenDeck browses rekordbox's collection (its categories
+  now read correctly), loads a track with rekordbox's grid and waveforms
+  over LINK, and rekordbox's LINK panel then shows that track for OpenDeck's
+  player, as it does for a CDJ-3000 on the same network. A track from
+  OpenDeck's own library shows as "other device", as a CDJ's own stick does.
+  A player's request 0x3007 after connecting is now answered as rekordbox
+  answers it.
 - **Big folders on a linked player could be cut short:** folder listings
   over LINK kept only the player's first reply (8 KB, roughly 100–250
   names) and never asked for the rest. They now read to the end.

@@ -437,6 +437,11 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
                 log::info!("dbserver: {peer:?} set up as device {}", arg(0));
                 reply(&mut w, Message { txid: m.txid, kind: kind::MENU_AVAILABLE, args: vec![u(0), u(device() as u32)] })?;
             }
+            // 0x3007, sent by a player right after setup: rekordbox answers
+            // an empty menu (0x4000 [0x3007, 0]), as captured; we did "unknown".
+            0x3007 => {
+                reply(&mut w, Message { txid: m.txid, kind: kind::MENU_AVAILABLE, args: vec![u(0x3007), u(0)] })?;
+            }
             kind::RENDER => {
                 let offset = arg(1) as usize;
                 let limit  = arg(2) as usize;
@@ -584,6 +589,19 @@ mod tests {
             t(2, "Alpha", "Bob", "Two", "/a.mp3"),
             t(3, "Gamma", "Ann", "Two", "/c.mp3"),
         ] }
+    }
+
+    #[test]
+    fn answers_a_players_0x3007_like_rekordbox() {
+        // A session on a throwaway port: setup, then 0x3007 as a CDJ-3000
+        // sends it after setup; rekordbox answers an empty menu.
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let lib = lib().shared();
+        thread::spawn(move || { let (c, _) = l.accept().unwrap(); let _ = serve_client(lib, Arc::new(|| 3), c); });
+        let mut c = crate::Client::connect(Ipv4Addr::LOCALHOST, port, 1).unwrap();
+        let r = c.request(0x3007, vec![u(0x0108_0301), u(0)]).unwrap();
+        assert_eq!((r.kind, r.args.clone()), (kind::MENU_AVAILABLE, vec![u(0x3007), u(0)]));
     }
 
     #[test]

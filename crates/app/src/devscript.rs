@@ -14,7 +14,7 @@
 //! | `shiftsync` / `snapgrid` / `gridreset` | the GRID ADJUST actions |
 //! | `screen=browse` (`taglist`, `menu`, `source`, `history`, `perform`, `perform-stems`, `playback`) | open that screen (`perform-stems`: PERFORM with the STEMS pads) |
 //! | `stems=<drums>,<vocal>,<harmonics>` | set the stem levels (0..1) |
-//! | `open=<row name>` | BROWSE: highlight the row with that name and enter it |
+//! | `open=<row name>` | BROWSE: highlight the row with that name (or the first starting with it) and enter it |
 //! | `select=<n>` | BROWSE: highlight row n |
 //! | `category=<n>` | BROWSE on rekordbox: open category n (0 = ARTIST) |
 //! | `search=<text>` | open SEARCH and type the text |

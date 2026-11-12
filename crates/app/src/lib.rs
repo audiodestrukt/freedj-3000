@@ -1667,7 +1667,10 @@ impl DeckApp {
                     };
                 }
                 A::Open(name) => {
-                    match self.browser.entries().iter().position(|e| e.name == name) {
+                    // Exact name, else the first row starting with it (LINK rows
+                    // carry the device's address after its name).
+                    let rows = self.browser.entries();
+                    match rows.iter().position(|e| e.name == name).or_else(|| rows.iter().position(|e| e.name.starts_with(name.as_str()))) {
                         Some(i) => { self.browser.selected = i; self.apply(Event::Deck(ControlEvent::Load)); }
                         None => log::warn!("script: no row {name:?}"),
                     }
