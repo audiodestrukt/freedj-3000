@@ -917,7 +917,12 @@ impl DeckApp {
             zoom_grid_mode:    std::env::var("OPENDECK_GRID_ADJUST").map(|v| v == "1").unwrap_or(false),   // dev: start in GRID ADJUST
             // Dev: OPENDECK_PHASE_VIEW=ticks starts in the alignment view (for captures).
             phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
-            faceplate:         std::env::var("OPENDECK_FACEPLATE").map(|v| v == "1").unwrap_or(false),
+            // The full deck (jog, keys, fader around the screen) by default
+            // on the Mac and Windows, where nothing else gives the controls;
+            // screen-only elsewhere (the Pi appliance's panel).
+            // OPENDECK_FACEPLATE=1/0, --faceplate / --screen-only.
+            faceplate:         std::env::var("OPENDECK_FACEPLATE").map(|v| v == "1")
+                                   .unwrap_or(cfg!(any(target_os = "macos", target_os = "windows"))),
             portrait:          std::env::var("OPENDECK_PORTRAIT").map(|v| v == "1").unwrap_or(false),
             phone:             std::env::var("OPENDECK_PHONE").map(|v| v == "1").unwrap_or(false),
             phone_controls:    std::env::var("OPENDECK_PHONE_PAGE").map(|v| v == "controls").unwrap_or(false),
@@ -2595,6 +2600,10 @@ impl DeckApp {
     fn initial_window_size(&self) -> (u32, u32) {
         let (win_w, win_h) = if self.phone { (932u32, 430u32) }        // iPhone 6.9" landscape, points
                              else if self.portrait { (966u32, 1288u32) }   // iPad 13" portrait (0.75)
+                             else if self.faceplate && self.settings.skin == settings::Skin::Cdj3000 {
+                                 // The CDJ-3000's top panel, at the deck's own aspect.
+                                 ((1090.0 * cdjface::DECK_ASPECT.x / cdjface::DECK_ASPECT.y).round() as u32, 1090u32)
+                             }
                              else if self.faceplate { (860u32, 1090u32) }
                              else if self.settings.skin == settings::Skin::Cdj3000 && cdjface::bare_screen() { (1280u32, 720u32) }
                              else if self.settings.skin == settings::Skin::Cdj3000 { (cdjface::SIDE_ASPECT.x as u32, 720u32) }
@@ -3513,7 +3522,19 @@ impl ApplicationHandler for DeckApp {
         // so letting it have the whole thing is both correct and what we want.
         #[cfg(not(target_os = "ios"))]
         {
-            attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(win_w, win_h));
+            // A first window taller than the screen (the full deck is 1090
+            // high; a 13" MacBook has ~950 points) is scaled down to fit,
+            // aspect kept; an explicit OPENDECK_WINDOW is taken as given.
+            let (mut w, mut h) = (win_w as f64, win_h as f64);
+            if std::env::var("OPENDECK_WINDOW").is_err() {
+                if let Some(m) = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next()) {
+                    let size = m.size().to_logical::<f64>(m.scale_factor());
+                    let fit = (size.height * 0.9 / h).min(size.width * 0.9 / w).min(1.0);
+                    if fit < 1.0 { log::info!("window: {w}x{h} scaled to fit the {}x{} screen", size.width, size.height); }
+                    w *= fit; h *= fit;
+                }
+            }
+            attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(w.round(), h.round()));
         }
         #[cfg(target_os = "ios")]
         let _ = (win_w, win_h);
@@ -3836,6 +3857,7 @@ pub fn desktop_main() -> Result<()> {
             "--link-receive-only" => link_send = false,
             "--controllers" => controllers = Some(args.next().context("--controllers needs a path to a controllers.toml")?.into()),
             "--faceplate" => std::env::set_var("OPENDECK_FACEPLATE", "1"),
+            "--screen-only" => std::env::set_var("OPENDECK_FACEPLATE", "0"),
             "--portrait"  => std::env::set_var("OPENDECK_PORTRAIT", "1"),  // iPad 13" portrait chrome
             _ => path = Some(a.into()),
         }

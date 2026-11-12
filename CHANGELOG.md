@@ -67,6 +67,11 @@ All notable changes to this project will be documented in this file.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
 ### Changed
+- **The Mac and Windows start with the full deck**: jog, every key and the
+  tempo fader around the screen, as on the iPad (`--screen-only` for the
+  screen alone; Linux keeps screen-only, `--faceplate` for the deck). The
+  CDJ-3000 deck opens at its own aspect (no side bands), and a first window
+  taller than the screen is scaled down to fit it.
 - **PLAYER No. AUTO tries 4, 5, 6, 3, 2, 1**, the same on every platform:
   OpenDeck starts at 4, above the players a DJ numbers from 1, goes up while
   4 is taken, then down. It used to try the platform's own default (1 on the

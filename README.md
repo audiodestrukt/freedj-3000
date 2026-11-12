@@ -295,13 +295,15 @@ The keyboard stands in for the deck's buttons on a desktop.
 The deck's look is chosen in MENU → SCREEN, or at launch with
 `OPENDECK_SKIN=cdj3000` (or `xdj1000mk2`). The CDJ-3000 screen is the
 default everywhere except on phones, which keep the XDJ-1000MK2 layout. The CDJ-3000 screen comes with
-its hardware buttons: on the desktop, SOURCE / BROWSE / TAG LIST / SEARCH /
-MENU and BACK / TAG TRACK / the rotary sit either side of the screen; on the
-iPad (and with `--faceplate`) it is the whole top panel, every key where the
-unit has it: the screen keys above the screen, hot cues under it (hold CALL /
+its hardware buttons. On the Mac, Windows and the iPad it is the whole top
+panel (the default; `--screen-only` drops it on the desktop), every key where
+the unit has it: the screen keys above the screen, hot cues under it (hold CALL /
 DELETE and press a pad to delete one), loops, BEAT JUMP, TRACK SEARCH and
 SEARCH down the left, CALL / DELETE / MEMORY over the jog, SYNC / MASTER,
-the tempo keys and the fader down the right. The phone keeps the XDJ
+the tempo keys and the fader down the right. On Linux the default is the
+screen with SOURCE / BROWSE / TAG LIST / SEARCH / MENU and BACK / TAG TRACK /
+the rotary either side of it (`--faceplate` for the whole panel). The first
+window is scaled down to fit a smaller screen. The phone keeps the XDJ
 layout for now.
 
 **USB sticks.** Mounted removable media appear as `USB: <label>` rows at the
