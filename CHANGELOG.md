@@ -67,6 +67,10 @@ All notable changes to this project will be documented in this file.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
 ### Changed
+- **PLAYER No. AUTO tries 4, 5, 6, 3, 2, 1**, the same on every platform:
+  OpenDeck starts at 4, above the players a DJ numbers from 1, goes up while
+  4 is taken, then down. It used to try the platform's own default (1 on the
+  desktop, 3 on an iPad, 4 on an iPhone), then the lowest free number.
 - **BROWSE remembers where you were.** Each source (the home folder, each
   stick) keeps its own place, folder and highlighted row: going to another
   source and back, or relaunching, returns there (saved by name in

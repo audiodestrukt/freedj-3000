@@ -38,10 +38,13 @@ packets in `crates/link/src/prodj.rs` (`build_hello`, `build_claim1..3`,
 
 1. **Listen** for 3 s (players send a keep-alive every 1.5–2 s), so every
    number in use is known, and pick the interface the players are on.
-2. **Pick**: the platform default if free (3 on an iPad, 4 on an iPhone, 1
-   on the desktop), else the lowest free of 1–4, then 5–6. Players 5 and 6
-   only work on a 6-player network (CDJ-3000s, no older players), so they
-   are used only when 1–4 are taken.
+2. **Pick**: the first free number in 4, 5, 6, 3, 2, 1 (`AUTO_ORDER`),
+   on every platform: OpenDeck starts at 4, above the players a DJ numbers
+   from 1, goes up while 4 is taken, then down. Players 5 and 6 only work
+   on a 6-player network (CDJ-3000s, no older players): on a network with
+   an older player or a 4-channel mixer, set the number by hand when 4 is
+   taken. (Until 2026-11-12: the platform default first, then the lowest
+   free 1–4, then 5–6.)
 3. **Claim**: hello ×3, then claim stages 1, 2 and 3, three packets each,
    300 ms apart (stage 2 carries the auto flag). If a device defends the
    number (0x08), or starts announcing it, try the next one.

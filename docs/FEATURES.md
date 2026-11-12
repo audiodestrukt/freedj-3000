@@ -78,7 +78,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | Feature | Status | Where |
 |---|---|---|
 | Appears as a player: announce, beats, status | ✅ tested on an XDJ-1000MK2 | All |
-| PLAYER No. AUTO: claims a free player number like a CDJ, defends it, moves on a collision; or set 1–6 (5–6 need a 6-player network) | 🧪 tested between OpenDecks, not yet real players | All |
+| PLAYER No. AUTO: claims a free player number like a CDJ (tries 4, 5, 6, 3, 2, 1), defends it, moves on a collision; or set 1–6 (5–6 need a 6-player network) | 🧪 tested between OpenDecks, not yet real players | All |
 | SYNC to the master's tempo and phase; a jog nudge while synced is kept as an offset | ✅ | All |
 | MASTER, handoff both ways | ✅ tested on an XDJ-1000MK2 | All |
 | LINK: browse and load from other players' USB / SD and from rekordbox (dbserver + NFS), with their grids and cues | ✅ | All |

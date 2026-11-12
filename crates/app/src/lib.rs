@@ -3868,11 +3868,11 @@ pub fn run(cfg: Config) -> Result<()> {
     // Dev / screenshots: OPENDECK_SKIN picks the skin for this run without
     // changing the saved choice (a MENU change still saves everything).
     if let Some(skin) = settings::Skin::from_env() { settings.skin = skin; }
-    // 0 = PLAYER No. AUTO: claim a free number on the network, trying the
-    // platform default first.
+    // 0 = PLAYER No. AUTO: claim a free number on the network, 4 first,
+    // then 5, 6, 3, 2, 1 (prodj::AUTO_ORDER).
     let player       = cfg.player.unwrap_or(settings.player);
     let player_auto  = player == 0;
-    let player       = if player_auto { cfg.default_player } else { player }.clamp(1, 6);
+    let player       = if player_auto { prodj::AUTO_ORDER[0] } else { player }.clamp(1, 6);
     let deck_channel = cfg.deck_channel;
     let link_send    = cfg.link_send;
 

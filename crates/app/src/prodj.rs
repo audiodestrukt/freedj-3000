@@ -995,13 +995,16 @@ const CLAIM_WATCH: Duration = Duration::from_millis(3000);
 /// Gap between the packets of each claim stage, as the players space them.
 const CLAIM_STEP: Duration = Duration::from_millis(300);
 
-/// The next number AUTO should try: `preferred` when free, then the lowest
-/// free 1–4 (the range every player supports), then 5–6 (all-CDJ-3000
-/// networks only).  `None` when all are taken.
-pub fn pick_number(preferred: u8, used: &[u8], tried: &[u8]) -> Option<u8> {
-    std::iter::once(preferred).filter(|n| (1..=4).contains(n))
-        .chain(1..=6)
-        .find(|n| !used.contains(n) && !tried.contains(n))
+/// The order AUTO tries player numbers in: 4 first, up through 5 and 6,
+/// then down through 3, 2, 1, so OpenDeck sits above the players a DJ
+/// numbers from 1 and leaves the low numbers to them.
+pub const AUTO_ORDER: [u8; 6] = [4, 5, 6, 3, 2, 1];
+
+/// The next number AUTO should try: the first in [`AUTO_ORDER`] that no
+/// device is using and that has not been defended against us.  `None` when
+/// all are taken.
+pub fn pick_number(used: &[u8], tried: &[u8]) -> Option<u8> {
+    AUTO_ORDER.into_iter().find(|n| !used.contains(n) && !tried.contains(n))
 }
 
 /// Run the device-number claim: hello ×3 (first time only), then stages
@@ -1024,7 +1027,7 @@ fn claim_number(link: &LinkState, sock: &UdpSocket, ip: Ipv4Addr, bcast: Ipv4Add
     'numbers: loop {
         let n = if link.auto {
             let used: Vec<u8> = link.peers.lock().map(|p| p.keys().copied().collect()).unwrap_or_default();
-            match pick_number(link.preferred, &used, &tried) {
+            match pick_number(&used, &tried) {
                 Some(n) => n,
                 None => {
                     log::warn!("ProDJ Link: no free player number (in use: {used:?}); using {}", link.preferred);
@@ -1032,7 +1035,7 @@ fn claim_number(link: &LinkState, sock: &UdpSocket, ip: Ipv4Addr, bcast: Ipv4Add
                 }
             }
         } else { link.preferred };
-        if n > 4 { log::info!("ProDJ Link: players 1-4 are in use; trying {n} (5 and 6 need a 6-player network: CDJ-3000s, no older players)"); }
+        if n > 4 { log::info!("ProDJ Link: trying player {n} (4 is in use; 5 and 6 need a 6-player network: CDJ-3000s, no older players)"); }
         link.player.store(n, Ordering::Relaxed);
         link.defended.store(0, Ordering::Relaxed);
         let me = ProDjLink::new(n);
@@ -1592,24 +1595,27 @@ mod claim_tests {
     }
 
     #[test]
-    fn auto_takes_the_preferred_number_when_free() {
-        assert_eq!(pick_number(3, &[1, 2], &[]), Some(3));
-        assert_eq!(pick_number(3, &[], &[]), Some(3));
+    fn auto_starts_at_four_goes_up_then_down() {
+        assert_eq!(pick_number(&[], &[]), Some(4));
+        assert_eq!(pick_number(&[1, 2], &[]), Some(4));
+        assert_eq!(pick_number(&[4], &[]), Some(5));
+        assert_eq!(pick_number(&[4, 5], &[]), Some(6));
+        assert_eq!(pick_number(&[4, 5, 6], &[]), Some(3));
+        assert_eq!(pick_number(&[3, 4, 5, 6], &[]), Some(2));
+        assert_eq!(pick_number(&[2, 3, 4, 5, 6], &[]), Some(1));
+        assert_eq!(pick_number(&[1, 2, 3, 4, 5, 6], &[]), None);
+        // Every number in the order, each tried once.
+        let mut tried = Vec::new();
+        while let Some(n) = pick_number(&[], &tried) { tried.push(n); }
+        assert_eq!(tried, [4, 5, 6, 3, 2, 1]);
     }
 
     #[test]
-    fn auto_takes_the_lowest_free_number_otherwise() {
-        assert_eq!(pick_number(3, &[1, 3], &[]), Some(2));
-        assert_eq!(pick_number(1, &[1, 2, 3], &[]), Some(4));
-        assert_eq!(pick_number(3, &[1], &[3, 2]), Some(4), "skips numbers already defended");
+    fn auto_skips_defended_numbers_and_ignores_non_players() {
+        assert_eq!(pick_number(&[], &[4]), Some(5), "skips a number already defended");
+        assert_eq!(pick_number(&[5], &[4, 6]), Some(3));
         // A mixer (33) or rekordbox (17+) does not use a player number.
-        assert_eq!(pick_number(1, &[33, 17], &[]), Some(1));
-    }
-
-    #[test]
-    fn auto_uses_five_and_six_only_when_one_to_four_are_taken() {
-        assert_eq!(pick_number(3, &[1, 2, 3, 4], &[]), Some(5));
-        assert_eq!(pick_number(3, &[1, 2, 3, 4, 5, 6], &[]), None);
+        assert_eq!(pick_number(&[33, 17], &[]), Some(4));
     }
 }
 
