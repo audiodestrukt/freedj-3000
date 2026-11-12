@@ -37,7 +37,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | Waveforms for other players: blue, RGB (PWV4/PWV5) and 3-band (PWV6/PWV7), fitted to rekordbox's | ✅ | All |
 | Analysis cache (a track is analysed once) | ✅ | All |
 | Key detection for untagged tracks (72 % exact vs rekordbox on a house stick) | ✅ | All |
-| Phrase analysis served as rekordbox PSSI (not yet measured against rekordbox) | 🧪 | All |
+| Phrase analysis served as rekordbox PSSI (phrase starts P 0.70 / R 0.73 vs rekordbox on 31 house tracks; mood needs more genres) | 🧪 | All |
 | Downbeat (bar 1) detection; drum & bass at full tempo; 4:5 / 2:3 tempo mistakes | 📋 | — |
 
 ## Playing

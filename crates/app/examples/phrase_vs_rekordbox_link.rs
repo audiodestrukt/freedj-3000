@@ -12,7 +12,7 @@
 //! rekordbox's downbeats.  Fetched tracks are cached in `PHRASE_LINK_CACHE`
 //! (default target/phrase-link-cache), so tuning reruns are fast; `-` as the
 //! IP reruns from the cache alone.  `PHRASE_VERBOSE=1` lists phrases.
-use opendeck_analysis::phrase::{detect_with, parse_pssi, Coarse, SongStructure};
+use opendeck_analysis::phrase::{detect_cfg, detect_with, parse_pssi, Coarse, Mood, PhraseConfig, SongStructure};
 use opendeck_analysis::{WaveformBuilder, WaveformCache};
 use opendeck_dbserver::{parse_beat_grid, Client, Slot};
 use opendeck_nfs::Nfs;
@@ -146,6 +146,21 @@ impl Tally {
     }
 }
 
+fn score(cases: &[(Case, SongStructure)], cfg: &PhraseConfig) -> (Tally, Vec<(f64, f64, Mood, Mood)>) {
+    let mut t = Tally::default();
+    let mut feats = Vec::new();
+    for (c, rb) in cases {
+        let (ours, f) = detect_cfg(&c.beats, &c.wave, c.frames, c.wave.sample_rate, true, cfg);
+        t.add(rb, &ours);
+        feats.push((f.driven, f.bass_med, rb.mood, ours.mood));
+    }
+    (t, feats)
+}
+
+fn lens(s: &SongStructure, h: &mut std::collections::BTreeMap<u16, u32>) {
+    for w in s.phrases.windows(2) { *h.entry((w[1].beat - w[0].beat) / 4).or_insert(0) += 1; }
+}
+
 fn main() -> anyhow::Result<()> {
     let mut a = std::env::args().skip(1);
     let ip = a.next().expect("usage: phrase_vs_rekordbox_link <ip|-> <track-id>...|all");
@@ -174,5 +189,35 @@ fn main() -> anyhow::Result<()> {
     }
     guessed.print("bar phase guessed     ");
     known.print("rekordbox downbeats   ");
+
+    // Calibration: cases in memory, mood features, phrase lengths, a sweep.
+    let mut cases = Vec::new();
+    for f in std::fs::read_dir(&dir)?.flatten().map(|e| e.path()) {
+        let Some(c) = std::fs::read(&f).ok().and_then(|b| get(&b)) else { continue };
+        if !ids.is_empty() && !ids.contains(&c.id) { continue; }
+        if let Ok(rb) = parse_pssi(&c.pssi) { if !rb.phrases.is_empty() { cases.push((c, rb)); } }
+    }
+    let (_, feats) = score(&cases, &PhraseConfig::default());
+    if std::env::var("PHRASE_FEATS").is_ok() {
+        for ((c, _), (d, b, rm, om)) in cases.iter().zip(&feats) { println!("  driven {d:.2} bass {b:>5.1}  rb {rm:?} ours {om:?}  {}", c.name); }
+    }
+    let (mut hr, mut ho) = (std::collections::BTreeMap::new(), std::collections::BTreeMap::new());
+    for (c, rb) in &cases { lens(rb, &mut hr); lens(&detect_with(&c.beats, &c.wave, c.frames, c.wave.sample_rate, true), &mut ho); }
+    println!("phrase lengths in bars (length: count)\n  rekordbox {hr:?}\n  ours      {ho:?}");
+    if std::env::var("PHRASE_SWEEP").is_ok() {
+        let mut best: Vec<(f64, String)> = Vec::new();
+        for &max_bars in &[8usize, 12, 16] { for &split_bars in &[4usize, 8] { for &nov_mult in &[1.5, 2.0, 2.5] {
+            for &high_driven in &[0.2, 0.35, 0.45, 0.55] { for &high_bass in &[40.0, 60.0, 75.0, 90.0] {
+                let cfg = PhraseConfig { max_bars, split_bars, nov_mult, high_driven, high_bass, ..Default::default() };
+                let (t, _) = score(&cases, &cfg);
+                let p = t.tp as f64 / t.n_ours.max(1) as f64; let r = t.tp as f64 / t.n_rb.max(1) as f64;
+                let f1 = 2.0 * p * r / (p + r).max(1e-9);
+                let (m, k) = (t.mood_ok as f64 / t.n.max(1) as f64, t.kind_ok as f64 / t.kind_n.max(1) as f64);
+                best.push((f1 + m + k, format!("F1 {f1:.2} mood {m:.2} kind {k:.2}  {cfg:?}")));
+            } }
+        } } }
+        best.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+        for (_, l) in best.iter().take(8) { println!("  {l}"); }
+    }
     Ok(())
 }

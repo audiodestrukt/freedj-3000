@@ -184,8 +184,37 @@ pub fn encode_pssi(s: &SongStructure, masked: bool) -> Vec<u8> {
 // outro, loud phrases choruses, and in between up / down (high mood) or
 // verse / bridge (mid, low).  The mood follows how bass-driven the track is.
 
+/// The detector's tunables (defaults are the shipped values).
+#[derive(Clone, Copy, Debug)]
+pub struct PhraseConfig {
+    /// Sections longer than this many bars are split...
+    pub max_bars: usize,
+    /// ...into phrases of this many bars.
+    pub split_bars: usize,
+    /// Novelty peaks count above this multiple of the track's median.
+    pub nov_mult: f64,
+    /// High mood: at least this share of bars bass-heavy...
+    pub high_driven: f64,
+    /// ...and the median bass level (0-255 columns) above this.
+    pub high_bass: f64,
+    /// Low mood: median bass below this.
+    pub low_bass: f64,
+}
+
+impl Default for PhraseConfig {
+    // Calibrated on 31 rekordbox-analysed tracks over LINK (examples/
+    // phrase_vs_rekordbox_link): rekordbox's phrases are mostly 8 bars, so
+    // sections over 12 bars split into 8 (phrase-start F1 0.61 -> 0.72).
+    // Mood moved only modestly: that set was 28 High / 3 Mid, and our
+    // features did not separate its Mid tracks, so it cannot calibrate mood.
+    fn default() -> Self { Self { max_bars: 12, split_bars: 8, nov_mult: 2.0, high_driven: 0.45, high_bass: 60.0, low_bass: 40.0 } }
+}
+
+/// What the mood decision saw, for calibration.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct MoodFeatures { pub driven: f64, pub bass_med: f64 }
+
 const MIN_BARS: usize = 4;
-const MAX_BARS: usize = 16;
 /// Novelty kernel half-width, bars.
 const KERNEL: usize = 4;
 
@@ -204,6 +233,17 @@ pub fn detect(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, sr: u
 /// than where the bar phase is guessed.  Guessing put every phrase of
 /// rekordbox's Demo Track 1 two beats off rekordbox's own.
 pub fn detect_with(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, sr: u32, downbeats_known: bool) -> SongStructure {
+    detect_cfg(beats, wave, frames, sr, downbeats_known, &PhraseConfig::default()).0
+}
+
+/// As [`detect_with`], with explicit tunables; also returns the mood features.
+pub fn detect_cfg(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, sr: u32, downbeats_known: bool, cfg: &PhraseConfig) -> (SongStructure, MoodFeatures) {
+    let mut feats = MoodFeatures::default();
+    let out = detect_inner(beats, wave, frames, sr, downbeats_known, cfg, &mut feats);
+    (out, feats)
+}
+
+fn detect_inner(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, sr: u32, downbeats_known: bool, cfg: &PhraseConfig, feats: &mut MoodFeatures) -> SongStructure {
     let mut out = SongStructure { unk2: 0x0100, ..Default::default() };
     let cols = &wave.columns;
     if beats.len() < 32 || cols.is_empty() || sr == 0 { return out; }
@@ -271,7 +311,7 @@ pub fn detect_with(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, 
         let (x, y) = (mean(i.saturating_sub(KERNEL)..i), mean(i..(i + KERNEL).min(nbars)));
         (0..4).map(|k| (x[k] - y[k]).powi(2)).sum::<f64>().sqrt()
     }).collect();
-    let thresh = (sorted(nov.clone())[nbars / 2] * 2.0).max(0.08);
+    let thresh = (sorted(nov.clone())[nbars / 2] * cfg.nov_mult).max(0.08);
 
     // Peaks, strongest first, at least MIN_BARS from each other and the ends.
     let mut order: Vec<usize> = (1..nbars)
@@ -296,7 +336,7 @@ pub fn detect_with(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, 
         let s = *bounds.last().unwrap();
         if c <= s { continue; }
         let mut x = s;
-        while c - x > MAX_BARS { x += 8; bounds.push(x); }
+        while c - x > cfg.max_bars { x += cfg.split_bars; bounds.push(x); }
         bounds.push(c);
     }
     bounds.dedup();
@@ -323,7 +363,8 @@ pub fn detect_with(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, 
     // sqrt-scaled 0-255 columns.
     let bass_med = sorted(raw[..nbars].iter().map(|f| f[0]).collect())[nbars / 2];
     let driven = bar.iter().filter(|f| f[0] > 0.6).count() as f64 / nbars as f64;
-    out.mood = if driven > 0.55 && bass_med > 90.0 { Mood::High } else if bass_med < 45.0 { Mood::Low } else { Mood::Mid };
+    *feats = MoodFeatures { driven, bass_med };
+    out.mood = if driven > cfg.high_driven && bass_med > cfg.high_bass { Mood::High } else if bass_med < cfg.low_bass { Mood::Low } else { Mood::Mid };
 
     let mut verse = 0u16;
     let mut prev_kind = 0u16;

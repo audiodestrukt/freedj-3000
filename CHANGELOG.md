@@ -21,8 +21,11 @@ All notable changes to this project will be documented in this file.
   up / down, chorus, outro; mood high / mid / low) and serves them as
   rekordbox's PSSI section, so a CDJ-3000 can colour the waveform by phrase.
   The encoder matches rekordbox's (masked) format byte for byte; the
-  detector itself is not yet measured against rekordbox's phrases
-  (`examples/phrase_vs_rekordbox` does that, given a source with them).
+  detector is calibrated on 31 phrase-analysed tracks from rekordbox over
+  LINK (`examples/phrase_vs_rekordbox_link`): phrase starts within a bar of
+  rekordbox's, precision 0.70 / recall 0.73; mood agrees on 25 of 31 (a
+  house set, so mood is not yet calibrated for other genres); coarse phrase
+  type 65 %. With a rekordbox grid, its downbeats are used for the bars.
 - **Colour waveforms for other players.** OpenDeck's analysis now also
   makes the waveforms newer players draw: the CDJ-3000's 3-band preview and
   detail (PWV6 / PWV7) and the nexus 2 RGB preview and detail (PWV4 /
