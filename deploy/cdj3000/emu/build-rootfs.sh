@@ -8,6 +8,7 @@ out=${1:?usage: build-rootfs.sh OUT.tar}
 here=$(cd "$(dirname "$0")" && pwd)
 eng=${CONTAINER_ENGINE:-$(command -v podman || command -v docker)}
 img=opendeck-emu-rootfs
+mkdir -p "$(dirname "$out")"
 "$eng" build --platform linux/arm64 -t "$img" -f "$here/Containerfile" "$here"
 cid=$("$eng" create --platform linux/arm64 "$img" /init)
 trap '"$eng" rm -f "$cid" >/dev/null' EXIT
