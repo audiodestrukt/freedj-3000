@@ -99,3 +99,4 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 
 - Sampler deck: auto one-shots, quantized triggers, cue sequencing ([#24](https://github.com/audiodestrukt/freedj-3000/issues/24)).
 - The remaining CDJ-3000 screen work: [TODO-cdj-3000.md](TODO-cdj-3000.md).
+- Analysis improvements (phrases, mood, downbeats, key): [TODO-analysis.md](TODO-analysis.md).
