@@ -117,7 +117,6 @@ jobs:
         run: |
           python3 tools/upd/updpack.py emu --rootfs target/upd/rootfs.tar \
             --add bin/opendeck:opt/opendeck/opendeck \
-            --add amplificate.mp3:opt/opendeck/amplificate.mp3 \
             --version "$V" --fw "$FW" --out target/upd
 
       # cdj3k-emu's own firmware code over the ISO: firmware info, kernel

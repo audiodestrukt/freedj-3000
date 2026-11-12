@@ -22,7 +22,9 @@ export OPENDECK_SUBUCOM=/dev/subucom_spi1.0
 export OPENDECK_STRETCH=wsola
 export OPENDECK_LINK_IFACE=${OPENDECK_LINK_IFACE:-eth0}
 export RUST_LOG=${RUST_LOG:-info,wgpu=warn,naga=warn}
-# Tracks: the emulator's USB stick mounts under /media/usb (scanned by
-# media.rs); the bundled demo track loads at start.
+# Tracks come from the emulator's USB stick, which mounts under
+# /media/usb (scanned by media.rs). The deck boots empty, as a CDJ does
+# (decoding and analysing a track before the first frame took ~25 s under
+# TCG); OPENDECK_TRACK=<file> preloads one anyway.
 cd /opt/opendeck
-exec ./opendeck ${OPENDECK_TRACK:-/opt/opendeck/amplificate.mp3}
+exec ./opendeck ${OPENDECK_TRACK:+"$OPENDECK_TRACK"}

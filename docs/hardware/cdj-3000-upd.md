@@ -143,7 +143,6 @@ deploy/pi/cross/build.sh aarch64                       # OpenDeck, aarch64
 deploy/cdj3000/emu/build-rootfs.sh target/upd/rootfs.tar
 python3 tools/upd/updpack.py emu --rootfs target/upd/rootfs.tar \
     --add target/aarch64-unknown-linux-gnu/release/opendeck-stripped:opt/opendeck/opendeck \
-    --add amplificate.mp3:opt/opendeck/amplificate.mp3 \
     --version 0.0.0-dev --out target/upd [--key /path/to/packaging.key]
 # cdj3k-emu's own install pipeline over the result (RES = its patch/ + tools/):
 (cd tools/upd/emucheck && cargo run --release -- ../../../target/upd/CDJ3Kv999-OPENDECK-EMU.iso /tmp/chk --patch RES)
