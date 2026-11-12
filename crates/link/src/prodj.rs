@@ -97,8 +97,11 @@ mod status {
     // Documented wire offsets we don't parse yet — keep for reference.
     #[allow(dead_code)] pub const LEN:      usize = 0x22;   // u16 BE, remaining length
     #[allow(dead_code)] pub const ACTIVITY: usize = 0x27;   // 0 idle, 1 active
+    pub const SOURCE:    usize = 0x28;   // Dr: player whose media holds the track
     pub const SLOT:      usize = 0x29;   // 1 CD, 2 SD, 3 USB, 4 rekordbox, 6 streaming
     pub const TRACK_TYPE: usize = 0x2a;  // 0 none, 1 rekordbox, 2 unanalysed, 5 CD
+    pub const TRACK_ID:  usize = 0x2c;   // u32 BE rekordbox ID in the source's database
+    pub const TRACK_NO:  usize = 0x32;   // u16 BE track number (CDs)
     pub const PLAY:      usize = 0x7b;   // P1, see PlayState
     pub const FIRMWARE:  usize = 0x7c;   // 4 ASCII bytes
     pub const SYNC_N:    usize = 0x84;   // u32 BE sync counter: a new master sets largest-seen + 1
@@ -146,6 +149,8 @@ impl PlayState {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Status {
     pub player:       u8,
+    /// The loaded track's source player, slot, kind and ID.
+    pub track:        TrackRef,
     pub play:         PlayState,
     pub playing:      bool,     // F bit 6
     pub master:       bool,     // F bit 5
@@ -168,9 +173,27 @@ pub struct Status {
     pub sync_counter: u32,
 }
 
+/// Which track a status packet says is loaded: where it lives and its ID
+/// there.  Peers ask that player's database for the title, artist, grid and
+/// so on by this ID (Beat Link, ShowKontrol, other players' LINK INFO).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TrackRef {
+    /// Player whose media holds the track; 0 = us.
+    pub player: u8,
+    /// 1 CD, 2 SD, 3 USB, 4 rekordbox collection.
+    pub slot:   u8,
+    /// 1 rekordbox-analysed, 2 unanalysed.
+    pub kind:   u8,
+    /// The track's ID in that player's database (0 = unknown).
+    pub id:     u32,
+}
+
 /// What we put in our own status packets.
 #[derive(Debug, Clone, Copy)]
 pub struct StatusFields {
+    /// The loaded track's source and ID; None with a track loaded reports
+    /// our own USB with ID 0 (nothing to look up).
+    pub track:        Option<TrackRef>,
     pub playing:      bool,
     pub track_loaded: bool,
     pub master:       bool,
@@ -356,11 +379,20 @@ impl ProDjLink {
         p[0x1f] = 0x01;
         p[status::DEVICE] = self.player_num;
         p[0x24] = self.player_num;
-        // Track source: our own player, "USB", rekordbox-analysed — so peers
-        // trust the BPM and grid we report.
-        p[0x28] = if f.track_loaded { self.player_num } else { 0 };
-        p[status::SLOT] = if f.track_loaded { 0x03 } else { 0 };
-        p[status::TRACK_TYPE] = if f.track_loaded { 0x01 } else { 0 };
+        // Track source and ID.  Default: our own player, USB, rekordbox-
+        // analysed, so peers trust the BPM and grid we report.  The template
+        // carried a captured device's track ID here (0x05010100), so every
+        // peer asked for a track that does not exist: no title or position.
+        let t = match (f.track_loaded, f.track) {
+            (false, _) => TrackRef::default(),
+            (true, Some(t)) => TrackRef { player: if t.player == 0 { self.player_num } else { t.player }, ..t },
+            (true, None) => TrackRef { player: self.player_num, slot: 3, kind: 1, id: 0 },
+        };
+        p[status::SOURCE] = t.player;
+        p[status::SLOT] = t.slot;
+        p[status::TRACK_TYPE] = t.kind;
+        p[status::TRACK_ID..status::TRACK_ID + 4].copy_from_slice(&t.id.to_be_bytes());
+        p[status::TRACK_NO..status::TRACK_NO + 2].copy_from_slice(&0u16.to_be_bytes());
         p[status::PLAY] = match (f.track_loaded, f.playing) {
             (false, _)   => 0x00,
             (true, true) => 0x03,
@@ -583,6 +615,7 @@ impl ProDjLink {
             beat_in_bar:  (1..=4).contains(&bib).then_some(bib),
             handoff_to:   (handoff != 0xff && handoff != 0).then_some(handoff),
             track_loaded: data[status::TRACK_TYPE] != 0,
+            track:        TrackRef { player: data[status::SOURCE], slot: data[status::SLOT], kind: data[status::TRACK_TYPE], id: u32_at(status::TRACK_ID) },
             firmware:     [data[status::FIRMWARE], data[status::FIRMWARE + 1], data[status::FIRMWARE + 2], data[status::FIRMWARE + 3]],
             counter:      u32_at(status::COUNTER),
             sync_counter: u32_at(status::SYNC_N),
@@ -706,6 +739,7 @@ mod tests {
     fn status_round_trips_through_the_parser() {
         let link = ProDjLink::new(2);
         let f = StatusFields {
+            track: Some(TrackRef { player: 0, slot: 3, kind: 1, id: 4321 }),
             playing: true, track_loaded: true, master: true, sync: false, on_air: false,
             pitch: 1.02, bpm: Some(134.7), beat: Some(77), beat_in_bar: Some(3),
             handoff_to: None, counter: 9, sync_counter: 7,
@@ -722,6 +756,12 @@ mod tests {
         assert_eq!(st.beat_in_bar, Some(3));
         assert_eq!(st.handoff_to, None);
         assert!(st.track_loaded);
+        // Player 0 means us; the ID is the one peers will ask our database for.
+        assert_eq!(st.track, TrackRef { player: 2, slot: 3, kind: 1, id: 4321 });
+        let linked = link.build_status(&StatusFields { track: Some(TrackRef { player: 1, slot: 2, kind: 1, id: 9 }), ..f });
+        assert_eq!(ProDjLink::parse_status(&linked).unwrap().track, TrackRef { player: 1, slot: 2, kind: 1, id: 9 });
+        let none = link.build_status(&StatusFields { track: None, ..f });
+        assert_eq!(ProDjLink::parse_status(&none).unwrap().track.id, 0, "no leftover template ID");
         assert_eq!(&st.firmware, b"0.1 ");
         assert_eq!(st.counter, 9);
         assert_eq!(st.sync_counter, 7);

@@ -59,6 +59,11 @@ pub struct LinkState {
     /// Our Link IP and the sender's port, so our own broadcasts can be told
     /// from a peer's (two OpenDecks on one machine share the IP).
     pub own_src:       Mutex<Option<(Ipv4Addr, u16)>>,
+    /// The loaded track's source and ID, as our status reports it (None =
+    /// no track).  Set on every load by the deck.
+    pub track:         Mutex<Option<opendeck_link::prodj::TrackRef>>,
+    /// Our media server's tracks: canonical path → the ID peers look it up by.
+    pub served:        Mutex<HashMap<std::path::PathBuf, u32>>,
     /// Our Link broadcast address (defenses go there as well as unicast).
     pub own_bcast:     Mutex<Option<Ipv4Addr>>,
     /// We are the tempo master.
@@ -204,6 +209,8 @@ impl LinkState {
             reclaim: AtomicBool::new(false),
             own_src: Mutex::new(None),
             own_bcast: Mutex::new(None),
+            track: Mutex::new(None),
+            served: Mutex::new(HashMap::new()),
             master: AtomicBool::new(false),
             sync: AtomicBool::new(false),
             want_master: AtomicBool::new(false),
@@ -276,6 +283,11 @@ impl LinkState {
         self.yielded_from.store(0, Ordering::Relaxed);
         self.master_since_ms.store(self.epoch.elapsed().as_millis() as u64, Ordering::Relaxed);
         log::info!("ProDJ Link: taking master ({why}), sync counter {n}");
+    }
+
+    /// The player number a peer at `ip` announced.
+    pub fn peer_player(&self, ip: Ipv4Addr) -> Option<u8> {
+        self.peers.lock().ok()?.iter().find(|(_, a)| **a == ip).map(|(p, _)| *p)
     }
 
     fn peer_ip(&self, player: u8) -> Option<Ipv4Addr> {
@@ -614,84 +626,117 @@ fn diag_packet(port: u16, addr: SocketAddr, data: &[u8]) {
     crate::cpumeter::file_line(&format!("link: {now} {port} {addr} {} {hex}  -- first type {t:#04x} from player {player}", data.len()));
 }
 
+/// What the 50000 listener should do with a packet, after [`ClaimGuard`].
+#[derive(Debug, PartialEq)]
+pub enum ClaimAction {
+    /// Our own packet, or claim traffic fully handled: stop here.
+    Done,
+    /// Defend `number` (ours, at `ours`) against the claimant at `to`.
+    Defend { number: u8, to: Ipv4Addr, ours: Ipv4Addr },
+    /// Not ours and not claim traffic: carry on (an announce to record).
+    Continue,
+}
+
+/// The device-number rules on port 50000, kept apart from the socket so
+/// they can be tested: note a defense of the number we are claiming, defend
+/// the number we hold, and react to a device announcing it.
+#[derive(Default)]
+pub struct ClaimGuard {
+    /// Local port of the socket our defenses go out from (our own echo).
+    pub defend_port: Option<u16>,
+    /// Who we have defended our number against: if one announces with it
+    /// anyway, it is the one in the wrong, and we keep the number.
+    defended_against: Vec<(Ipv4Addr, u16)>,
+    /// Collisions already acted on, once per device.
+    warned: Vec<(Ipv4Addr, u16)>,
+}
+
+impl ClaimGuard {
+    pub fn on_packet(&mut self, link: &LinkState, data: &[u8], from: Option<(Ipv4Addr, u16)>) -> ClaimAction {
+        let own_src = link.own_src.lock().ok().and_then(|g| *g);
+        // Our own broadcasts come back to us; a peer is anyone else.
+        if from.is_some() && from == own_src { return ClaimAction::Done; }
+        if from.is_some_and(|f| Some(f.1) == self.defend_port && Some(f.0) == own_src.map(|o| o.0)) { return ClaimAction::Done; }
+        let ours = link.player();
+        let holding = link.claimed.load(Ordering::Relaxed);
+        if let Some(n) = ProDjLink::parse_defense(data) {
+            if !holding && n == ours {
+                log::debug!("ProDJ Link: {from:?} defends player {n}");
+                link.defended.store(n, Ordering::Relaxed);
+            } else if holding && n == ours {
+                if link.auto {
+                    log::warn!("ProDJ Link: {from:?} says player {n} is its own; claiming a new number");
+                    link.reclaim.store(true, Ordering::Relaxed);
+                } else {
+                    log::warn!("ProDJ Link: {from:?} says player {n} is its own; PLAYER No. is set to {n}, so keeping it");
+                }
+            }
+            return ClaimAction::Done;
+        }
+        if let Some(n) = ProDjLink::parse_claim(data) {
+            if let (true, true, Some(own), Some(f)) = (holding, n == ours, own_src, from) {
+                if !self.defended_against.contains(&f) {
+                    self.defended_against.push(f);
+                    log::info!("ProDJ Link: {f:?} claims player {n}, ours; defending");
+                }
+                return ClaimAction::Defend { number: n, to: f.0, ours: own.0 };
+            }
+            return ClaimAction::Done;
+        }
+        if let Some((player, pkt_ip)) = ProDjLink::parse_announce(data) {
+            let they = from.unwrap_or((pkt_ip, 0));
+            if player == ours && holding && !self.warned.contains(&they) {
+                self.warned.push(they);
+                // A device that never claimed (or ignored our defense) is
+                // using our number.  AUTO moves; a set number stays put.  Two
+                // AUTO OpenDecks that finished claiming the same number at
+                // the same moment both see this; only the higher address moves.
+                if self.defended_against.contains(&they) {
+                    log::warn!("ProDJ Link: {they:?} is announcing as player {player} although we hold it and told it so");
+                } else if link.auto && own_src.is_some_and(|me| me > they) {
+                    log::warn!("ProDJ Link: {they:?} is also announcing as player {player}; claiming a new number");
+                    link.reclaim.store(true, Ordering::Relaxed);
+                } else if link.auto {
+                    log::info!("ProDJ Link: {they:?} is also announcing as player {player}; keeping it (it should move)");
+                } else {
+                    log::warn!("ProDJ Link: {they:?} is also announcing as player {player} (PLAYER No. is set to {player})");
+                }
+            }
+        }
+        ClaimAction::Continue
+    }
+}
+
 fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(PORT_ANNOUNCE)?;
     log::info!("ProDJ Link: listening for announces on port {PORT_ANNOUNCE}");
     // Defenses go back to the claimant's port 50000 from a socket of our own.
     let defend_sock = UdpSocket::bind("0.0.0.0:0").ok();
-    let defend_port = defend_sock.as_ref().and_then(|d| d.local_addr().ok()).map(|a| a.port());
-    // Who we have defended our number against: if one announces with it
-    // anyway, it is the one in the wrong, and we keep the number.
-    let mut defended_against: Vec<(Ipv4Addr, u16)> = Vec::new();
-    // Collisions already logged, once per device.
-    let mut warned: Vec<(Ipv4Addr, u16)> = Vec::new();
+    let mut guard = ClaimGuard { defend_port: defend_sock.as_ref().and_then(|d| d.local_addr().ok()).map(|a| a.port()), ..Default::default() };
     spawn("prodj-rx-50000", PORT_ANNOUNCE, sock, move |data, addr| {
         log::trace!("ProDJ rx :50000 {} bytes from {addr} — {:02X?}", data.len(), data);
         diag_packet(50000, addr, data);
         let from = match addr { SocketAddr::V4(v) => Some((*v.ip(), v.port())), _ => None };
-        let own_src = link.own_src.lock().ok().and_then(|g| *g);
-        // Our own broadcasts come back to us; a peer is anyone else.
-        if from.is_some() && from == own_src { return; }
-        if from.is_some_and(|f| Some(f.1) == defend_port && Some(f.0) == own_src.map(|o| o.0)) { return; }
-        let src = from.map(|f| f.0);
-        let own = own_src.map(|o| o.0);
-        let ours = link.player();
-        let holding = link.claimed.load(Ordering::Relaxed);
-        if let Some(n) = ProDjLink::parse_defense(data) {
-            if !holding && n == ours {
-                log::debug!("ProDJ Link: {addr} defends player {n}");
-                link.defended.store(n, Ordering::Relaxed);
-            } else if holding && n == ours {
-                if link.auto {
-                    log::warn!("ProDJ Link: {addr} says player {n} is its own; claiming a new number");
-                    link.reclaim.store(true, Ordering::Relaxed);
-                } else {
-                    log::warn!("ProDJ Link: {addr} says player {n} is its own; PLAYER No. is set to {n}, so keeping it");
-                }
-            }
-            return;
-        }
-        if let Some(n) = ProDjLink::parse_claim(data) {
-            if holding && n == ours {
-                if let (Some(ip), Some(ds), Some(to)) = (own, defend_sock.as_ref(), src) {
-                    if let Some(f) = from { if !defended_against.contains(&f) {
-                        defended_against.push(f);
-                        log::info!("ProDJ Link: {addr} claims player {n}, ours; defending");
-                    } }
-                    // Unicast, as the players do, and broadcast too: on one
-                    // machine several programs share port 50000 and a
-                    // unicast reaches only one of them.  Others ignore a
-                    // defense of a number they are not claiming.
-                    let pkt = ProDjLink::new(n).build_defense(n, ip);
+        match guard.on_packet(&link, data, from) {
+            ClaimAction::Done => return,
+            ClaimAction::Defend { number, to, ours } => {
+                // Unicast, as the players do, and broadcast too: on one
+                // machine several programs share port 50000 and a unicast
+                // reaches only one of them.  Others ignore a defense of a
+                // number they are not claiming.
+                if let Some(ds) = defend_sock.as_ref() {
+                    let pkt = ProDjLink::new(number).build_defense(number, ours);
                     let _ = ds.send_to(&pkt, (to, PORT_ANNOUNCE));
                     if let Some(b) = link.own_bcast.lock().ok().and_then(|g| *g) {
                         let _ = ds.set_broadcast(true);
                         let _ = ds.send_to(&pkt, (b, PORT_ANNOUNCE));
                     }
                 }
+                return;
             }
-            return;
+            ClaimAction::Continue => {}
         }
         if let Some((player, pkt_ip)) = ProDjLink::parse_announce(data) {
-            let first = from.is_some_and(|f| !warned.contains(&f));
-            if player == ours && holding && first {
-                if let Some(f) = from { warned.push(f); }
-                // A device that never claimed (or ignored our defense) is
-                // using our number.  AUTO moves; a set number stays put.
-                // Two AUTO OpenDecks that finished claiming the same number
-                // at the same moment both see this; only the higher IP moves.
-                let they = from.unwrap_or((pkt_ip, 0));
-                if defended_against.contains(&they) {
-                    log::warn!("ProDJ Link: {addr} is announcing as player {player} although we hold it and told it so");
-                } else if link.auto && own_src.is_some_and(|me| me > they) {
-                    log::warn!("ProDJ Link: {addr} is also announcing as player {player}; claiming a new number");
-                    link.reclaim.store(true, Ordering::Relaxed);
-                } else if link.auto {
-                    log::info!("ProDJ Link: {addr} is also announcing as player {player}; keeping it (it should move)");
-                } else {
-                    log::warn!("ProDJ Link: {addr} is also announcing as player {player} (PLAYER No. is set to {player})");
-                }
-            }
             // Reach the peer where its packet came FROM: identical to the IP in
             // the packet on a LAN, and the only address that works when the
             // announce was unicast across a routed link (Tailscale).
@@ -1375,9 +1420,11 @@ impl ProDjSender {
                             }
                             _ => (None, None),
                         };
+                        let track = link.track.lock().ok().and_then(|t| *t);
                         let fields = StatusFields {
+                            track,
                             playing,
-                            track_loaded: true,
+                            track_loaded: track.is_some() || cur_grid.is_some(),
                             master:  link.master.load(Ordering::Relaxed),
                             sync:    link.sync.load(Ordering::Relaxed),
                             on_air:  false,
@@ -1430,7 +1477,85 @@ impl ProDjSender {
 
 #[cfg(test)]
 mod claim_tests {
-    use super::pick_number;
+    use super::{pick_number, ClaimAction, ClaimGuard, LinkState};
+    use opendeck_link::ProDjLink;
+    use std::net::Ipv4Addr;
+    use std::sync::atomic::Ordering;
+
+    const US: (Ipv4Addr, u16) = (Ipv4Addr::new(169, 254, 1, 1), 40000);
+    const LOW: (Ipv4Addr, u16) = (Ipv4Addr::new(169, 254, 0, 9), 41000);
+    const HIGH: (Ipv4Addr, u16) = (Ipv4Addr::new(169, 254, 9, 9), 42000);
+
+    /// A deck at US holding (or claiming) `n`.
+    fn deck(n: u8, auto: bool, holding: bool) -> std::sync::Arc<LinkState> {
+        let l = if auto { LinkState::auto(n) } else { LinkState::new(n) };
+        *l.own_src.lock().unwrap() = Some(US);
+        l.claimed.store(holding, Ordering::Relaxed);
+        l
+    }
+    fn announce(n: u8, ip: Ipv4Addr) -> Vec<u8> { ProDjLink::new(n).build_announce(ip, [0; 6]) }
+
+    #[test]
+    fn a_claim_for_our_number_is_defended_once_held() {
+        let link = deck(2, true, true);
+        let mut g = ClaimGuard::default();
+        let claim = ProDjLink::new(2).build_claim3(1, 2);
+        assert_eq!(g.on_packet(&link, &claim, Some(HIGH)), ClaimAction::Defend { number: 2, to: HIGH.0, ours: US.0 });
+        let other = ProDjLink::new(3).build_claim3(1, 3);
+        assert_eq!(g.on_packet(&link, &other, Some(HIGH)), ClaimAction::Done, "not our number");
+        // Still claiming: a claim for the same number is not ours to defend.
+        let claiming = deck(2, true, false);
+        assert_eq!(ClaimGuard::default().on_packet(&claiming, &claim, Some(HIGH)), ClaimAction::Done);
+    }
+
+    #[test]
+    fn a_defense_while_claiming_marks_the_number_taken() {
+        let link = deck(3, true, false);
+        let d = ProDjLink::new(3).build_defense(3, HIGH.0);
+        assert_eq!(ClaimGuard::default().on_packet(&link, &d, Some(HIGH)), ClaimAction::Done);
+        assert_eq!(link.defended.load(Ordering::Relaxed), 3);
+    }
+
+    #[test]
+    fn a_defense_of_the_number_we_hold_moves_auto_but_not_a_set_number() {
+        let d = ProDjLink::new(1).build_defense(1, HIGH.0);
+        let auto = deck(1, true, true);
+        ClaimGuard::default().on_packet(&auto, &d, Some(HIGH));
+        assert!(auto.reclaim.load(Ordering::Relaxed));
+        let set = deck(1, false, true);
+        ClaimGuard::default().on_packet(&set, &d, Some(HIGH));
+        assert!(!set.reclaim.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn our_own_packets_are_ignored() {
+        let link = deck(1, true, false);
+        let d = ProDjLink::new(1).build_defense(1, US.0);
+        assert_eq!(ClaimGuard::default().on_packet(&link, &d, Some(US)), ClaimAction::Done);
+        let mut g = ClaimGuard { defend_port: Some(50555), ..Default::default() };
+        assert_eq!(g.on_packet(&link, &d, Some((US.0, 50555))), ClaimAction::Done, "our defense socket's echo");
+        assert_eq!(link.defended.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn an_announce_collision_moves_only_the_higher_address() {
+        // We are at US; a lower address announcing our number keeps it.
+        let link = deck(4, true, true);
+        assert_eq!(ClaimGuard::default().on_packet(&link, &announce(4, LOW.0), Some(LOW)), ClaimAction::Continue);
+        assert!(link.reclaim.load(Ordering::Relaxed), "we are higher: we move");
+        let link = deck(4, true, true);
+        ClaimGuard::default().on_packet(&link, &announce(4, HIGH.0), Some(HIGH));
+        assert!(!link.reclaim.load(Ordering::Relaxed), "they are higher: they move");
+    }
+
+    #[test]
+    fn a_device_we_defended_against_does_not_move_us() {
+        let link = deck(1, true, true);
+        let mut g = ClaimGuard::default();
+        g.on_packet(&link, &ProDjLink::new(1).build_claim2(1, LOW.0, [0; 6], 1, false), Some(LOW));
+        g.on_packet(&link, &announce(1, LOW.0), Some(LOW));
+        assert!(!link.reclaim.load(Ordering::Relaxed));
+    }
 
     #[test]
     fn auto_takes_the_preferred_number_when_free() {

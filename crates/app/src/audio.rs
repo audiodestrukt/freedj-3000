@@ -628,7 +628,16 @@ fn block_ranges(len: usize, pos: usize, want: usize, lp: Option<(usize, usize)>)
 
 #[cfg(test)]
 mod loop_read_tests {
-    use super::{decode_file, read_block, resample_interleaved, to_stereo};
+    use super::{decode_file, pick_rate, read_block, resample_interleaved, to_stereo};
+
+    #[test]
+    fn the_decoded_rate_wins_over_the_header() {
+        // A header that guessed 44.1 kHz for 48 kHz audio played it 8 % slow.
+        assert_eq!(pick_rate(44_100, Some(48_000)), 48_000);
+        assert_eq!(pick_rate(48_000, Some(48_000)), 48_000);
+        assert_eq!(pick_rate(44_100, None), 44_100, "nothing decoded yet: keep the header");
+        assert_eq!(pick_rate(44_100, Some(0)), 44_100, "a zero rate is no answer");
+    }
 
     #[test]
     fn mono_alac_loads_as_stereo_at_its_rate() {
@@ -1190,7 +1199,12 @@ pub fn to_stereo(samples: Vec<f32>, ch: usize) -> (Vec<f32>, usize) {
 /// the packets disagree, they win, or the track plays at the wrong speed
 /// (a 48 kHz track taken for 44.1 kHz runs 8 % slow).
 fn true_rate(decoder: &SymphoniaDecoder, header_sr: u32) -> u32 {
-    match decoder.decoded_rate() {
+    pick_rate(header_sr, decoder.decoded_rate())
+}
+
+/// The rule behind [`true_rate`]: decoded packets win over the header.
+fn pick_rate(header_sr: u32, decoded: Option<u32>) -> u32 {
+    match decoded {
         Some(r) if r != header_sr && r > 0 => {
             log::warn!("container says {header_sr} Hz but the audio decodes at {r} Hz; using {r}");
             r

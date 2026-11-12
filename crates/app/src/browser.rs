@@ -52,7 +52,7 @@ pub enum Load {
     /// A local file (with an optional local ANLZ analysis file).
     Local { path: PathBuf, analyze: Option<PathBuf> },
     /// A track on a linked player, read over NFS.  Paths are rekordbox-relative.
-    Link  { ip: Ipv4Addr, rel_path: String, analyze_rel: String },
+    Link  { ip: Ipv4Addr, rel_path: String, analyze_rel: String, #[serde(default)] id: u32 },
     /// A track served by a peer's dbserver (a player's USB or SD, or a
     /// rekordbox laptop's collection when `rekordbox`): path and beat grid
     /// come from dbserver, the audio over the peer's NFS export.
@@ -785,7 +785,7 @@ impl Browser {
         tracks.into_iter().filter_map(|t| {
             let load = match &src {
                 Some(RbSource::Local(root)) => Load::Local { path: t.path_on(root), analyze: t.analyze_on(root) },
-                Some(RbSource::Link(ip))    => Load::Link { ip: *ip, rel_path: t.rel_path.clone(), analyze_rel: t.analyze_rel.clone() },
+                Some(RbSource::Link(ip))    => Load::Link { ip: *ip, rel_path: t.rel_path.clone(), analyze_rel: t.analyze_rel.clone(), id: t.id },
                 None => return None,
             };
             Some(Entry {

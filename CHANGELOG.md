@@ -19,6 +19,14 @@ All notable changes to this project will be documented in this file.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
 ### Fixed
+- **Other devices could not show OpenDeck's track title or position.** Our
+  status packets carried a track ID left over from the captured packet they
+  were built from, so Beat Link, ShowKontrol and the players asked our
+  database for a track that does not exist (grids, sent in beat packets,
+  were fine). Status now names the loaded track: one of ours by the ID our
+  database serves it under, one loaded from a player or rekordbox over LINK
+  by that player, slot and ID, as a CDJ reports it. With no track loaded,
+  status says so.
 - **Big folders on a linked player could be cut short:** folder listings
   over LINK kept only the player's first reply (8 KB, roughly 100–250
   names) and never asked for the rest. They now read to the end.

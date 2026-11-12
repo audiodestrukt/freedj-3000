@@ -82,6 +82,25 @@ const HISTORY_MAX: usize = 100;
 
 /// LOAD PREVIOUS TRACK bookkeeping for a new load: the track it replaces
 /// goes to the top of `history`, and the new one leaves it.
+/// Where a loaded track lives, for our status packets: player 0 = us.
+fn track_ref(load: &Load, link: &prodj::LinkState) -> Option<opendeck_link::prodj::TrackRef> {
+    use opendeck_link::prodj::TrackRef;
+    match load {
+        Load::Local { path, .. } => {
+            let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.clone());
+            let id = link.served.lock().ok().and_then(|m| m.get(&key).copied()).unwrap_or(0);
+            Some(TrackRef { player: 0, slot: 3, kind: 1, id })
+        }
+        Load::Db { ip, id, rekordbox, sd, .. } => Some(TrackRef {
+            player: link.peer_player(*ip)?,
+            slot: if *rekordbox { 4 } else if *sd { 2 } else { 3 },
+            kind: 1,
+            id: *id,
+        }),
+        Load::Link { ip, id, .. } => Some(TrackRef { player: link.peer_player(*ip)?, slot: 3, kind: 1, id: *id }),
+    }
+}
+
 fn record_load(history: &mut Vec<Load>, loaded: &mut Option<Load>, load: Load) {
     if let Some(prev) = loaded.replace(load.clone()) {
         if prev != load {
@@ -91,6 +110,42 @@ fn record_load(history: &mut Vec<Load>, loaded: &mut Option<Load>, load: Load) {
     }
     history.retain(|l| *l != load);
     history.truncate(HISTORY_MAX);
+}
+
+#[cfg(test)]
+mod track_ref_tests {
+    use super::{track_ref, Load};
+    use opendeck_link::prodj::TrackRef;
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn status_names_where_the_loaded_track_lives() {
+        let link = crate::prodj::LinkState::new(3);
+        let cdj = Ipv4Addr::new(169, 254, 5, 55);
+        link.peers.lock().unwrap().insert(1, cdj);
+        let dir = tempfile::tempdir().unwrap();
+        let served = dir.path().join("a.mp3");
+        std::fs::write(&served, b"x").unwrap();
+        link.served.lock().unwrap().insert(std::fs::canonicalize(&served).unwrap(), 42);
+
+        // A file we serve: ours, with the ID our database answers to.
+        let local = Load::Local { path: served.clone(), analyze: None };
+        assert_eq!(track_ref(&local, &link), Some(TrackRef { player: 0, slot: 3, kind: 1, id: 42 }));
+        // A file we do not serve: ours, nothing to look up.
+        let other = Load::Local { path: dir.path().join("b.mp3"), analyze: None };
+        assert_eq!(track_ref(&other, &link).map(|t| t.id), Some(0));
+        // From a player's USB, SD, or rekordbox: that player, its slot and ID.
+        let db = |rekordbox, sd| Load::Db { ip: cdj, id: 7, title: String::new(), rekordbox, sd };
+        assert_eq!(track_ref(&db(false, false), &link), Some(TrackRef { player: 1, slot: 3, kind: 1, id: 7 }));
+        assert_eq!(track_ref(&db(false, true), &link).unwrap().slot, 2);
+        assert_eq!(track_ref(&db(true, false), &link).unwrap().slot, 4);
+        // Over NFS from the export: that player's USB, the export's ID.
+        let nfs = Load::Link { ip: cdj, rel_path: "Contents/x.mp3".into(), analyze_rel: String::new(), id: 99 };
+        assert_eq!(track_ref(&nfs, &link), Some(TrackRef { player: 1, slot: 3, kind: 1, id: 99 }));
+        // A player we no longer see: no claim about it.
+        let gone = Load::Link { ip: Ipv4Addr::new(169, 254, 7, 7), rel_path: String::new(), analyze_rel: String::new(), id: 1 };
+        assert_eq!(track_ref(&gone, &link), None);
+    }
 }
 
 #[cfg(test)]
@@ -1726,7 +1781,7 @@ impl DeckApp {
     fn load_selected_inner(&mut self, load: Load) -> Result<()> {
         match load {
             Load::Local { path, analyze } => self.load_track(&path, analyze.as_deref()),
-            Load::Link { ip, rel_path, analyze_rel } => self.load_track_link(ip, &rel_path, &analyze_rel),
+            Load::Link { ip, rel_path, analyze_rel, .. } => self.load_track_link(ip, &rel_path, &analyze_rel),
             Load::Db { ip, id, title, rekordbox, sd } => self.load_track_db(ip, id, &title, rekordbox, sd),
         }
     }
@@ -1986,6 +2041,17 @@ impl DeckApp {
     /// The UI-thread tail of a load: hand the prepared samples to the audio
     /// thread, upload the waveform, reset transport to the cue.  Cheap; every
     /// heavy step happened in [`Prep::finish`].
+    /// Tell the Link sender which track is loaded and where it lives, so a
+    /// peer can look up its title, artist and grid by ID: a file we serve is
+    /// ours, a track from a player's media is that player's (as a CDJ reports
+    /// a track loaded over LINK).
+    fn publish_track(&self) {
+        let t = self.loaded.as_ref().and_then(|l| track_ref(l, &self.link));
+        log::info!("link: status track {t:?}");
+        let ours_unknown = opendeck_link::prodj::TrackRef { player: 0, slot: 3, kind: 1, id: 0 };
+        if let Ok(mut g) = self.link.track.lock() { *g = Some(t.unwrap_or(ours_unknown)); }
+    }
+
     fn apply_prepared(&mut self, p: Prepared) -> Result<()> {
         let deck_sr = self.audio.sample_rate;
         self.track_tags     = p.tags;
@@ -2015,6 +2081,7 @@ impl DeckApp {
         // starts there — with AUTO CUE that's the first sound, not the leader.
         if p.cue_pt > 0 { self.seek_to(p.cue_pt); }
         self.start_stems(&p.samples, p.ch);
+        self.publish_track();
         log::info!(
             "loaded {} in {:.1}s ({} BPM, {} grid, cue {:.2}s)",
             p.name, p.t0.elapsed().as_secs_f32(),
@@ -3318,7 +3385,7 @@ pub fn run(cfg: Config) -> Result<()> {
         let serve_root = browse_root.clone().or_else(|| track.as_ref().and_then(|t| t.parent().map(|p| p.to_path_buf())));
         if let Some(root) = serve_root {
             let l = Arc::clone(&link);
-            match start_media_server(&root, Arc::new(move || l.player())) {
+            match start_media_server(&root, Arc::new(move || l.player()), &link) {
                 Ok(n) => link.serve_tracks.store(n, Ordering::Relaxed),
                 Err(e) => log::warn!("media server not started: {e:#}"),
             }
@@ -3368,7 +3435,9 @@ pub fn run(cfg: Config) -> Result<()> {
     surface::start(surface::load(cfg.controllers.as_deref()), deck, event_tx, Arc::clone(&indicators));
 
     // ── 6. Run the UI event loop ──────────────────────────────────────────────
+    let has_track = track.is_some();
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
+    if has_track { app.publish_track(); }
     // Park the startup track at its cue (AUTO CUE's first sound, or the
     // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
     if app.transport.cue_point > 0 { let c = app.transport.cue_point; app.seek_to(c); }
@@ -3632,11 +3701,15 @@ fn link_cache_dir() -> std::path::PathBuf { taglist::app_data_dir().join("linkca
 /// browsing.  The library starts as file names; a background thread fills in
 /// tags, duration, tempo, grid and waveforms per track (cached in the app data
 /// dir, so only the first launch pays).  Returns the number of tracks served.
-fn start_media_server(root: &std::path::Path, player: opendeck_dbserver::server::DeviceNumber) -> Result<u32> {
+fn start_media_server(root: &std::path::Path, player: opendeck_dbserver::server::DeviceNumber, link: &prodj::LinkState) -> Result<u32> {
     use opendeck_dbserver::server::Server as DbServer;
     use opendeck_nfs::server::NfsServer;
     let scanned = opendeck_mediaserver::scan(root, "OpenDeck")?;
     let n = scanned.files.len() as u32;
+    // Our status reports a loaded file by its ID here, so peers can look it up.
+    if let Ok(mut m) = link.served.lock() {
+        m.extend(scanned.files.iter().map(|(id, p)| (std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()), *id)));
+    }
     let nfs = NfsServer::start(scanned.tree, "/C/", 111, 2049)?;
     let db = DbServer::start_live(Arc::clone(&scanned.library), player, 0)?;
     log::info!("media server: {n} tracks under {} — nfs portmap {} nfsd {}, dbserver {}", root.display(), nfs.portmap, nfs.nfsd, db.db_port);
