@@ -74,6 +74,14 @@ All notable changes to this project will be documented in this file.
   layout yet).
 
 ### Fixed
+- **Loading on slow CPUs (cdj3k-emu, Pi Zero).** A track took about a
+  minute to load in the emulator, and each further press of LOAD started
+  another full decode alongside it, so a few presses looked like loading
+  did nothing. LOAD on the track already loading is now ignored, a newer
+  LOAD stops the older one at its next stage, and load-time resampling
+  (48 to 44.1 kHz) uses an FFT resampler, 3x faster than the 256-tap sinc
+  (0.20 s vs 0.59 s for 200 s of audio on a desktop). The log times each
+  load stage (`load: decoded / resampled / waveform in … ms`).
 - **The playing track's analysis reaches the network at once.** A peer
   that looks up the track our status names (another player's LINK INFO, a
   Beat Link-style lighting controller following the deck) got no grid,

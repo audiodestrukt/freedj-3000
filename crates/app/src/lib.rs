@@ -510,6 +510,8 @@ struct DeckApp {
     /// The stems job for the loaded track (see `stems.rs`).
     stems_rx:          Option<mpsc::Receiver<Result<Option<stems::StemBank>>>>,
     pub loading:       Option<String>,
+    /// Counts LOADs; an in-flight load stops when it is no longer the latest.
+    load_gen:          Arc<AtomicU64>,
     play_on_load:      bool,      // dev autoload: start playback once the load lands
     /// VINYL-mode drag began while playing: resume on release.
     jog_hold_resume:   bool,
@@ -852,6 +854,7 @@ impl DeckApp {
             fetch_rx: None,
             stems_rx: None,
             loading: None,
+            load_gen: Arc::new(AtomicU64::new(0)),
             play_on_load: false,
             jog_offset:        0.0,
             jog_until:         None,
@@ -2026,6 +2029,8 @@ impl DeckApp {
     fn prepare_local(prep: Prep, path: std::path::PathBuf, analyze: Option<std::path::PathBuf>) -> Result<Prepared> {
         let t0 = Instant::now();
         let (samples, sr, ch, tags) = audio::decode_file(&path)?;
+        log::info!("load: decoded in {} ms", t0.elapsed().as_millis());
+        prep.check_current()?;
         // Grid: the rekordbox ANLZ next to the file, else what the media
         // server's analysis cached for it, else detect (and cache) it here.
         let cached = opendeck_mediaserver::load_cached(&prep.cache_dir, &path).filter(|a| !a.beats.is_empty());
@@ -2209,6 +2214,9 @@ impl DeckApp {
             auto_cue: self.auto_cue, auto_cue_level_db: self.settings.auto_cue_level_db,
             cache_dir: link_cache_dir(),
             link: Some(Arc::clone(&self.link)),
+            // start_fetch bumps the counter to this number as it spawns.
+            gen: self.load_gen.load(Ordering::Relaxed) + 1,
+            load_gen: Arc::clone(&self.load_gen),
         }
     }
 
@@ -2216,6 +2224,12 @@ impl DeckApp {
     /// playing; the frame loop swaps the track in when it is ready.  A newer
     /// load supersedes an older one still in flight (its result is dropped).
     fn start_fetch(&mut self, name: String, load: impl FnOnce() -> Result<Prepared> + Send + 'static) -> Result<()> {
+        // LOAD again on the track already loading: keep the load in flight.
+        if self.loading.as_deref() == Some(name.as_str()) {
+            log::info!("loading {name:?}: already in progress");
+            return Ok(());
+        }
+        self.load_gen.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
         std::thread::Builder::new().name("track-load".into()).spawn(move || { let _ = tx.send(load()); })?;
         log::info!("loading {name:?} in the background");
@@ -3106,6 +3120,20 @@ struct Prep {
     cache_dir: std::path::PathBuf,
     /// For the key thread to update the served row (None in tests).
     link: Option<Arc<prodj::LinkState>>,
+    /// The deck's load counter and this load's number in it: a newer LOAD
+    /// bumps the counter, and this one stops at its next stage instead of
+    /// finishing work nobody will use (on a slow CPU, a few presses of LOAD
+    /// stacked up whole decodes and slowed the one that counted).
+    load_gen: Arc<AtomicU64>,
+    gen: u64,
+}
+
+impl Prep {
+    /// A newer LOAD has started: give up.
+    fn check_current(&self) -> Result<()> {
+        if self.load_gen.load(Ordering::Relaxed) != self.gen { bail!("superseded by a newer load"); }
+        Ok(())
+    }
 }
 
 /// A track ready to swap in: decoded at the deck rate, waveform built, grid
@@ -3150,15 +3178,22 @@ impl Prep {
             bail!("track has {} channels but the deck runs {} — channel conversion not yet implemented",
                   ch, self.deck_ch);
         }
+        self.check_current()?;
         // Offline SRC so a differently-sampled track plays at the right pitch.
+        let stage = Instant::now();
         let samples = if sr != self.deck_sr {
             audio::resample_interleaved(&samples, ch, sr, self.deck_sr)?
         } else { samples };
+        if sr != self.deck_sr { log::info!("load: resampled in {} ms", stage.elapsed().as_millis()); }
+        self.check_current()?;
         let samples = Arc::new(samples);
 
+        let stage = Instant::now();
         let mut wb = WaveformBuilder::new(self.deck_sr);
         wb.push(&samples);
         let waveform = wb.finish();
+        log::info!("load: waveform in {} ms", stage.elapsed().as_millis());
+        self.check_current()?;
 
         // Prefer rekordbox's grid+cues; fall back to freedj's detector otherwise.
         let (beat_grid, cue_pt, memory_cues, hot_cues, grid_src) = match grid_cue {
@@ -3173,6 +3208,7 @@ impl Prep {
         // rather than 0:00 (the unit's behaviour; the A.CUE badge).  A memory
         // cue still wins — that is the DJ's own choice.
         let cue_pt = if self.auto_cue && cue_pt == 0 { first_sound(&samples, ch, self.auto_cue_level_db) } else { cue_pt };
+        if grid_src == "freedj" { log::info!("load: beat grid detected"); }
         log::info!("prepared {name:?} in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
         Ok(Prepared { name, path, tags, samples, ch, waveform, beat_grid, cue_pt, memory_cues, hot_cues, grid_src, t0, link_analysis: None })
     }

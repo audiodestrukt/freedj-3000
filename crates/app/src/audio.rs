@@ -664,6 +664,19 @@ mod loop_read_tests {
     /// The start-up track and every LOAD are converted to the device rate:
     /// a 1 kHz tone at 48 kHz must come out at 44.1 kHz the right length and
     /// still 1 kHz (the bug this fixed played it 8 % slow and flat).
+    /// Load-time resampling cost: 200 s of 48 kHz stereo to 44.1 kHz.
+    /// `cargo test --release -p opendeck-app resample_speed -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn resample_speed() {
+        let n = 48_000 * 200;
+        let mut x = 1u32;
+        let s: Vec<f32> = (0..n * 2).map(|_| { x ^= x << 13; x ^= x >> 17; x ^= x << 5; (x as f32 / u32::MAX as f32) - 0.5 }).collect();
+        let t = std::time::Instant::now();
+        let out = resample_interleaved(&s, 2, 48_000, 44_100).unwrap();
+        println!("resample_speed: {} frames in {:.2}s", out.len() / 2, t.elapsed().as_secs_f32());
+    }
+
     #[test]
     fn resampling_keeps_length_and_pitch() {
         let (src, dst, secs) = (48_000u32, 44_100u32, 1.0f64);
@@ -1246,8 +1259,7 @@ pub fn resample_interleaved(
     src_sr:   u32,
     dst_sr:   u32,
 ) -> Result<Vec<f32>> {
-    use rubato::{Resampler, SincFixedIn, SincInterpolationParameters,
-                 SincInterpolationType, WindowFunction};
+    use rubato::{FftFixedIn, Resampler};
     if src_sr == dst_sr || samples.is_empty() {
         return Ok(samples.to_vec());
     }
@@ -1255,15 +1267,13 @@ pub fn resample_interleaved(
     let frames = samples.len() / channels;
     let chunk  = 16_384;
 
-    let params = SincInterpolationParameters {
-        sinc_len:            256,
-        f_cutoff:            0.95,
-        oversampling_factor: 256,
-        interpolation:       SincInterpolationType::Linear,
-        window:              WindowFunction::BlackmanHarris2,
-    };
-    let mut rs = SincFixedIn::<f32>::new(ratio, 1.0, params, chunk, channels)
+    // FFT resampling: the fixed ratio (147/160 for 48 → 44.1 kHz) as a
+    // band-limited FFT filter.  A 256-tap sinc did the same at ~10x the
+    // cost: a minute per track in cdj3k-emu (TCG) and on a Pi Zero.
+    let mut rs = FftFixedIn::<f32>::new(src_sr as usize, dst_sr as usize, chunk, 2, channels)
         .context("failed to create resampler")?;
+    // The filter's group delay: output frames before the input's first frame.
+    let delay = rs.output_delay();
 
     // De-interleave into per-channel planes.
     let mut planar: Vec<Vec<f32>> = vec![Vec::with_capacity(frames); channels];
@@ -1289,16 +1299,15 @@ pub fn resample_interleaved(
         let out = rs.process_partial(Some(&rem), None).context("resample tail failed")?;
         for c in 0..channels { out_planar[c].extend_from_slice(&out[c]); }
     }
-    // The last partial chunk comes back padded to a whole chunk (~20 ms of
-    // extra silence on a 48 → 44.1 kHz track): cut to the exact length,
-    // flushing first if the output is short. The start needs no trim; the
-    // click test pins that the timing is already right.
+    // Flush until the delayed output covers the whole input, then drop the
+    // leading delay and the padding after the end.
     let want = (frames as f64 * ratio).round() as usize;
-    while out_planar[0].len() < want {
+    while out_planar[0].len() < want + delay {
         let out = rs.process_partial::<Vec<f32>>(None, None).context("resample flush failed")?;
         if out[0].is_empty() { break; }
         for c in 0..channels { out_planar[c].extend_from_slice(&out[c]); }
     }
+    for c in out_planar.iter_mut() { c.drain(..delay.min(c.len())); }
 
     // Re-interleave.
     let avail = out_planar.iter().map(|c| c.len()).min().unwrap_or(0);
