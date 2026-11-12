@@ -82,6 +82,14 @@ pub struct Analysis {
     pub beats:      Vec<(u8, f32, u32)>,
     pub preview:    Vec<u8>,
     pub detail:     Vec<u8>,
+    /// 3-band waveforms for CDJ-3000-class players (`.2EX` PWV6 / PWV7):
+    /// 1,200 columns and 150 entries a second, 3 bytes each (low, mid, high).
+    pub band_preview: Vec<u8>,
+    pub band_detail:  Vec<u8>,
+    /// RGB waveforms for nexus-2-class players (`.EXT` PWV4 / PWV5): 1,200
+    /// columns of 6 bytes, and 150 two-byte entries a second.
+    pub rgb_preview: Vec<u8>,
+    pub rgb_detail:  Vec<u8>,
     pub has_art:    bool,
 }
 
@@ -97,13 +105,15 @@ impl Analysis {
             None => (0.0, Vec::new()),
         };
         let (preview, detail) = waveform_blobs(wave, frames, sr);
+        let (band_preview, band_detail) = three_band(wave, frames, sr);
+        let (rgb_preview, rgb_detail) = rgb_waveforms(wave, frames, sr);
         Analysis {
             title:   tags.title.clone().unwrap_or_default(),
             artist:  tags.artist.clone().unwrap_or_default(),
             album:   tags.album.clone().unwrap_or_default(),
             comment: tags.comment.clone().unwrap_or_default(),
             key:     tags.key.clone().unwrap_or_default(),
-            duration_s, bpm, beats, preview, detail,
+            duration_s, bpm, beats, preview, detail, band_preview, band_detail, rgb_preview, rgb_detail,
             bitrate: if duration_s > 0 { (file_bytes * 8 / duration_s as u64 / 1000) as u32 } else { 0 },
             has_art: tags.artwork.is_some(),
         }
@@ -121,6 +131,10 @@ impl Analysis {
         t.beats = self.beats.clone();
         t.preview = self.preview.clone();
         t.detail = self.detail.clone();
+        t.band_preview = self.band_preview.clone();
+        t.band_detail = self.band_detail.clone();
+        t.rgb_preview = self.rgb_preview.clone();
+        t.rgb_detail = self.rgb_detail.clone();
         t.has_art = self.has_art;
     }
 }
@@ -165,6 +179,148 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     Ok(Analysis::from_deck(&tags, grid.as_deref(), &wave, frames, sr, bytes))
 }
+
+/// rekordbox's 3-band scale, as percentile pairs (ours → rekordbox) at 0, 5,
+/// ..., 100 %, per band (low, mid, high).  Fitted on 30 rekordbox-analysed
+/// tracks with `examples/waveform_vs_rekordbox` (correlation over time 0.93 /
+/// 0.83 / 0.83 detail, 0.93 / 0.77 / 0.84 preview).  Our band values map
+/// through these piecewise-linearly.
+const BAND_DETAIL: [([u8; 21], [u8; 21]); 3] = [
+    ([0, 9, 20, 31, 41, 51, 61, 72, 84, 97, 110, 120, 130, 138, 145, 153, 160, 168, 177, 189, 228],
+     [0, 6, 12, 16, 20, 24, 29, 34, 40, 45, 50, 54, 59, 63, 67, 71, 75, 79, 84, 89, 112]),
+    ([0, 15, 22, 26, 29, 32, 35, 37, 39, 42, 44, 46, 48, 50, 53, 55, 58, 61, 66, 72, 110],
+     [0, 7, 12, 15, 18, 21, 23, 26, 28, 31, 33, 36, 39, 41, 45, 48, 53, 58, 65, 77, 127]),
+    ([0, 3, 6, 8, 9, 11, 12, 13, 15, 16, 17, 18, 19, 21, 22, 23, 25, 27, 30, 34, 50],
+     [0, 0, 0, 0, 1, 2, 2, 4, 5, 6, 8, 10, 13, 16, 21, 26, 34, 43, 57, 75, 127]),
+];
+const BAND_PREVIEW: [([u8; 21], [u8; 21]); 3] = [
+    ([0, 11, 26, 39, 49, 57, 66, 75, 87, 101, 115, 124, 131, 136, 142, 148, 154, 160, 167, 175, 203],
+     [0, 3, 6, 8, 10, 12, 15, 17, 21, 26, 30, 33, 35, 37, 38, 40, 42, 44, 47, 50, 68]),
+    ([0, 21, 27, 31, 34, 36, 38, 40, 41, 43, 44, 46, 48, 49, 51, 53, 54, 57, 59, 63, 90],
+     [0, 8, 12, 14, 16, 17, 19, 20, 21, 22, 24, 25, 26, 27, 29, 30, 32, 34, 36, 40, 72]),
+    ([0, 5, 8, 10, 12, 13, 14, 15, 16, 17, 18, 19, 19, 20, 21, 22, 23, 24, 26, 29, 46],
+     [0, 3, 6, 9, 12, 15, 17, 19, 21, 22, 24, 26, 27, 29, 30, 32, 34, 37, 40, 45, 84]),
+];
+
+/// Piecewise-linear through `(ours, rb)` points; equal `ours` steps are skipped.
+fn band_curve(x: f64, (ours, rb): &([u8; 21], [u8; 21])) -> u8 {
+    if x <= ours[0] as f64 { return rb[0]; }
+    for k in 1..21 {
+        let (x0, x1) = (ours[k - 1] as f64, ours[k] as f64);
+        if x <= x1 && x1 > x0 {
+            return (rb[k - 1] as f64 + (x - x0) / (x1 - x0) * (rb[k] as f64 - rb[k - 1] as f64)).round() as u8;
+        }
+    }
+    let (xl, yl) = (ours[20] as f64, rb[20] as f64);
+    (yl + (x - xl) * yl / xl.max(1.0)).round().clamp(0.0, 127.0) as u8
+}
+
+/// 3-band waveforms as a CDJ-3000 reads them from a `.2EX` file: the 1,200-
+/// column preview (PWV6) and the 150-a-second detail (PWV7), 3 bytes per
+/// entry in the order low, mid, high (as rekordbox writes them; the order
+/// "mid, high, low" in the published analysis does not match real files).
+/// A column's value belongs to its FFT window's centre, half a window on.
+pub fn three_band(wave: &WaveformCache, frames: u64, sr: u32) -> (Vec<u8>, Vec<u8>) {
+    let cols = &wave.columns;
+    if cols.is_empty() || frames == 0 { return (Vec::new(), Vec::new()); }
+    let (hop, half) = (wave.hop_size.max(1) as u64, opendeck_analysis::waveform::FFT_SIZE as u64 / 2);
+    let col_at = |frame: u64| ((frame.saturating_sub(half) / hop) as usize).min(cols.len() - 1);
+    let band = |c: &[u8; 4], b: usize| c[b] as f64;   // columns are [bass, mid, high, rms]
+    let n = (frames * DETAIL_PER_SEC as u64 / sr as u64) as usize;
+    let mut detail = Vec::with_capacity(n * 3);
+    for j in 0..n {
+        let c = &cols[col_at(j as u64 * sr as u64 / DETAIL_PER_SEC as u64)];
+        for b in 0..3 { detail.push(band_curve(band(c, b), &BAND_DETAIL[b])); }
+    }
+    let mut preview = Vec::with_capacity(BAND_PREVIEW_COLUMNS * 3);
+    for i in 0..BAND_PREVIEW_COLUMNS {
+        let s = col_at(frames * i as u64 / BAND_PREVIEW_COLUMNS as u64);
+        let e = col_at(frames * (i as u64 + 1) / BAND_PREVIEW_COLUMNS as u64).max(s);
+        let span = &cols[s..=e];
+        for b in 0..3 {
+            let mean = span.iter().map(|c| band(c, b)).sum::<f64>() / span.len() as f64;
+            preview.push(band_curve(mean, &BAND_PREVIEW[b]));
+        }
+    }
+    (preview, detail)
+}
+
+/// RGB waveforms (rekordbox's nexus-2 colour waveforms), fitted the same
+/// way on the same 30 tracks.  Detail (PWV5) channels and the features they
+/// follow (correlation): red ← bass (0.83), green ← mid (0.45), blue ← high
+/// (0.60), height ← overall level (0.81).  Preview (PWV4) bytes: 0 ← level
+/// (0.80), 1 ← level inverted (-0.48; a "whiteness" byte, 128-255), 2 and 3
+/// ← bass (0.87, 0.91), 4 ← mid (0.58), 5 ← high (0.61).
+const RMS_DETAIL: [u8; 21] = [0, 14, 20, 23, 26, 28, 30, 32, 34, 36, 38, 40, 42, 43, 45, 47, 48, 50, 52, 55, 66];
+const RMS_PREVIEW: [u8; 21] = [0, 18, 23, 25, 28, 29, 31, 33, 34, 36, 38, 40, 41, 43, 44, 46, 47, 48, 50, 52, 59];
+const RGB_R: [u8; 21] = [0, 0, 0, 0, 1, 1, 2, 3, 4, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7];
+const RGB_G: [u8; 21] = [0, 0, 0, 1, 1, 1, 2, 2, 3, 3, 3, 4, 4, 5, 5, 5, 5, 5, 5, 5, 7];
+const RGB_B: [u8; 21] = [0, 0, 0, 1, 2, 2, 3, 4, 4, 5, 5, 6, 7, 7, 7, 7, 7, 7, 7, 7, 7];
+const RGB_H: [u8; 21] = [0, 0, 0, 1, 2, 3, 4, 6, 7, 9, 11, 13, 15, 17, 20, 22, 25, 27, 29, 30, 31];
+const PV4_B0: [u8; 21] = [0, 34, 56, 71, 83, 93, 100, 106, 111, 115, 119, 121, 122, 124, 125, 126, 127, 127, 127, 127, 127];
+/// Byte 1 falls as the level rises: these are rekordbox's percentiles from
+/// the top down, against our level's from the bottom up.
+const PV4_B1: [u8; 21] = [255, 215, 197, 182, 170, 161, 155, 149, 144, 140, 137, 135, 133, 132, 131, 130, 128, 128, 128, 128, 128];
+const PV4_B2: [u8; 21] = [0, 12, 25, 33, 40, 47, 55, 63, 71, 79, 85, 91, 97, 102, 107, 111, 114, 117, 120, 124, 127];
+const PV4_B3: [u8; 21] = [0, 1, 4, 10, 15, 21, 28, 38, 49, 60, 68, 75, 81, 87, 92, 98, 104, 109, 113, 119, 127];
+const PV4_B4: [u8; 21] = [0, 8, 13, 17, 20, 24, 27, 30, 33, 36, 39, 42, 45, 49, 52, 56, 61, 67, 75, 88, 127];
+const PV4_B5: [u8; 21] = [0, 3, 8, 12, 15, 18, 21, 24, 28, 31, 34, 37, 40, 43, 46, 49, 53, 57, 62, 73, 127];
+
+/// RGB waveforms as a nexus-2-class player reads them from a `.EXT` file:
+/// the 1,200-column preview (PWV4, 6 bytes a column) and the 150-a-second
+/// detail (PWV5, 2 bytes big-endian: red 3 bits, green 3, blue 3, height 5,
+/// 2 unused).
+pub fn rgb_waveforms(wave: &WaveformCache, frames: u64, sr: u32) -> (Vec<u8>, Vec<u8>) {
+    let cols = &wave.columns;
+    if cols.is_empty() || frames == 0 { return (Vec::new(), Vec::new()); }
+    let (hop, half) = (wave.hop_size.max(1) as u64, opendeck_analysis::waveform::FFT_SIZE as u64 / 2);
+    let col_at = |frame: u64| ((frame.saturating_sub(half) / hop) as usize).min(cols.len() - 1);
+    let f = |x: f64, ours: &[u8; 21], rb: &[u8; 21]| band_curve(x, &(*ours, *rb));
+    let n = (frames * DETAIL_PER_SEC as u64 / sr as u64) as usize;
+    let mut detail = Vec::with_capacity(n * 2);
+    for j in 0..n {
+        let c = &cols[col_at(j as u64 * sr as u64 / DETAIL_PER_SEC as u64)];
+        let r = f(c[0] as f64, &BAND_DETAIL[0].0, &RGB_R).min(7) as u16;
+        let g = f(c[1] as f64, &BAND_DETAIL[1].0, &RGB_G).min(7) as u16;
+        let b = f(c[2] as f64, &BAND_DETAIL[2].0, &RGB_B).min(7) as u16;
+        let h = f(c[3] as f64, &RMS_DETAIL, &RGB_H).min(31) as u16;
+        detail.extend_from_slice(&((r << 13) | (g << 10) | (b << 7) | (h << 2)).to_be_bytes());
+    }
+    let mut preview = Vec::with_capacity(BAND_PREVIEW_COLUMNS * 6);
+    for i in 0..BAND_PREVIEW_COLUMNS {
+        let s = col_at(frames * i as u64 / BAND_PREVIEW_COLUMNS as u64);
+        let e = col_at(frames * (i as u64 + 1) / BAND_PREVIEW_COLUMNS as u64).max(s);
+        let span = &cols[s..=e];
+        let m = |k: usize| span.iter().map(|c| c[k] as f64).sum::<f64>() / span.len() as f64;
+        let level = m(3);
+        // Byte 1 falls as the level rises: the level's percentile rank,
+        // read off rekordbox's curve from the top down.
+        let rank = band_curve(level, &(RMS_PREVIEW, RANKS)) as f64;
+        preview.extend_from_slice(&[
+            f(level, &RMS_PREVIEW, &PV4_B0),
+            pv4_b1(rank),
+            f(m(0), &BAND_PREVIEW[0].0, &PV4_B2),
+            f(m(0), &BAND_PREVIEW[0].0, &PV4_B3),
+            f(m(1), &BAND_PREVIEW[1].0, &PV4_B4),
+            f(m(2), &BAND_PREVIEW[2].0, &PV4_B5),
+        ]);
+    }
+    (preview, detail)
+}
+
+/// Percentile ranks 0, 5, ..., 100 % on a 0-127 scale.
+const RANKS: [u8; 21] = [0, 6, 13, 19, 25, 32, 38, 44, 51, 57, 64, 70, 76, 83, 89, 95, 102, 108, 114, 121, 127];
+
+/// PWV4 byte 1 from the level's rank (0-127): rekordbox's falling curve.
+fn pv4_b1(rank: f64) -> u8 {
+    let k = ((rank / 127.0) * 20.0).clamp(0.0, 20.0);
+    let (i, t) = (k.floor() as usize, k.fract());
+    let (a, b) = (PV4_B1[i] as f64, PV4_B1[(i + 1).min(20)] as f64);
+    (a + (b - a) * t).round() as u8
+}
+
+/// Columns in a 3-band preview (PWV6), as rekordbox writes it.
+pub const BAND_PREVIEW_COLUMNS: usize = 1200;
 
 /// The two waveform blobs a player asks for, from a deck-style waveform
 /// cache.  Column c covers `hop_size` frames; amplitude and the high band
@@ -218,7 +374,7 @@ pub fn grid_beats(anchor: u64, bpm: f64, downbeat_offset: u8, sr: u32, frames: u
 const CACHE_MAGIC: &[u8; 4] = b"ODLA";
 // 2: MP3s decode with the encoder delay kept (the rekordbox / player timeline).
 // 3: tempo + phase fitted together, grids on rekordbox's timing.
-const CACHE_VERSION: u16 = 3;
+const CACHE_VERSION: u16 = 5;   // 4: 3-band waveforms, 5: RGB waveforms
 
 fn cache_key(path: &Path) -> Option<String> {
     let md = std::fs::metadata(path).ok()?;
@@ -264,6 +420,10 @@ pub fn encode(a: &Analysis) -> Vec<u8> {
     put_bytes(&mut out, &a.preview);
     put_bytes(&mut out, &a.detail);
     out.push(a.has_art as u8);
+    put_bytes(&mut out, &a.band_preview);
+    put_bytes(&mut out, &a.band_detail);
+    put_bytes(&mut out, &a.rgb_preview);
+    put_bytes(&mut out, &a.rgb_detail);
     out
 }
 
@@ -284,6 +444,8 @@ pub fn decode(b: &[u8]) -> Option<Analysis> {
     let n = r.u32()? as usize;
     a.beats = (0..n).map(|_| Some((r.u8()?, r.f32()?, r.u32()?))).collect::<Option<Vec<_>>>()?;
     a.preview = r.bytes()?; a.detail = r.bytes()?; a.has_art = r.u8()? != 0;
+    a.band_preview = r.bytes()?; a.band_detail = r.bytes()?;
+    a.rgb_preview = r.bytes()?; a.rgb_detail = r.bytes()?;
     Some(a)
 }
 
@@ -327,11 +489,42 @@ mod tests {
             title: "T".into(), artist: "A".into(), album: "".into(), comment: "c".into(), key: "Am".into(),
             duration_s: 200, bpm: 128.0, bitrate: 320, beats: vec![(1, 128.0, 25), (2, 128.0, 494)],
             preview: vec![1, 2, 3, 4], detail: vec![0x21; 10], has_art: true,
+            band_preview: vec![5; 6], band_detail: vec![7; 9], rgb_preview: vec![1; 12], rgb_detail: vec![2; 4],
         };
         assert_eq!(decode(&encode(&a)), Some(a.clone()));
         let mut short = encode(&a); short.truncate(20);
         assert_eq!(decode(&short), None);
         assert_eq!(decode(b"nope"), None);
+    }
+
+    #[test]
+    fn three_band_layout_order_and_scale() {
+        // 10 s at 44.1 kHz, hop 512: bass only for the first half, highs only after.
+        let sr = 44_100u32;
+        let frames = 10 * sr as u64;
+        let n = (frames / 512) as usize;
+        let columns = (0..n).map(|i| if i < n / 2 { [200u8, 0, 0, 0] } else { [0u8, 0, 40, 0] }).collect();
+        let wave = WaveformCache { columns, sample_rate: sr, hop_size: 512 };
+        let (pre, det) = three_band(&wave, frames, sr);
+        assert_eq!(pre.len(), 1200 * 3, "PWV6: 1,200 columns of low, mid, high");
+        assert_eq!(det.len(), 1500 * 3, "PWV7: 150 entries a second");
+        // Early: low only.  Late: high only.  Bytes are low, mid, high.
+        assert!(det[300] > 60 && det[301] == 0 && det[302] == 0, "{:?}", &det[300..303]);
+        let late = 1400 * 3;
+        assert!(det[late] == 0 && det[late + 1] == 0 && det[late + 2] > 50, "{:?}", &det[late..late + 3]);
+        assert!(pre[100 * 3] > 30 && pre[1100 * 3 + 2] > 30);
+        // Within rekordbox's 7-bit range.
+        assert!(det.iter().chain(&pre).all(|&v| v <= 127));
+
+        // RGB: 6-byte preview columns, 2-byte detail entries; bass reads red,
+        // highs blue, and byte 1 sits in rekordbox's 128-255 band.
+        let (pre, det) = rgb_waveforms(&wave, frames, sr);
+        assert_eq!((pre.len(), det.len()), (1200 * 6, 1500 * 2));
+        let e = |j: usize| u16::from_be_bytes([det[j * 2], det[j * 2 + 1]]);
+        let rb = |v: u16| (v >> 13, (v >> 7) & 7);   // (red, blue)
+        assert!(rb(e(100)).0 >= 6 && rb(e(100)).1 == 0, "bass is red: {:016b}", e(100));
+        assert!(rb(e(1400)).0 == 0 && rb(e(1400)).1 >= 4, "highs are blue: {:016b}", e(1400));
+        assert!(pre.chunks(6).all(|c| c[1] >= 128));
     }
 
     #[test]

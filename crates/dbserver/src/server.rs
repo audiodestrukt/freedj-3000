@@ -49,6 +49,14 @@ pub struct Track {
     /// Waveform detail (`0x4a02`): one byte per half-frame (150 per second),
     /// low 5 bits height, high 3 bits whiteness.  Empty = not analysed yet.
     pub detail:     Vec<u8>,
+    /// 3-band preview (PWV6: 1,200 × low, mid, high) and detail (PWV7: 150 a
+    /// second × 3), served as `.2EX` sections to a CDJ-3000.  Empty = none.
+    pub band_preview: Vec<u8>,
+    pub band_detail:  Vec<u8>,
+    /// RGB preview (PWV4: 1,200 × 6 bytes) and detail (PWV5: 150 a second ×
+    /// 2 bytes), served as `.EXT` sections.  Empty = none.
+    pub rgb_preview: Vec<u8>,
+    pub rgb_detail:  Vec<u8>,
     /// The file has embedded cover art; menu rows then carry the track id as
     /// the artwork id and `0x2003` fetches it through [`Library::art`].
     pub has_art:    bool,
@@ -124,17 +132,28 @@ fn menu_rows(lib: &Library, kind_: u16, args: &[Field]) -> Option<Vec<Vec<Field>
         ts.iter().map(|t| track_row(t, &t.title)).collect()
     };
     Some(match kind_ {
-        // Root menu: the browse categories a player shows for a slot.  The
-        // same four rekordbox 7 serves, plus ALBUM (players list it too).
+        // Root menu: the categories a player shows for our "USB", as a
+        // CDJ-3000 serves its own stick (ids, item types and the U+FFFA/FFFB-
+        // wrapped labels as captured), limited to what we can list.  FILE
+        // NAME is ours; players show it (type 0x94).
         kind::ROOT_MENU => vec![
-            row(0, 0x85, "PLAYLIST", "", 0x0085, 0),
-            row(0, 0x82, "ARTIST", "", 0x0082, 0),
-            row(0, 0x83, "ALBUM", "", 0x0083, 0),
-            row(0, 0x84, "TRACK", "", 0x0084, 0),
-            row(0, 0x94, "FILENAME", "", 0x0094, 0),
+            row(0, 2, &crate::mark("ARTIST"), "", 0x0081, 0),
+            row(0, 3, &crate::mark("ALBUM"), "", 0x0082, 0),
+            row(0, 4, &crate::mark("TRACK"), "", 0x0083, 0),
+            row(0, 5, &crate::mark("PLAYLIST"), "", 0x0084, 0),
+            row(0, 19, &crate::mark("FILENAME"), "", 0x0094, 0),
         ],
-        // All tracks (sort ignored) and its sort-by variants.
-        kind::ALL_TRACKS | 0x1014 | 0x1015 | 0x1016 => all(lib.tracks.iter().collect()),
+        // The sort choices a player offers in a list (as a CDJ-3000 lists
+        // them, without the ones we have no data for); we keep our order.
+        0x1400 => vec![
+            row(0, 0, &crate::mark("DEFAULT"), "", 0x00a1, 0),
+            row(0, 1, &crate::mark("ALPHABET"), "", 0x00a2, 0),
+            row(0, 2, &crate::mark("ARTIST"), "", 0x0081, 0),
+            row(0, 3, &crate::mark("ALBUM"), "", 0x0082, 0),
+            row(0, 4, &crate::mark("BPM"), "", 0x0085, 0),
+        ],
+        // All tracks (sort ignored).  (0x1014 is the KEY menu, not a sort.)
+        kind::ALL_TRACKS => all(lib.tracks.iter().collect()),
         kind::FILENAME_MENU => {
             let mut ts: Vec<&Track> = lib.tracks.iter().collect();
             ts.sort_by_key(|t| t.file_name().to_lowercase());
@@ -217,11 +236,51 @@ pub fn beat_grid_blob(beats: &[(u8, f32, u32)]) -> Vec<u8> {
     b
 }
 
-/// Bytes Beat Link skips at the front of a `0x4a02` detail blob.
-pub const DETAIL_LEAD: usize = 19;
+/// The 20-byte header of a `0x4a02` detail blob, as a CDJ-3000 sends it:
+/// entry count, 1, entry count, entries a second (150), then 0xffffffff, all
+/// little-endian.  We sent 19 zero bytes (Beat Link skips them), and a
+/// player read zero entries: no scrolling waveform.
+pub fn detail_header(entries: usize) -> [u8; 20] {
+    let mut h = [0u8; 20];
+    for (k, v) in [entries as u32, 1, entries as u32, 150, u32::MAX].into_iter().enumerate() {
+        h[k * 4..k * 4 + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    h
+}
 
 /// A blob reply: request type, 0, length, bytes (Beat Link's argument list
 /// for artwork, preview and detail; the beat grid adds a trailing 0).
+/// An ANLZ section as a player serves it (`0x4f02`'s blob): the section's
+/// padded length (u32 LE), then the section as it sits in the file: fourcc,
+/// header length, section length, entry size, entry count, (PWV7: a constant
+/// 0x00960000), the entries, zero padding to 4 bytes.
+pub fn anlz_section(fourcc: &[u8; 4], entry_bytes: u32, entries: &[u8], extra: Option<u32>) -> Vec<u8> {
+    let header = 20 + if extra.is_some() { 4 } else { 0 };
+    let len = header + entries.len();
+    let padded = (len + 3) & !3;
+    let mut b = Vec::with_capacity(4 + padded);
+    b.extend_from_slice(&(padded as u32).to_le_bytes());
+    b.extend_from_slice(fourcc);
+    for v in [header as u32, len as u32, entry_bytes, entries.len() as u32 / entry_bytes] { b.extend_from_slice(&v.to_be_bytes()); }
+    if let Some(x) = extra { b.extend_from_slice(&x.to_be_bytes()); }
+    b.extend_from_slice(entries);
+    b.resize(4 + padded, 0);
+    b
+}
+
+/// The colour waveform section a player asked for (3-band or RGB) (`tag` = fourcc as a little-
+/// endian u32), if we have it for that track.
+fn band_tag(lib: &Library, id: u32, tag: u32) -> Option<Vec<u8>> {
+    let t = lib.track(id)?;
+    match &tag.to_le_bytes() {
+        b"PWV6" if !t.band_preview.is_empty() => Some(anlz_section(b"PWV6", 3, &t.band_preview, None)),
+        b"PWV7" if !t.band_detail.is_empty() => Some(anlz_section(b"PWV7", 3, &t.band_detail, Some(0x0096_0000))),
+        b"PWV4" if !t.rgb_preview.is_empty() => Some(anlz_section(b"PWV4", 6, &t.rgb_preview, Some(0))),
+        b"PWV5" if !t.rgb_detail.is_empty() => Some(anlz_section(b"PWV5", 2, &t.rgb_detail, Some(0x0096_0305))),
+        _ => None,
+    }
+}
+
 /// A player's "no data" answer to a per-track request: the matching reply
 /// kind, then request, status 0x32, length 0, the (omitted) empty blob and,
 /// for most kinds, a trailing 0.  `None` for a request with no known reply.
@@ -290,16 +349,16 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
             kind::WAVE_PREVIEW => {
                 let blob = lib.read().unwrap().track(arg(2)).filter(|t| !t.preview.is_empty()).map(|t| t.preview.clone());
                 match blob {
-                    Some(b) => reply(&mut w, blob_reply(m.txid, kind::WAVE_PREVIEW_BLOB, m.kind, b, false))?,
+                    Some(b) => { log::debug!("dbserver: {peer:?} preview for track {} — {} bytes", arg(2), b.len()); reply(&mut w, blob_reply(m.txid, kind::WAVE_PREVIEW_BLOB, m.kind, b, false))? }
                     None => reply(&mut w, no_data(m.txid, m.kind))?,
                 }
             }
             // Waveform detail: (dmst, track id, 0).
             kind::WAVE_DETAIL => {
                 let blob = lib.read().unwrap().track(arg(1)).filter(|t| !t.detail.is_empty())
-                    .map(|t| { let mut b = vec![0u8; DETAIL_LEAD]; b.extend_from_slice(&t.detail); b });
+                    .map(|t| { let mut b = detail_header(t.detail.len()).to_vec(); b.extend_from_slice(&t.detail); b });
                 match blob {
-                    Some(b) => reply(&mut w, blob_reply(m.txid, kind::WAVE_DETAIL_BLOB, m.kind, b, false))?,
+                    Some(b) => { log::debug!("dbserver: {peer:?} detail for track {} — {} bytes", arg(1), b.len()); reply(&mut w, blob_reply(m.txid, kind::WAVE_DETAIL_BLOB, m.kind, b, false))? }
                     None => reply(&mut w, no_data(m.txid, m.kind))?,
                 }
             }
@@ -327,8 +386,19 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
             // such data (captured from a CDJ-3000): the reply type with status
             // 0x32, length 0 and the blob left out.  "Unavailable" (0x4003)
             // made a CDJ-3000 abandon a load and reconnect.
+            // An ANLZ section by fourcc (arg 2, little-endian ASCII) and file
+            // (arg 3): the 3-band waveforms a CDJ-3000 draws, from our own
+            // analysis.  Anything else: "no data" below.
+            kind::ANLZ_TAG | kind::ANLZ_TAG2 if band_tag(&lib.read().unwrap(), arg(1), arg(2)).is_some() => {
+                let blob = band_tag(&lib.read().unwrap(), arg(1), arg(2)).unwrap();
+                log::debug!("dbserver: {peer:?} {} for track {} — {} bytes", String::from_utf8_lossy(&arg(2).to_le_bytes()), arg(1), blob.len());
+                reply(&mut w, Message { txid: m.txid, kind: kind::ANLZ_TAG_BLOB, args: vec![u(m.kind as u32), u(0), u(blob.len() as u32), Field::Blob(blob), u(1)] })?;
+            }
             kind::CUES_EXT | kind::ANLZ_TAG | kind::ANLZ_TAG2 | kind::LOAD_INFO => {
-                log::debug!("dbserver: {peer:?} 0x{:04x} for track {} — none", m.kind, arg(1));
+                let what = if matches!(m.kind, kind::ANLZ_TAG | kind::ANLZ_TAG2) {
+                    format!(" {}.{}", String::from_utf8_lossy(&arg(2).to_le_bytes()), String::from_utf8_lossy(&arg(3).to_le_bytes()).trim_end_matches('\0'))
+                } else { String::new() };
+                log::debug!("dbserver: {peer:?} 0x{:04x}{what} for track {} — none", m.kind, arg(1));
                 reply(&mut w, no_data(m.txid, m.kind))?;
             }
             k if (0x1000..0x3000).contains(&k) => match menu_rows(&lib.read().unwrap(), k, &m.args) {
@@ -415,8 +485,15 @@ mod tests {
     #[test]
     fn root_menu_lists_the_categories() {
         let rows = items(menu_rows(&lib(), kind::ROOT_MENU, &[dmst(), u(0), u(0xffffff)]).unwrap());
-        assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["PLAYLIST", "ARTIST", "ALBUM", "TRACK", "FILENAME"]);
-        assert!(rows.iter().all(|r| r.type_name().starts_with("root-")));
+        assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["ARTIST", "ALBUM", "TRACK", "PLAYLIST", "FILENAME"]);
+        // The item types a player reads for each (Beat Link's numbering, as
+        // a CDJ-3000 serves them), and the marked labels a player expects.
+        assert_eq!(rows.iter().map(|r| r.item_type).collect::<Vec<_>>(), [0x81, 0x82, 0x83, 0x84, 0x94]);
+        assert_eq!(rows.iter().map(|r| r.type_name()).collect::<Vec<_>>(), ["root-artist", "root-album", "root-track", "root-playlist", "root-filename"]);
+        let raw = menu_rows(&lib(), kind::ROOT_MENU, &[dmst(), u(0), u(0xffffff)]).unwrap();
+        assert_eq!(raw[0][3], s("\u{fffa}ARTIST\u{fffb}"));
+        assert!(menu_rows(&lib(), 0x1014, &[dmst(), u(0)]).is_none(), "0x1014 is KEY, not a track list");
+        assert_eq!(menu_rows(&lib(), 0x1400, &[dmst(), u(0), u(0)]).unwrap().len(), 5, "sort choices");
     }
 
     #[test]
@@ -455,6 +532,16 @@ mod tests {
         assert_eq!(back.args, vec![u(0x2b04), u(0x32), u(0), Field::Blob(vec![]), u(0)], "the omitted blob reads back");
         assert_eq!(super::no_data(1, kind::LOAD_INFO).kind, kind::LOAD_INFO_BLOB);
         assert_eq!(super::no_data(1, kind::ANLZ_TAG2).kind, kind::ANLZ_TAG_BLOB);
+        // The PWV6 header as a CDJ-3000 sent it for a rekordbox track.
+        let sec = super::anlz_section(b"PWV6", 3, &[0u8; 3600], None);
+        assert_eq!(&sec[..24], &[0x24, 0x0e, 0, 0, b'P', b'W', b'V', b'6', 0, 0, 0, 0x14, 0, 0, 0x0e, 0x24, 0, 0, 0, 3, 0, 0, 0x04, 0xb0]);
+        assert_eq!(sec.len(), 3624);
+        // PWV7: 0x18 header, the 0x00960000 constant, padded to 4.
+        let sec = super::anlz_section(b"PWV7", 3, &[0u8; 3 * 22911], Some(0x0096_0000));
+        assert_eq!(&sec[..28], &[0x98, 0x0c, 1, 0, b'P', b'W', b'V', b'7', 0, 0, 0, 0x18, 0, 1, 0x0c, 0x95, 0, 0, 0, 3, 0, 0, 0x59, 0x7f, 0, 0x96, 0, 0]);
+        assert_eq!(sec.len(), 68764);
+        // Detail header as captured (26,986 entries).
+        assert_eq!(super::detail_header(26986), [0x6a, 0x69, 0, 0, 1, 0, 0, 0, 0x6a, 0x69, 0, 0, 0x96, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
         let cues = super::empty_cue_list(7);
         assert_eq!(cues.kind, kind::CUES_BLOB);
         assert_eq!(cues.args.len(), 7, "Beat Link reads hot and memory counts at args 5 and 6");

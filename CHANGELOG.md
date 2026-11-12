@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **Colour waveforms for other players.** OpenDeck's analysis now also
+  makes the waveforms newer players draw: the CDJ-3000's 3-band preview and
+  detail (PWV6 / PWV7) and the nexus 2 RGB preview and detail (PWV4 /
+  PWV5), served over LINK for every track, whether rekordbox analysed it
+  or not. They are fitted to rekordbox's own on 30 tracks
+  (`examples/waveform_vs_rekordbox`): the 3-band detail follows rekordbox's
+  at a correlation of 0.93 (lows), 0.83 (mids), 0.83 (highs). The analysis
+  cache is rebuilt once.
 - **PLAYER No. AUTO.** OpenDeck now picks its own Pro DJ Link player
   number, as a CDJ set to AUTO does: it listens for the players already on
   the network, takes a free number (the device's usual one when it is free:
@@ -34,7 +42,17 @@ All notable changes to this project will be documented in this file.
   a player does, an empty reply with status 0x32, instead of "unavailable",
   which made the CDJ give up and reconnect; and NFS reads are served 32 KiB
   at a time as players ask (capped at 8 KiB, the CDJ stopped with "E-8302:
-  CANNOT PLAY TRACK"). Not yet: the CDJ-3000's colour scrolling waveform.
+  CANNOT PLAY TRACK").
+- **Players draw OpenDeck's scrolling waveform.** The detail waveform's
+  20-byte header was sent as zeros, so a player read zero entries and drew
+  nothing; it now carries the entry count and rate as a CDJ sends them.
+- **A CDJ-3000 browses OpenDeck by the right categories** (ARTIST, ALBUM,
+  TRACK, PLAYLIST, FILE NAME). Our category item types were one off from
+  the documented ones (Deep Symmetry's Menu Item Types), so a CDJ showed
+  BPM, ALBUM, TRACK, PLAYLIST. Labels are now marked as a player marks them,
+  a player's sort-options request is answered, and request 0x1014 (KEY) is
+  no longer taken for the track list. OpenDeck browsing a CDJ over LINK
+  names its categories correctly too.
 - **Other devices could not show OpenDeck's track title or position.** Our
   status packets carried a track ID left over from the captured packet they
   were built from, so Beat Link, ShowKontrol and the players asked our

@@ -33,6 +33,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | rekordbox's own grid and cues used when present (stick or LINK) | ✅ | All |
 | GRID ADJUST: SNAP GRID, SHIFT GRID (folds a synced jog nudge into the grid), reset | ✅ | All |
 | Waveforms: detail (zoomable, beat and bar markers) and full-track overview with needle search | ✅ | All |
+| Waveforms for other players: blue, RGB (PWV4/PWV5) and 3-band (PWV6/PWV7), fitted to rekordbox's | ✅ | All |
 | Analysis cache (a track is analysed once) | ✅ | All |
 | Downbeat (bar 1) detection; drum & bass at full tempo; 4:5 / 2:3 tempo mistakes | 📋 | — |
 
@@ -74,7 +75,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | SYNC to the master's tempo and phase; a jog nudge while synced is kept as an offset | ✅ | All |
 | MASTER, handoff both ways | ✅ tested on an XDJ-1000MK2 | All |
 | LINK: browse and load from other players' USB / SD and from rekordbox (dbserver + NFS), with their grids and cues | ✅ | All |
-| Serve our own music to other decks (metadata, grid, waveforms, art) | ✅ OpenDeck→OpenDeck; a CDJ-3000 lists, browses, loads and plays it (emulator; its colour scrolling waveform not yet); XDJ untested | All |
+| Serve our own music to other decks (metadata, grid, waveforms, art) | ✅ OpenDeck→OpenDeck; a CDJ-3000 lists, browses (ARTIST, ALBUM, TRACK, PLAYLIST, FILE NAME), loads and plays it with its waveforms (emulator); XDJ untested | All |
 | Works over Wi-Fi or ethernet; survives iOS backgrounding | ✅ | All |
 | DJM mixer channel assignment of player numbers | 📋 | — |
 | Read a CDJ-3000's USB over LINK | ✅ emulator: 226 tracks, audio, analysis | All |

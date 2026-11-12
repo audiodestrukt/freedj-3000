@@ -192,6 +192,13 @@ impl Message {
     }
 }
 
+/// Category labels come wrapped in U+FFFA … U+FFFB (a player shows its own
+/// name for them); strip the marks for display.
+pub fn unmark(s: &str) -> String { s.trim_start_matches('\u{fffa}').trim_end_matches('\u{fffb}').to_string() }
+
+/// Wrap a category label the way a player serves it.
+pub fn mark(s: &str) -> String { format!("\u{fffa}{s}\u{fffb}") }
+
 /// One row of a rendered menu (`0x4101`).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MenuItem {
@@ -211,8 +218,8 @@ impl MenuItem {
         Some(MenuItem {
             parent_id:  m.args[0].as_u32(),
             id:         m.args[1].as_u32(),
-            label:      m.args[3].as_str().to_string(),
-            label2:     m.args[5].as_str().to_string(),
+            label:      unmark(m.args[3].as_str()),
+            label2:     unmark(m.args[5].as_str()),
             item_type:  m.args[6].as_u32(),
             flags:      m.args[7].as_u32(),
             artwork_id: m.args[8].as_u32(),
@@ -227,13 +234,17 @@ impl MenuItem {
             0x000b => "duration", 0x000d => "tempo",    0x000e => "label",    0x000f => "key",
             0x0010 => "bitrate",  0x0011 => "year",     0x0013..=0x001a => "color",
             0x0023 => "comment",  0x0024 => "history",  0x0028 => "orig-artist", 0x0029 => "remixer",
-            0x002e => "date-added", 0x0000 => "path",   0x002f => "flag?",  0x0080 => "root",   0x0081 => "root-genre", 0x0082 => "root-artist",
-            0x0083 => "root-album", 0x0084 => "root-track", 0x0085 => "root-playlist",
-            0x0086 => "root-bpm", 0x0087 => "root-rating", 0x0088 => "root-year", 0x0089 => "root-remixer",
-            0x008a => "root-label", 0x008b => "root-orig-artist", 0x008c => "root-key",
-            0x008e => "root-color", 0x0090 => "root-folder", 0x0091 => "root-search",
-            0x0092 => "root-time", 0x0093 => "root-bitrate", 0x0094 => "root-filename",
-            0x0095 => "root-history", 0x0098 => "root-hot-cue-bank", _ => "?",
+            // Root-menu categories, numbered as Beat Link's MenuItemType and as
+            // a CDJ-3000 serves them (we had these one off: ARTIST read as
+            // ALBUM, PLAYLIST as BPM on a player browsing us).
+            0x002e => "date-added", 0x0000 => "path",   0x002f => "flag?",
+            0x0080 => "root-genre", 0x0081 => "root-artist", 0x0082 => "root-album",
+            0x0083 => "root-track", 0x0084 => "root-playlist", 0x0085 => "root-bpm",
+            0x0086 => "root-rating", 0x0087 => "root-year", 0x008b => "root-key",
+            0x008c => "root-date-added", 0x008e => "root-color", 0x0090 => "root-folder",
+            0x0091 => "root-search", 0x0092 => "root-time", 0x0093 => "root-bitrate",
+            0x0094 => "root-filename", 0x0095 => "root-history", 0x0098 => "root-hot-cue-bank",
+            0x00aa => "root-matching", 0x00a1 => "sort-default", 0x00a2 => "sort-alphabet", _ => "?",
         }
     }
 }

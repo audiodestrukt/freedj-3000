@@ -12,7 +12,7 @@
 
 use rustfft::{num_complex::Complex, FftPlanner};
 
-const FFT_SIZE: usize = 2048;
+pub const FFT_SIZE: usize = 2048;
 pub const HOP_SIZE: usize = 512;
 
 /// One display column: [R, G, B, amplitude] each 0–255.

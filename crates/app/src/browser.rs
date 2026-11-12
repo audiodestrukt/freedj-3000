@@ -46,6 +46,19 @@ fn is_audio(path: &Path) -> bool {
 /// A linked track's file path (if the server has one) and its beat-grid blob.
 pub type DbTrackFile = (Option<String>, anyhow::Result<Vec<u8>>);
 
+/// Which category a dbserver root-menu row is: by its label when it is one
+/// we know (a source may number the item types its own way), else by type.
+fn db_category(i: &opendeck_dbserver::MenuItem) -> &'static str {
+    match i.label.to_ascii_uppercase().as_str() {
+        "TRACK" => "root-track",
+        "PLAYLIST" => "root-playlist",
+        "ARTIST" => "root-artist",
+        "ALBUM" => "root-album",
+        "FILENAME" | "FILE NAME" => "root-filename",
+        _ => i.type_name(),
+    }
+}
+
 /// Where a track to load lives.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Load {
@@ -497,7 +510,7 @@ impl Browser {
             Some(Err(e)) => { log::info!("LINK: no category menu ({e:#}); showing playlists"); return self.db_folder_entries(0); }
         };
         items.into_iter().map(|i| {
-            let kind = match i.type_name() {
+            let kind = match db_category(&i) {
                 "root-track"    => EntryKind::Descend(Loc::DbAllTracks),
                 "root-playlist" => EntryKind::Descend(Loc::DbFolder(0)),
                 "root-artist"   => EntryKind::Descend(Loc::DbArtists),
