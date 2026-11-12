@@ -93,7 +93,6 @@ pub trait Renderer {
     /// Write the next rendered frame to `path` as a PNG.
     fn request_capture(&mut self, path: std::path::PathBuf);
     fn render(&mut self, snap: &DeckSnapshot, vp: &Viewports, egui_ctx: &egui::Context, full_output: egui::FullOutput);
-    fn color_mode(&self) -> ColorMode;
     fn set_color_mode(&mut self, mode: ColorMode);
     /// Waveform columns visible across the enlarged waveform (zoom).
     fn set_cols_visible(&mut self, cols: f32);
@@ -481,7 +480,6 @@ impl WgpuRenderer {
 }
 
 impl Renderer for WgpuRenderer {
-    fn color_mode(&self) -> ColorMode { self.color_mode }
     fn set_color_mode(&mut self, mode: ColorMode) { self.color_mode = mode; }
     fn set_cols_visible(&mut self, cols: f32) { self.cols_visible = cols; }
     fn surface_size(&self) -> (u32, u32) { (self.surface_config.width, self.surface_config.height) }

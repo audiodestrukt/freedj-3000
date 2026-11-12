@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **WAVEFORM COLOR in MENU** (BLUE, RGB, 3BAND), saved, and **3BAND by
+  default**, as the CDJ-3000 shows it: lows blue, mids amber, highs white.
+  The waveforms were blue unless you knew the `C` key, which did not stick
+  and could not be reached by touch (iPad). `C` now cycles the saved
+  setting.
 - **DECK VIEW: switch between the whole deck and the screen alone while
   running** (desktop): the `F` key or MENU → DECK VIEW. The window resizes
   to the new shape, fitted to the screen, and the choice is saved; the full

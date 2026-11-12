@@ -101,18 +101,17 @@ large ones are both key detection.
 
 ## Waveform colour modes
 
-The CDJ offers three under `Waveform Color` on the Shortcut screen. FreeDJ
-already implements one of them correctly:
+The CDJ offers three under `Waveform Color` on the Shortcut screen. OpenDeck
+has all three, as MENU → WAVEFORM COLOR (saved; the `C` key cycles it):
 
-| Mode | Mapping | FreeDJ |
+| Mode | Mapping | OpenDeck |
 |------|---------|--------|
-| `RGB` | low → red, mid → green, high → blue | **Built** — this is what `analysis/waveform.rs` computes and the shader draws |
-| `3 BAND` | low → blue, mid → amber, high → white | Missing — shader constant |
-| `BLUE` | monochrome | Missing — shader constant |
+| `RGB` | low → red, mid → green, high → blue | **Built** |
+| `3 BAND` | low → blue, mid → amber, high → white | **Built — the default** (2026-11-12) |
+| `BLUE` | monochrome | **Built** (the default until 2026-11-12) |
 
-Neither missing mode needs new analysis or a new buffer. The manual screenshot
-shows 3 BAND, which is why CDJ waveforms read as blue/orange rather than
-red/green.
+The manual screenshot shows 3 BAND, which is why CDJ waveforms read as
+blue/orange rather than red/green, and why it is the default here.
 
 Two related settings worth copying:
 

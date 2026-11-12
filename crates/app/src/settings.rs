@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, DeckView, Stems, PerfLog }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, WaveColor, DeckView, Stems, PerfLog }
 
 /// DECK VIEW is a desktop row: the iPad always shows the whole deck and the
 /// phone has its two pages.
@@ -20,6 +20,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
+    (Setting::WaveColor,    "WAVEFORM COLOR"),
     (Setting::DeckView,     "DECK VIEW"),
     (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
@@ -31,6 +32,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
+    (Setting::WaveColor,    "WAVEFORM COLOR"),
     (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
 ];
@@ -63,6 +65,23 @@ impl Skin {
             "xdj1000mk2" | "xdj-1000mk2" | "xdj" => Some(Skin::Xdj1000Mk2),
             _ => None,
         }
+    }
+}
+
+/// Waveform Color, as the CDJ-3000 offers it: BLUE (one colour), RGB
+/// (low red, mid green, high blue: the nexus look) and 3BAND (low blue, mid
+/// amber, high white: what the CDJ-3000's manual shows, the default here).
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+pub enum WaveColor {
+    Blue,
+    Rgb,
+    #[default]
+    ThreeBand,
+}
+
+impl WaveColor {
+    pub fn label(self) -> &'static str {
+        match self { WaveColor::Blue => "BLUE", WaveColor::Rgb => "RGB", WaveColor::ThreeBand => "3BAND" }
     }
 }
 
@@ -100,6 +119,8 @@ pub struct Settings {
     /// or the screen alone.  Defaults to the whole deck on the Mac and
     /// Windows; `--faceplate` / `--screen-only` override it for one run.
     pub full_deck: bool,
+    /// Waveform Color (both waveforms); the C key cycles it too.
+    pub wave_color: WaveColor,
     /// Play prepared stems (OverCue's open USB format) and show their
     /// controls: a STEMS key and panel on the CDJ-3000 screen, a STEMS pad
     /// mode in the XDJ's PERFORM screen.  Off by default, so both skins look
@@ -125,7 +146,7 @@ const SEED: u8 = 3;
 impl Default for Settings {
     fn default() -> Self {
         Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000,
-               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), stems: false, seed: 0, phone: false }
+               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, stems: false, seed: 0, phone: false }
     }
 }
 
@@ -204,6 +225,7 @@ impl Settings {
             Setting::Skin if c.phone => {}
             Setting::Skin         => c.skin = step(&[Skin::Xdj1000Mk2, Skin::Cdj3000], c.skin, dir),
             Setting::DeckView     => c.full_deck = !c.full_deck,
+            Setting::WaveColor    => c.wave_color = step(&[WaveColor::Blue, WaveColor::Rgb, WaveColor::ThreeBand], c.wave_color, dir),
             Setting::Stems        => c.stems = !c.stems,
             Setting::PerfLog      => c.perf_log = !c.perf_log,
         }
@@ -220,6 +242,7 @@ impl Settings {
             Setting::Player       => format!("{}   (applies at next launch)", self.player),
             Setting::Skin if self.phone => format!("{}   (CDJ-3000: iPad only)", Skin::Xdj1000Mk2.label()),
             Setting::Skin         => self.skin.label().into(),
+            Setting::WaveColor    => format!("{}   (C)", self.wave_color.label()),
             Setting::DeckView     => if self.full_deck { "FULL DECK   (F)".into() } else { "SCREEN ONLY   (F)".into() },
             Setting::Stems        => if self.stems { "ON   (prepared stems)".into() } else { "OFF".into() },
             Setting::PerfLog      => if self.perf_log { "ON   (Documents/opendeck-perf.log)".into() } else { "OFF".into() },

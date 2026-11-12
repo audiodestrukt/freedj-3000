@@ -63,6 +63,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | Feature | Status | Where |
 |---|---|---|
 | XDJ-1000MK2 screen: waveforms, grid, INFO, BROWSE, PERFORM pads, MENU / UTILITY | ✅ | All |
+| Waveform Color BLUE / RGB / 3BAND (MENU, saved; 3BAND default, as the CDJ-3000) | ✅ | All |
 | CDJ-3000 screen and faceplate (the default screen; MENU → SCREEN switches; the full deck by default on the Mac, Windows and iPad, `F` / MENU → DECK VIEW toggles it on the desktop): playback, BEAT LOOP / BEAT JUMP panels, SOURCE, BROWSE, TAG LIST, UTILITY, SEARCH, phase meter and master badge, STEMS panel | ✅ | D, Pi, iPad, Android tablet |
 | iPhone / Android phone: two landscape pages (SCREEN, CONTROLS) | ✅ | iOS, And |
 | Keyboard control | ✅ | D |

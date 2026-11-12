@@ -120,6 +120,7 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
     app.host     = Some(Host::Sdl(SdlHost { pump, events: Vec::new(), modifiers: egui::Modifiers::default(),
                                             size_px: (pw, ph), ppp, start: Instant::now(), focused: true }));
     app.renderer = Some(Box::new(renderer));
+    app.apply_wave_color();
 
     loop {
         // ── Events ───────────────────────────────────────────────────────
@@ -559,7 +560,6 @@ fn unmultiply(c: egui::Color32) -> [u8; 4] {
 }
 
 impl Renderer for SdlRenderer {
-    fn color_mode(&self) -> ColorMode { self.color_mode }
     fn set_color_mode(&mut self, mode: ColorMode) { self.color_mode = mode; }
     fn set_cols_visible(&mut self, cols: f32) { self.cols_visible = cols; }
     fn surface_size(&self) -> (u32, u32) { self.size }

@@ -1465,14 +1465,8 @@ impl DeckApp {
                     if fs > 0 { self.seek_to(fs); self.transport.arrived_at_cue(fs); }
                 }
             }
-            Event::Ui(UiEvent::CycleColor) => {
-                if let Some(r) = &mut self.renderer {
-                    use renderer::ColorMode::*;
-                    let next = match r.color_mode() { Rgb => ThreeBand, ThreeBand => Blue, Blue => Rgb };
-                    r.set_color_mode(next);
-                    log::info!("waveform colour → {:?}", next);
-                }
-            }
+            // WAVEFORM COLOR, saved: BLUE → RGB → 3BAND.
+            Event::Ui(UiEvent::CycleColor) => self.cycle_setting(settings::Setting::WaveColor),
             Event::Ui(UiEvent::ZoomStep(d)) => {
                 let n = ZOOM_LEVELS.len() as i32;
                 // Positive = zoom in = fewer columns visible.
@@ -2241,6 +2235,7 @@ impl DeckApp {
         self.settings.cycle(s, 1);
         cpumeter::set_file_log(self.settings.perf_log);
         if s == settings::Setting::DeckView { self.apply_deck_view(); }
+        if s == settings::Setting::WaveColor { self.apply_wave_color(); }
         if s == settings::Setting::Stems {
             // On: look for the loaded track's stems now.  Off: drop them,
             // back to the plain track, and leave the STEMS pad mode.
@@ -2600,6 +2595,16 @@ impl DeckApp {
     }
 
     fn request_redraw(&self) { if let Some(h) = &self.host { h.request_redraw(); } }
+
+    /// Draw the waveforms in the saved WAVEFORM COLOR (at start-up, once a
+    /// renderer exists, and on every change).
+    pub(crate) fn apply_wave_color(&mut self) {
+        use renderer::ColorMode as M;
+        let mode = match self.settings.wave_color {
+            settings::WaveColor::Blue => M::Blue, settings::WaveColor::Rgb => M::Rgb, settings::WaveColor::ThreeBand => M::ThreeBand,
+        };
+        if let Some(r) = &mut self.renderer { r.set_color_mode(mode); }
+    }
 
     /// DECK VIEW changed: draw the whole deck or the screen alone, and
     /// resize the window to the new shape (fitted to its monitor, as at
@@ -3617,6 +3622,7 @@ impl ApplicationHandler for DeckApp {
 
         self.host     = Some(Host::Winit { window: Arc::clone(&window), egui_state });
         self.renderer = Some(Box::new(renderer));
+        self.apply_wave_color();
 
         // Kick off the first redraw.
         window.request_redraw();
