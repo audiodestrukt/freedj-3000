@@ -14,7 +14,7 @@
 //! binary run exactly this.
 
 use anyhow::{Context, Result};
-use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
+use opendeck_analysis::{BeatAnalyzerImpl, KeyDetector, WaveformBuilder, WaveformCache};
 use opendeck_dbserver::server::{Library, SharedLibrary, Track};
 use opendeck_decode::{SymphoniaDecoder, TrackTags};
 use opendeck_nfs::server::Tree;
@@ -119,6 +119,14 @@ impl Analysis {
         }
     }
 
+    /// Fill `key` from the audio when the file had no key tag (a tag key is
+    /// kept as written).  `samples` are interleaved, `channels` wide, at `sr`.
+    pub fn detect_key_if_missing(&mut self, samples: &[f32], channels: usize, sr: u32) {
+        if self.key.is_empty() {
+            if let Some(k) = opendeck_analysis::detect_key(samples, channels, sr) { self.key = k.name().to_string(); }
+        }
+    }
+
     fn apply(&self, t: &mut Track) {
         if !self.title.is_empty() { t.title = self.title.clone(); }
         t.artist = self.artist.clone();
@@ -140,7 +148,8 @@ impl Analysis {
 }
 
 /// Decode one file and analyse it: tags, duration, tempo + grid from the
-/// leading two minutes, waveform preview and detail from the whole track.
+/// leading two minutes, waveform preview and detail from the whole track,
+/// and the key from the whole track when the tags have none.
 /// Streams through the waveform builder, so memory is the lead buffer plus
 /// the columns, not the decoded track.
 pub fn analyze(path: &Path) -> Result<Analysis> {
@@ -151,6 +160,8 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     let lead_cap = LEAD_SECS as usize * sr as usize * 2;
     let mut lead: Vec<f32> = Vec::with_capacity(lead_cap.min(1 << 26));
     let mut wb = WaveformBuilder::new(sr);
+    let tag_key = tags.key.as_deref().is_some_and(|k| !k.trim().is_empty());
+    let mut kd = (!tag_key).then(|| KeyDetector::new(sr));
     let mut frames: u64 = 0;
     let mut buf = vec![0f32; 4096 * ch];
     // Both analysers assume interleaved stereo; fold other layouts to that.
@@ -166,6 +177,7 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
             c => for f in buf[..n * c].chunks(c) { stereo.push(f[0]); stereo.push(f[1.min(c - 1)]); },
         }
         wb.push(&stereo);
+        if let Some(kd) = &mut kd { kd.push(&stereo, 2); }
         if lead.len() < lead_cap {
             let take = (lead_cap - lead.len()).min(stereo.len());
             lead.extend_from_slice(&stereo[..take]);
@@ -177,7 +189,9 @@ pub fn analyze(path: &Path) -> Result<Analysis> {
     drop(lead);
     let grid = ba.beat_grid();
     let bytes = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-    Ok(Analysis::from_deck(&tags, grid.as_deref(), &wave, frames, sr, bytes))
+    let mut a = Analysis::from_deck(&tags, grid.as_deref(), &wave, frames, sr, bytes);
+    if let Some(k) = kd.and_then(|kd| kd.finish()) { if a.key.is_empty() { a.key = k.name().to_string(); } }
+    Ok(a)
 }
 
 /// rekordbox's 3-band scale, as percentile pairs (ours → rekordbox) at 0, 5,
@@ -374,7 +388,8 @@ pub fn grid_beats(anchor: u64, bpm: f64, downbeat_offset: u8, sr: u32, frames: u
 const CACHE_MAGIC: &[u8; 4] = b"ODLA";
 // 2: MP3s decode with the encoder delay kept (the rekordbox / player timeline).
 // 3: tempo + phase fitted together, grids on rekordbox's timing.
-const CACHE_VERSION: u16 = 5;   // 4: 3-band waveforms, 5: RGB waveforms
+// 4: 3-band waveforms, 5: RGB waveforms, 6: detected keys for untagged tracks.
+const CACHE_VERSION: u16 = 6;
 
 fn cache_key(path: &Path) -> Option<String> {
     let md = std::fs::metadata(path).ok()?;
@@ -572,6 +587,11 @@ mod tests {
         assert_eq!(a.preview.iter().step_by(2).max(), Some(&31), "loudest column fills the height");
         assert!(a.preview.iter().step_by(2).all(|&h| h < 32) && a.preview.iter().skip(1).step_by(2).all(|&w| w < 8));
         assert!(!a.has_art);
+        // No key tag: the key comes from the audio (a 440 Hz tone over clicks).
+        assert!(opendeck_analysis::Key::parse(&a.key).is_some(), "detected key {:?}", a.key);
+        let mut tagged = Analysis { key: "8A".into(), ..Default::default() };
+        tagged.detect_key_if_missing(&[0.1; 44_100 * 8], 2, 44_100);
+        assert_eq!(tagged.key, "8A", "a tag key is kept");
 
         // Scan + cache: the served row picks the analysis up.
         let sc = scan(&dir, "T").unwrap();
@@ -580,6 +600,7 @@ mod tests {
         let l = sc.library.read().unwrap();
         assert_eq!(l.tracks[0].duration_s, 2);
         assert_eq!(l.tracks[0].detail.len(), a.detail.len());
+        assert_eq!(l.tracks[0].key, a.key);
         drop(l);
         assert_eq!(std::fs::read_dir(dir.join("cache")).unwrap().count(), 1);
         let _ = std::fs::remove_dir_all(&dir);
