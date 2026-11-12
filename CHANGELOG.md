@@ -26,8 +26,15 @@ All notable changes to this project will be documented in this file.
   (its layout differs from Beat Link's), our media answer put our IP where
   the owning player's number goes, and our status claimed an SD card. Our
   own media queries now use the player layout too, so OpenDeck learns what
-  is in a CDJ-3000's slots. The CDJ-3000 browses OpenDeck's tracks (title,
-  BPM, art, preview waveform); loading one still stops at NOW LOADING.
+  is in a CDJ-3000's slots.
+- **A CDJ-3000 loads and plays OpenDeck's tracks**, with OpenDeck's beat
+  grid, BPM, art and overview waveform. Two more fixes, found by recording
+  one emulated CDJ-3000 loading from another: when a track has no data of a
+  kind (cues, a waveform, an analysis section), OpenDeck now answers the way
+  a player does, an empty reply with status 0x32, instead of "unavailable",
+  which made the CDJ give up and reconnect; and NFS reads are served 32 KiB
+  at a time as players ask (capped at 8 KiB, the CDJ stopped with "E-8302:
+  CANNOT PLAY TRACK"). Not yet: the CDJ-3000's colour scrolling waveform.
 - **Other devices could not show OpenDeck's track title or position.** Our
   status packets carried a track ID left over from the captured packet they
   were built from, so Beat Link, ShowKontrol and the players asked our

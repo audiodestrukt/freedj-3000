@@ -222,6 +222,23 @@ pub const DETAIL_LEAD: usize = 19;
 
 /// A blob reply: request type, 0, length, bytes (Beat Link's argument list
 /// for artwork, preview and detail; the beat grid adds a trailing 0).
+/// A player's "no data" answer to a per-track request: the matching reply
+/// kind, then request, status 0x32, length 0, the (omitted) empty blob and,
+/// for most kinds, a trailing 0.  `None` for a request with no known reply.
+pub fn no_data(txid: u32, req: u16) -> Message {
+    let (want, trailing) = match req {
+        kind::CUES_EXT => (kind::CUES_EXT_BLOB, true),
+        kind::BEAT_GRID => (kind::BEAT_GRID_BLOB, true),
+        kind::LOAD_INFO => (kind::LOAD_INFO_BLOB, false),
+        kind::WAVE_PREVIEW => (kind::WAVE_PREVIEW_BLOB, true),
+        kind::WAVE_DETAIL => (kind::WAVE_DETAIL_BLOB, true),
+        _ => (kind::ANLZ_TAG_BLOB, true),   // 0x2c04 / 0x2d04
+    };
+    let mut args = vec![u(req as u32), u(0x32), u(0), Field::Blob(Vec::new())];
+    if trailing { args.push(u(0)); }
+    Message { txid, kind: want, args }
+}
+
 /// A cue list (0x4702) with no entries: request, 0, length 0, an empty blob,
 /// the entry size (36), zero hot cues, zero memory points.
 fn empty_cue_list(txid: u32) -> Message {
@@ -266,7 +283,7 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
                 let blob = lib.read().unwrap().track(arg(1)).filter(|t| !t.beats.is_empty()).map(|t| beat_grid_blob(&t.beats));
                 match blob {
                     Some(b) => reply(&mut w, blob_reply(m.txid, kind::BEAT_GRID_BLOB, m.kind, b, true))?,
-                    None => unavailable(&mut w)?,
+                    None => reply(&mut w, no_data(m.txid, m.kind))?,
                 }
             }
             // Waveform preview: (dmst, 4, track id, 0).
@@ -274,7 +291,7 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
                 let blob = lib.read().unwrap().track(arg(2)).filter(|t| !t.preview.is_empty()).map(|t| t.preview.clone());
                 match blob {
                     Some(b) => reply(&mut w, blob_reply(m.txid, kind::WAVE_PREVIEW_BLOB, m.kind, b, false))?,
-                    None => unavailable(&mut w)?,
+                    None => reply(&mut w, no_data(m.txid, m.kind))?,
                 }
             }
             // Waveform detail: (dmst, track id, 0).
@@ -283,7 +300,7 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
                     .map(|t| { let mut b = vec![0u8; DETAIL_LEAD]; b.extend_from_slice(&t.detail); b });
                 match blob {
                     Some(b) => reply(&mut w, blob_reply(m.txid, kind::WAVE_DETAIL_BLOB, m.kind, b, false))?,
-                    None => unavailable(&mut w)?,
+                    None => reply(&mut w, no_data(m.txid, m.kind))?,
                 }
             }
             // Artwork: (dmst, artwork id); our artwork ids are track ids.
@@ -291,7 +308,8 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
                 let art = lib.read().unwrap().art.clone();
                 match art.and_then(|f| f(arg(1))) {
                     Some(b) => reply(&mut w, blob_reply(m.txid, kind::ARTWORK_BLOB, m.kind, b, false))?,
-                    None => unavailable(&mut w)?,
+                    // No art: as a player answers, length 0 and the blob left out.
+                    None => reply(&mut w, Message { txid: m.txid, kind: kind::ARTWORK_BLOB, args: vec![u(m.kind as u32), u(0), u(0), Field::Blob(Vec::new())] })?,
                 }
             }
             // Cue lists and raw ANLZ sections: nothing to serve (no memory
@@ -305,9 +323,13 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
                 log::debug!("dbserver: {peer:?} cue list for track {} — empty", arg(1));
                 reply(&mut w, empty_cue_list(m.txid))?;
             }
-            kind::CUES_EXT | kind::ANLZ_TAG => {
+            // Nothing to serve: answer as a player does when a track has no
+            // such data (captured from a CDJ-3000): the reply type with status
+            // 0x32, length 0 and the blob left out.  "Unavailable" (0x4003)
+            // made a CDJ-3000 abandon a load and reconnect.
+            kind::CUES_EXT | kind::ANLZ_TAG | kind::ANLZ_TAG2 | kind::LOAD_INFO => {
                 log::debug!("dbserver: {peer:?} 0x{:04x} for track {} — none", m.kind, arg(1));
-                unavailable(&mut w)?;
+                reply(&mut w, no_data(m.txid, m.kind))?;
             }
             k if (0x1000..0x3000).contains(&k) => match menu_rows(&lib.read().unwrap(), k, &m.args) {
                 Some(rows) => {
@@ -423,6 +445,16 @@ mod tests {
     #[test]
     fn track_info_carries_the_path_in_row_type_zero() {
         let rows = items(menu_rows(&lib(), kind::TRACK_INFO, &[dmst(), u(2)]).unwrap());
+        // "No data" as a CDJ-3000 sends it: kind, request, 0x32, 0, the
+        // blob absent from the body, trailing 0 (bytes captured off the wire).
+        let nd = super::no_data(0x7b, kind::CUES_EXT).encode();
+        let want: Vec<u8> = [&[0x11, 0x87, 0x23, 0x49, 0xae, 0x11, 0, 0, 0, 0x7b, 0x10, 0x4e, 0x02, 0x0f, 0x05, 0x14, 0, 0, 0, 0x0c][..],
+            &[6, 6, 6, 3, 6, 0, 0, 0, 0, 0, 0, 0], &[0x11, 0, 0, 0x2b, 0x04, 0x11, 0, 0, 0, 0x32, 0x11, 0, 0, 0, 0, 0x11, 0, 0, 0, 0]].concat();
+        assert_eq!(nd, want);
+        let back = Message::read(&mut std::io::Cursor::new(&nd)).unwrap();
+        assert_eq!(back.args, vec![u(0x2b04), u(0x32), u(0), Field::Blob(vec![]), u(0)], "the omitted blob reads back");
+        assert_eq!(super::no_data(1, kind::LOAD_INFO).kind, kind::LOAD_INFO_BLOB);
+        assert_eq!(super::no_data(1, kind::ANLZ_TAG2).kind, kind::ANLZ_TAG_BLOB);
         let cues = super::empty_cue_list(7);
         assert_eq!(cues.kind, kind::CUES_BLOB);
         assert_eq!(cues.args.len(), 7, "Beat Link reads hot and memory counts at args 5 and 6");

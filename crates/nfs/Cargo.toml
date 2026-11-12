@@ -9,3 +9,6 @@ license.workspace = true
 anyhow = { workspace = true }
 log    = { workspace = true }
 if-addrs = "0.13"
+
+[dev-dependencies]
+tempfile = "3"

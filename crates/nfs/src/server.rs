@@ -27,6 +27,10 @@ const NFSERR_ACCES: u32 = 13;
 const NFSERR_NOTDIR: u32 = 20;
 const NFSERR_STALE: u32 = 70;
 const MAX_READ: usize = 8192;
+/// Largest READ we answer.  Players read 32 KiB at a time over UDP (one
+/// fragmented datagram); capped at 8 KiB, a CDJ-3000 got short reads and
+/// refused the track ("E-8302: CANNOT PLAY TRACK").
+const READ_CAP: usize = 32 * 1024;
 
 struct Node { path: PathBuf, is_dir: bool, size: u64, mtime: u32, children: Vec<(String, u32)> }
 
@@ -261,7 +265,7 @@ fn serve_nfsd(sock: UdpSocket, tree: Arc<Tree>) {
                 match node_at(off) {
                     Some((i, nd)) if !nd.is_dir => {
                         let offset = be32(d, off + 32).unwrap_or(0) as u64;
-                        let count = (be32(d, off + 36).unwrap_or(0) as usize).min(MAX_READ);
+                        let count = (be32(d, off + 36).unwrap_or(0) as usize).min(READ_CAP);
                         let mut data = vec![0u8; count];
                         let got = fs::File::open(&nd.path).and_then(|mut f| { f.seek(SeekFrom::Start(offset))?; let mut total = 0; while total < count { let k = f.read(&mut data[total..])?; if k == 0 { break; } total += k; } Ok(total) });
                         match got {
@@ -341,6 +345,21 @@ impl NfsServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serves_a_players_32k_read_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: Vec<u8> = (0..100_000u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(dir.path().join("t.mp3"), &body).unwrap();
+        let srv = NfsServer::start(Tree::scan(dir.path()).unwrap(), "/C/", 0, 0).unwrap();
+        let mut c = crate::Nfs::connect_at(Ipv4Addr::LOCALHOST, srv.portmap).unwrap();
+        let root = c.mount_usb().unwrap();
+        let (fh, size) = c.lookup_path(&root, "t.mp3").unwrap();
+        assert_eq!(size, 100_000);
+        let got = c.read(&fh, 32_768, 32_768).unwrap();
+        assert_eq!(got.len(), 32_768, "a 32 KiB read comes back whole");
+        assert_eq!(&got[..], &body[32_768..65_536]);
+    }
 
     #[test]
     fn file_handles_are_never_blank_and_round_trip() {

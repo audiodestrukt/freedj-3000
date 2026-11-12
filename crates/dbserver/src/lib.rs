@@ -64,6 +64,13 @@ pub mod kind {
     pub const WAVE_DETAIL:    u16 = 0x2904;
     pub const CUES_EXT:       u16 = 0x2b04;
     pub const ANLZ_TAG:       u16 = 0x2c04;
+    /// An ANLZ tag a CDJ-3000 asks for while loading (3-band waveforms
+    /// PWV6 / PWV7 from the .2EX file); same arguments as `ANLZ_TAG`.
+    pub const ANLZ_TAG2:      u16 = 0x2d04;
+    /// Undocumented, sent by a CDJ-3000 while loading a track; a player
+    /// answers 0x4502 with a 1,604-byte blob, or "no data".
+    pub const LOAD_INFO:      u16 = 0x2504;
+    pub const LOAD_INFO_BLOB: u16 = 0x4502;
     pub const RENDER:         u16 = 0x3000;
     pub const MENU_AVAILABLE: u16 = 0x4000;
     pub const MENU_HEADER:    u16 = 0x4001;
@@ -97,6 +104,9 @@ impl Field {
             Field::U8(v)   => { out.push(0x0f); out.push(*v); }
             Field::U16(v)  => { out.push(0x10); out.extend_from_slice(&v.to_be_bytes()); }
             Field::U32(v)  => { out.push(0x11); out.extend_from_slice(&v.to_be_bytes()); }
+            // A zero-length binary is left out of the body (its type stays in
+            // the header), as the players write it.
+            Field::Blob(b) if b.is_empty() => {}
             Field::Blob(b) => { out.push(0x14); out.extend_from_slice(&(b.len() as u32).to_be_bytes()); out.extend_from_slice(b); }
             Field::Str(s)  => {
                 let units: Vec<u16> = s.encode_utf16().collect();
@@ -167,9 +177,17 @@ impl Message {
         let txid = Field::read(r)?.as_u32();
         let kind = Field::read(r)?.as_u32() as u16;
         let argc = Field::read(r)?.as_u32() as usize;
-        let _tags = Field::read(r)?;
-        let mut args = Vec::with_capacity(argc);
-        for _ in 0..argc { args.push(Field::read(r)?); }
+        let tags = match Field::read(r)? { Field::Blob(b) => b, _ => Vec::new() };
+        let mut args: Vec<Field> = Vec::with_capacity(argc);
+        for i in 0..argc {
+            // A binary whose length argument (the one before it) is 0 is not
+            // in the body at all: a player's "no data" reply.
+            if tags.get(i) == Some(&0x03) && args.last().map(|a| a.as_u32()) == Some(0) {
+                args.push(Field::Blob(Vec::new()));
+                continue;
+            }
+            args.push(Field::read(r)?);
+        }
         Ok(Message { txid, kind, args })
     }
 }
