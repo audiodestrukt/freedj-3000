@@ -1,7 +1,11 @@
-Plays nicely with CDJ-3000s and rekordbox, and analyses your tracks more like rekordbox does.
+Loads like a CDJ, looks like a CDJ-3000, and plays nicely with CDJ-3000s, rekordbox and lighting.
 
-PRO DJ LINK: a CDJ-3000 on the same network now lists OpenDeck's music in SOURCE, browses it by artist, album, track, key, playlist, history and matching, and loads and plays it with OpenDeck's beat grid, cues and colour waveforms. rekordbox shows OpenDeck as a player. PLAYER No. AUTO picks a free player number by itself, like a CDJ.
+INSTANT LOAD: a track is playable almost the moment you load it. The deck starts as soon as the audio around the cue is ready and the rest loads while it plays, so long tracks no longer keep you waiting.
+
+CDJ-3000 SCREEN: the CDJ-3000 screen and keys are now the default on the iPad (MENU > SCREEN switches back to the XDJ-1000MK2). BROWSE remembers where you were in each source, and BACK returns to the folder you came from.
+
+PRO DJ LINK: a CDJ-3000 on the same network lists OpenDeck's music in SOURCE, browses it by artist, album, track, key, playlist, history and matching, and loads and plays it with OpenDeck's beat grid, cues and colour waveforms. rekordbox shows OpenDeck as a player. The track you are playing shares its beat grid, waveforms and phrases straight away, so other players and Pro DJ Link lighting controllers can follow it. PLAYER No. AUTO picks a free player number by itself, starting at 4.
 
 ANALYSIS: tracks without a key tag get a detected key, named as rekordbox names it. Beat grids land on the beat and BPMs match rekordbox's closely. OpenDeck also marks phrases (intro, verse, chorus, outro), which a CDJ-3000 can show as coloured bands on the waveform.
 
-FIXES: Apple Lossless (ALAC) and mono tracks load. MP3s were 24 ms off from rekordbox and the players; they now line up. Big folders on a linked player are no longer cut short.
+FIXES: Apple Lossless (ALAC) and mono tracks load. MP3s were 24 ms off from rekordbox and the players; they now line up. Big folders on a linked player are no longer cut short. No more brief freeze after loading a track for the first time.

@@ -4,6 +4,68 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.10] — 2026-11-12
+
+### Changed
+- **The Mac and Windows start with the full deck**: jog, every key and the
+  tempo fader around the screen, as on the iPad (`--screen-only` for the
+  screen alone; Linux keeps screen-only, `--faceplate` for the deck). The
+  CDJ-3000 deck opens at its own aspect (no side bands), and a first window
+  taller than the screen is scaled down to fit it.
+- **PLAYER No. AUTO tries 4, 5, 6, 3, 2, 1**, the same on every platform:
+  OpenDeck starts at 4, above the players a DJ numbers from 1, goes up while
+  4 is taken, then down. It used to try the platform's own default (1 on the
+  desktop, 3 on an iPad, 4 on an iPhone), then the lowest free number.
+- **BROWSE remembers where you were.** Each source (the home folder, each
+  stick) keeps its own place, folder and highlighted row: going to another
+  source and back, or relaunching, returns there (saved by name in
+  `browse.json`, so it survives a rescan or a re-read export). BACK lands on
+  the folder it came out of instead of the top of the list. The USB / BROWSE
+  key returns to the source browsed last; a stick mounted since no longer
+  takes it over (pick the stick from SOURCE, or its row in the list).
+- **Tracks are playable almost at once, as on a CDJ.** A load used to
+  decode the whole file, resample it, build its waveform and detect its grid
+  before the deck could play. Now the deck is playable once the audio four
+  seconds past the cue is decoded, and the rest streams in behind playback:
+  an 8.8-minute MP3 is playable in 19 ms (fully in after 0.9 s) on a desktop,
+  where the deck used to wait for all of it. The full length shows at once,
+  and the overview fills in as the track decodes. A grid we detect ourselves
+  (no rekordbox data) arrives once the whole track is in.
+- **The CDJ-3000 screen is the default** on the desktop, iPad, Android
+  tablets and the Pi. An install still on the old default (XDJ-1000MK2)
+  moves to it once; MENU → SCREEN switches back, and stays switched.
+  Phones keep the XDJ-1000MK2 layout (the CDJ-3000 screen has no phone
+  layout yet).
+
+### Fixed
+- **A 120–150 ms freeze after loading a track for the first time.** Key
+  detection held a lock the screen needed for its whole pass over the track,
+  so the first load of any file without a cached analysis froze the UI for
+  about a tenth of a second (longer on slow devices).
+- **Loading on slow CPUs (cdj3k-emu, Pi Zero).** A track took about a
+  minute to load in the emulator, and each further press of LOAD started
+  another full decode alongside it, so a few presses looked like loading
+  did nothing. LOAD on the track already loading is now ignored, a newer
+  LOAD stops the older one at its next stage, and load-time resampling
+  (48 to 44.1 kHz) uses an FFT resampler, 3x faster than the 256-tap sinc
+  (0.20 s vs 0.59 s for 200 s of audio on a desktop). The log times each
+  load stage (`load: decoded / resampled / waveform in … ms`).
+- **The playing track's analysis reaches the network at once.** A peer
+  that looks up the track our status names (another player's LINK INFO, a
+  Beat Link-style lighting controller following the deck) got no grid,
+  waveform or phrases until the library's background analysis reached the
+  file, and never for a file outside the served folder (a USB stick, a
+  Files-app pick, the iOS demo track): those were reported as track 0.
+  Every local load now hands the deck's own analysis to the dbserver; a
+  file outside the folder gets an unlisted row under its own id (answers
+  by id, in no menu), and with no music folder at all a dbserver starts
+  for it. The served beat grid is the one the deck plays to: a hand-
+  adjusted grid and every GRID ADJUST edit reach peers at once, and the
+  library's background analysis no longer overwrites a row the deck
+  already filled.
+
+## [0.3.9] — 2026-11-12
+
 ### Added
 - **OpenDeck as cdj3k-emu firmware (emulator UPD).** `deploy/cdj3000/emu/`
   builds a small Debian arm64 rootfs and `tools/upd/updpack.py` packs it,
@@ -66,63 +128,7 @@ All notable changes to this project will be documented in this file.
   assignment (DJM) is not supported yet.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
-### Changed
-- **The Mac and Windows start with the full deck**: jog, every key and the
-  tempo fader around the screen, as on the iPad (`--screen-only` for the
-  screen alone; Linux keeps screen-only, `--faceplate` for the deck). The
-  CDJ-3000 deck opens at its own aspect (no side bands), and a first window
-  taller than the screen is scaled down to fit it.
-- **PLAYER No. AUTO tries 4, 5, 6, 3, 2, 1**, the same on every platform:
-  OpenDeck starts at 4, above the players a DJ numbers from 1, goes up while
-  4 is taken, then down. It used to try the platform's own default (1 on the
-  desktop, 3 on an iPad, 4 on an iPhone), then the lowest free number.
-- **BROWSE remembers where you were.** Each source (the home folder, each
-  stick) keeps its own place, folder and highlighted row: going to another
-  source and back, or relaunching, returns there (saved by name in
-  `browse.json`, so it survives a rescan or a re-read export). BACK lands on
-  the folder it came out of instead of the top of the list. The USB / BROWSE
-  key returns to the source browsed last; a stick mounted since no longer
-  takes it over (pick the stick from SOURCE, or its row in the list).
-- **Tracks are playable almost at once, as on a CDJ.** A load used to
-  decode the whole file, resample it, build its waveform and detect its grid
-  before the deck could play. Now the deck is playable once the audio four
-  seconds past the cue is decoded, and the rest streams in behind playback:
-  an 8.8-minute MP3 is playable in 19 ms (fully in after 0.9 s) on a desktop,
-  where the deck used to wait for all of it. The full length shows at once,
-  and the overview fills in as the track decodes. A grid we detect ourselves
-  (no rekordbox data) arrives once the whole track is in.
-- **The CDJ-3000 screen is the default** on the desktop, iPad, Android
-  tablets and the Pi. An install still on the old default (XDJ-1000MK2)
-  moves to it once; MENU → SCREEN switches back, and stays switched.
-  Phones keep the XDJ-1000MK2 layout (the CDJ-3000 screen has no phone
-  layout yet).
-
 ### Fixed
-- **A 120–150 ms freeze after loading a track for the first time.** Key
-  detection held a lock the screen needed for its whole pass over the track,
-  so the first load of any file without a cached analysis froze the UI for
-  about a tenth of a second (longer on slow devices).
-- **Loading on slow CPUs (cdj3k-emu, Pi Zero).** A track took about a
-  minute to load in the emulator, and each further press of LOAD started
-  another full decode alongside it, so a few presses looked like loading
-  did nothing. LOAD on the track already loading is now ignored, a newer
-  LOAD stops the older one at its next stage, and load-time resampling
-  (48 to 44.1 kHz) uses an FFT resampler, 3x faster than the 256-tap sinc
-  (0.20 s vs 0.59 s for 200 s of audio on a desktop). The log times each
-  load stage (`load: decoded / resampled / waveform in … ms`).
-- **The playing track's analysis reaches the network at once.** A peer
-  that looks up the track our status names (another player's LINK INFO, a
-  Beat Link-style lighting controller following the deck) got no grid,
-  waveform or phrases until the library's background analysis reached the
-  file, and never for a file outside the served folder (a USB stick, a
-  Files-app pick, the iOS demo track): those were reported as track 0.
-  Every local load now hands the deck's own analysis to the dbserver; a
-  file outside the folder gets an unlisted row under its own id (answers
-  by id, in no menu), and with no music folder at all a dbserver starts
-  for it. The served beat grid is the one the deck plays to: a hand-
-  adjusted grid and every GRID ADJUST edit reach peers at once, and the
-  library's background analysis no longer overwrites a row the deck
-  already filled.
 - **A CDJ-3000 now lists OpenDeck's music in SOURCE** ("USB LINK2:
   OPENDECK"). Five things stopped it, found against an emulated CDJ-3000:
   our NFS export named no network (a player reads that as "not for you"),
