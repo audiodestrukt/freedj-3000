@@ -52,6 +52,10 @@ pub enum UiEvent {
     /// Open (true) or close BROWSE outright, for surfaces that report BROWSE
     /// as a level (a CDJ-3000 over lanhid) rather than a toggling key.
     ShowBrowse(bool),
+    /// A CDJ-3000 panel key went down or up, by cdj3k-emu's name for it
+    /// (`"PLAY"`, `"HOT_C"`, `"SEARCH_NEXT"`…).  From the deck's own sub-CPU
+    /// (`surface::subucom`); `DeckApp` gives it the faceplate's behaviour.
+    PanelKey { key: &'static str, pressed: bool },
     /// SEARCH: open it, or edit the text (the CDJ-3000's on-screen keyboard,
     /// or typing on a computer keyboard).
     Search(SearchEdit),

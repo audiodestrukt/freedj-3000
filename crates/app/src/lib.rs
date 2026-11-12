@@ -258,6 +258,16 @@ impl Host {
     }
 }
 
+/// A CDJ-3000 panel key being held (see `DeckApp::panel_key`).
+struct PanelHeld {
+    key: &'static str,
+    since: Instant,
+    /// Its press returned a release to send when it comes up (CUE, a pad).
+    release: bool,
+    /// Where the playhead was at the press, for SEARCH scanning.
+    from: f64,
+}
+
 struct DeckApp {
     // Provided before event loop starts.
     path:         PathBuf,
@@ -381,6 +391,8 @@ struct DeckApp {
     /// Dev script: buttons held (`hold=`), and the lamp report / screenshot
     /// due this frame (`lamps=`, `shot=`).
     script_held: Vec<String>,
+    /// CDJ-3000 panel keys held down on the sub-CPU (`surface::subucom`).
+    panel_held: Vec<PanelHeld>,
     /// A pop-up message and when it goes (the CDJ-3000 screen's notices).
     notice: Option<(String, Instant)>,
     /// Where the loaded track parked its cue on load (the auto cue): TRACK
@@ -697,6 +709,7 @@ impl DeckApp {
             slip_anchor:       None,
             exit_after_capture: false,
             script_held: Vec::new(),
+            panel_held: Vec::new(),
             notice: None,
             load_cue: cue_point,
             script_lamps: None,
@@ -1301,6 +1314,7 @@ impl DeckApp {
                 self.browser.open_rb_category(i);
                 self.screen_mode = ScreenMode::Browse;
             }
+            Event::Ui(UiEvent::PanelKey { key, pressed }) => self.panel_key(key, pressed),
             Event::Ui(UiEvent::ShowBrowse(on)) => {
                 if let Some(m) = nav::follow_browse_level(self.screen_mode, on) {
                     if m == ScreenMode::Browse { self.browser.refresh(); }
@@ -1655,17 +1669,7 @@ impl DeckApp {
                     }
                 }
                 A::Hold(b) => { if !self.script_held.contains(&b) { self.script_held.push(b); } }
-                A::Release(b) => {
-                    self.script_held.retain(|h| *h != b);
-                    match b.as_str() {
-                        "CUE" => self.apply(Event::Deck(ControlEvent::Cue { pressed: false })),
-                        _ if b.starts_with("HOT_") => {
-                            let slot = b.as_bytes()[4].wrapping_sub(b'A');
-                            self.apply(Event::Deck(ControlEvent::HotCueRelease { slot }));
-                        }
-                        _ => {}
-                    }
-                }
+                A::Release(b) => self.script_release(&b),
                 A::Rotary(n) => self.apply(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: n })),
                 A::Lamps(p) => self.script_lamps = Some(p),
                 A::Shot(p) => self.script_shot = Some(p),
@@ -1730,6 +1734,57 @@ impl DeckApp {
             }
         }
         None
+    }
+
+    /// The other edge of a [`Self::script_press`] that returned a release.
+    fn script_release(&mut self, b: &str) {
+        self.script_held.retain(|h| h != b);
+        match b {
+            "CUE" => self.apply(Event::Deck(ControlEvent::Cue { pressed: false })),
+            _ if b.starts_with("HOT_") => {
+                let slot = b.as_bytes()[4].wrapping_sub(b'A');
+                self.apply(Event::Deck(ControlEvent::HotCueRelease { slot }));
+            }
+            _ => {}
+        }
+    }
+
+    /// A key on the CDJ-3000's own panel (its sub-CPU), with real edges.
+    /// Same behaviour as the faceplate and the dev script: most keys act on
+    /// the press; MENU and TIME MODE wait for the release to tell a tap from
+    /// a long press; SEARCH ◀◀ / ▶▶ scan while held (`panel_scan`).
+    fn panel_key(&mut self, key: &'static str, pressed: bool) {
+        use cdjface::Key;
+        let k = Key::from_emu_name(key);
+        if pressed {
+            if self.panel_held.iter().any(|h| h.key == key) { return; }
+            let deferred = matches!(k, Some(Key::SearchPrev | Key::SearchNext)) || k.and_then(|k| k.long()).is_some();
+            let release = if deferred { false } else { self.script_press(key, 0).is_some() };
+            self.panel_held.push(PanelHeld { key, since: Instant::now(), release, from: self.smoothed_pos });
+            return;
+        }
+        let Some(i) = self.panel_held.iter().position(|h| h.key == key) else { return };
+        let h = self.panel_held.remove(i);
+        match k {
+            Some(Key::SearchPrev | Key::SearchNext) => {}
+            Some(k) if k.long().is_some() => { self.script_press(key, h.since.elapsed().as_millis() as u32); }
+            _ if h.release => self.script_release(key),
+            _ => {}
+        }
+    }
+
+    /// SEARCH ◀◀ / ▶▶ held on the panel: move the playhead as far as the
+    /// faceplate's scan would have by now, from where the press began.
+    fn panel_scan(&mut self) {
+        let total = self.audio.len().max(1) as f64;
+        let per_sec = self.audio.sample_rate as f64 * self.audio.channels as f64;
+        let scans: Vec<f64> = self.panel_held.iter().filter_map(|h| {
+            let dir = match h.key { "SEARCH_NEXT" => 1.0, "SEARCH_PREV" => -1.0, _ => return None };
+            Some((h.from + dir * cdjface::scan_distance(h.since.elapsed().as_secs_f64()) * per_sec) / total)
+        }).collect();
+        for at in scans {
+            self.apply(Event::Deck(ControlEvent::NeedleSearch { position: at.clamp(0.0, 1.0) as f32 }));
+        }
     }
 
     /// Show a pop-up on the CDJ-3000 screen for three seconds.
@@ -2659,6 +2714,9 @@ impl DeckApp {
             ScreenMode::Source   => screen::ScreenView::Source(&self.browser, self.source_cursor, self.loaded.as_ref()),
             ScreenMode::History  => screen::ScreenView::History(&self.history, self.history_cursor),
         };
+        if self.indicators.panel.active() {
+            self.indicators.panel.publish(surface::subucom::mosi_frame(&snap, &view, self.transport.cued, surface::blink_phase()));
+        }
         if let Some(path) = self.script_lamps.take() {
             let report = cdjface::lamp_report(&snap, &view, false);
             if let Err(e) = std::fs::write(&path, report) { log::warn!("script: lamps {path}: {e}"); }
@@ -2693,6 +2751,7 @@ impl DeckApp {
         for ev in pending {
             self.apply(ev);
         }
+        if !self.panel_held.is_empty() { self.panel_scan(); }
         self.poll_fetch();
         // The track given at launch never went through a LOAD: look for its
         // stems once, on the first frame.

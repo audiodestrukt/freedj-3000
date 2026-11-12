@@ -64,6 +64,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | USB MIDI controllers mapped in `controllers.toml` with LED feedback (DJ2Go preset) | ✅ | D, Pi (not yet iOS / Android) |
 | PCF8574 I2C button boards | 🧪 built and unit-tested, no board yet | Pi |
 | A CDJ-3000 as OpenDeck's control surface and screen (HID over LINK, Control Mode) | 🧪 emulator only | D |
+| The CDJ-3000's own panel over its sub-CPU SPI device (`OPENDECK_SUBUCOM`): keys, jog, fader, rotary, LEDs | 🧪 unit-tested, not yet run in the emulator | Linux |
 | ADK-1000 hardware panel (RP2350 hub) | 📋 PCB routed, not made | — |
 
 ## Pro DJ Link

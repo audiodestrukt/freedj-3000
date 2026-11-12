@@ -18,6 +18,7 @@ pub mod i2c;
 pub mod lanhid;
 pub mod map;
 pub mod midi;
+pub mod subucom;
 
 use crate::input::Event;
 use config::{Deck, Indicator, SurfaceFile};
@@ -39,6 +40,8 @@ pub struct Indicators {
     bits: AtomicU32,
     /// Richer state for a CDJ in Control Mode: its own screen mirrors the deck.
     pub cdj: lanhid::Feed,
+    /// The CDJ-3000 sub-CPU's LED frame, when that panel is attached.
+    pub panel: subucom::Panel,
 }
 
 pub mod bit {
@@ -138,6 +141,8 @@ pub fn default_path() -> PathBuf { crate::taglist::app_data_dir().join("controll
 pub fn start(file: SurfaceFile, deck: Deck, tx: Sender<Event>, ind: Arc<Indicators>) {
     // A CDJ/XDJ in CONTROL MODE over HID-via-LINK, if OPENDECK_CDJ_HID is set.
     lanhid::spawn_from_env(tx.clone(), Arc::clone(&ind));
+    // The CDJ-3000's own panel over its sub-CPU SPI device, if OPENDECK_SUBUCOM is set.
+    subucom::spawn_from_env(tx.clone(), Arc::clone(&ind));
 
     let mut midis = Vec::new();
     for s in file.surface {

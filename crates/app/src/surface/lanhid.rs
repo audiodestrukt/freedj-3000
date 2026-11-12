@@ -62,6 +62,13 @@ impl JogScaler {
         JogScaler { factor: canon_per_rev / CDJ_JOG_TICKS_PER_REV, carry: 0.0 }
     }
 
+    /// A scaler for a jog that counts `ticks_per_rev` per platter turn, with
+    /// the CDJ feel (a turn scrubs `CDJ_JOG_REV_SECONDS`).
+    pub fn per_rev(ticks_per_rev: f64) -> Self {
+        let canon_per_rev = CDJ_JOG_REV_SECONDS / JOG_SECS_PER_TICK;
+        JogScaler { factor: canon_per_rev / ticks_per_rev, carry: 0.0 }
+    }
+
     /// Feed native ticks; return whole canonical ticks, keeping the remainder.
     pub fn step(&mut self, native: i32) -> i32 {
         let v = self.carry + native as f64 * self.factor;

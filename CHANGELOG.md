@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **The CDJ-3000's panel as a control surface.** With
+  `OPENDECK_SUBUCOM=/dev/subucom_spi1.0`, OpenDeck reads the CDJ-3000's
+  sub-CPU directly, as the deck's own player does: every key, the jog (turn
+  and touch), the tempo fader and the browse rotary drive the deck, and the
+  key and pad LEDs follow it. It is the same device on a real deck and in
+  cdj3k-emu, so OpenDeck running as the emulator's guest gets the drawn
+  panel. Keys behave as on the on-screen CDJ-3000 faceplate. Unit-tested on
+  synthetic frames; not yet run on the device. LCD touch is next.
 - **Colour waveforms for other players.** OpenDeck's analysis now also
   makes the waveforms newer players draw: the CDJ-3000's 3-band preview and
   detail (PWV6 / PWV7) and the nexus 2 RGB preview and detail (PWV4 /

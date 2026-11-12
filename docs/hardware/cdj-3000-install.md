@@ -77,8 +77,9 @@ rustup target add aarch64-unknown-linux-gnu
 cargo zigbuild --release --target aarch64-unknown-linux-gnu.2.17 -p opendeck-app --features deck-cdj3000
 ```
 
-`--features deck-cdj3000` (to be added) turns on the sub-CPU adapter and the
-1280×720 screen profile, and turns off the desktop chrome. Check the result
+The sub-CPU adapter is in every Linux build (`crates/app/src/surface/subucom.rs`)
+and switches on with `OPENDECK_SUBUCOM`. `--features deck-cdj3000` (to be
+added) sets the 1280×720 screen profile, and turns off the desktop chrome. Check the result
 before it goes anywhere near a deck:
 
 ```sh
@@ -119,6 +120,14 @@ published by the cdj3k-emu project (`docs/subucom.md` there): buttons,
 direction rocker, rotary encoder, LCD touch, tempo slider, vinyl-speed
 rotary, jog position/velocity/touch, capacitive sensors, power state; and
 single-bit, step and RGB-pad LEDs the other way. CRC-16/X-25 on both.
+
+Built (2026-11-11), unit-tested on synthetic frames, not yet run against the
+device: every key (by cdj3k-emu's names, through the same CDJ-3000 key logic
+as the on-screen faceplate: long press, SEARCH scanning while held,
+CALL/DELETE + pad), jog turn and touch, tempo fader, browse rotary, and the
+lamps the faceplate already models (screen keys, SLIP / QUANTIZE, sync,
+master, loop and jump keys, PLAY / CUE, jog mode, pads). Not yet: LCD touch,
+the direction rocker, VINYL SPEED ADJUST, the jog ring's colour.
 
 ## 2. Dry run in the emulator
 
