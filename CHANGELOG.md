@@ -83,7 +83,10 @@ All notable changes to this project will be documented in this file.
   Every local load now hands the deck's own analysis to the dbserver; a
   file outside the folder gets an unlisted row under its own id (answers
   by id, in no menu), and with no music folder at all a dbserver starts
-  for it.
+  for it. The served beat grid is the one the deck plays to: a hand-
+  adjusted grid and every GRID ADJUST edit reach peers at once, and the
+  library's background analysis no longer overwrites a row the deck
+  already filled.
 - **A CDJ-3000 now lists OpenDeck's music in SOURCE** ("USB LINK2:
   OPENDECK"). Five things stopped it, found against an emulated CDJ-3000:
   our NFS export named no network (a player reads that as "not for you"),

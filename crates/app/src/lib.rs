@@ -135,15 +135,34 @@ fn serve_loaded(link: &Arc<prodj::LinkState>, path: &std::path::Path, a: &opende
 /// Update a served row with a later analysis (the key, once detected), if
 /// the track is served.
 fn refresh_served(link: &prodj::LinkState, path: &std::path::Path, a: &opendeck_mediaserver::Analysis) {
+    update_served(link, path, |t| {
+        let unlisted = t.unlisted;
+        // The key thread's analysis carries the analysed grid; the deck's
+        // own (hand-adjusted) grid, already served, stays.
+        let (beats, bpm) = (std::mem::take(&mut t.beats), t.bpm);
+        a.apply(t);
+        if !beats.is_empty() { t.beats = beats; t.bpm = bpm; }
+        if unlisted { t.has_art = false; }
+    });
+}
+
+/// Change the served row of a local file, if it is served.
+fn update_served(link: &prodj::LinkState, path: &std::path::Path, f: impl FnOnce(&mut opendeck_dbserver::server::Track)) {
     let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let Some(id) = link.served.lock().ok().and_then(|m| m.get(&key).copied()) else { return };
     let Some(lib) = link.library.lock().ok().and_then(|l| l.clone()) else { return };
     let Ok(mut lib) = lib.write() else { return };
-    if let Some(t) = lib.track_mut(id) {
-        let unlisted = t.unlisted;
-        a.apply(t);
-        if unlisted { t.has_art = false; }
-    }
+    if let Some(t) = lib.track_mut(id) { f(t); }
+}
+
+/// The beat grid a peer reads for the loaded track: the one the deck plays
+/// to (hand-adjusted, GRID ADJUST), as the beat packets count it.
+fn serve_grid(link: &prodj::LinkState, path: &std::path::Path, grid: Option<&BeatGrid>, sr: u32, frames: u64) {
+    let (beats, bpm) = match grid {
+        Some(g) => (opendeck_mediaserver::grid_beats(g.anchor_sample, g.bpm, g.downbeat_offset, sr, frames), g.bpm as f32),
+        None => (Vec::new(), 0.0),
+    };
+    update_served(link, path, |t| { t.beats = beats; t.bpm = bpm; });
 }
 
 /// The library our dbserver serves; started empty, dbserver only, when no
@@ -266,9 +285,20 @@ mod track_ref_tests {
         // Reloaded: the same row, not a second one; a later key lands in it.
         super::serve_loaded(&link, &outside, &a);
         super::refresh_served(&link, &outside, &opendeck_mediaserver::Analysis { key: "Am".into(), ..a.clone() });
+        {
+            let l = lib.read().unwrap();
+            assert_eq!(l.tracks.len(), 2);
+            assert_eq!(l.track(id).unwrap().key, "Am");
+        }
+        // GRID ADJUST: the served grid is the one the deck plays to, at
+        // 1 kHz here (a beat every 500 frames from 100), and a later key
+        // refresh does not put the analysed grid back.
+        let g = opendeck_types::BeatGrid::new_constant(100, 120.0);
+        super::serve_grid(&link, &outside, Some(&g), 1000, 2000);
+        super::refresh_served(&link, &outside, &a);
         let l = lib.read().unwrap();
-        assert_eq!(l.tracks.len(), 2);
-        assert_eq!(l.track(id).unwrap().key, "Am");
+        let t = l.track(id).unwrap();
+        assert_eq!((t.bpm, t.beats.iter().map(|b| b.2).collect::<Vec<_>>()), (120.0, vec![100, 600, 1100, 1600]));
     }
 }
 
@@ -1375,6 +1405,7 @@ impl DeckApp {
                         self.beat_grid = self.grid_orig.clone();
                         self.grids.remove(&self.path.to_string_lossy());
                         self.link_grid.store(Arc::new(self.beat_grid.clone()));
+                        self.serve_deck_grid();
                         log::info!("grid: reset to analysed");
                     }
                     ShiftSync => {
@@ -1572,10 +1603,18 @@ impl DeckApp {
     // ── Loop helpers ─────────────────────────────────────────────────────────
 
     /// Interleaved samples per beat from the beat grid; None without a grid.
+    /// Serve the grid the deck plays to for a local file (see [`serve_grid`]).
+    fn serve_deck_grid(&self) {
+        // Only a served local file has a row (`served` is keyed by local path).
+        let frames = self.audio.len() as u64 / self.audio.channels.max(1) as u64;
+        serve_grid(&self.link, &self.path, self.beat_grid.as_ref(), self.audio.sample_rate, frames);
+    }
+
     /// After a GRID ADJUST edit: the Link sender follows the new grid, and it
     /// is remembered for this track.
     fn grid_changed(&mut self) {
         self.link_grid.store(Arc::new(self.beat_grid.clone()));
+        self.serve_deck_grid();
         if let Some(g) = &self.beat_grid {
             self.grids.set(&self.path.to_string_lossy(), g);
             log::info!("grid: anchor {} frames, downbeat offset {}", g.anchor_sample, g.downbeat_offset);
@@ -2288,6 +2327,7 @@ impl DeckApp {
         if let Some(a) = &p.link_analysis {
             let a = a.lock().map(|g| g.clone()).unwrap_or_default();
             serve_loaded(&self.link, &self.path, &a);
+            self.serve_deck_grid();
         }
         self.publish_track();
         log::info!(
@@ -3683,7 +3723,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let has_track = track.is_some();
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
     if has_track {
-        if let Some(a) = &startup_analysis { serve_loaded(&app.link, &app.path, a); }
+        if let Some(a) = &startup_analysis { serve_loaded(&app.link, &app.path, a); app.serve_deck_grid(); }
         app.publish_track();
     }
     // Park the startup track at its cue (AUTO CUE's first sound, or the

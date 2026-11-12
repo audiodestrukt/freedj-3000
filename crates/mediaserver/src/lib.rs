@@ -496,7 +496,9 @@ pub fn start_analysis(lib: SharedLibrary, files: Vec<(u32, PathBuf)>, cache_dir:
                     Err(e) => { failed += 1; log::warn!("media: [{id}] {}: {e:#}", path.display()); continue; }
                 },
             };
-            if let Ok(mut l) = lib.write() { if let Some(t) = l.track_mut(*id) { a.apply(t); } }
+            // A row the deck already filled (it loaded this file before the
+            // thread got here) keeps the deck's analysis and grid.
+            if let Ok(mut l) = lib.write() { if let Some(t) = l.track_mut(*id) { if t.beats.is_empty() && t.detail.is_empty() { a.apply(t); } } }
         }
         log::info!("media: library ready — {} tracks ({cached} cached, {fresh} analysed, {failed} failed) in {:.1}s", files.len(), t0.elapsed().as_secs_f32());
     })?;
