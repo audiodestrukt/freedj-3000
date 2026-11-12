@@ -1,11 +1,7 @@
-USB drives, stems, and a second screen with its own faceplate on iPad.
+Plays nicely with CDJ-3000s and rekordbox, and analyses your tracks more like rekordbox does.
 
-USB DRIVES: plug in a USB stick and pick it once from BROWSE → USB: ADD DRIVE…. A stick exported from rekordbox opens on its categories (artist, album, track, key, playlist, history, folder), with its cues and beat grids, and is remembered whenever it is plugged in again. Other players on Pro DJ Link can browse it too.
+PRO DJ LINK: a CDJ-3000 on the same network now lists OpenDeck's music in SOURCE, browses it by artist, album, track, key, playlist, history and matching, and loads and plays it with OpenDeck's beat grid, cues and colour waveforms. rekordbox shows OpenDeck as a player. PLAYER No. AUTO picks a free player number by itself, like a CDJ.
 
-STEMS: tracks prepared with OverCue Desktop's open stems format play with their drums, vocal and harmonics under your control. Turn it on in MENU → STEMS, load a prepared track, and mute or ride each part from the STEMS panel or the PERFORM pads.
+ANALYSIS: tracks without a key tag get a detected key, named as rekordbox names it. Beat grids land on the beat and BPMs match rekordbox's closely. OpenDeck also marks phrases (intro, verse, chorus, outro), which a CDJ-3000 can show as coloured bands on the waveform.
 
-A SECOND SCREEN: MENU → SCREEN offers a second player layout: its own playback screen with BEAT LOOP and BEAT JUMP panels, SOURCE and BROWSE screens with category browsing and a track table, SEARCH with an on-screen keyboard, LOAD PREVIOUS TRACK, and GRID ADJUST. On iPad it comes with its own full faceplate: eight hot cues, 4 and 8 beat loops, beat jump, track search, fast search, time mode, tempo range and reset. In this layout MENU opens the settings with a single tap.
-
-The jog wheel turns under your finger and follows a circular motion, and turning it while paused plays the track under the playhead. The tempo fader reaches its very ends. A phase meter shows your beats and bars against the master's.
-
-FIXES: CUE now starts right on the transient it was set on (the first instant of a kick was being lost after a cue). Loading a track from another player over Pro DJ Link no longer drops BROWSE to ALL TRACKS.
+FIXES: Apple Lossless (ALAC) and mono tracks load. MP3s were 24 ms off from rekordbox and the players; they now line up. Big folders on a linked player are no longer cut short.
