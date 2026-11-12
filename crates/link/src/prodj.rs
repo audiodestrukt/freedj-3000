@@ -24,6 +24,16 @@ pub const PORT_STATUS:    u16 = 50002;
 
 /// Packet type byte, at offset 0x0a in every packet.
 pub const PKT_ANNOUNCE:   u8 = 0x06;
+/// Device-number claim on PORT_ANNOUNCE, in the order a joining player sends
+/// them (each three times, ~300 ms apart): hello, stage 1, 2 and 3.  A device
+/// already holding the claimed number answers with a defense, unicast.
+/// Layouts per Deep Symmetry's protocol analysis ("startup") and Beat Link's
+/// `VirtualCdj`, which joins real CDJ / XDJ rigs this way.
+pub const PKT_HELLO:      u8 = 0x0a;
+pub const PKT_CLAIM1:     u8 = 0x00;
+pub const PKT_CLAIM2:     u8 = 0x02;
+pub const PKT_CLAIM3:     u8 = 0x04;
+pub const PKT_DEFENSE:    u8 = 0x08;
 /// Media query / response on port 50002 (same type bytes as the 50000 family,
 /// distinguished by port).
 pub const PKT_MEDIA_QUERY: u8 = 0x05;
@@ -437,6 +447,79 @@ impl ProDjLink {
         })
     }
 
+    /// A port-50000 packet: magic, type, name, `01 <structure>`, length.
+    fn claim_header(&self, kind: u8, structure: u8, len: usize) -> Vec<u8> {
+        let mut p = vec![0u8; len];
+        p[..10].copy_from_slice(MAGIC);
+        p[0x0a] = kind;
+        p[0x0c..0x20].copy_from_slice(&self.device_name);
+        p[0x20] = 0x01;
+        p[0x21] = structure;
+        p[0x22..0x24].copy_from_slice(&(len as u16).to_be_bytes());
+        p
+    }
+
+    /// "Coming online" (0x0a), sent three times before claiming.
+    pub fn build_hello(&self) -> Vec<u8> {
+        let mut p = self.claim_header(PKT_HELLO, 0x04, 0x26);
+        p[0x24] = 0x01;         // a player
+        p[0x25] = 0x40;
+        p
+    }
+
+    /// Claim stage 1 (0x00): packet `counter` 1–3 and our MAC.
+    pub fn build_claim1(&self, counter: u8, mac: [u8; 6]) -> Vec<u8> {
+        let mut p = self.claim_header(PKT_CLAIM1, 0x03, 0x2c);
+        p[0x24] = counter;
+        p[0x25] = 0x01;
+        p[0x26..0x2c].copy_from_slice(&mac);
+        p
+    }
+
+    /// Claim stage 2 (0x02): IP, MAC, the number we want and whether we
+    /// picked it ourselves (`auto`) or were set to it.
+    pub fn build_claim2(&self, counter: u8, ip: Ipv4Addr, mac: [u8; 6], number: u8, auto: bool) -> Vec<u8> {
+        let mut p = self.claim_header(PKT_CLAIM2, 0x03, 0x32);
+        p[0x24..0x28].copy_from_slice(&ip.octets());
+        p[0x28..0x2e].copy_from_slice(&mac);
+        p[0x2e] = number;
+        p[0x2f] = counter;
+        p[0x30] = 0x01;
+        p[0x31] = if auto { 0x01 } else { 0x02 };
+        p
+    }
+
+    /// Claim stage 3 (0x04): the number, final.
+    pub fn build_claim3(&self, counter: u8, number: u8) -> Vec<u8> {
+        let mut p = self.claim_header(PKT_CLAIM3, 0x03, 0x26);
+        p[0x24] = number;
+        p[0x25] = counter;
+        p
+    }
+
+    /// Defense (0x08): "`number` is mine, at `ip`", unicast to a claimant.
+    pub fn build_defense(&self, number: u8, ip: Ipv4Addr) -> Vec<u8> {
+        let mut p = self.claim_header(PKT_DEFENSE, 0x02, 0x29);
+        p[0x24] = number;
+        p[0x25..0x29].copy_from_slice(&ip.octets());
+        p
+    }
+
+    /// The number a stage-2 or stage-3 claim asks for.  A stage-2-typed
+    /// packet with byte 0x0b set is a request to a mixer, not a claim.
+    pub fn parse_claim(data: &[u8]) -> Option<u8> {
+        match Self::packet_type(data)? {
+            PKT_CLAIM2 if data.len() >= 0x32 && data[0x0b] == 0 => Some(data[0x2e]),
+            PKT_CLAIM3 if data.len() >= 0x26 && data[0x0b] == 0 => Some(data[0x24]),
+            _ => None,
+        }.filter(|n| *n != 0)
+    }
+
+    /// The number a defense says is taken.
+    pub fn parse_defense(data: &[u8]) -> Option<u8> {
+        (Self::packet_type(data)? == PKT_DEFENSE && data.len() >= 0x25).then(|| data[0x24]).filter(|n| *n != 0)
+    }
+
     /// Parse an announce / keep-alive: (player, ip).
     pub fn parse_announce(data: &[u8]) -> Option<(u8, Ipv4Addr)> {
         (Self::packet_type(data)? == PKT_ANNOUNCE && data.len() >= 0x30).then(|| {
@@ -680,6 +763,33 @@ mod tests {
         assert_eq!(b.beat_in_bar, 3);
         assert!((b.pitch - 1.02).abs() < 1e-4);
         assert_eq!(b.next_beat_ms, 462);   // 60_000 / 130
+    }
+
+    #[test]
+    fn claim_packets_have_spec_layout_and_parse() {
+        let me = ProDjLink::new(3);
+        let (ip, mac) = (Ipv4Addr::new(169, 254, 1, 2), [1, 2, 3, 4, 5, 6]);
+        let h = me.build_hello();
+        assert_eq!((h.len(), h[0x0a], h[0x21]), (0x26, PKT_HELLO, 0x04));
+        let c1 = me.build_claim1(2, mac);
+        assert_eq!((c1.len(), c1[0x0a], c1[0x24], &c1[0x26..0x2c]), (0x2c, PKT_CLAIM1, 2, &mac[..]));
+        let c2 = me.build_claim2(1, ip, mac, 3, true);
+        assert_eq!((c2.len(), c2[0x2e], c2[0x2f], c2[0x31]), (0x32, 3, 1, 0x01));
+        assert_eq!(&c2[0x24..0x28], &ip.octets());
+        assert_eq!(me.build_claim2(1, ip, mac, 3, false)[0x31], 0x02);
+        let c3 = me.build_claim3(3, 2);
+        assert_eq!((c3.len(), c3[0x24], c3[0x25]), (0x26, 2, 3));
+        assert_eq!(ProDjLink::parse_claim(&c2), Some(3));
+        assert_eq!(ProDjLink::parse_claim(&c3), Some(2));
+        assert_eq!(ProDjLink::parse_claim(&c1), None);           // stage 1 names no number
+        let mut to_mixer = c2.clone(); to_mixer[0x0b] = 1;
+        assert_eq!(ProDjLink::parse_claim(&to_mixer), None);
+        let d = me.build_defense(3, ip);
+        assert_eq!((d.len(), d[0x0a]), (0x29, PKT_DEFENSE));
+        assert_eq!(ProDjLink::parse_defense(&d), Some(3));
+        assert_eq!(ProDjLink::parse_defense(&c3), None);
+        // Every one is still a ProDJ Link packet the announce parser rejects.
+        for p in [&h, &c1, &c2, &c3, &d] { assert!(ProDjLink::parse_announce(p).is_none()); }
     }
 
     #[test]

@@ -593,7 +593,7 @@ impl Browser {
     fn connect_db(&mut self, ip: Ipv4Addr, slot: Slot) -> anyhow::Result<()> {
         if matches!(&self.db, Some((cur, _, s)) if *cur == ip && *s == slot) { return Ok(()); }
         // Servers answer requests from a real player number (1–4).
-        let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
+        let device = if (1..=4).contains(&self.link.player()) { self.link.player() } else { 1 };
         let c = DbClient::discover(ip, device)?;
         log::info!("LINK {ip}: dbserver session open ({slot:?})");
         self.db = Some((ip, c, slot));

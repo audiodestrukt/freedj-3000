@@ -65,8 +65,9 @@ pub struct Settings {
     pub quantize: bool,
     /// Tempo fader range as a fraction (0.16 = ±16 %).
     pub tempo_range: f32,
-    /// Pro DJ Link player number 1–4.  Read at launch (the sender bakes it
-    /// into its packets), so a change applies on the next start.
+    /// Pro DJ Link player number 1–6, or 0 for AUTO (claim a free one on
+    /// the network, as a CDJ set to AUTO does).  Read at launch, so a change
+    /// applies on the next start.
     pub player: u8,
     /// JOG MODE: true = VINYL (a drag while playing moves the playhead
     /// directly — the platter counts as always pressed, since a touch screen
@@ -96,11 +97,13 @@ pub struct Settings {
 }
 
 /// Seeding generation written by this build; see `Settings::seed`.
-const SEED: u8 = 1;
+/// 2: PLAYER No. AUTO arrived; a number still at the device's default
+/// (never changed by the user) becomes AUTO.
+const SEED: u8 = 2;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 1, jog_vinyl: true, perf_log: false, skin: Skin::Xdj1000Mk2, stems: false, seed: 0, phone: false }
+        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Xdj1000Mk2, stems: false, seed: 0, phone: false }
     }
 }
 
@@ -114,15 +117,19 @@ impl Settings {
     /// iPhone installed as 0.2.0 stops colliding with the iPad.
     pub fn load(default_player: u8) -> Self {
         let path = Self::path();
-        let fresh = || Self { player: default_player, seed: SEED, ..Self::default() };
+        let fresh = || Self { player: 0, seed: SEED, ..Self::default() };
         match std::fs::read(&path) {
             Ok(b) => match serde_json::from_slice::<Settings>(&b) {
                 Ok(mut s) => {
                     log::info!("settings: {:?} from {}", s, path.display());
                     if s.seed < SEED {
-                        if cfg!(target_os = "ios") && s.player == 3 && default_player != 3 {
+                        if s.seed < 1 && cfg!(target_os = "ios") && s.player == 3 && default_player != 3 {
                             log::info!("settings: PLAYER No. re-seeded {} → {default_player} for this device", s.player);
                             s.player = default_player;
+                        }
+                        if s.seed < 2 && s.player == default_player {
+                            log::info!("settings: PLAYER No. {} was the default; now AUTO", s.player);
+                            s.player = 0;
                         }
                         s.seed = SEED;
                         s.save();
@@ -167,7 +174,7 @@ impl Settings {
             Setting::AutoCueLevel => c.auto_cue_level_db = step(&AUTO_CUE_LEVELS, c.auto_cue_level_db, dir),
             Setting::Quantize     => c.quantize = !c.quantize,
             Setting::TempoRange   => c.tempo_range = step(&TEMPO_RANGES, c.tempo_range, dir),
-            Setting::Player       => c.player = step(&[1u8, 2, 3, 4], c.player, dir),
+            Setting::Player       => c.player = step(&[0u8, 1, 2, 3, 4, 5, 6], c.player, dir),
             Setting::Skin if c.phone => {}
             Setting::Skin         => c.skin = step(&[Skin::Xdj1000Mk2, Skin::Cdj3000], c.skin, dir),
             Setting::Stems        => c.stems = !c.stems,
@@ -182,6 +189,7 @@ impl Settings {
             Setting::AutoCueLevel => format!("{:.0} dB", self.auto_cue_level_db),
             Setting::Quantize     => if self.quantize { "ON".into() } else { "OFF".into() },
             Setting::TempoRange   => Self::range_label(self.tempo_range),
+            Setting::Player if self.player == 0 => "AUTO   (applies at next launch)".into(),
             Setting::Player       => format!("{}   (applies at next launch)", self.player),
             Setting::Skin if self.phone => format!("{}   (CDJ-3000: iPad only)", Skin::Xdj1000Mk2.label()),
             Setting::Skin         => self.skin.label().into(),
@@ -237,7 +245,11 @@ mod tests {
         let s = s.cycled(Setting::TempoRange, 1);  assert_eq!(s.tempo_range, 0.06);   // wraps
         let s = s.cycled(Setting::TempoRange, -1); assert_eq!(s.tempo_range, 1.00);   // and back
         let s = s.cycled(Setting::Quantize, 1);    assert!(!s.quantize);
-        let s = s.cycled(Setting::Player, -1);     assert_eq!(s.player, 4);
+        assert_eq!(s.player, 0);
+        assert!(s.value(Setting::Player).starts_with("AUTO"));
+        let s = s.cycled(Setting::Player, 1);      assert_eq!(s.player, 1);
+        let s = s.cycled(Setting::Player, -1);     assert_eq!(s.player, 0);      // back to AUTO
+        let s = s.cycled(Setting::Player, -1);     assert_eq!(s.player, 6);      // wraps
         let s = s.cycled(Setting::AutoCueLevel, 1); assert_eq!(s.auto_cue_level_db, -54.0);
         assert_eq!(Settings::range_label(1.0), "WIDE");
         assert_eq!(Settings::range_label(0.10), "±10");
@@ -254,7 +266,7 @@ mod tests {
         let s: Settings = serde_json::from_str(r#"{"quantize":false}"#).unwrap();
         assert!(!s.quantize);
         assert_eq!(s.tempo_range, 0.16);
-        assert_eq!(s.player, 1);
+        assert_eq!(s.player, 0);                                   // AUTO
         assert_eq!(s.skin, Skin::Xdj1000Mk2);
     }
 }

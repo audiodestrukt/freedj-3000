@@ -28,6 +28,42 @@ work in `crates/app/src/prodj.rs` / `crates/link/src/prodj.rs`.
 - The ADK-1000 is a drop-in **deck 3** next to CDJs 1–2, so the iOS default of
   **3** is the right choice; a mixed rig can only go 1–4 anyway.
 
+## PLAYER No. AUTO — how freedj picks its number
+
+PLAYER No. (MENU / UTILITY) is AUTO by default: freedj claims a free number
+the way a player set to AUTO does, so it can join a rig as deck 3 or 4
+without anyone setting it. Code: `claim_number` in `crates/app/src/prodj.rs`;
+packets in `crates/link/src/prodj.rs` (`build_hello`, `build_claim1..3`,
+`build_defense`).
+
+1. **Listen** for 3 s (players send a keep-alive every 1.5–2 s), so every
+   number in use is known, and pick the interface the players are on.
+2. **Pick**: the platform default if free (3 on an iPad, 4 on an iPhone, 1
+   on the desktop), else the lowest free of 1–4, then 5–6. Players 5 and 6
+   only work on a 6-player network (CDJ-3000s, no older players), so they
+   are used only when 1–4 are taken.
+3. **Claim**: hello ×3, then claim stages 1, 2 and 3, three packets each,
+   300 ms apart (stage 2 carries the auto flag). If a device defends the
+   number (0x08), or starts announcing it, try the next one.
+4. **Defend**: once ours, any stage-2/3 claim for our number gets a 0x08
+   defense, unicast as the players do and also broadcast (on one machine
+   several programs share UDP 50000 and a unicast reaches only one).
+5. **Collisions after start-up**: a device announcing our number that never
+   claimed it (or claimed at the same instant) makes an AUTO deck claim
+   again; when two OpenDecks collide, only the one with the higher address
+   moves. A device we already defended against is in the wrong, and we keep
+   the number.
+
+A set number (1–6) is claimed with the "specific number" flag and kept even
+if defended, with a warning, as before. A saved number equal to the
+device's old default became AUTO on upgrade (settings seed 2); a number
+the user chose is kept. `OPENDECK_PLAYER=0` forces AUTO, `=N` a number.
+
+Tested with five instances on an isolated bridge (`docker0`): AUTO decks
+took 1, 2, 3 and 4 (two started at the same instant), and a deck set to 1
+was refused by the holder of 1. Not yet tried against real players; mixer
+channel assignment (DJM 0x01/0x03/0x05) is not implemented.
+
 ## Changing the XDJ PLAYER No. — TWO conditions must both be met
 
 Changing a CDJ/XDJ's **PLAYER No.** (Utility → hold MENU >1s) is blocked unless

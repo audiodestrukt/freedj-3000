@@ -1801,7 +1801,7 @@ impl DeckApp {
     fn load_track_db(&mut self, ip: std::net::Ipv4Addr, id: u32, title: &str, rekordbox: bool, sd: bool) -> Result<()> {
         use opendeck_dbserver::{parse_beat_grid, Client, Slot};
         let slot = if rekordbox { Slot::Collection } else if sd { Slot::Sd } else { Slot::Usb };
-        let device = if (1..=4).contains(&self.link.player) { self.link.player } else { 1 };
+        let device = if (1..=4).contains(&self.link.player()) { self.link.player() } else { 1 };
         let title = title.to_string();
         let prep = self.prep();
         // Ask on the browser's session when it is open to this player: a
@@ -2464,7 +2464,7 @@ impl DeckApp {
             } else {
                 self.link.master_player.load(Ordering::Relaxed) as u8
             },
-            player: self.link.player,
+            player: self.link.player(),
             cue_point: self.transport.cue_point,
             hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
             loop_active: self.audio.loop_active.load(Ordering::Relaxed),
@@ -2673,7 +2673,7 @@ impl DeckApp {
             } else {
                 self.link.master_player.load(Ordering::Relaxed) as u8
             },
-            player: self.link.player,
+            player: self.link.player(),
             cue_point: self.transport.cue_point,
             hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
             loop_active: self.audio.loop_active.load(Ordering::Relaxed),
@@ -3237,7 +3237,11 @@ pub fn run(cfg: Config) -> Result<()> {
     // Dev / screenshots: OPENDECK_SKIN picks the skin for this run without
     // changing the saved choice (a MENU change still saves everything).
     if let Some(skin) = settings::Skin::from_env() { settings.skin = skin; }
-    let player       = cfg.player.unwrap_or(settings.player).clamp(1, 6);
+    // 0 = PLAYER No. AUTO: claim a free number on the network, trying the
+    // platform default first.
+    let player       = cfg.player.unwrap_or(settings.player);
+    let player_auto  = player == 0;
+    let player       = if player_auto { cfg.default_player } else { player }.clamp(1, 6);
     let deck_channel = cfg.deck_channel;
     let link_send    = cfg.link_send;
 
@@ -3306,14 +3310,15 @@ pub fn run(cfg: Config) -> Result<()> {
     let beat2_bib    = Arc::new(AtomicU32::new(0));
 
     // ── 4. Start ProDJ Link listener (optional — app runs fine without it) ────────
-    let link = prodj::LinkState::new(player);
+    let link = if player_auto { prodj::LinkState::auto(player) } else { prodj::LinkState::new(player) };
     // Serve our music folder to the other decks as a Link media source (dbserver
     // + NFS, like a CDJ with a stick in it).  OPENDECK_SERVE=0 disables; a port
     // we cannot bind (111 needs privilege on Linux) just logs and skips.
     if std::env::var("OPENDECK_SERVE").map(|v| v != "0").unwrap_or(true) {
         let serve_root = browse_root.clone().or_else(|| track.as_ref().and_then(|t| t.parent().map(|p| p.to_path_buf())));
         if let Some(root) = serve_root {
-            match start_media_server(&root, player) {
+            let l = Arc::clone(&link);
+            match start_media_server(&root, Arc::new(move || l.player())) {
                 Ok(n) => link.serve_tracks.store(n, Ordering::Relaxed),
                 Err(e) => log::warn!("media server not started: {e:#}"),
             }
@@ -3627,13 +3632,13 @@ fn link_cache_dir() -> std::path::PathBuf { taglist::app_data_dir().join("linkca
 /// browsing.  The library starts as file names; a background thread fills in
 /// tags, duration, tempo, grid and waveforms per track (cached in the app data
 /// dir, so only the first launch pays).  Returns the number of tracks served.
-fn start_media_server(root: &std::path::Path, player: u8) -> Result<u32> {
+fn start_media_server(root: &std::path::Path, player: opendeck_dbserver::server::DeviceNumber) -> Result<u32> {
     use opendeck_dbserver::server::Server as DbServer;
     use opendeck_nfs::server::NfsServer;
     let scanned = opendeck_mediaserver::scan(root, "OpenDeck")?;
     let n = scanned.files.len() as u32;
     let nfs = NfsServer::start(scanned.tree, "/C/", 111, 2049)?;
-    let db = DbServer::start(Arc::clone(&scanned.library), player, 0)?;
+    let db = DbServer::start_live(Arc::clone(&scanned.library), player, 0)?;
     log::info!("media server: {n} tracks under {} — nfs portmap {} nfsd {}, dbserver {}", root.display(), nfs.portmap, nfs.nfsd, db.db_port);
     opendeck_mediaserver::start_analysis(scanned.library, scanned.files, Some(link_cache_dir()))?;
     Ok(n)

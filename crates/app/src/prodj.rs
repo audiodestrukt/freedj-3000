@@ -24,7 +24,7 @@ use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr, UdpSocket},
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -41,7 +41,26 @@ const MEDIA_QUERY_EVERY: Duration = Duration::from_secs(5);
 /// Everything the Link threads and the UI share.  Written by the threads,
 /// read by the snapshot; `want_master` / `sync` are written by `DeckApp::apply`.
 pub struct LinkState {
-    pub player:        u8,
+    /// Our player number: the one we hold once claimed, the one being tried
+    /// while claiming.  Read it with `player()`.
+    player:            AtomicU8,
+    /// PLAYER No. AUTO: pick a free number at start-up, as a CDJ set to AUTO
+    /// does, and move to another if a device turns out to hold ours.
+    pub auto:          bool,
+    /// The number AUTO tries first when it is free (the platform's old
+    /// fixed default: "deck 3" on an iPad).
+    pub preferred:     u8,
+    /// The number claim has finished (no device defended it).
+    pub claimed:       AtomicBool,
+    /// A device defended this number against our claim (0 = none yet).
+    pub defended:      AtomicU8,
+    /// A device announced or defended the number we hold: claim again.
+    pub reclaim:       AtomicBool,
+    /// Our Link IP and the sender's port, so our own broadcasts can be told
+    /// from a peer's (two OpenDecks on one machine share the IP).
+    pub own_src:       Mutex<Option<(Ipv4Addr, u16)>>,
+    /// Our Link broadcast address (defenses go there as well as unicast).
+    pub own_bcast:     Mutex<Option<Ipv4Addr>>,
     /// We are the tempo master.
     pub master:        AtomicBool,
     /// SYNC engaged: follow the master's tempo and phase.
@@ -167,9 +186,24 @@ impl SyncPhase {
 }
 
 impl LinkState {
-    pub fn new(player: u8) -> Arc<Self> {
+    /// A fixed player number.
+    pub fn new(player: u8) -> Arc<Self> { Self::build(player, false) }
+
+    /// PLAYER No. AUTO, trying `preferred` first.
+    pub fn auto(preferred: u8) -> Arc<Self> { Self::build(preferred, true) }
+
+    pub fn player(&self) -> u8 { self.player.load(Ordering::Relaxed) }
+
+    fn build(player: u8, auto: bool) -> Arc<Self> {
         Arc::new(Self {
-            player,
+            player: AtomicU8::new(player),
+            auto,
+            preferred: player,
+            claimed: AtomicBool::new(false),
+            defended: AtomicU8::new(0),
+            reclaim: AtomicBool::new(false),
+            own_src: Mutex::new(None),
+            own_bcast: Mutex::new(None),
             master: AtomicBool::new(false),
             sync: AtomicBool::new(false),
             want_master: AtomicBool::new(false),
@@ -583,11 +617,81 @@ fn diag_packet(port: u16, addr: SocketAddr, data: &[u8]) {
 fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(PORT_ANNOUNCE)?;
     log::info!("ProDJ Link: listening for announces on port {PORT_ANNOUNCE}");
+    // Defenses go back to the claimant's port 50000 from a socket of our own.
+    let defend_sock = UdpSocket::bind("0.0.0.0:0").ok();
+    let defend_port = defend_sock.as_ref().and_then(|d| d.local_addr().ok()).map(|a| a.port());
+    // Who we have defended our number against: if one announces with it
+    // anyway, it is the one in the wrong, and we keep the number.
+    let mut defended_against: Vec<(Ipv4Addr, u16)> = Vec::new();
+    // Collisions already logged, once per device.
+    let mut warned: Vec<(Ipv4Addr, u16)> = Vec::new();
     spawn("prodj-rx-50000", PORT_ANNOUNCE, sock, move |data, addr| {
         log::trace!("ProDJ rx :50000 {} bytes from {addr} — {:02X?}", data.len(), data);
         diag_packet(50000, addr, data);
+        let from = match addr { SocketAddr::V4(v) => Some((*v.ip(), v.port())), _ => None };
+        let own_src = link.own_src.lock().ok().and_then(|g| *g);
+        // Our own broadcasts come back to us; a peer is anyone else.
+        if from.is_some() && from == own_src { return; }
+        if from.is_some_and(|f| Some(f.1) == defend_port && Some(f.0) == own_src.map(|o| o.0)) { return; }
+        let src = from.map(|f| f.0);
+        let own = own_src.map(|o| o.0);
+        let ours = link.player();
+        let holding = link.claimed.load(Ordering::Relaxed);
+        if let Some(n) = ProDjLink::parse_defense(data) {
+            if !holding && n == ours {
+                log::debug!("ProDJ Link: {addr} defends player {n}");
+                link.defended.store(n, Ordering::Relaxed);
+            } else if holding && n == ours {
+                if link.auto {
+                    log::warn!("ProDJ Link: {addr} says player {n} is its own; claiming a new number");
+                    link.reclaim.store(true, Ordering::Relaxed);
+                } else {
+                    log::warn!("ProDJ Link: {addr} says player {n} is its own; PLAYER No. is set to {n}, so keeping it");
+                }
+            }
+            return;
+        }
+        if let Some(n) = ProDjLink::parse_claim(data) {
+            if holding && n == ours {
+                if let (Some(ip), Some(ds), Some(to)) = (own, defend_sock.as_ref(), src) {
+                    if let Some(f) = from { if !defended_against.contains(&f) {
+                        defended_against.push(f);
+                        log::info!("ProDJ Link: {addr} claims player {n}, ours; defending");
+                    } }
+                    // Unicast, as the players do, and broadcast too: on one
+                    // machine several programs share port 50000 and a
+                    // unicast reaches only one of them.  Others ignore a
+                    // defense of a number they are not claiming.
+                    let pkt = ProDjLink::new(n).build_defense(n, ip);
+                    let _ = ds.send_to(&pkt, (to, PORT_ANNOUNCE));
+                    if let Some(b) = link.own_bcast.lock().ok().and_then(|g| *g) {
+                        let _ = ds.set_broadcast(true);
+                        let _ = ds.send_to(&pkt, (b, PORT_ANNOUNCE));
+                    }
+                }
+            }
+            return;
+        }
         if let Some((player, pkt_ip)) = ProDjLink::parse_announce(data) {
-            if player == link.player { return; }
+            let first = from.is_some_and(|f| !warned.contains(&f));
+            if player == ours && holding && first {
+                if let Some(f) = from { warned.push(f); }
+                // A device that never claimed (or ignored our defense) is
+                // using our number.  AUTO moves; a set number stays put.
+                // Two AUTO OpenDecks that finished claiming the same number
+                // at the same moment both see this; only the higher IP moves.
+                let they = from.unwrap_or((pkt_ip, 0));
+                if defended_against.contains(&they) {
+                    log::warn!("ProDJ Link: {addr} is announcing as player {player} although we hold it and told it so");
+                } else if link.auto && own_src.is_some_and(|me| me > they) {
+                    log::warn!("ProDJ Link: {addr} is also announcing as player {player}; claiming a new number");
+                    link.reclaim.store(true, Ordering::Relaxed);
+                } else if link.auto {
+                    log::info!("ProDJ Link: {addr} is also announcing as player {player}; keeping it (it should move)");
+                } else {
+                    log::warn!("ProDJ Link: {addr} is also announcing as player {player} (PLAYER No. is set to {player})");
+                }
+            }
             // Reach the peer where its packet came FROM: identical to the IP in
             // the packet on a LAN, and the only address that works when the
             // announce was unicast across a routed link (Tailscale).
@@ -614,7 +718,7 @@ fn listen_beat(
 ) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(PORT_BEAT)?;
     log::info!("ProDJ Link: listening for beats on port {PORT_BEAT}");
-    let me = ProDjLink::new(link.player);
+    let me = ProDjLink::new(link.player());
     let tx = UdpSocket::bind("0.0.0.0:0").ok()?;
     let mut last_beat_at: HashMap<u8, Instant> = HashMap::new();
     spawn("prodj-rx-50001", PORT_BEAT, sock, move |data, addr| {
@@ -622,7 +726,7 @@ fn listen_beat(
         diag_packet(50001, addr, data);
 
         if let Some(b) = ProDjLink::parse_beat(data) {
-            if b.player == link.player { return; }           // our own broadcast
+            if b.player == link.player() { return; }           // our own broadcast
             // An OpenDeck sends each beat by broadcast AND unicast (see the
             // sender); the second copy lands within a few ms.  A real beat is
             // never closer than 300 ms (200 BPM), so drop the twin.
@@ -679,7 +783,7 @@ fn listen_beat(
             return;
         }
         if let Some((from, target, cmd)) = ProDjLink::parse_sync_control(data) {
-            if target != link.player { return; }
+            if target != link.player() { return; }
             match cmd {
                 SYNC_ON  => { link.sync.store(true,  Ordering::Relaxed); log::info!("ProDJ Link: player {from} turned our SYNC on"); }
                 SYNC_OFF => { link.sync.store(false, Ordering::Relaxed); log::info!("ProDJ Link: player {from} turned our SYNC off"); }
@@ -697,7 +801,7 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
     log::info!("ProDJ Link: listening for status on port {PORT_STATUS}");
     let mut last: HashMap<u8, Status> = HashMap::new();
     let reply_sock = UdpSocket::bind("0.0.0.0:0").ok();
-    let me = ProDjLink::new(link.player);
+    let me = ProDjLink::new(link.player());
     spawn("prodj-rx-50002", PORT_STATUS, sock, move |data, addr| {
         log::trace!("ProDJ rx :50002 {} bytes from {addr} — {:02X?}", data.len(), data);
         diag_packet(50002, addr, data);
@@ -707,7 +811,7 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
             if let Some((dev, rip, target, slot)) = ProDjLink::parse_media_query(data) {
                 let n = link.serve_tracks.load(Ordering::Relaxed);
                 log::info!("ProDJ Link: media query from device {dev} ({rip}) for player {target} slot {slot}; serving {n} tracks");
-                if target == link.player && n > 0 && matches!(slot, 0 | 3) {
+                if target == link.player() && n > 0 && matches!(slot, 0 | 3) {
                     // To the address inside the packet and, across a routed
                     // link where that is the peer's LAN address, to where the
                     // query came from — on the status port either way.
@@ -732,7 +836,7 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
             return;
         }
         let Some(st) = ProDjLink::parse_status(data) else { return };
-        if st.player == link.player { return; }
+        if st.player == link.player() { return; }
 
         let changed = last.get(&st.player).map_or(true, |p| {
             p.play != st.play || p.master != st.master || p.sync != st.sync
@@ -777,7 +881,7 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
             }
         }
         let cur = link.master_player.load(Ordering::Relaxed) as u8;
-        let handing_to_us = st.handoff_to == Some(link.player);
+        let handing_to_us = st.handoff_to == Some(link.player());
         if st.master || st.player == cur {
             link.master_seen_ms.store(link.now_ms(), Ordering::Relaxed);
         }
@@ -825,6 +929,82 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
 
 // ── Sender ────────────────────────────────────────────────────────────────────
 
+/// How long AUTO listens for keep-alives before choosing (players send one
+/// every 1.5–2 s, so this hears everyone already on the network).
+const CLAIM_WATCH: Duration = Duration::from_millis(3000);
+/// Gap between the packets of each claim stage, as the players space them.
+const CLAIM_STEP: Duration = Duration::from_millis(300);
+
+/// The next number AUTO should try: `preferred` when free, then the lowest
+/// free 1–4 (the range every player supports), then 5–6 (all-CDJ-3000
+/// networks only).  `None` when all are taken.
+pub fn pick_number(preferred: u8, used: &[u8], tried: &[u8]) -> Option<u8> {
+    std::iter::once(preferred).filter(|n| (1..=4).contains(n))
+        .chain(1..=6)
+        .find(|n| !used.contains(n) && !tried.contains(n))
+}
+
+/// Run the device-number claim: hello ×3 (first time only), then stages
+/// 1–3, three packets each.  AUTO picks a free number and moves on when one
+/// is defended; a set number is claimed with the "specific number" flag and
+/// kept even if defended (with a warning), as before.  Returns the number.
+fn claim_number(link: &LinkState, sock: &UdpSocket, ip: Ipv4Addr, bcast: Ipv4Addr, mac: [u8; 6], hello: bool) -> u8 {
+    let send = |p: &[u8]| { let _ = sock.send_to(p, (bcast, PORT_ANNOUNCE)); };
+    link.claimed.store(false, Ordering::Relaxed);
+    if hello {
+        let me = ProDjLink::new(0);
+        for _ in 0..3 { send(&me.build_hello()); thread::sleep(CLAIM_STEP); }
+    }
+    if link.auto {
+        // Hello took ~0.9 s; listen out the rest of the window.
+        thread::sleep(CLAIM_WATCH.saturating_sub(if hello { CLAIM_STEP * 3 } else { Duration::ZERO }));
+    }
+    let mut tried: Vec<u8> = Vec::new();
+    let taken = |n: u8| link.peers.lock().map(|p| p.contains_key(&n)).unwrap_or(false);
+    'numbers: loop {
+        let n = if link.auto {
+            let used: Vec<u8> = link.peers.lock().map(|p| p.keys().copied().collect()).unwrap_or_default();
+            match pick_number(link.preferred, &used, &tried) {
+                Some(n) => n,
+                None => {
+                    log::warn!("ProDJ Link: no free player number (in use: {used:?}); using {}", link.preferred);
+                    link.preferred
+                }
+            }
+        } else { link.preferred };
+        if n > 4 { log::info!("ProDJ Link: players 1-4 are in use; trying {n} (5 and 6 need a 6-player network: CDJ-3000s, no older players)"); }
+        link.player.store(n, Ordering::Relaxed);
+        link.defended.store(0, Ordering::Relaxed);
+        let me = ProDjLink::new(n);
+        log::info!("ProDJ Link: claiming player {n}{}", if link.auto { " (AUTO)" } else { "" });
+        for stage in 1..=3u8 {
+            for counter in 1..=3u8 {
+                send(&match stage {
+                    1 => me.build_claim1(counter, mac),
+                    2 => me.build_claim2(counter, ip, mac, n, link.auto),
+                    _ => me.build_claim3(counter, n),
+                });
+                thread::sleep(CLAIM_STEP);
+                let lost = link.defended.load(Ordering::Relaxed) == n || (link.auto && taken(n));
+                if lost {
+                    if link.auto && tried.len() < 6 {
+                        log::info!("ProDJ Link: player {n} is taken; trying another number");
+                        tried.push(n);
+                        continue 'numbers;
+                    }
+                    log::warn!("ProDJ Link: player {n} is in use by another device; PLAYER No. is set to {n}, keeping it");
+                    break 'numbers;
+                }
+            }
+        }
+        break;
+    }
+    let n = link.player();
+    link.claimed.store(true, Ordering::Relaxed);
+    log::info!("ProDJ Link: player {n} is ours");
+    n
+}
+
 /// Announces this deck, unicasts status to every peer, sends a beat packet at
 /// every beat of the *audible* position, runs the master handoff, and
 /// follows the master when SYNC is on.
@@ -841,21 +1021,35 @@ impl ProDjSender {
             log::warn!("ProDJ Link: set_broadcast failed: {e} (announces/beats will not go out)");
         }
         let (ip, bcast, mac, iface) = link_interface(&[]);
-        let player = link.player;
         if let Ok(mut a) = link.own_addr.lock() { *a = format!("{ip} ({iface}) to {bcast}"); }
         // OPENDECK_LINK_UNICAST=ip,ip — also send announces straight to these
         // devices (broadcast does not cross a VPN such as Tailscale).
         let unicast_peers: Vec<Ipv4Addr> = std::env::var("OPENDECK_LINK_UNICAST").ok()
             .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect()).unwrap_or_default();
         if !unicast_peers.is_empty() { log::info!("ProDJ Link: announcing by unicast to {unicast_peers:?}"); }
-        log::info!("ProDJ Link: sending as player {player} from {ip} ({iface}) to {bcast}");
-
-        let me = ProDjLink::new(player);
+        log::info!("ProDJ Link: sending from {ip} ({iface}) to {bcast}");
         let t = thread::Builder::new()
             .name("prodj-tx".into())
             .spawn(move || {
                 // Re-selected below once players are discovered.
                 let (mut ip, mut bcast, mut mac) = (ip, bcast, mac);
+                // PLAYER No. AUTO: listen first, so the numbers already on
+                // the network are known, and so the interface can be picked
+                // by where the players are.
+                if link.auto {
+                    thread::sleep(CLAIM_WATCH);
+                    let peers: Vec<Ipv4Addr> = link.peers.lock().map(|p| p.values().copied().collect()).unwrap_or_default();
+                    let (nip, nbc, nmac, niface) = link_interface(&peers);
+                    if (nip, nbc) != (ip, bcast) {
+                        if let Ok(mut a) = link.own_addr.lock() { *a = format!("{nip} ({niface}) to {nbc}"); }
+                    }
+                    (ip, bcast, mac) = (nip, nbc, nmac);
+                }
+                let port = sock.local_addr().map(|a| a.port()).unwrap_or(0);
+                if let Ok(mut o) = link.own_src.lock() { *o = Some((ip, port)); }
+                if let Ok(mut o) = link.own_bcast.lock() { *o = Some(bcast); }
+                let mut player = claim_number(&link, &sock, ip, bcast, mac, true);
+                let mut me = ProDjLink::new(player);
                 let mut announce = me.build_announce(ip, mac);
                 let mut known_peers: Vec<Ipv4Addr>;
                 let mut bcast_warned = false;
@@ -893,6 +1087,13 @@ impl ProDjSender {
                 let mut last_flags = (false, false);
 
                 loop {
+                    // Someone else holds our number: claim another (AUTO).
+                    if link.reclaim.swap(false, Ordering::Relaxed) {
+                        player = claim_number(&link, &sock, ip, bcast, mac, false);
+                        me = ProDjLink::new(player);
+                        announce = me.build_announce(ip, mac);
+                        last_announce = Instant::now() - Duration::from_secs(5);
+                    }
                     let now = Instant::now();
                     let dt  = now.duration_since(last_tick).as_secs_f64();
                     // Load the current track's grid (updated on each LOAD).
@@ -994,6 +1195,8 @@ impl ProDjSender {
                             );
                             ip = nip; bcast = nbc; mac = nmac;
                             if let Ok(mut a) = link.own_addr.lock() { *a = format!("{ip} ({niface}) to {bcast}"); }
+                            if let Ok(mut o) = link.own_src.lock() { *o = Some((ip, sock.local_addr().map(|a| a.port()).unwrap_or(0))); }
+                            if let Ok(mut o) = link.own_bcast.lock() { *o = Some(bcast); }
                             announce = me.build_announce(ip, mac);
                             bcast_warned = false;   // re-warn if the new one also fails
                         }
@@ -1013,6 +1216,7 @@ impl ProDjSender {
                                     if let Ok(s) = UdpSocket::bind("0.0.0.0:0") {
                                         let _ = s.set_broadcast(true);
                                         sock = s;
+                                        if let Ok(mut o) = link.own_src.lock() { *o = Some((ip, sock.local_addr().map(|a| a.port()).unwrap_or(0))); }
                                         send_failures = 0;
                                         bcast_warned = false;
                                         log::info!("ProDJ Link: sender socket reopened");
@@ -1049,7 +1253,7 @@ impl ProDjSender {
                         const MASTER_GONE_MS: u64 = 5000;
                         let cur = link.master_player.load(Ordering::Relaxed) as u8;
                         let seen = link.master_seen_ms.load(Ordering::Relaxed);
-                        if cur != 0 && cur != link.player && seen > 0 && link.now_ms().saturating_sub(seen) > MASTER_GONE_MS {
+                        if cur != 0 && cur != link.player() && seen > 0 && link.now_ms().saturating_sub(seen) > MASTER_GONE_MS {
                             log::info!("ProDJ Link: master player {cur} silent for {}s — forgetting it", MASTER_GONE_MS / 1000);
                             link.master_player.store(0, Ordering::Relaxed);
                             link.yielded_from.store(0, Ordering::Relaxed);
@@ -1221,6 +1425,32 @@ impl ProDjSender {
             })
             .ok()?;
         Some(ProDjSender { _thread: t })
+    }
+}
+
+#[cfg(test)]
+mod claim_tests {
+    use super::pick_number;
+
+    #[test]
+    fn auto_takes_the_preferred_number_when_free() {
+        assert_eq!(pick_number(3, &[1, 2], &[]), Some(3));
+        assert_eq!(pick_number(3, &[], &[]), Some(3));
+    }
+
+    #[test]
+    fn auto_takes_the_lowest_free_number_otherwise() {
+        assert_eq!(pick_number(3, &[1, 3], &[]), Some(2));
+        assert_eq!(pick_number(1, &[1, 2, 3], &[]), Some(4));
+        assert_eq!(pick_number(3, &[1], &[3, 2]), Some(4), "skips numbers already defended");
+        // A mixer (33) or rekordbox (17+) does not use a player number.
+        assert_eq!(pick_number(1, &[33, 17], &[]), Some(1));
+    }
+
+    #[test]
+    fn auto_uses_five_and_six_only_when_one_to_four_are_taken() {
+        assert_eq!(pick_number(3, &[1, 2, 3, 4], &[]), Some(5));
+        assert_eq!(pick_number(3, &[1, 2, 3, 4, 5, 6], &[]), None);
     }
 }
 

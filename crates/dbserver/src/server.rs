@@ -81,6 +81,9 @@ impl Library {
 }
 
 /// Handle to a running server.
+/// Our player number as the server reports it (it can change after start).
+pub type DeviceNumber = Arc<dyn Fn() -> u8 + Send + Sync>;
+
 pub struct Server { pub db_port: u16, pub device: u8 }
 
 fn s(v: &str) -> Field { Field::Str(v.to_string()) }
@@ -225,7 +228,7 @@ fn blob_reply(txid: u32, want: u16, req: u16, blob: Vec<u8>, trailing_zero: bool
     Message { txid, kind: want, args }
 }
 
-fn serve_client(lib: SharedLibrary, device: u8, stream: TcpStream) -> Result<()> {
+fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> Result<()> {
     let peer = stream.peer_addr().ok();
     let mut w = stream.try_clone()?;
     let mut r = BufReader::new(stream);
@@ -241,7 +244,7 @@ fn serve_client(lib: SharedLibrary, device: u8, stream: TcpStream) -> Result<()>
         match m.kind {
             kind::SETUP => {
                 log::info!("dbserver: {peer:?} set up as device {}", arg(0));
-                reply(&mut w, Message { txid: m.txid, kind: kind::MENU_AVAILABLE, args: vec![u(0), u(device as u32)] })?;
+                reply(&mut w, Message { txid: m.txid, kind: kind::MENU_AVAILABLE, args: vec![u(0), u(device() as u32)] })?;
             }
             kind::RENDER => {
                 let offset = arg(1) as usize;
@@ -317,6 +320,12 @@ impl Server {
     /// Start the port-query service (TCP 12523) and the database service
     /// (`db_port`, 0 = ephemeral).  Threads run for the life of the process.
     pub fn start(lib: SharedLibrary, device: u8, db_port: u16) -> Result<Server> {
+        Self::start_live(lib, Arc::new(move || device), db_port)
+    }
+
+    /// As `start`, but our player number is read per client, for a deck
+    /// whose number is claimed (PLAYER No. AUTO) after the server is up.
+    pub fn start_live(lib: SharedLibrary, device: DeviceNumber, db_port: u16) -> Result<Server> {
         let db = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, db_port)).context("bind dbserver")?;
         let db_port = db.local_addr()?.port();
         let pq = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, crate::PORT_QUERY)).context("bind 12523")?;
@@ -330,14 +339,15 @@ impl Server {
                 let _ = c.write_all(&db_port.to_be_bytes());
             }
         })?;
+        let now = device();
         thread::Builder::new().name("dbserver-accept".into()).spawn(move || {
             for c in db.incoming().flatten() {
-                let lib = Arc::clone(&lib);
+                let (lib, device) = (Arc::clone(&lib), Arc::clone(&device));
                 let _ = c.set_nodelay(true);
                 thread::spawn(move || { if let Err(e) = serve_client(lib, device, c) { log::warn!("dbserver client: {e:#}"); } });
             }
         })?;
-        Ok(Server { db_port, device })
+        Ok(Server { db_port, device: now })
     }
 }
 
