@@ -24,6 +24,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | Files-app music folder with a bundled demo track | ✅ | iOS (Android: Music folder) |
 | Stems prepared with OverCue Desktop: mute / solo / level per stem (MENU → STEMS, off by default) | ✅ | All |
 | Sorting, TRACK FILTER, KEY SHIFT (CDJ-3000 screen) | 📋 | — |
+| OneLibrary sticks (rekordbox's new encrypted USB library, read by the CDJ-3000X); today OpenDeck reads the Device Library (`export.pdb`) that rekordbox 7.2.11+ writes alongside it | 📋 | — |
 
 ## Analysis
 
