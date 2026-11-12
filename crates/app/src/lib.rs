@@ -3435,7 +3435,13 @@ impl Prep {
                 // caches, and re-serves the row once the load has published it.
                 let (samples, cache_dir, link, path, sh) = (Arc::clone(&samples), self.cache_dir.clone(), self.link.clone(), path.clone(), Arc::clone(&shared));
                 std::thread::spawn(move || {
-                    let a = { let mut g = sh.lock().unwrap(); g.detect_key_if_missing(&samples, ch, deck_sr); g.clone() };
+                    // Detect on a copy: the lock is held only to read and to
+                    // write the key.  Holding it through the detection (a pass
+                    // over the whole track, ~100 ms on a desktop) stalled the
+                    // UI thread, which reads this record to serve it.
+                    let mut a = sh.lock().unwrap().clone();
+                    a.detect_key_if_missing(&samples, ch, deck_sr);
+                    sh.lock().unwrap().key = a.key.clone();
                     if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, &path, &a) { log::info!("link cache: {e:#}"); }
                     if let Some(link) = link { refresh_served(&link, &path, &a); }
                 });

@@ -176,10 +176,12 @@ is about 21 MB a minute; a 6-minute track is ~127 MB), and during the load the
 loader's buffer and the last copy it sent exist side by side. Streaming from
 the file instead of holding it is the next step if memory ever matters.
 
-**Known: a frame spike when a detected grid first draws.** The first frame
-with a newly detected grid takes ~120–150 ms on a desktop (both skins). It
-predates streaming (the old loader showed 149 ms on the same file) and is
-not in the load path itself (`apply_grow` is 0.1 ms).
+**Never hold the analysis lock through work.** The served analysis
+(`SharedAnalysis`) is read by the UI thread when the whole track is in. The
+key-detection thread used to hold that mutex through its pass over the whole
+track (~100 ms on a desktop), and the UI thread waited on it: a 120–150 ms
+frame spike on every load of a file with no cached analysis, in the old
+loader too. It now detects on a copy and locks only to write the key.
 
 ## Related
 

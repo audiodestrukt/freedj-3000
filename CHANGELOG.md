@@ -82,6 +82,10 @@ All notable changes to this project will be documented in this file.
   layout yet).
 
 ### Fixed
+- **A 120–150 ms freeze after loading a track for the first time.** Key
+  detection held a lock the screen needed for its whole pass over the track,
+  so the first load of any file without a cached analysis froze the UI for
+  about a tenth of a second (longer on slow devices).
 - **Loading on slow CPUs (cdj3k-emu, Pi Zero).** A track took about a
   minute to load in the emulator, and each further press of LOAD started
   another full decode alongside it, so a few presses looked like loading
