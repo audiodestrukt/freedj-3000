@@ -57,6 +57,10 @@ pub struct Track {
     /// 2 bytes), served as `.EXT` sections.  Empty = none.
     pub rgb_preview: Vec<u8>,
     pub rgb_detail:  Vec<u8>,
+    /// Phrase analysis (song structure): the `.EXT` PSSI section as it sits
+    /// in a rekordbox file, fourcc to end, masked as rekordbox 6+ writes it.
+    /// Empty = none.
+    pub phrases:    Vec<u8>,
     /// The file has embedded cover art; menu rows then carry the track id as
     /// the artwork id and `0x2003` fetches it through [`Library::art`].
     pub has_art:    bool,
@@ -268,7 +272,18 @@ pub fn anlz_section(fourcc: &[u8; 4], entry_bytes: u32, entries: &[u8], extra: O
     b
 }
 
-/// The colour waveform section a player asked for (3-band or RGB) (`tag` = fourcc as a little-
+/// A whole ANLZ section (fourcc on) as a player serves it: its padded
+/// length (u32 LE), the section, zero padding to 4 bytes.
+pub fn anlz_raw(section: &[u8]) -> Vec<u8> {
+    let padded = (section.len() + 3) & !3;
+    let mut b = Vec::with_capacity(4 + padded);
+    b.extend_from_slice(&(padded as u32).to_le_bytes());
+    b.extend_from_slice(section);
+    b.resize(4 + padded, 0);
+    b
+}
+
+/// The colour waveform or phrase section a player asked for (3-band or RGB) (`tag` = fourcc as a little-
 /// endian u32), if we have it for that track.
 fn band_tag(lib: &Library, id: u32, tag: u32) -> Option<Vec<u8>> {
     let t = lib.track(id)?;
@@ -277,6 +292,7 @@ fn band_tag(lib: &Library, id: u32, tag: u32) -> Option<Vec<u8>> {
         b"PWV7" if !t.band_detail.is_empty() => Some(anlz_section(b"PWV7", 3, &t.band_detail, Some(0x0096_0000))),
         b"PWV4" if !t.rgb_preview.is_empty() => Some(anlz_section(b"PWV4", 6, &t.rgb_preview, Some(0))),
         b"PWV5" if !t.rgb_detail.is_empty() => Some(anlz_section(b"PWV5", 2, &t.rgb_detail, Some(0x0096_0305))),
+        b"PSSI" if !t.phrases.is_empty() => Some(anlz_raw(&t.phrases)),
         _ => None,
     }
 }
@@ -387,7 +403,7 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
             // 0x32, length 0 and the blob left out.  "Unavailable" (0x4003)
             // made a CDJ-3000 abandon a load and reconnect.
             // An ANLZ section by fourcc (arg 2, little-endian ASCII) and file
-            // (arg 3): the 3-band waveforms a CDJ-3000 draws, from our own
+            // (arg 3): the colour waveforms and phrases a CDJ-3000 draws, from our own
             // analysis.  Anything else: "no data" below.
             kind::ANLZ_TAG | kind::ANLZ_TAG2 if band_tag(&lib.read().unwrap(), arg(1), arg(2)).is_some() => {
                 let blob = band_tag(&lib.read().unwrap(), arg(1), arg(2)).unwrap();
@@ -475,6 +491,23 @@ mod tests {
             t(2, "Alpha", "Bob", "Two", "/a.mp3"),
             t(3, "Gamma", "Ann", "Two", "/c.mp3"),
         ] }
+    }
+
+    #[test]
+    fn serves_the_phrase_section_by_fourcc() {
+        let mut l = lib();
+        let pssi = u32::from_le_bytes(*b"PSSI");
+        assert_eq!(band_tag(&l, 2, pssi), None, "no phrases, no section");
+        // A 0x38-byte section (one entry) is served as-is behind its length.
+        let mut sec = b"PSSI".to_vec();
+        sec.resize(0x38, 7);
+        l.tracks[1].phrases = sec.clone();
+        let blob = band_tag(&l, 2, pssi).unwrap();
+        assert_eq!(&blob[..4], &0x38u32.to_le_bytes());
+        assert_eq!(&blob[4..], &sec[..]);
+        // Odd lengths pad to 4.
+        l.tracks[1].phrases.truncate(0x37);
+        assert_eq!(band_tag(&l, 2, pssi).unwrap().len(), 4 + 0x38);
     }
 
     fn items(rows: Vec<Vec<Field>>) -> Vec<MenuItem> {

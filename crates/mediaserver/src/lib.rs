@@ -90,6 +90,9 @@ pub struct Analysis {
     /// columns of 6 bytes, and 150 two-byte entries a second.
     pub rgb_preview: Vec<u8>,
     pub rgb_detail:  Vec<u8>,
+    /// Phrase analysis: the `.EXT` PSSI section exactly as rekordbox writes
+    /// it (masked), from [`opendeck_analysis::phrase::detect`].  Empty = none.
+    pub phrases:    Vec<u8>,
     pub has_art:    bool,
 }
 
@@ -107,13 +110,15 @@ impl Analysis {
         let (preview, detail) = waveform_blobs(wave, frames, sr);
         let (band_preview, band_detail) = three_band(wave, frames, sr);
         let (rgb_preview, rgb_detail) = rgb_waveforms(wave, frames, sr);
+        let song = opendeck_analysis::phrase::detect(&beats, wave, frames, sr);
+        let phrases = if song.phrases.is_empty() { Vec::new() } else { opendeck_analysis::phrase::encode_pssi(&song, true) };
         Analysis {
             title:   tags.title.clone().unwrap_or_default(),
             artist:  tags.artist.clone().unwrap_or_default(),
             album:   tags.album.clone().unwrap_or_default(),
             comment: tags.comment.clone().unwrap_or_default(),
             key:     tags.key.clone().unwrap_or_default(),
-            duration_s, bpm, beats, preview, detail, band_preview, band_detail, rgb_preview, rgb_detail,
+            duration_s, bpm, beats, preview, detail, band_preview, band_detail, rgb_preview, rgb_detail, phrases,
             bitrate: if duration_s > 0 { (file_bytes * 8 / duration_s as u64 / 1000) as u32 } else { 0 },
             has_art: tags.artwork.is_some(),
         }
@@ -135,6 +140,7 @@ impl Analysis {
         t.band_detail = self.band_detail.clone();
         t.rgb_preview = self.rgb_preview.clone();
         t.rgb_detail = self.rgb_detail.clone();
+        t.phrases = self.phrases.clone();
         t.has_art = self.has_art;
     }
 }
@@ -374,7 +380,7 @@ pub fn grid_beats(anchor: u64, bpm: f64, downbeat_offset: u8, sr: u32, frames: u
 const CACHE_MAGIC: &[u8; 4] = b"ODLA";
 // 2: MP3s decode with the encoder delay kept (the rekordbox / player timeline).
 // 3: tempo + phase fitted together, grids on rekordbox's timing.
-const CACHE_VERSION: u16 = 5;   // 4: 3-band waveforms, 5: RGB waveforms
+const CACHE_VERSION: u16 = 6;   // 4: 3-band waveforms, 5: RGB waveforms, 6: phrases
 
 fn cache_key(path: &Path) -> Option<String> {
     let md = std::fs::metadata(path).ok()?;
@@ -424,6 +430,7 @@ pub fn encode(a: &Analysis) -> Vec<u8> {
     put_bytes(&mut out, &a.band_detail);
     put_bytes(&mut out, &a.rgb_preview);
     put_bytes(&mut out, &a.rgb_detail);
+    put_bytes(&mut out, &a.phrases);
     out
 }
 
@@ -446,6 +453,7 @@ pub fn decode(b: &[u8]) -> Option<Analysis> {
     a.preview = r.bytes()?; a.detail = r.bytes()?; a.has_art = r.u8()? != 0;
     a.band_preview = r.bytes()?; a.band_detail = r.bytes()?;
     a.rgb_preview = r.bytes()?; a.rgb_detail = r.bytes()?;
+    a.phrases = r.bytes()?;
     Some(a)
 }
 
@@ -489,7 +497,7 @@ mod tests {
             title: "T".into(), artist: "A".into(), album: "".into(), comment: "c".into(), key: "Am".into(),
             duration_s: 200, bpm: 128.0, bitrate: 320, beats: vec![(1, 128.0, 25), (2, 128.0, 494)],
             preview: vec![1, 2, 3, 4], detail: vec![0x21; 10], has_art: true,
-            band_preview: vec![5; 6], band_detail: vec![7; 9], rgb_preview: vec![1; 12], rgb_detail: vec![2; 4],
+            band_preview: vec![5; 6], band_detail: vec![7; 9], rgb_preview: vec![1; 12], rgb_detail: vec![2; 4], phrases: vec![3; 32],
         };
         assert_eq!(decode(&encode(&a)), Some(a.clone()));
         let mut short = encode(&a); short.truncate(20);
