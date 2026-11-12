@@ -25,8 +25,9 @@ pub const MENU: [(Setting, &str); 7] = [
 /// unit's). Both skins drive the same deck.
 #[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
 pub enum Skin {
-    #[default]
     Xdj1000Mk2,
+    /// The default since seed 3 (0.3.10).
+    #[default]
     Cdj3000,
 }
 
@@ -99,11 +100,13 @@ pub struct Settings {
 /// Seeding generation written by this build; see `Settings::seed`.
 /// 2: PLAYER No. AUTO arrived; a number still at the device's default
 /// (never changed by the user) becomes AUTO.
-const SEED: u8 = 2;
+/// 3: the CDJ-3000 screen became the default; a file still on the old
+/// default (XDJ-1000MK2) moves to it once.  SCREEN switches back.
+const SEED: u8 = 3;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Xdj1000Mk2, stems: false, seed: 0, phone: false }
+        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000, stems: false, seed: 0, phone: false }
     }
 }
 
@@ -130,6 +133,10 @@ impl Settings {
                         if s.seed < 2 && s.player == default_player {
                             log::info!("settings: PLAYER No. {} was the default; now AUTO", s.player);
                             s.player = 0;
+                        }
+                        if s.seed < 3 && s.skin == Skin::Xdj1000Mk2 {
+                            log::info!("settings: SCREEN was the old default (XDJ-1000MK2); now CDJ-3000");
+                            s.skin = Skin::Cdj3000;
                         }
                         s.seed = SEED;
                         s.save();
@@ -223,15 +230,21 @@ mod tests {
 
     #[test]
     fn skin_switch_names_toggles_and_persists() {
-        assert_eq!(Settings::default().skin, Skin::Xdj1000Mk2, "the XDJ UI stays the default");
+        assert_eq!(Settings::default().skin, Skin::Cdj3000, "the CDJ-3000 screen is the default");
         for v in ["cdj3000", "CDJ-3000", "cdj"] { assert_eq!(Skin::parse(v), Some(Skin::Cdj3000), "{v}"); }
         for v in ["xdj1000mk2", "XDJ-1000MK2", "xdj"] { assert_eq!(Skin::parse(v), Some(Skin::Xdj1000Mk2), "{v}"); }
         assert_eq!(Skin::parse("cdj2000"), None);
         // The MENU row: SCREEN, stepping either way flips the skin.
         assert!(MENU.iter().any(|(s, n)| *s == Setting::Skin && *n == "SCREEN"));
-        let s = Settings::default().cycled(Setting::Skin, 1);
+        let s = Settings::default();
         assert_eq!((s.skin, s.value(Setting::Skin).as_str()), (Skin::Cdj3000, "CDJ-3000"));
+        assert_eq!(s.cycled(Setting::Skin, 1).skin, Skin::Xdj1000Mk2);
         assert_eq!(s.cycled(Setting::Skin, -1).skin, Skin::Xdj1000Mk2);
+        // A file from before the switch (no skin saved, or the old default) is
+        // read as CDJ-3000 by serde's default; the seed-3 migration moves a
+        // saved XDJ-1000MK2 (load() covers it; here the field default).
+        let old: Settings = serde_json::from_str(r#"{"quantize":true,"seed":2}"#).unwrap();
+        assert_eq!(old.skin, Skin::Cdj3000);
         // Saved and read back with the other settings.
         let back: Settings = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.skin, Skin::Cdj3000);
@@ -254,10 +267,10 @@ mod tests {
         assert_eq!(Settings::range_label(1.0), "WIDE");
         assert_eq!(Settings::range_label(0.10), "±10");
         let phone = Settings { phone: true, ..Settings::default() };
-        assert_eq!(phone.cycled(Setting::Skin, 1).skin, Skin::Xdj1000Mk2, "no CDJ-3000 screen on a phone yet");
+        assert_eq!(phone.cycled(Setting::Skin, 1).skin, phone.skin, "no CDJ-3000 screen on a phone yet: SCREEN does not step");
         assert!(phone.value(Setting::Skin).contains("iPad only"));
-        let s = s.cycled(Setting::Skin, 1);        assert_eq!(s.skin, Skin::Cdj3000);
         let s = s.cycled(Setting::Skin, 1);        assert_eq!(s.skin, Skin::Xdj1000Mk2);
+        let s = s.cycled(Setting::Skin, 1);        assert_eq!(s.skin, Skin::Cdj3000);
     }
 
     #[test]
@@ -267,6 +280,6 @@ mod tests {
         assert!(!s.quantize);
         assert_eq!(s.tempo_range, 0.16);
         assert_eq!(s.player, 0);                                   // AUTO
-        assert_eq!(s.skin, Skin::Xdj1000Mk2);
+        assert_eq!(s.skin, Skin::Cdj3000);
     }
 }

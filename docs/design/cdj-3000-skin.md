@@ -48,6 +48,8 @@ References:
 ## Architecture
 
 - `settings::Skin { Xdj1000Mk2, Cdj3000 }`, persisted in `settings.json`.
+  CDJ-3000 is the default (0.3.10); settings seed 3 moves a file still on
+  the old default once. Phones draw the XDJ screen whatever is saved.
   Switch it with a MENU row, `OPENDECK_SKIN=cdj3000` (dev/screenshots) or a
   keyboard toggle.
 - `crates/app/src/cdj3000/`:

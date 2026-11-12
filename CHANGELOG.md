@@ -66,6 +66,13 @@ All notable changes to this project will be documented in this file.
   assignment (DJM) is not supported yet.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
+### Changed
+- **The CDJ-3000 screen is the default** on the desktop, iPad, Android
+  tablets and the Pi. An install still on the old default (XDJ-1000MK2)
+  moves to it once; MENU → SCREEN switches back, and stays switched.
+  Phones keep the XDJ-1000MK2 layout (the CDJ-3000 screen has no phone
+  layout yet).
+
 ### Fixed
 - **The playing track's analysis reaches the network at once.** A peer
   that looks up the track our status names (another player's LINK INFO, a

@@ -293,7 +293,8 @@ The keyboard stands in for the deck's buttons on a desktop.
 | `Q` / `Esc` | Quit (`Esc` closes an open screen first) |
 
 The deck's look is chosen in MENU → SCREEN, or at launch with
-`OPENDECK_SKIN=cdj3000` (or `xdj1000mk2`). The CDJ-3000 screen comes with
+`OPENDECK_SKIN=cdj3000` (or `xdj1000mk2`). The CDJ-3000 screen is the
+default everywhere except on phones, which keep the XDJ-1000MK2 layout. The CDJ-3000 screen comes with
 its hardware buttons: on the desktop, SOURCE / BROWSE / TAG LIST / SEARCH /
 MENU and BACK / TAG TRACK / the rotary sit either side of the screen; on the
 iPad (and with `--faceplate`) it is the whole top panel, every key where the
