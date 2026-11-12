@@ -38,3 +38,6 @@ dist/
 # CDJ HID host identity (secret; never commit the real one)
 cdj_hid_identity.conf
 build/
+
+# Packaging keys for CDJ-3000 .UPD builds (docs/hardware/cdj-3000-upd.md#keys): never committed.
+*.key

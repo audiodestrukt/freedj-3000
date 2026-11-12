@@ -5,15 +5,17 @@ the install guide as it will read when the pieces exist. Each step says
 whether its piece is built. Nothing on this page has been done on a deck.
 The reasoning behind the design is in
 [docs/reference/cdj-3000-target.md](../reference/cdj-3000-target.md).
+**What the `.UPD` files are, the emulator image versus the deck overlay, and
+how they are built: [cdj-3000-upd.md](cdj-3000-upd.md).**
 
 | Piece | State |
 |---|---|
 | OpenDeck binary for the deck (aarch64, glibc 2.17) | not built |
-| Sub-CPU adapter (`opendeck-subucom`: buttons, jog, touch, LEDs) | not built; spec in hand |
+| Sub-CPU adapter (`OPENDECK_SUBUCOM`: keys, jog, fader, rotary, LEDs) | built and unit-tested; touch not yet; not run on the device |
 | Launcher and install scripts (`payload.sh`, phases, removal) | not written |
 | Jog LCD | not driven; stays blank in the first version |
-| Package (`.UPD`) | needs the deck's packaging key, which this project does not have or distribute |
-| Dry run in the emulator | not done |
+| Package (`.UPD`) | designed: [cdj-3000-upd.md](cdj-3000-upd.md); built with a packaging key passed at build time, never in the repo |
+| Dry run in the emulator | not done; as an emulator UPD ([cdj-3000-upd.md](cdj-3000-upd.md)) |
 | Tested on a deck | no |
 
 ## Read this first
@@ -133,8 +135,9 @@ the direction rocker, VINYL SPEED ADJUST, the jog ring's colour.
 
 *Not done yet.* Before any deck, boot the payload in
 [cdj3k-emu](https://github.com/nsaintot/cdj3k-emu)'s machine with a rootfs
-of our own (their kernel and `subucom_virt` module, a Debian arm64 userland,
-no Pioneer firmware). Their panel UI then drives the same sub-CPU device the
+of our own (their kernel and `subucom_virt` module, our arm64 userland, no
+Pioneer firmware), installed as an emulator UPD through its firmware
+wizard: [cdj-3000-upd.md](cdj-3000-upd.md#the-emulator-upd). Their panel UI then drives the same sub-CPU device the
 deck has, and their control API scripts it. The pass criteria: every panel
 control reaches OpenDeck, every LED we set lights on the panel, audio plays,
 and a second emulator slot syncs to us over Link. The recipe for that guest
@@ -144,9 +147,12 @@ is part of this work and will live next to this page.
 
 The deck installs a `.UPD` that is a LUKS container holding the payload
 and the installer scripts, named `CDJ3Kv<three digits>.UPD`. The container
-has to be encrypted with the deck's packaging key. **This project does not
-have that key, does not distribute it, and will not tell you where to get
-it.** The community mods' `package/updater/` (MIT/Apache-2.0) is the packing
+has to be encrypted with the deck's packaging key, passed to the build as a
+path (`make upd-deck KEY=…`). **This project does not publish the key and
+will not tell you where to get it**; releases carry UPDs the maintainer
+built with their own key. Full layout and build:
+[cdj-3000-upd.md](cdj-3000-upd.md). This is the *deck* UPD; the emulator
+takes a different one, and the two must not be swapped. The community mods' `package/updater/` (MIT/Apache-2.0) is the packing
 pipeline we would reuse: `pack.sh --key <key>` with our payload and scripts
 in place of theirs.
 
