@@ -196,6 +196,14 @@ fn sorted(mut v: Vec<f64>) -> Vec<f64> { v.sort_by(|a, b| a.partial_cmp(b).unwra
 /// waveform columns ([bass, mid, high, rms] per `hop_size` frames).
 /// Empty (no phrases) without a grid or with under 8 bars.
 pub fn detect(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, sr: u32) -> SongStructure {
+    detect_with(beats, wave, frames, sr, false)
+}
+
+/// As [`detect`]; with `downbeats_known` the grid's beat-in-bar numbers are
+/// trusted (a rekordbox grid), so bars start where it says beat 1 is rather
+/// than where the bar phase is guessed.  Guessing put every phrase of
+/// rekordbox's Demo Track 1 two beats off rekordbox's own.
+pub fn detect_with(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, sr: u32, downbeats_known: bool) -> SongStructure {
     let mut out = SongStructure { unk2: 0x0100, ..Default::default() };
     let cols = &wave.columns;
     if beats.len() < 32 || cols.is_empty() || sr == 0 { return out; }
@@ -226,7 +234,8 @@ pub fn detect(beats: &[(u8, f32, u32)], wave: &WaveformCache, frames: u64, sr: u
     for i in 1..beat_feat.len() {
         rise[i % 4] += (beat_feat[i][0] - beat_feat[i - 1][0]).max(0.0) + (beat_feat[i][2] - beat_feat[i - 1][2]).max(0.0);
     }
-    let phase = (0..4).max_by(|a, b| rise[*a].partial_cmp(&rise[*b]).unwrap()).unwrap();
+    let guessed = (0..4).max_by(|a, b| rise[*a].partial_cmp(&rise[*b]).unwrap()).unwrap();
+    let phase = if downbeats_known { beats.iter().take(4).position(|b| b.0 == 1).unwrap_or(guessed) } else { guessed };
 
     // Bars from `phase`; a partial first bar joins the first phrase.
     let bar_start: Vec<usize> = (phase..beats.len()).step_by(4).filter(|&b| b + 4 <= beats.len()).collect();
@@ -416,6 +425,19 @@ mod tests {
             match bar / 16 { 0 => [20, 60, 40, 50], 1 | 3 => [200, 120, 120, 200], 2 | 4 => [90, 110, 60, 120], _ => [20, 50, 30, 40] }
         }).collect();
         (beats, WaveformCache { columns, sample_rate: sr, hop_size: 512 }, frames, sr)
+    }
+
+    #[test]
+    fn trusts_the_grids_downbeats_when_told() {
+        // Same track, but the grid says bar 1 starts on the third beat: with
+        // downbeats known, every phrase starts on a beat the grid calls 1.
+        let (mut beats, wave, frames, sr) = synthetic();
+        for (i, b) in beats.iter_mut().enumerate() { b.0 = ((i + 2) % 4 + 1) as u8; }   // beat 3 (index 2) is a 1
+        let s = detect_with(&beats, &wave, frames, sr, true);
+        assert!(!s.phrases.is_empty());
+        for p in &s.phrases[1..] {
+            assert_eq!(beats[p.beat as usize - 1].0, 1, "phrase at beat {} is not on a downbeat", p.beat);
+        }
     }
 
     #[test]
