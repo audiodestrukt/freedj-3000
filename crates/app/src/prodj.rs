@@ -763,7 +763,6 @@ fn listen_beat(
 ) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(PORT_BEAT)?;
     log::info!("ProDJ Link: listening for beats on port {PORT_BEAT}");
-    let me = ProDjLink::new(link.player());
     let tx = UdpSocket::bind("0.0.0.0:0").ok()?;
     let mut last_beat_at: HashMap<u8, Instant> = HashMap::new();
     spawn("prodj-rx-50001", PORT_BEAT, sock, move |data, addr| {
@@ -809,7 +808,7 @@ fn listen_beat(
             if link.master.load(Ordering::Relaxed) {
                 log::info!("ProDJ Link: player {requester} asks for master — yielding");
                 link.handoff_to.store(requester as u32, Ordering::Relaxed);
-                let _ = tx.send_to(&me.build_master_response(true), (addr.ip(), PORT_BEAT));
+                let _ = tx.send_to(&ProDjLink::new(link.player()).build_master_response(true), (addr.ip(), PORT_BEAT));
             }
             return;
         }
@@ -840,31 +839,37 @@ fn listen_beat(
 }
 
 /// 50002: status from peers → who is master, handoff progress; one log line
+/// Our answer to a media query (port 50002) about our USB, and where to send
+/// it: built with the number we hold now (AUTO may have moved since start).
+pub fn answer_media_query(link: &LinkState, data: &[u8]) -> Option<(Vec<u8>, Ipv4Addr)> {
+    let (dev, rip, target, slot) = ProDjLink::parse_media_query(data)?;
+    let n = link.serve_tracks.load(Ordering::Relaxed);
+    log::info!("ProDJ Link: media query from device {dev} ({rip}) for player {target} slot {slot}; serving {n} tracks");
+    (target == link.player() && n > 0 && matches!(slot, 0 | 3)).then(|| {
+        let resp = ProDjLink::new(link.player()).build_media_response(rip, 3, "OPENDECK", n.min(u16::MAX as u32) as u16, 0, 32 << 30, 16 << 30);
+        (resp, rip)
+    })
+}
+
 /// per change per player.
 fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(PORT_STATUS)?;
     log::info!("ProDJ Link: listening for status on port {PORT_STATUS}");
     let mut last: HashMap<u8, Status> = HashMap::new();
     let reply_sock = UdpSocket::bind("0.0.0.0:0").ok();
-    let me = ProDjLink::new(link.player());
     spawn("prodj-rx-50002", PORT_STATUS, sock, move |data, addr| {
         log::trace!("ProDJ rx :50002 {} bytes from {addr} — {:02X?}", data.len(), data);
         diag_packet(50002, addr, data);
         // Media query: a peer asks what is in one of our slots.  Answer when we
         // are serving (the media response names the library and its size).
         if ProDjLink::packet_type(data) == Some(PKT_MEDIA_QUERY) {
-            if let Some((dev, rip, target, slot)) = ProDjLink::parse_media_query(data) {
-                let n = link.serve_tracks.load(Ordering::Relaxed);
-                log::info!("ProDJ Link: media query from device {dev} ({rip}) for player {target} slot {slot}; serving {n} tracks");
-                if target == link.player() && n > 0 && matches!(slot, 0 | 3) {
-                    // To the address inside the packet and, across a routed
-                    // link where that is the peer's LAN address, to where the
-                    // query came from — on the status port either way.
-                    let resp = me.build_media_response(rip, 3, "OPENDECK", n.min(u16::MAX as u32) as u16, 0, 32 << 30, 16 << 30);
-                    if let Some(s) = &reply_sock {
-                        let _ = s.send_to(&resp, (rip, PORT_STATUS));
-                        if let std::net::SocketAddr::V4(f) = addr { if *f.ip() != rip { let _ = s.send_to(&resp, (*f.ip(), PORT_STATUS)); } }
-                    }
+            if let Some((resp, rip)) = answer_media_query(&link, data) {
+                // To the address inside the packet and, across a routed link
+                // where that is the peer's LAN address, to where the query
+                // came from — on the status port either way.
+                if let Some(s) = &reply_sock {
+                    let _ = s.send_to(&resp, (rip, PORT_STATUS));
+                    if let std::net::SocketAddr::V4(f) = addr { if *f.ip() != rip { let _ = s.send_to(&resp, (*f.ip(), PORT_STATUS)); } }
                 }
             }
             return;
@@ -1546,6 +1551,21 @@ mod claim_tests {
         let link = deck(4, true, true);
         ClaimGuard::default().on_packet(&link, &announce(4, HIGH.0), Some(HIGH));
         assert!(!link.reclaim.load(Ordering::Relaxed), "they are higher: they move");
+    }
+
+    #[test]
+    fn media_answers_carry_the_number_we_hold_now() {
+        let link = LinkState::auto(1);
+        link.serve_tracks.store(3, Ordering::Relaxed);
+        link.player.store(2, Ordering::Relaxed);      // AUTO claimed 2, not the preferred 1
+        let peer = Ipv4Addr::new(169, 254, 5, 55);
+        let q = ProDjLink::new(1).build_media_query(peer, 2, 3);
+        let (resp, to) = super::answer_media_query(&link, &q).expect("answers a query for us");
+        assert_eq!(to, peer);
+        assert_eq!(ProDjLink::parse_media_response(&resp).unwrap().player, 2);
+        assert!(super::answer_media_query(&link, &ProDjLink::new(1).build_media_query(peer, 1, 3)).is_none(), "not our number");
+        link.serve_tracks.store(0, Ordering::Relaxed);
+        assert!(super::answer_media_query(&link, &q).is_none(), "nothing served");
     }
 
     #[test]
