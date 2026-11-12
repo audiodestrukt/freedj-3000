@@ -58,6 +58,8 @@ interoperable with Pioneer hardware on the same network.
 protocol, media sharing and both screens work; the physical control surface
 and the sampler features are the roadmap. What is left on the CDJ-3000 side
 is listed in [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md).
+The full, current feature list by area and platform is
+[docs/FEATURES.md](docs/FEATURES.md).
 
 | Feature | Status |
 |---|---|
@@ -513,6 +515,10 @@ The codebase is Rust throughout. Contributions welcome in any area. The most use
 - **RP2350 firmware** — no_std Rust for the control surface MCU
 - **XDJ media-source acceptance** — an XDJ browsing and loading from OpenDeck over LINK (dbserver + NFS servers are in; see `docs/reference/prodj-link-media.md`)
 - **Hardware** — the panel board is generated and routed ([hardware/](hardware/README.md)); it needs its control positions checked and a first fab
+
+A change that adds, removes or changes a feature updates
+[CHANGELOG.md](CHANGELOG.md) and [docs/FEATURES.md](docs/FEATURES.md) in the
+same commit.
 
 See `AUDIO_ENGINE.md` for detailed design documentation on the audio engine,
 and `docs/design/track-loading.md` for how a track load runs off the UI thread.

@@ -4,7 +4,41 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **PLAYER No. AUTO.** OpenDeck now picks its own Pro DJ Link player
+  number, as a CDJ set to AUTO does: it listens for the players already on
+  the network, takes a free number (the device's usual one when it is free:
+  3 on an iPad, 4 on an iPhone) and claims it with the players' own claim
+  sequence, moving on if a player says the number is taken. Once it has a
+  number it defends it, and it moves if another device turns up with the
+  same one. AUTO is the new default; a number you set yourself is kept.
+  Players 5 and 6 can be chosen too (they need a 6-player network of
+  CDJ-3000s); AUTO uses them only when 1–4 are taken. Tested with five
+  OpenDecks on one network; not yet against real players. Mixer channel
+  assignment (DJM) is not supported yet.
+- **Apple Lossless (ALAC) tracks load.** They were refused.
+
 ### Fixed
+- **Mono tracks would not load** ("track has 1 channels but the deck runs
+  2"). They now play on both sides; tracks with more than two channels play
+  their front left and right. Mono ALAC files also read at half length,
+  because their header names no channel count; the layout now comes from the
+  decoded audio.
+- **A track whose header gave no sample rate** was taken for 44.1 kHz, so a
+  48 kHz one would play 8 % slow. The rate of the decoded audio now wins.
+  No track we could find did this; checked over 684 tracks and every
+  supported format (`examples/probe_rate` checks a folder).
+- **MP3s were 24 ms off from rekordbox and the players.** The decoder trimmed
+  the MP3 encoder delay; rekordbox and Pioneer players keep it, so every
+  rekordbox beat grid and cue on an MP3 sat ~24 ms late against our audio (a
+  cue on a kick started after the attack), a synced deck next to a CDJ ran
+  ~24 ms early, and grids we served over LINK were ~24 ms early on the
+  players. MP3s now decode with the delay kept, like rekordbox. Measured over
+  a 226-track rekordbox stick (`examples/analysis_vs_rekordbox`): the deck's
+  own grids moved from a median 22.7 ms off rekordbox's to 0.7 ms, and
+  OverCue stems now line up within 1 ms without correction. The Link
+  analysis cache is rebuilt once. Grids hand-adjusted with GRID ADJUST on an
+  MP3 before this sit ~24 ms early: SNAP GRID them again.
 - **Beat grids on the off-beat.** The deck's own analysis (tracks without a
   rekordbox grid) put a fifth of house / tech-house grids half a beat out,
   on the open hats instead of the kick: the phase vote summed energy per
@@ -21,17 +55,20 @@ All notable changes to this project will be documented in this file.
   from rekordbox's (p90 6.3 ms), off-beat grids 27 → 12. Load time is
   unchanged. Still wrong: four tracks read at 4/5 or 2/3 tempo, and drum &
   bass at half tempo.
-- **MP3s were 24 ms off from rekordbox and the players.** The decoder trimmed
-  the MP3 encoder delay; rekordbox and Pioneer players keep it, so every
-  rekordbox beat grid and cue on an MP3 sat ~24 ms late against our audio (a
-  cue on a kick started after the attack), a synced deck next to a CDJ ran
-  ~24 ms early, and grids we served over LINK were ~24 ms early on the
-  players. MP3s now decode with the delay kept, like rekordbox. Measured over
-  a 226-track rekordbox stick (`examples/analysis_vs_rekordbox`): the deck's
-  own grids moved from a median 22.7 ms off rekordbox's to 0.7 ms, and
-  OverCue stems now line up within 1 ms without correction. The Link
-  analysis cache is rebuilt once. Grids hand-adjusted with GRID ADJUST on an
-  MP3 before this sit ~24 ms early: SNAP GRID them again.
+
+### Changed
+- **CDJ-3000 skin: UTILITY shows the version** and support address at the
+  bottom, as the XDJ skin's MENU always has.
+- **A player on LINK that serves its export without a database service**
+  opens on the rekordbox categories, like a USB stick (it went straight to
+  PLAYLIST).
+- **Releases:** only a `v*` tag publishes a GitHub release, so every release
+  carries every platform; per-platform tags build without publishing.
+
+## [0.3.8] — 2026-11-10
+
+Includes 0.3.3–0.3.7, which went to TestFlight and Android test builds only.
+### Fixed
 - **CUE lost the transient it was set on** (Rubber Band, the default
   key-lock engine). After a seek, R3 swallowed the first ~30–50 ms of what
   followed, so a CUE on a kick played the kick's tail. The stretcher now
@@ -44,18 +81,19 @@ All notable changes to this project will be documented in this file.
   a missing rate was read as 96 kHz. Checked on a real prepared stick: all
   six tracks load (MP3 and M4A) and drums / vocal mute and solo as they
   should.
+- **Tempo fader dead spots at max and min.** The handle overhangs the slot
+  at either end and that overhang took no touches, and the fader was read
+  absolutely, so grabbing the handle at an end did nothing until the finger
+  reached the slot. The touch area now covers the handle's whole travel
+  (trimmed at MASTER TEMPO), and a drag moves the fader by how far the
+  finger moves from where it took hold.
 
 ### Changed
-- **CDJ-3000 skin: UTILITY shows the version** and support address at the
-  bottom, as the XDJ skin's MENU always has.
 - **A rekordbox stick opens on its categories** (ARTIST, ALBUM, TRACK,
   KEY, PLAYLIST, HISTORY, FOLDER) from the USB row and the USB key too, not
   only from the CDJ-3000 SOURCE screen, as on the units. Folder lists no
   longer show a stick's system folders (PIONEER, CDJMODS, System Volume
-  Information, $RECYCLE.BIN, LOST.DIR). A player on LINK that serves its
-  export without a database service opens on the same categories too (it
-  went straight to PLAYLIST); players and rekordbox with one already opened
-  on their own category list.
+  Information, $RECYCLE.BIN, LOST.DIR).
 - **CDJ-3000 skin: MENU opens UTILITY on a tap** (the settings, STEMS
   included). LOAD PREVIOUS TRACK moved to the hold. The unit has it the
   other way round, but on a touchscreen the settings must be one tap away.
@@ -119,18 +157,6 @@ All notable changes to this project will be documented in this file.
   now), and one turn of the platter moves the track 1.8 s, a record's turn
   at 33⅓ rpm, so the centre display's marker turns with the finger (it ran
   about ten times faster on the iPad).
-
-### Fixed
-- **Tempo fader dead spots at max and min.** The handle overhangs the slot
-  at either end and that overhang took no touches, and the fader was read
-  absolutely, so grabbing the handle at an end did nothing until the finger
-  reached the slot. The touch area now covers the handle's whole travel
-  (trimmed at MASTER TEMPO), and a drag moves the fader by how far the
-  finger moves from where it took hold.
-
-### Changed
-- CDJ-3000 faceplate: a short MENU press opens LOAD PREVIOUS TRACK, as the
-  manual says; UTILITY is the long press.
 
 ## [0.3.2] — 2026-11-09
 

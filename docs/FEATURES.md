@@ -1,0 +1,95 @@
+# OpenDeck features
+
+Everything the deck does today, by area. Keep it current: a change that adds,
+removes or changes a feature updates this file in the same commit as its
+CHANGELOG entry. The CHANGELOG says *when* something changed; this file says
+*what there is now*.
+
+✅ works · 🧪 experimental / not yet tested on real hardware · 📋 planned
+
+Platforms: **D** desktop (Linux x86_64/aarch64, Windows, macOS) · **Pi**
+Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
+(App Store: OpenDeck DJ) · **And** Android (.apk). "All" = every one.
+
+## Tracks and library
+
+| Feature | Status | Where |
+|---|---|---|
+| Formats: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF, OGG Vorbis; mono and multichannel play as stereo | ✅ | All |
+| Any sample rate (44.1, 48, 96 kHz…), converted to the output's rate on load | ✅ | All |
+| BROWSE a music folder; LOAD; LOAD PREVIOUS TRACK; TAG LIST; track INFO; cover art | ✅ | All |
+| SEARCH with the on-screen keyboard (CDJ-3000 skin; `/` on the desktop) | ✅ | All |
+| rekordbox USB sticks: export.pdb categories (ARTIST, ALBUM, TRACK, KEY, PLAYLIST, HISTORY, FOLDER), beat grids, memory and hot cues, preview waveforms, covers | ✅ | All |
+| USB drives plugged into the device (iOS: "USB: ADD DRIVE…" picker, remembered; Android: "All files access") | ✅ | iOS, And, D, Pi |
+| Files-app music folder with a bundled demo track | ✅ | iOS (Android: Music folder) |
+| Stems prepared with OverCue Desktop: mute / solo / level per stem (MENU → STEMS, off by default) | ✅ | All |
+| Sorting, TRACK FILTER, KEY SHIFT (CDJ-3000 screen) | 📋 | — |
+
+## Analysis
+
+| Feature | Status | Where |
+|---|---|---|
+| BPM and beat grid for tracks without rekordbox data: tempo and phase fitted together, rekordbox's beat timing; 222/226 tempos exact on a test stick, grids 1.3 ms median from rekordbox's | ✅ | All |
+| rekordbox's own grid and cues used when present (stick or LINK) | ✅ | All |
+| GRID ADJUST: SNAP GRID, SHIFT GRID (folds a synced jog nudge into the grid), reset | ✅ | All |
+| Waveforms: detail (zoomable, beat and bar markers) and full-track overview with needle search | ✅ | All |
+| Analysis cache (a track is analysed once) | ✅ | All |
+| Downbeat (bar 1) detection; drum & bass at full tempo; 4:5 / 2:3 tempo mistakes | 📋 | — |
+
+## Playing
+
+| Feature | Status | Where |
+|---|---|---|
+| PLAY / CUE with hold-to-preview and back-cue, AUTO CUE (with level setting) | ✅ | All |
+| Hot cues (A–D on the XDJ screen, A–H on the CDJ-3000 faceplate), memory cues | ✅ | All |
+| Loops: manual IN / OUT, beat loops 1/2–16, BEAT JUMP | ✅ | All |
+| QUANTIZE for cues and loops | ✅ | All |
+| SLIP mode | ✅ | All |
+| Jog wheel: VINYL (scratch) and CDJ (nudge) modes; the platter turns under the finger, one turn = one record turn | ✅ | All |
+| Scrub audio: a paused jog (or a VINYL scratch) plays the audio under the playhead | ✅ | All |
+| Drag the big waveform to seek | ✅ | All |
+| Tempo fader ±6 / ±10 / ±16 / WIDE; MASTER TEMPO key lock | ✅ | All |
+| Key-lock engines: Rubber Band R3 (default), Bungee, WSOLA (low-power boards) | ✅ | All (WSOLA for Pi Zero) |
+| Vinyl brake, key lock off (varispeed), real-time sample-rate conversion | 📋 | — |
+
+## Screens and controls
+
+| Feature | Status | Where |
+|---|---|---|
+| XDJ-1000MK2 screen: waveforms, grid, INFO, BROWSE, PERFORM pads, MENU / UTILITY | ✅ | All |
+| CDJ-3000 screen and faceplate: playback, BEAT LOOP / BEAT JUMP panels, SOURCE, BROWSE, TAG LIST, UTILITY, SEARCH, phase meter and master badge, STEMS panel | ✅ | D, Pi, iPad, Android tablet |
+| iPhone / Android phone: two landscape pages (SCREEN, CONTROLS) | ✅ | iOS, And |
+| Keyboard control | ✅ | D |
+| USB MIDI controllers mapped in `controllers.toml` with LED feedback (DJ2Go preset) | ✅ | D, Pi (not yet iOS / Android) |
+| PCF8574 I2C button boards | 🧪 built and unit-tested, no board yet | Pi |
+| A CDJ-3000 as OpenDeck's control surface and screen (HID over LINK, Control Mode) | 🧪 emulator only | D |
+| ADK-1000 hardware panel (RP2350 hub) | 📋 PCB routed, not made | — |
+
+## Pro DJ Link
+
+| Feature | Status | Where |
+|---|---|---|
+| Appears as a player: announce, beats, status | ✅ tested on an XDJ-1000MK2 | All |
+| PLAYER No. AUTO: claims a free player number like a CDJ, defends it, moves on a collision; or set 1–6 (5–6 need a 6-player network) | 🧪 tested between OpenDecks, not yet real players | All |
+| SYNC to the master's tempo and phase; a jog nudge while synced is kept as an offset | ✅ | All |
+| MASTER, handoff both ways | ✅ tested on an XDJ-1000MK2 | All |
+| LINK: browse and load from other players' USB / SD and from rekordbox (dbserver + NFS), with their grids and cues | ✅ | All |
+| Serve our own music to other decks (metadata, grid, waveforms, art) | ✅ OpenDeck→OpenDeck; XDJ acceptance pending | All |
+| Works over Wi-Fi or ethernet; survives iOS backgrounding | ✅ | All |
+| DJM mixer channel assignment of player numbers | 📋 | — |
+| CDJ-3000-generation media transfer | 📋 | — |
+
+## Platforms and releases
+
+| Feature | Status |
+|---|---|
+| Linux x86_64 / aarch64, Windows x64, macOS universal app, Android APK, iOS IPA: one `v*` tag publishes all on one GitHub release | ✅ |
+| App Store: OpenDeck DJ (iPhone + iPad) | ✅ |
+| Raspberry Pi 5 (60 fps, ~0.6 of a core playing) | ✅ |
+| Raspberry Pi Zero W (SDL renderer on KMSDRM, WSOLA, 49 fps) | ✅ |
+| Running on a CDJ-3000 itself | 📋 designed, not built |
+
+## Planned
+
+- Sampler deck: auto one-shots, quantized triggers, cue sequencing ([#24](https://github.com/audiodestrukt/freedj-3000/issues/24)).
+- The remaining CDJ-3000 screen work: [TODO-cdj-3000.md](TODO-cdj-3000.md).
