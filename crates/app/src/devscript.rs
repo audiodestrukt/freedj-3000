@@ -23,6 +23,7 @@
 //! | `rotary=<n>` | turn the rotary `n` detents (positive = down the list) |
 //! | `lamps=<path>` | write the faceplate's lamps as cdj3k-emu reports them (JSON) |
 //! | `shot=<path>` | save the next frame as a PNG and carry on |
+//! | `deckview` | DECK VIEW: full deck ↔ screen only (the F key) |
 //! | `quit` | exit the process (status 0) |
 //!
 //! The button actions use the emulator's names on purpose: one scenario
@@ -52,6 +53,8 @@ pub enum Action {
     /// Stem levels: drums, vocal, harmonics (0..1).
     Stems([f32; 3]),
     Quit,
+    /// DECK VIEW: flip full deck ↔ screen only (the F key).
+    DeckView,
 }
 
 /// Parse a script; entries are sorted by time. Errors name the bad entry.
@@ -71,6 +74,7 @@ pub fn parse(src: &str) -> Result<Vec<(f64, Action)>, String> {
             "snapgrid" => Action::SnapGrid,
             "gridreset" => Action::GridReset,
             "quit" => Action::Quit,
+            "deckview" => Action::DeckView,
             _ if act.starts_with("screen=") => Action::Screen(act[7..].to_string()),
             _ if act.starts_with("open=") => Action::Open(act[5..].to_string()),
             _ if act.starts_with("search=") => Action::Search(act[7..].to_string()),

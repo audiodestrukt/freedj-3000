@@ -22,6 +22,9 @@ pub enum Event {
 pub enum UiEvent {
     /// Toggle TIME (elapsed) ↔ REMAIN.
     TimeMode,
+    /// DECK VIEW: the whole deck around the screen ↔ the screen alone
+    /// (desktop; the F key).
+    DeckView,
     /// Toggle AUTO CUE: on load, cue at the first audible sound instead of 0:00.
     AutoCue,
     /// Cycle Waveform Color: RGB → 3 BAND → BLUE.

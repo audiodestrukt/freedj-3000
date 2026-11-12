@@ -9,9 +9,23 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, Stems, PerfLog }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, DeckView, Stems, PerfLog }
 
-pub const MENU: [(Setting, &str); 7] = [
+/// DECK VIEW is a desktop row: the iPad always shows the whole deck and the
+/// phone has its two pages.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub const MENU: &[(Setting, &str)] = &[
+    (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
+    (Setting::Quantize,     "QUANTIZE"),
+    (Setting::TempoRange,   "TEMPO RANGE"),
+    (Setting::Player,       "PLAYER No."),
+    (Setting::Skin,         "SCREEN"),
+    (Setting::DeckView,     "DECK VIEW"),
+    (Setting::Stems,        "STEMS"),
+    (Setting::PerfLog,      "PERF LOG"),
+];
+#[cfg(any(target_os = "ios", target_os = "android"))]
+pub const MENU: &[(Setting, &str)] = &[
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
     (Setting::TempoRange,   "TEMPO RANGE"),
@@ -82,6 +96,10 @@ pub struct Settings {
     pub perf_log: bool,
     /// Which unit's screens to show.
     pub skin: Skin,
+    /// Desktop: the whole deck (jog, keys, tempo fader) around the screen,
+    /// or the screen alone.  Defaults to the whole deck on the Mac and
+    /// Windows; `--faceplate` / `--screen-only` override it for one run.
+    pub full_deck: bool,
     /// Play prepared stems (OverCue's open USB format) and show their
     /// controls: a STEMS key and panel on the CDJ-3000 screen, a STEMS pad
     /// mode in the XDJ's PERFORM screen.  Off by default, so both skins look
@@ -106,7 +124,8 @@ const SEED: u8 = 3;
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000, stems: false, seed: 0, phone: false }
+        Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000,
+               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), stems: false, seed: 0, phone: false }
     }
 }
 
@@ -184,6 +203,7 @@ impl Settings {
             Setting::Player       => c.player = step(&[0u8, 1, 2, 3, 4, 5, 6], c.player, dir),
             Setting::Skin if c.phone => {}
             Setting::Skin         => c.skin = step(&[Skin::Xdj1000Mk2, Skin::Cdj3000], c.skin, dir),
+            Setting::DeckView     => c.full_deck = !c.full_deck,
             Setting::Stems        => c.stems = !c.stems,
             Setting::PerfLog      => c.perf_log = !c.perf_log,
         }
@@ -200,6 +220,7 @@ impl Settings {
             Setting::Player       => format!("{}   (applies at next launch)", self.player),
             Setting::Skin if self.phone => format!("{}   (CDJ-3000: iPad only)", Skin::Xdj1000Mk2.label()),
             Setting::Skin         => self.skin.label().into(),
+            Setting::DeckView     => if self.full_deck { "FULL DECK   (F)".into() } else { "SCREEN ONLY   (F)".into() },
             Setting::Stems        => if self.stems { "ON   (prepared stems)".into() } else { "OFF".into() },
             Setting::PerfLog      => if self.perf_log { "ON   (Documents/opendeck-perf.log)".into() } else { "OFF".into() },
         }

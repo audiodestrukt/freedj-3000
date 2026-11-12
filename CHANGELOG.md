@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- **DECK VIEW: switch between the whole deck and the screen alone while
+  running** (desktop): the `F` key or MENU → DECK VIEW. The window resizes
+  to the new shape, fitted to the screen, and the choice is saved; the full
+  deck stays the default on the Mac and Windows. `--faceplate` /
+  `--screen-only` still override it for one run.
+
 ## [0.3.10] — 2026-11-12
 
 ### Changed

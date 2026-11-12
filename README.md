@@ -286,6 +286,7 @@ The keyboard stands in for the deck's buttons on a desktop.
 | `C` | Waveform colour: RGB → 3 BAND → BLUE |
 | `T` | TIME ↔ REMAIN |
 | `P` | Phase meter: beat boxes ↔ master alignment |
+| `F` | DECK VIEW: the whole deck (jog, keys, fader) ↔ the screen alone (also MENU → DECK VIEW; saved) |
 | `B` `L` `I` `U` | BROWSE · TAG LIST · INFO · MENU/UTILITY |
 | `O` · `H` | SOURCE · LOAD PREVIOUS TRACK |
 | `/` | SEARCH; then type, `Backspace` deletes, `Esc` leaves |

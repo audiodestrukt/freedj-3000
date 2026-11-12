@@ -827,6 +827,7 @@ impl DeckApp {
         let mut browser = browser;
         if let Some(l) = &loaded { browser.note_played(l); }
         let tag_list = taglist::TagList::open();
+        let full_deck = settings.full_deck;
         let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
             .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
         // AUTO CUE (on by default, as the unit): with no explicit cue, the
@@ -917,12 +918,12 @@ impl DeckApp {
             zoom_grid_mode:    std::env::var("OPENDECK_GRID_ADJUST").map(|v| v == "1").unwrap_or(false),   // dev: start in GRID ADJUST
             // Dev: OPENDECK_PHASE_VIEW=ticks starts in the alignment view (for captures).
             phase_ticks_view:  std::env::var("OPENDECK_PHASE_VIEW").map(|v| v == "ticks").unwrap_or(false),
-            // The full deck (jog, keys, fader around the screen) by default
-            // on the Mac and Windows, where nothing else gives the controls;
-            // screen-only elsewhere (the Pi appliance's panel).
-            // OPENDECK_FACEPLATE=1/0, --faceplate / --screen-only.
-            faceplate:         std::env::var("OPENDECK_FACEPLATE").map(|v| v == "1")
-                                   .unwrap_or(cfg!(any(target_os = "macos", target_os = "windows"))),
+            // The full deck (jog, keys, fader around the screen): the DECK
+            // VIEW setting, on by default on the Mac and Windows, where
+            // nothing else gives the controls; screen-only elsewhere (the Pi
+            // appliance's panel).  OPENDECK_FACEPLATE=1/0 (--faceplate /
+            // --screen-only) overrides it for one run; F flips it.
+            faceplate:         std::env::var("OPENDECK_FACEPLATE").map(|v| v == "1").unwrap_or(full_deck),
             portrait:          std::env::var("OPENDECK_PORTRAIT").map(|v| v == "1").unwrap_or(false),
             phone:             std::env::var("OPENDECK_PHONE").map(|v| v == "1").unwrap_or(false),
             phone_controls:    std::env::var("OPENDECK_PHONE_PAGE").map(|v| v == "controls").unwrap_or(false),
@@ -1525,6 +1526,10 @@ impl DeckApp {
                 log::info!("phone: {} page", if self.phone_controls { "CONTROLS" } else { "SCREEN" });
                 self.release_held_controls();
             }
+            Event::Ui(UiEvent::DeckView) => {
+                self.settings.cycle(settings::Setting::DeckView, 1);
+                self.apply_deck_view();
+            }
             Event::Ui(UiEvent::PhaseMeterView) => { self.phase_ticks_view = !self.phase_ticks_view; log::info!("phase meter → {}", if self.phase_ticks_view { "alignment" } else { "beat display" }); }
             // Source keys: open the browser on that source — LINK lists the
             // linked players, FILE the local root.
@@ -1934,6 +1939,7 @@ impl DeckApp {
                 A::Lamps(p) => self.script_lamps = Some(p),
                 A::Shot(p) => self.script_shot = Some(p),
                 A::Stems(g) => { for (i, v) in g.iter().enumerate() { self.audio.stems.set_gain(i, *v); } log::info!("script: stems {g:?}"); }
+                A::DeckView => self.events.push(Event::Ui(UiEvent::DeckView)),
                 A::Quit => { log::info!("script: quit"); log::logger().flush(); std::process::exit(0); }
             }
         }
@@ -2234,6 +2240,7 @@ impl DeckApp {
     fn cycle_setting(&mut self, s: settings::Setting) {
         self.settings.cycle(s, 1);
         cpumeter::set_file_log(self.settings.perf_log);
+        if s == settings::Setting::DeckView { self.apply_deck_view(); }
         if s == settings::Setting::Stems {
             // On: look for the loaded track's stems now.  Off: drop them,
             // back to the plain track, and leave the STEMS pad mode.
@@ -2577,6 +2584,7 @@ impl DeckApp {
             Comma  => Some(Event::Deck(ControlEvent::JogDelta { delta: -4, velocity_rpm: 0.0 })),
             Period => Some(Event::Deck(ControlEvent::JogDelta { delta:  4, velocity_rpm: 0.0 })),
             KeyP => Some(Event::Ui(UiEvent::PhaseMeterView)),
+            KeyF => Some(Event::Ui(UiEvent::DeckView)),
             KeyA => Some(Event::Ui(UiEvent::ZoomGridMode)),   // GRID ADJUST (knob = arrows)
             KeyC => Some(Event::Ui(UiEvent::CycleColor)),
             KeyZ => Some(Event::Ui(UiEvent::ZoomStep(1))),
@@ -2592,6 +2600,22 @@ impl DeckApp {
     }
 
     fn request_redraw(&self) { if let Some(h) = &self.host { h.request_redraw(); } }
+
+    /// DECK VIEW changed: draw the whole deck or the screen alone, and
+    /// resize the window to the new shape (fitted to its monitor, as at
+    /// launch), so neither ends up letterboxed in the other's window.
+    /// Desktop only: the iPad always shows the deck, the phone its pages.
+    fn apply_deck_view(&mut self) {
+        if cfg!(any(target_os = "ios", target_os = "android")) || self.phone || self.portrait { return; }
+        self.faceplate = self.settings.full_deck;
+        log::info!("deck view → {}", if self.faceplate { "full deck" } else { "screen only" });
+        let (w, h) = self.initial_window_size();
+        if let Some(Host::Winit { window, .. }) = &self.host {
+            let (w, h) = fit_to_monitor(window.current_monitor(), w as f64, h as f64);
+            let _ = window.request_inner_size(winit::dpi::LogicalSize::new(w, h));
+            window.request_redraw();
+        }
+    }
 
     /// Screen-only is the 7" panel; the faceplate window matches the deck
     /// photo's aspect (the image is aspect-fit inside it).  Dev:
@@ -3489,6 +3513,17 @@ fn memory_prev(cues: &[u64], pos: u64, tol: u64) -> Option<u64> {
     cues.iter().rev().find(|&&m| m.saturating_add(tol) < pos).copied()
 }
 
+/// A window of `w`×`h` points scaled down (aspect kept) to fit 90 % of the
+/// monitor, when it would not: the full deck is 1090 high and a 13" MacBook
+/// has ~950 points.  Unchanged when it fits or the monitor is unknown.
+fn fit_to_monitor(m: Option<winit::monitor::MonitorHandle>, w: f64, h: f64) -> (f64, f64) {
+    let Some(m) = m else { return (w, h) };
+    let size = m.size().to_logical::<f64>(m.scale_factor());
+    let fit = (size.height * 0.9 / h).min(size.width * 0.9 / w).min(1.0);
+    if fit < 1.0 { log::info!("window: {w}x{h} scaled to fit the {}x{} screen", size.width, size.height); }
+    ((w * fit).round(), (h * fit).round())
+}
+
 /// Interleaved index of the first sample louder than `level_db` (the AUTO CUE
 /// LEVEL menu setting, -36…-78 dB), frame-aligned — where AUTO CUE places the
 /// cue on load.  0 if silent.
@@ -3525,16 +3560,10 @@ impl ApplicationHandler for DeckApp {
             // A first window taller than the screen (the full deck is 1090
             // high; a 13" MacBook has ~950 points) is scaled down to fit,
             // aspect kept; an explicit OPENDECK_WINDOW is taken as given.
-            let (mut w, mut h) = (win_w as f64, win_h as f64);
-            if std::env::var("OPENDECK_WINDOW").is_err() {
-                if let Some(m) = event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next()) {
-                    let size = m.size().to_logical::<f64>(m.scale_factor());
-                    let fit = (size.height * 0.9 / h).min(size.width * 0.9 / w).min(1.0);
-                    if fit < 1.0 { log::info!("window: {w}x{h} scaled to fit the {}x{} screen", size.width, size.height); }
-                    w *= fit; h *= fit;
-                }
-            }
-            attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(w.round(), h.round()));
+            let (w, h) = if std::env::var("OPENDECK_WINDOW").is_err() {
+                fit_to_monitor(event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next()), win_w as f64, win_h as f64)
+            } else { (win_w as f64, win_h as f64) };
+            attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(w, h));
         }
         #[cfg(target_os = "ios")]
         let _ = (win_w, win_h);
