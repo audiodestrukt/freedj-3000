@@ -82,6 +82,16 @@ const HISTORY_MAX: usize = 100;
 
 /// LOAD PREVIOUS TRACK bookkeeping for a new load: the track it replaces
 /// goes to the top of `history`, and the new one leaves it.
+/// Add a served track to this session's HISTORY (one session per run, id 1),
+/// not twice in a row.
+fn note_history(link: &prodj::LinkState, id: u32) {
+    let Some(lib) = link.library.lock().ok().and_then(|l| l.clone()) else { return };
+    let Ok(mut lib) = lib.write() else { return };
+    if lib.history.is_empty() { lib.history.push((1, Vec::new())); }
+    let session = &mut lib.history.last_mut().unwrap().1;
+    if session.last() != Some(&id) { session.push(id); }
+}
+
 /// Where a loaded track lives, for our status packets: player 0 = us.
 fn track_ref(load: &Load, link: &prodj::LinkState) -> Option<opendeck_link::prodj::TrackRef> {
     use opendeck_link::prodj::TrackRef;
@@ -142,6 +152,11 @@ mod track_ref_tests {
         // Over NFS from the export: that player's USB, the export's ID.
         let nfs = Load::Link { ip: cdj, rel_path: "Contents/x.mp3".into(), analyze_rel: String::new(), id: 99 };
         assert_eq!(track_ref(&nfs, &link), Some(TrackRef { player: 1, slot: 3, kind: 1, id: 99 }));
+        // Playing our own tracks fills this session's HISTORY, once per play in a row.
+        let lib = opendeck_dbserver::server::Library { tracks: vec![], name: "t".into(), art: None, history: vec![] }.shared();
+        *link.library.lock().unwrap() = Some(std::sync::Arc::clone(&lib));
+        for id in [42, 42, 7, 42] { super::note_history(&link, id); }
+        assert_eq!(lib.read().unwrap().history, vec![(1, vec![42, 7, 42])]);
         // A player we no longer see: no claim about it.
         let gone = Load::Link { ip: Ipv4Addr::new(169, 254, 7, 7), rel_path: String::new(), analyze_rel: String::new(), id: 1 };
         assert_eq!(track_ref(&gone, &link), None);
@@ -2103,6 +2118,9 @@ impl DeckApp {
     fn publish_track(&self) {
         let t = self.loaded.as_ref().and_then(|l| track_ref(l, &self.link));
         log::info!("link: status track {t:?}");
+        // One of ours: it goes in this session's HISTORY, as a player logs
+        // what it plays from its own stick.
+        if let Some(t) = t.filter(|t| t.player == 0 && t.id != 0) { note_history(&self.link, t.id); }
         let ours_unknown = opendeck_link::prodj::TrackRef { player: 0, slot: 3, kind: 1, id: 0 };
         if let Ok(mut g) = self.link.track.lock() { *g = Some(t.unwrap_or(ours_unknown)); }
     }
@@ -3771,6 +3789,7 @@ fn start_media_server(root: &std::path::Path, player: opendeck_dbserver::server:
     }
     let nfs = NfsServer::start(scanned.tree, "/C/", 111, 2049)?;
     let db = DbServer::start_live(Arc::clone(&scanned.library), player, 0)?;
+    if let Ok(mut l) = link.library.lock() { *l = Some(Arc::clone(&scanned.library)); }
     log::info!("media server: {n} tracks under {} — nfs portmap {} nfsd {}, dbserver {}", root.display(), nfs.portmap, nfs.nfsd, db.db_port);
     opendeck_mediaserver::start_analysis(scanned.library, scanned.files, Some(link_cache_dir()))?;
     Ok(n)

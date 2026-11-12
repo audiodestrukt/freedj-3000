@@ -61,6 +61,12 @@ All notable changes to this project will be documented in this file.
   a player's sort-options request is answered, and request 0x1014 (KEY) is
   no longer taken for the track list. OpenDeck browsing a CDJ over LINK
   names its categories correctly too.
+- **KEY, HISTORY and MATCHING on players browsing OpenDeck.** KEY lists
+  the keys in Camelot order with the CDJ's related-key levels (same key,
+  plus relative, plus a fifth either way); HISTORY lists what this deck
+  played from its own library this session; MATCHING suggests tracks in a
+  related key within 6 % of the chosen player's tempo. Request formats as
+  captured from a CDJ-3000. Keys come from tags until key detection lands.
 - **Other devices could not show OpenDeck's track title or position.** Our
   status packets carried a track ID left over from the captured packet they
   were built from, so Beat Link, ShowKontrol and the players asked our

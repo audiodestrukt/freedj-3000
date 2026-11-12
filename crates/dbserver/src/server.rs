@@ -77,6 +77,9 @@ pub struct Library {
     pub tracks: Vec<Track>,
     pub name:   String,
     pub art:    Option<ArtLoader>,
+    /// HISTORY: sessions of tracks played from this library, oldest first
+    /// (id, track ids in play order).  Shown newest first, "HISTORY nnn".
+    pub history: Vec<(u32, Vec<u32>)>,
 }
 
 /// The library as the server and the analysis thread share it.
@@ -124,6 +127,52 @@ fn names<'a>(it: impl Iterator<Item = &'a str>) -> Vec<(u32, &'a str)> {
     v.into_iter().map(|n| (name_id(n), n)).collect()
 }
 
+/// Musical keys in Camelot order as rekordbox names them: index 0 is 1A,
+/// 1 is 1B, ..., so a key's dbserver id (as a CDJ-3000 numbers its KEY
+/// menu: Abm 1, B 2, Ebm 3, ...) is its index + 1.
+pub const KEYS: [&str; 24] = ["Abm", "B", "Ebm", "F#", "Bbm", "Db", "Fm", "Ab", "Cm", "Eb", "Gm", "Bb",
+                              "Dm", "F", "Am", "C", "Em", "G", "Bm", "D", "F#m", "A", "Dbm", "E"];
+
+/// A key as tags spell it ("Am", "A minor", "G#m", "Abm", "8A", "C#") to
+/// its id 1-24 (see [`KEYS`]).  `None` if it is not a key.
+pub fn key_id(name: &str) -> Option<u32> {
+    let s = name.trim();
+    if s.is_empty() { return None; }
+    // Camelot "8A" / "12B".
+    if let Some(l) = s.chars().last().filter(|c| matches!(c, 'A' | 'B' | 'a' | 'b')) {
+        if let Ok(n) = s[..s.len() - 1].parse::<u32>() {
+            if (1..=12).contains(&n) { return Some((n - 1) * 2 + if l.eq_ignore_ascii_case(&'A') { 1 } else { 2 }); }
+        }
+    }
+    let mut chars = s.chars();
+    let root = chars.next()?.to_ascii_uppercase();
+    let mut pc: i32 = match root { 'C' => 0, 'D' => 2, 'E' => 4, 'F' => 5, 'G' => 7, 'A' => 9, 'B' => 11, _ => return None };
+    let rest: String = chars.collect();
+    let mut rest = rest.trim().to_string();
+    if rest.starts_with('#') || rest.starts_with('♯') { pc += 1; rest = rest[rest.chars().next().unwrap().len_utf8()..].to_string(); }
+    else if rest.starts_with('b') && !rest.to_lowercase().starts_with("b ") || rest.starts_with('♭') { pc -= 1; rest = rest[rest.chars().next().unwrap().len_utf8()..].to_string(); }
+    let r = rest.trim().to_lowercase();
+    let minor = match r.as_str() { "" | "maj" | "major" => false, "m" | "min" | "minor" => true, _ => return None };
+    let pc = pc.rem_euclid(12);
+    // Camelot number: majors C=8B, G=9B, ... (each fifth up adds one).
+    let major_of = if minor { (pc + 3) % 12 } else { pc };
+    let n = ((major_of * 7) % 12 + 7) % 12 + 1;   // C(0)→8, G(7)→9, ...
+    let n = n as u32;
+    Some((n - 1) * 2 + if minor { 1 } else { 2 })
+}
+
+/// The keys a CDJ lists as related at `distance` (0 same key, 1 adds the
+/// relative major/minor, 2 adds the neighbours a fifth away in the same
+/// mode), as ids, in the order a CDJ-3000 lists them.
+pub fn related_keys(id: u32, distance: u32) -> Vec<u32> {
+    let (n, minor) = ((id - 1) / 2 + 1, id % 2 == 1);
+    let at = |n: u32, minor: bool| (n - 1) * 2 + if minor { 1 } else { 2 };
+    let mut v = vec![id];
+    if distance >= 1 { v.push(at(n, !minor)); }
+    if distance >= 2 { v.push(at(if n == 1 { 12 } else { n - 1 }, minor)); v.push(at(n % 12 + 1, minor)); }
+    v
+}
+
 /// Menu rows for the requests we implement.  `None` = unavailable.
 fn menu_rows(lib: &Library, kind_: u16, args: &[Field]) -> Option<Vec<Vec<Field>>> {
     let arg = |i: usize| args.get(i).map(|f| f.as_u32()).unwrap_or(0);
@@ -140,9 +189,53 @@ fn menu_rows(lib: &Library, kind_: u16, args: &[Field]) -> Option<Vec<Vec<Field>
             row(0, 2, &crate::mark("ARTIST"), "", 0x0081, 0),
             row(0, 3, &crate::mark("ALBUM"), "", 0x0082, 0),
             row(0, 4, &crate::mark("TRACK"), "", 0x0083, 0),
+            row(0, 12, &crate::mark("KEY"), "", 0x008b, 0),
             row(0, 5, &crate::mark("PLAYLIST"), "", 0x0084, 0),
+            row(0, 22, &crate::mark("HISTORY"), "", 0x0095, 0),
+            row(0, 26, &crate::mark("MATCHING"), "", 0x00aa, 0),
             row(0, 19, &crate::mark("FILENAME"), "", 0x0094, 0),
         ],
+        // KEY: the keys our tracks are in, by id (Camelot order).
+        0x1014 => {
+            let mut ids: Vec<u32> = lib.tracks.iter().filter_map(|t| key_id(&t.key)).collect();
+            ids.sort_unstable(); ids.dedup();
+            ids.into_iter().map(|k| row(0, k, KEYS[k as usize - 1], "", 0x000f, 0)).collect()
+        }
+        // A key's related-key levels (args: dmst, sort, key id): three rows,
+        // parent = distance, label = the keys at that distance.
+        0x1114 => {
+            let k = arg(2);
+            if !(1..=24).contains(&k) { return Some(Vec::new()); }
+            (0..3).map(|d| {
+                let label = related_keys(k, d).iter().map(|&i| KEYS[i as usize - 1]).collect::<Vec<_>>().join(", ");
+                row(d, k, &label, "", 0x000f, 0)
+            }).collect()
+        }
+        // Tracks in a key's related set (args: dmst, sort, key id, distance).
+        0x1214 => {
+            let set = if (1..=24).contains(&arg(2)) { related_keys(arg(2), arg(3).min(2)) } else { Vec::new() };
+            all(lib.tracks.iter().filter(|t| key_id(&t.key).is_some_and(|k| set.contains(&k))).collect())
+        }
+        // HISTORY: our play sessions, newest first, as a CDJ names them.
+        0x1012 => lib.history.iter().rev().map(|(id, _)| row(0, *id, &format!("HISTORY {id:03}"), "", 0x0024, 0)).collect(),
+        // One session's tracks, in play order (args: dmst, sort, history id).
+        0x1112 => {
+            let ids = lib.history.iter().find(|(id, _)| *id == arg(2)).map(|(_, v)| v.clone()).unwrap_or_default();
+            ids.iter().filter_map(|&i| lib.track(i)).map(|t| track_row(t, &t.title)).collect()
+        }
+        // MATCHING (args: dmst, sort, track id): tracks that mix with it —
+        // a related key (distance 1: same or relative) and a tempo within
+        // 6 %, closest tempo first.
+        0x1017 => {
+            let Some(seed) = lib.track(arg(2)) else { return Some(Vec::new()) };
+            let (Some(k), bpm) = (key_id(&seed.key), seed.bpm) else { return Some(Vec::new()) };
+            let keys = related_keys(k, 2);
+            let mut ts: Vec<&Track> = lib.tracks.iter().filter(|t| t.id != seed.id
+                && key_id(&t.key).is_some_and(|tk| keys.contains(&tk))
+                && bpm > 0.0 && (t.bpm / bpm - 1.0).abs() <= 0.06).collect();
+            ts.sort_by(|a, b| (a.bpm - bpm).abs().partial_cmp(&(b.bpm - bpm).abs()).unwrap());
+            ts.iter().map(|t| track_row(t, &t.title)).collect()
+        }
         // The sort choices a player offers in a list (as a CDJ-3000 lists
         // them, without the ones we have no data for); we keep our order.
         0x1400 => vec![
@@ -470,7 +563,7 @@ mod tests {
         let t = |id, title: &str, artist: &str, album: &str, path: &str| Track {
             id, title: title.into(), artist: artist.into(), album: album.into(), path: path.into(), ..Default::default()
         };
-        Library { name: "T".into(), art: None, tracks: vec![
+        Library { name: "T".into(), art: None, history: vec![(1, vec![3, 1])], tracks: vec![
             t(1, "Beta", "Ann", "One", "/b.mp3"),
             t(2, "Alpha", "Bob", "Two", "/a.mp3"),
             t(3, "Gamma", "Ann", "Two", "/c.mp3"),
@@ -483,16 +576,56 @@ mod tests {
     fn dmst() -> Field { Field::U32(0x0101_0301) }
 
     #[test]
+    fn keys_parse_from_tag_spellings_to_cdj_ids() {
+        // A CDJ-3000 numbers its KEY menu in Camelot order: Abm 1, B 2, Ebm 3, ...
+        for (name, id) in [("Abm", 1), ("G#m", 1), ("1A", 1), ("B", 2), ("Ebm", 3), ("F#", 4), ("Gb", 4),
+                           ("Fm", 7), ("Am", 15), ("A minor", 15), ("8A", 15), ("C", 16), ("8B", 16),
+                           ("Bbm", 5), ("Db", 6), ("C#", 6), ("E", 24), ("12B", 24), ("Bm", 19)] {
+            assert_eq!(key_id(name), Some(id), "{name}");
+            assert_eq!(KEYS[id as usize - 1], KEYS[key_id(KEYS[id as usize - 1]).unwrap() as usize - 1]);
+        }
+        for bad in ["", "X", "13A", "Hm", "Am7"] { assert_eq!(key_id(bad), None, "{bad}"); }
+        // Every name in KEYS maps back to its own id.
+        for (i, k) in KEYS.iter().enumerate() { assert_eq!(key_id(k), Some(i as u32 + 1), "{k}"); }
+    }
+
+    #[test]
+    fn related_keys_match_a_cdj_3000s_levels() {
+        // Captured for Abm: "Abm", "Abm, B", "Abm, B, Dbm, Ebm".
+        let names = |d| related_keys(1, d).iter().map(|&i| KEYS[i as usize - 1]).collect::<Vec<_>>().join(", ");
+        assert_eq!((names(0), names(1), names(2)), ("Abm".into(), "Abm, B".into(), "Abm, B, Dbm, Ebm".into()));
+        assert_eq!(related_keys(16, 2), [16, 15, 14, 18], "C: C, Am, F, G");
+    }
+
+    #[test]
+    fn key_history_and_matching_menus() {
+        let mut l = lib();
+        for (t, k) in l.tracks.iter_mut().zip(["Am", "C", "Fm"]) { t.key = k.into(); t.bpm = 128.0; }
+        let keys = items(menu_rows(&l, 0x1014, &[dmst(), u(0)]).unwrap());
+        assert_eq!(keys.iter().map(|r| (r.id, r.label.as_str())).collect::<Vec<_>>(), [(7, "Fm"), (15, "Am"), (16, "C")]);
+        let levels = items(menu_rows(&l, 0x1114, &[dmst(), u(0), u(15)]).unwrap());
+        assert_eq!(levels.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["Am", "Am, C", "Am, C, Dm, Em"]);
+        let near = items(menu_rows(&l, 0x1214, &[dmst(), u(0), u(15), u(1)]).unwrap());
+        assert_eq!(near.len(), 2, "Am and its relative C");
+        let hist = items(menu_rows(&l, 0x1012, &[dmst(), u(0)]).unwrap());
+        assert_eq!((hist[0].label.as_str(), hist[0].type_name()), ("HISTORY 001", "history"));
+        let played = items(menu_rows(&l, 0x1112, &[dmst(), u(0), u(1)]).unwrap());
+        assert_eq!(played.iter().map(|r| r.id).collect::<Vec<_>>(), [3, 1], "play order");
+        let id_am = l.tracks.iter().find(|t| t.key == "Am").unwrap().id;
+        let matches = items(menu_rows(&l, 0x1017, &[dmst(), u(0), u(id_am)]).unwrap());
+        assert_eq!(matches.len(), 1, "C matches Am; Fm does not");
+    }
+
+    #[test]
     fn root_menu_lists_the_categories() {
         let rows = items(menu_rows(&lib(), kind::ROOT_MENU, &[dmst(), u(0), u(0xffffff)]).unwrap());
-        assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["ARTIST", "ALBUM", "TRACK", "PLAYLIST", "FILENAME"]);
+        assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), ["ARTIST", "ALBUM", "TRACK", "KEY", "PLAYLIST", "HISTORY", "MATCHING", "FILENAME"]);
         // The item types a player reads for each (Beat Link's numbering, as
         // a CDJ-3000 serves them), and the marked labels a player expects.
-        assert_eq!(rows.iter().map(|r| r.item_type).collect::<Vec<_>>(), [0x81, 0x82, 0x83, 0x84, 0x94]);
-        assert_eq!(rows.iter().map(|r| r.type_name()).collect::<Vec<_>>(), ["root-artist", "root-album", "root-track", "root-playlist", "root-filename"]);
+        assert_eq!(rows.iter().map(|r| r.item_type).collect::<Vec<_>>(), [0x81, 0x82, 0x83, 0x8b, 0x84, 0x95, 0xaa, 0x94]);
         let raw = menu_rows(&lib(), kind::ROOT_MENU, &[dmst(), u(0), u(0xffffff)]).unwrap();
         assert_eq!(raw[0][3], s("\u{fffa}ARTIST\u{fffb}"));
-        assert!(menu_rows(&lib(), 0x1014, &[dmst(), u(0)]).is_none(), "0x1014 is KEY, not a track list");
+        assert!(items(menu_rows(&lib(), 0x1014, &[dmst(), u(0)]).unwrap()).iter().all(|r| r.type_name() == "key"), "0x1014 is the KEY menu, not a track list");
         assert_eq!(menu_rows(&lib(), 0x1400, &[dmst(), u(0), u(0)]).unwrap().len(), 5, "sort choices");
     }
 

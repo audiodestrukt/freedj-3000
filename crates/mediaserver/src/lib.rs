@@ -64,7 +64,7 @@ pub fn scan(root: &Path, name: &str) -> Result<Scanned> {
         let (_, path) = by_id.iter().find(|(i, _)| *i == id)?;
         SymphoniaDecoder::open(path).ok()?.tags().artwork.as_ref().map(|(_, bytes)| bytes.clone())
     });
-    let library = Library { tracks, name: name.to_string(), art: Some(art) }.shared();
+    let library = Library { tracks, name: name.to_string(), art: Some(art), history: Vec::new() }.shared();
     Ok(Scanned { tree, library, files })
 }
 

@@ -62,6 +62,8 @@ pub struct LinkState {
     /// The loaded track's source and ID, as our status reports it (None =
     /// no track).  Set on every load by the deck.
     pub track:         Mutex<Option<opendeck_link::prodj::TrackRef>>,
+    /// The library our media server serves (for HISTORY), once it is up.
+    pub library:       Mutex<Option<opendeck_dbserver::server::SharedLibrary>>,
     /// Our media server's tracks: canonical path → the ID peers look it up by.
     pub served:        Mutex<HashMap<std::path::PathBuf, u32>>,
     /// Our Link broadcast address (defenses go there as well as unicast).
@@ -211,6 +213,7 @@ impl LinkState {
             own_bcast: Mutex::new(None),
             track: Mutex::new(None),
             served: Mutex::new(HashMap::new()),
+            library: Mutex::new(None),
             master: AtomicBool::new(false),
             sync: AtomicBool::new(false),
             want_master: AtomicBool::new(false),
