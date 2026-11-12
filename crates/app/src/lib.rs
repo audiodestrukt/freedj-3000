@@ -1879,8 +1879,13 @@ impl DeckApp {
         if from_cache { p.grid_src = "cache"; }
         else {
             let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let a = opendeck_mediaserver::Analysis::from_deck(&p.tags, p.beat_grid.as_ref(), &p.waveform, (p.samples.len() / p.ch.max(1)) as u64, deck_sr, bytes);
-            if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, &path, &a) { log::info!("link cache: {e:#}"); }
+            let mut a = opendeck_mediaserver::Analysis::from_deck(&p.tags, p.beat_grid.as_ref(), &p.waveform, (p.samples.len() / p.ch.max(1)) as u64, deck_sr, bytes);
+            // Key detection (untagged files) runs off the load path, then caches.
+            let (samples, ch) = (p.samples.clone(), p.ch);
+            std::thread::spawn(move || {
+                a.detect_key_if_missing(&samples, ch, deck_sr);
+                if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, &path, &a) { log::info!("link cache: {e:#}"); }
+            });
         }
         Ok(p)
     }
@@ -3424,7 +3429,8 @@ pub fn run(cfg: Config) -> Result<()> {
     let beat_grid = cached_grid.or_else(|| beat_analyzer.beat_grid().map(|g| (*g).clone()));
     if analysed_here { if let Some(p) = &track {
         let bytes = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        let a = opendeck_mediaserver::Analysis::from_deck(&audio.tags, beat_grid.as_ref(), &waveform, (samples_arc.len() / audio.channels.max(1) as usize) as u64, audio.sample_rate, bytes);
+        let mut a = opendeck_mediaserver::Analysis::from_deck(&audio.tags, beat_grid.as_ref(), &waveform, (samples_arc.len() / audio.channels.max(1) as usize) as u64, audio.sample_rate, bytes);
+        a.detect_key_if_missing(&samples_arc, audio.channels.max(1) as usize, audio.sample_rate);
         if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, p, &a) { log::info!("link cache: {e:#}"); }
     } }
     match &beat_grid {
