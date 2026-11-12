@@ -47,7 +47,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex,
     },
     time::{Duration, Instant},
 };
@@ -92,6 +92,74 @@ fn note_history(link: &prodj::LinkState, id: u32) {
     if lib.history.is_empty() { lib.history.push((1, Vec::new())); }
     let session = &mut lib.history.last_mut().unwrap().1;
     if session.last() != Some(&id) { session.push(id); }
+}
+
+/// A load's analysis, shared between the load and its key-detection thread.
+type SharedAnalysis = Arc<Mutex<opendeck_mediaserver::Analysis>>;
+
+/// First id for tracks we serve that are not in the scanned folder: well
+/// clear of the scan's 1-based ids.
+const UNLISTED_ID_BASE: u32 = 0x0100_0000;
+
+/// Serve the deck's own analysis of a local load, so a peer that looks up
+/// the track our status names gets its grid, waveforms and tags now — not
+/// when the library's background analysis reaches the file, and not never
+/// when the file is outside the served folder (a stick, a Files-app pick).
+/// Such a file gets an unlisted row under a fresh id (no menu shows it;
+/// there is nothing behind it to load over NFS).  With no media server
+/// running (no music folder), a dbserver with an empty library starts here
+/// for it.
+fn serve_loaded(link: &Arc<prodj::LinkState>, path: &std::path::Path, a: &opendeck_mediaserver::Analysis) {
+    let Some(lib) = served_library(link) else { return };
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let Ok(mut served) = link.served.lock() else { return };
+    let Ok(mut lib) = lib.write() else { return };
+    let id = match served.get(&key) {
+        Some(&id) => id,
+        None => {
+            let id = lib.tracks.iter().map(|t| t.id).filter(|&i| i >= UNLISTED_ID_BASE).max().map_or(UNLISTED_ID_BASE, |m| m + 1);
+            let title = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            lib.tracks.push(opendeck_dbserver::server::Track { id, title, unlisted: true, ..Default::default() });
+            served.insert(key, id);
+            id
+        }
+    };
+    if let Some(t) = lib.track_mut(id) {
+        a.apply(t);
+        // The art loader only knows the scanned files.
+        if t.unlisted { t.has_art = false; }
+    }
+    log::info!("link: serving the loaded track's analysis as id {id} ({} beats, {:.1} BPM)", a.beats.len(), a.bpm);
+}
+
+/// Update a served row with a later analysis (the key, once detected), if
+/// the track is served.
+fn refresh_served(link: &prodj::LinkState, path: &std::path::Path, a: &opendeck_mediaserver::Analysis) {
+    let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let Some(id) = link.served.lock().ok().and_then(|m| m.get(&key).copied()) else { return };
+    let Some(lib) = link.library.lock().ok().and_then(|l| l.clone()) else { return };
+    let Ok(mut lib) = lib.write() else { return };
+    if let Some(t) = lib.track_mut(id) {
+        let unlisted = t.unlisted;
+        a.apply(t);
+        if unlisted { t.has_art = false; }
+    }
+}
+
+/// The library our dbserver serves; started empty, dbserver only, when no
+/// media server is running yet.  None when serving is off
+/// (`OPENDECK_SERVE=0`) or the ports are taken.
+fn served_library(link: &Arc<prodj::LinkState>) -> Option<opendeck_dbserver::server::SharedLibrary> {
+    if let Some(l) = link.library.lock().ok().and_then(|l| l.clone()) { return Some(l); }
+    if std::env::var("OPENDECK_SERVE").map(|v| v == "0").unwrap_or(false) { return None; }
+    let lib = opendeck_dbserver::server::Library { tracks: Vec::new(), name: "OpenDeck".into(), art: None, history: Vec::new() }.shared();
+    let l = Arc::clone(link);
+    match opendeck_dbserver::server::Server::start_live(Arc::clone(&lib), Arc::new(move || l.player()), 0) {
+        Ok(db) => log::info!("link: dbserver on {} for the loaded track (no music folder served)", db.db_port),
+        Err(e) => { log::warn!("link: no dbserver for the loaded track: {e:#}"); return None; }
+    }
+    if let Ok(mut g) = link.library.lock() { *g = Some(Arc::clone(&lib)); }
+    Some(lib)
 }
 
 /// Where a loaded track lives, for our status packets: player 0 = us.
@@ -162,6 +230,45 @@ mod track_ref_tests {
         // A player we no longer see: no claim about it.
         let gone = Load::Link { ip: Ipv4Addr::new(169, 254, 7, 7), rel_path: String::new(), analyze_rel: String::new(), id: 1 };
         assert_eq!(track_ref(&gone, &link), None);
+    }
+
+    /// The deck's analysis of a local load is served at once: into the
+    /// scanned row for a served file, into an unlisted row (same id on a
+    /// reload, in no menu) for one outside the folder.
+    #[test]
+    fn loaded_track_analysis_is_served() {
+        use opendeck_dbserver::server::{Library, Track};
+        let link = std::sync::Arc::new(crate::prodj::LinkState::new(3));
+        let dir = tempfile::tempdir().unwrap();
+        let (inside, outside) = (dir.path().join("in.mp3"), dir.path().join("stick.mp3"));
+        for p in [&inside, &outside] { std::fs::write(p, b"x").unwrap(); }
+        let lib = Library { tracks: vec![Track { id: 1, title: "in".into(), path: "/in.mp3".into(), ..Default::default() }],
+                            name: "t".into(), art: None, history: vec![] }.shared();
+        *link.library.lock().unwrap() = Some(std::sync::Arc::clone(&lib));
+        link.served.lock().unwrap().insert(std::fs::canonicalize(&inside).unwrap(), 1);
+        let a = opendeck_mediaserver::Analysis { title: "Song".into(), bpm: 124.0, beats: vec![(1, 124.0, 10), (2, 124.0, 494)],
+                                                 detail: vec![0x21; 30], has_art: true, ..Default::default() };
+
+        super::serve_loaded(&link, &inside, &a);
+        let l = lib.read().unwrap();
+        assert_eq!((l.track(1).unwrap().bpm, l.track(1).unwrap().beats.len(), l.tracks.len()), (124.0, 2, 1));
+        drop(l);
+
+        super::serve_loaded(&link, &outside, &a);
+        let id = track_ref(&Load::Local { path: outside.clone(), analyze: None }, &link).unwrap().id;
+        assert_eq!(id, super::UNLISTED_ID_BASE);
+        {
+            let l = lib.read().unwrap();
+            let t = l.track(id).unwrap();
+            assert!(t.unlisted && !t.has_art && t.beats.len() == 2 && t.title == "Song");
+            assert_eq!(l.listed().map(|t| t.id).collect::<Vec<_>>(), vec![1], "never in a menu");
+        }
+        // Reloaded: the same row, not a second one; a later key lands in it.
+        super::serve_loaded(&link, &outside, &a);
+        super::refresh_served(&link, &outside, &opendeck_mediaserver::Analysis { key: "Am".into(), ..a.clone() });
+        let l = lib.read().unwrap();
+        assert_eq!(l.tracks.len(), 2);
+        assert_eq!(l.track(id).unwrap().key, "Am");
     }
 }
 
@@ -1883,20 +1990,26 @@ impl DeckApp {
         // Grid: the rekordbox ANLZ next to the file, else what the media
         // server's analysis cached for it, else detect (and cache) it here.
         let cached = opendeck_mediaserver::load_cached(&prep.cache_dir, &path).filter(|a| !a.beats.is_empty());
-        let from_cache = cached.is_some();
         let grid_cue = analyze.and_then(|p| Self::grid_from_anlz(&p, prep.deck_sr, ch as u8))
             .or_else(|| cached.as_ref().and_then(|a| Self::grid_from_analysis(a, prep.deck_sr, ch as u8)));
         let (cache_dir, deck_sr) = (prep.cache_dir.clone(), prep.deck_sr);
+        let link = prep.link.clone();
         let mut p = prep.finish(path.display().to_string(), path.clone(), samples, sr, ch, tags, grid_cue, t0)?;
-        if from_cache { p.grid_src = "cache"; }
-        else {
+        if let Some(a) = cached {
+            p.grid_src = "cache";
+            p.link_analysis = Some(Arc::new(Mutex::new(a)));
+        } else {
             let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            let mut a = opendeck_mediaserver::Analysis::from_deck(&p.tags, p.beat_grid.as_ref(), &p.waveform, (p.samples.len() / p.ch.max(1)) as u64, deck_sr, bytes);
-            // Key detection (untagged files) runs off the load path, then caches.
+            let a = opendeck_mediaserver::Analysis::from_deck(&p.tags, p.beat_grid.as_ref(), &p.waveform, (p.samples.len() / p.ch.max(1)) as u64, deck_sr, bytes);
+            let shared = Arc::new(Mutex::new(a));
+            p.link_analysis = Some(Arc::clone(&shared));
+            // Key detection (untagged files) runs off the load path, then
+            // caches, and re-serves the row if the load has published it.
             let (samples, ch) = (p.samples.clone(), p.ch);
             std::thread::spawn(move || {
-                a.detect_key_if_missing(&samples, ch, deck_sr);
+                let a = { let mut g = shared.lock().unwrap(); g.detect_key_if_missing(&samples, ch, deck_sr); g.clone() };
                 if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, &path, &a) { log::info!("link cache: {e:#}"); }
+                if let Some(link) = link { refresh_served(&link, &path, &a); }
             });
         }
         Ok(p)
@@ -2056,6 +2169,7 @@ impl DeckApp {
             deck_sr: self.audio.sample_rate, deck_ch: self.audio.channels,
             auto_cue: self.auto_cue, auto_cue_level_db: self.settings.auto_cue_level_db,
             cache_dir: link_cache_dir(),
+            link: Some(Arc::clone(&self.link)),
         }
     }
 
@@ -2171,6 +2285,10 @@ impl DeckApp {
         // starts there — with AUTO CUE that's the first sound, not the leader.
         if p.cue_pt > 0 { self.seek_to(p.cue_pt); }
         self.start_stems(&p.samples, p.ch);
+        if let Some(a) = &p.link_analysis {
+            let a = a.lock().map(|g| g.clone()).unwrap_or_default();
+            serve_loaded(&self.link, &self.path, &a);
+        }
         self.publish_track();
         log::info!(
             "loaded {} in {:.1}s ({} BPM, {} grid, cue {:.2}s)",
@@ -2946,6 +3064,8 @@ struct Prep {
     /// file, and writes there when it had to analyse, so no track is
     /// analysed twice between the deck and the served library.
     cache_dir: std::path::PathBuf,
+    /// For the key thread to update the served row (None in tests).
+    link: Option<Arc<prodj::LinkState>>,
 }
 
 /// A track ready to swap in: decoded at the deck rate, waveform built, grid
@@ -2955,6 +3075,10 @@ struct Prepared {
     samples: Arc<Vec<f32>>, ch: usize, waveform: WaveformCache,
     beat_grid: Option<BeatGrid>, cue_pt: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8],
     grid_src: &'static str, t0: Instant,
+    /// A local file's analysis as we serve it (from the cache, or built from
+    /// this load), for [`serve_loaded`].  Shared with the key-detection
+    /// thread, which fills the key in when the file had no tag.
+    link_analysis: Option<SharedAnalysis>,
 }
 
 impl Prep {
@@ -3010,7 +3134,7 @@ impl Prep {
         // cue still wins — that is the DJ's own choice.
         let cue_pt = if self.auto_cue && cue_pt == 0 { first_sound(&samples, ch, self.auto_cue_level_db) } else { cue_pt };
         log::info!("prepared {name:?} in {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
-        Ok(Prepared { name, path, tags, samples, ch, waveform, beat_grid, cue_pt, memory_cues, hot_cues, grid_src, t0 })
+        Ok(Prepared { name, path, tags, samples, ch, waveform, beat_grid, cue_pt, memory_cues, hot_cues, grid_src, t0, link_analysis: None })
     }
 }
 
@@ -3450,9 +3574,12 @@ pub fn run(cfg: Config) -> Result<()> {
     // The Link media cache may already hold this file's grid (the media
     // server analyses the browse root); use it and skip the detector.
     let cache_dir = link_cache_dir();
-    let cached_grid = track.as_ref()
-        .and_then(|p| opendeck_mediaserver::load_cached(&cache_dir, p)).filter(|a| !a.beats.is_empty())
-        .and_then(|a| DeckApp::grid_from_analysis(&a, audio.sample_rate, audio.channels)).map(|l| l.grid);
+    let cached = track.as_ref()
+        .and_then(|p| opendeck_mediaserver::load_cached(&cache_dir, p)).filter(|a| !a.beats.is_empty());
+    let cached_grid = cached.as_ref()
+        .and_then(|a| DeckApp::grid_from_analysis(a, audio.sample_rate, audio.channels)).map(|l| l.grid);
+    // What we serve for the startup track (serve_loaded, once Link is up).
+    let mut startup_analysis = cached;
     if cached_grid.is_some() { log::info!("grid: from the link cache"); }
     if !samples_arc.is_empty() {
         waveform_builder.push(&samples_arc);
@@ -3466,6 +3593,7 @@ pub fn run(cfg: Config) -> Result<()> {
         let mut a = opendeck_mediaserver::Analysis::from_deck(&audio.tags, beat_grid.as_ref(), &waveform, (samples_arc.len() / audio.channels.max(1) as usize) as u64, audio.sample_rate, bytes);
         a.detect_key_if_missing(&samples_arc, audio.channels.max(1) as usize, audio.sample_rate);
         if let Err(e) = opendeck_mediaserver::store_cached(&cache_dir, p, &a) { log::info!("link cache: {e:#}"); }
+        startup_analysis = Some(a);
     } }
     match &beat_grid {
         Some(g) => log::info!(
@@ -3554,7 +3682,10 @@ pub fn run(cfg: Config) -> Result<()> {
     // ── 6. Run the UI event loop ──────────────────────────────────────────────
     let has_track = track.is_some();
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
-    if has_track { app.publish_track(); }
+    if has_track {
+        if let Some(a) = &startup_analysis { serve_loaded(&app.link, &app.path, a); }
+        app.publish_track();
+    }
     // Park the startup track at its cue (AUTO CUE's first sound, or the
     // OPENDECK_CUE override) so PLAY starts there, as after a browser LOAD.
     if app.transport.cue_point > 0 { let c = app.transport.cue_point; app.seek_to(c); }

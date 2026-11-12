@@ -64,6 +64,11 @@ pub struct Track {
     /// The file has embedded cover art; menu rows then carry the track id as
     /// the artwork id and `0x2003` fetches it through [`Library::art`].
     pub has_art:    bool,
+    /// Not in any menu: a track the deck loaded from outside the served
+    /// folder.  Our status names it by id, so a peer can still fetch its
+    /// metadata, grid and waveforms; there is no file behind it to browse
+    /// or load over NFS.
+    pub unlisted:   bool,
 }
 
 impl Track {
@@ -93,6 +98,8 @@ impl Library {
     pub fn shared(self) -> SharedLibrary { Arc::new(RwLock::new(self)) }
     pub fn track(&self, id: u32) -> Option<&Track> { self.tracks.iter().find(|t| t.id == id) }
     pub fn track_mut(&mut self, id: u32) -> Option<&mut Track> { self.tracks.iter_mut().find(|t| t.id == id) }
+    /// The tracks a player browses (every menu); [`unlisted`](Track::unlisted) ones answer only by id.
+    pub fn listed(&self) -> impl Iterator<Item = &Track> { self.tracks.iter().filter(|t| !t.unlisted) }
 }
 
 /// Handle to a running server.
@@ -201,7 +208,7 @@ fn menu_rows(lib: &Library, kind_: u16, args: &[Field]) -> Option<Vec<Vec<Field>
         ],
         // KEY: the keys our tracks are in, by id (Camelot order).
         0x1014 => {
-            let mut ids: Vec<u32> = lib.tracks.iter().filter_map(|t| key_id(&t.key)).collect();
+            let mut ids: Vec<u32> = lib.listed().filter_map(|t| key_id(&t.key)).collect();
             ids.sort_unstable(); ids.dedup();
             ids.into_iter().map(|k| row(0, k, KEYS[k as usize - 1], "", 0x000f, 0)).collect()
         }
@@ -218,7 +225,7 @@ fn menu_rows(lib: &Library, kind_: u16, args: &[Field]) -> Option<Vec<Vec<Field>
         // Tracks in a key's related set (args: dmst, sort, key id, distance).
         0x1214 => {
             let set = if (1..=24).contains(&arg(2)) { related_keys(arg(2), arg(3).min(2)) } else { Vec::new() };
-            all(lib.tracks.iter().filter(|t| key_id(&t.key).is_some_and(|k| set.contains(&k))).collect())
+            all(lib.listed().filter(|t| key_id(&t.key).is_some_and(|k| set.contains(&k))).collect())
         }
         // HISTORY: our play sessions, newest first, as a CDJ names them.
         0x1012 => lib.history.iter().rev().map(|(id, _)| row(0, *id, &format!("HISTORY {id:03}"), "", 0x0024, 0)).collect(),
@@ -234,7 +241,7 @@ fn menu_rows(lib: &Library, kind_: u16, args: &[Field]) -> Option<Vec<Vec<Field>
             let Some(seed) = lib.track(arg(2)) else { return Some(Vec::new()) };
             let (Some(k), bpm) = (key_id(&seed.key), seed.bpm) else { return Some(Vec::new()) };
             let keys = related_keys(k, 2);
-            let mut ts: Vec<&Track> = lib.tracks.iter().filter(|t| t.id != seed.id
+            let mut ts: Vec<&Track> = lib.listed().filter(|t| t.id != seed.id
                 && key_id(&t.key).is_some_and(|tk| keys.contains(&tk))
                 && bpm > 0.0 && (t.bpm / bpm - 1.0).abs() <= 0.06).collect();
             ts.sort_by(|a, b| (a.bpm - bpm).abs().partial_cmp(&(b.bpm - bpm).abs()).unwrap());
@@ -250,31 +257,31 @@ fn menu_rows(lib: &Library, kind_: u16, args: &[Field]) -> Option<Vec<Vec<Field>
             row(0, 4, &crate::mark("BPM"), "", 0x0085, 0),
         ],
         // All tracks (sort ignored).  (0x1014 is the KEY menu, not a sort.)
-        kind::ALL_TRACKS => all(lib.tracks.iter().collect()),
+        kind::ALL_TRACKS => all(lib.listed().collect()),
         kind::FILENAME_MENU => {
-            let mut ts: Vec<&Track> = lib.tracks.iter().collect();
+            let mut ts: Vec<&Track> = lib.listed().collect();
             ts.sort_by_key(|t| t.file_name().to_lowercase());
             ts.iter().map(|t| track_row(t, t.file_name())).collect()
         }
-        kind::ARTIST_MENU => names(lib.tracks.iter().map(|t| t.artist.as_str())).into_iter()
+        kind::ARTIST_MENU => names(lib.listed().map(|t| t.artist.as_str())).into_iter()
             .map(|(id, a)| row(0, id, a, "", 0x0007, 0)).collect(),
-        kind::ALBUM_MENU => names(lib.tracks.iter().map(|t| t.album.as_str())).into_iter()
+        kind::ALBUM_MENU => names(lib.listed().map(|t| t.album.as_str())).into_iter()
             .map(|(id, a)| row(0, id, a, "", 0x0002, 0)).collect(),
         // Albums of one artist (sort, artist id).
         kind::ALBUMS_FOR_ARTIST => {
             let artist = arg(2);
-            names(lib.tracks.iter().filter(|t| name_id(&t.artist) == artist).map(|t| t.album.as_str())).into_iter()
+            names(lib.listed().filter(|t| name_id(&t.artist) == artist).map(|t| t.album.as_str())).into_iter()
                 .map(|(id, a)| row(0, id, a, "", 0x0002, 0)).collect()
         }
         // Tracks of one album (sort, album id).
         kind::TRACKS_FOR_ALBUM => {
             let album = arg(2);
-            all(lib.tracks.iter().filter(|t| name_id(&t.album) == album).collect())
+            all(lib.listed().filter(|t| name_id(&t.album) == album).collect())
         }
         // Tracks of one artist (sort, artist id, album id or 0xffffffff = all).
         kind::TRACKS_FOR_ARTIST_ALBUM => {
             let (artist, album) = (arg(2), arg(3));
-            all(lib.tracks.iter().filter(|t| name_id(&t.artist) == artist && (album == 0xffff_ffff || name_id(&t.album) == album)).collect())
+            all(lib.listed().filter(|t| name_id(&t.artist) == artist && (album == 0xffff_ffff || name_id(&t.album) == album)).collect())
         }
         // Playlist tree: we have no playlists.
         kind::PLAYLIST => Vec::new(),

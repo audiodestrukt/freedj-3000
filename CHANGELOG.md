@@ -67,6 +67,16 @@ All notable changes to this project will be documented in this file.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
 ### Fixed
+- **The playing track's analysis reaches the network at once.** A peer
+  that looks up the track our status names (another player's LINK INFO, a
+  Beat Link-style lighting controller following the deck) got no grid,
+  waveform or phrases until the library's background analysis reached the
+  file, and never for a file outside the served folder (a USB stick, a
+  Files-app pick, the iOS demo track): those were reported as track 0.
+  Every local load now hands the deck's own analysis to the dbserver; a
+  file outside the folder gets an unlisted row under its own id (answers
+  by id, in no menu), and with no music folder at all a dbserver starts
+  for it.
 - **A CDJ-3000 now lists OpenDeck's music in SOURCE** ("USB LINK2:
   OPENDECK"). Five things stopped it, found against an emulated CDJ-3000:
   our NFS export named no network (a player reads that as "not for you"),

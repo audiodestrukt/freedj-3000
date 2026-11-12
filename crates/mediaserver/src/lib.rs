@@ -132,7 +132,8 @@ impl Analysis {
         }
     }
 
-    fn apply(&self, t: &mut Track) {
+    /// Write this analysis into a served library row.
+    pub fn apply(&self, t: &mut Track) {
         if !self.title.is_empty() { t.title = self.title.clone(); }
         t.artist = self.artist.clone();
         t.album = self.album.clone();
