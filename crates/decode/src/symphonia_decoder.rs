@@ -81,6 +81,8 @@ pub struct SymphoniaDecoder {
     /// caller's buffer is delivered across calls rather than truncated.
     buf_pos:     usize,
     tags:        TrackTags,
+    /// Rate of the last decoded packet: the rate the audio really has.
+    decoded_rate: Option<u32>,
 }
 
 impl SymphoniaDecoder {
@@ -152,11 +154,15 @@ impl SymphoniaDecoder {
             sample_buf: None,
             buf_pos: 0,
             tags,
+            decoded_rate: None,
         })
     }
 
     /// The track's own metadata, as read at open.
     pub fn tags(&self) -> &TrackTags { &self.tags }
+
+    /// Sample rate of the decoded packets so far (None before the first).
+    pub fn decoded_rate(&self) -> Option<u32> { self.decoded_rate }
 }
 
 impl Decoder for SymphoniaDecoder {
@@ -204,6 +210,7 @@ impl Decoder for SymphoniaDecoder {
             // Vorbis's first packet decodes to zero frames; symphonia's
             // SampleBuffer panics on a zero-length copy, so skip such packets.
             if frames == 0 { continue; }
+            self.decoded_rate = Some(spec.rate);
             let needed = frames * spec.channels.count();
 
             // Reallocate if the buffer is absent or too small for this packet.

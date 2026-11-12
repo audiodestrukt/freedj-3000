@@ -1143,6 +1143,7 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize, TrackTags)> {
             frames => samples.extend_from_slice(&buf[..frames * file_ch]),
         }
     }
+    let file_sr = true_rate(&decoder, file_sr);
     log::info!(
         "decoded {} frames ({:.1}s) at {}Hz {}ch",
         samples.len() / file_ch,
@@ -1150,6 +1151,20 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize, TrackTags)> {
         file_sr, file_ch,
     );
     Ok((samples, file_sr, file_ch, tags))
+}
+
+/// The rate of the decoded audio itself. The container's rate is what the
+/// decoder reports before decoding (44.1 kHz when the header has none); if
+/// the packets disagree, they win, or the track plays at the wrong speed
+/// (a 48 kHz track taken for 44.1 kHz runs 8 % slow).
+fn true_rate(decoder: &SymphoniaDecoder, header_sr: u32) -> u32 {
+    match decoder.decoded_rate() {
+        Some(r) if r != header_sr && r > 0 => {
+            log::warn!("container says {header_sr} Hz but the audio decodes at {r} Hz; using {r}");
+            r
+        }
+        _ => header_sr,
+    }
 }
 
 /// Decode an audio file from an in-memory buffer (e.g. read over NFS from a
@@ -1168,6 +1183,7 @@ pub fn decode_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<(Vec<f32>, u32,
             frames => samples.extend_from_slice(&buf[..frames * file_ch]),
         }
     }
+    let file_sr = true_rate(&decoder, file_sr);
     log::info!("decoded {} frames ({:.1}s) at {}Hz {}ch (from memory)",
         samples.len() / file_ch, samples.len() as f64 / file_ch as f64 / file_sr as f64, file_sr, file_ch);
     Ok((samples, file_sr, file_ch, tags))
