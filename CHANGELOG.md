@@ -19,6 +19,9 @@ All notable changes to this project will be documented in this file.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
 ### Fixed
+- **Big folders on a linked player showed only their first page** (about
+  27 entries): folder listings over LINK asked the player once and never
+  for the rest. They now read to the end.
 - **Mono tracks would not load** ("track has 1 channels but the deck runs
   2"). They now play on both sides; tracks with more than two channels play
   their front left and right. Mono ALAC files also read at half length,

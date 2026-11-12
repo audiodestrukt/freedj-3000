@@ -38,7 +38,7 @@ pub const PORTMAP_REKORDBOX: u16 = 50_111;
 pub type Fh = [u8; 32];
 
 /// A directory entry from READDIR.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct DirEntry {
     pub name:    String,
     pub file_id: u32,
@@ -341,30 +341,53 @@ impl Nfs {
 
     /// List a directory (one READDIR; large dirs may need cookie paging — TODO).
     pub fn readdir(&mut self, fh: &Fh) -> Result<Vec<DirEntry>> {
-        let mut a = Vec::new();
-        a.extend_from_slice(fh);
-        a.extend_from_slice(&0u32.to_be_bytes());     // cookie
-        a.extend_from_slice(&8192u32.to_be_bytes());  // count
-        let r = self.call(PROG_NFS, 2, 16, self.nfs_port, &a)?;
-        let status = be32(&r, 0);
-        if status != 0 { bail!("READDIR failed (status {status})"); }
+        // One READDIR reply holds a page of entries; follow the last cookie
+        // until the server says eof.  Asking once returned only the first
+        // page (~27 names of a large folder).
         let mut out = Vec::new();
-        let mut off = 4;
-        while off + 4 <= r.len() {
-            let more = be32(&r, off); off += 4;
-            if more == 0 { break; }
-            let file_id = be32(&r, off); off += 4;
-            let nlen = be32(&r, off) as usize; off += 4;
-            let raw = &r[off..off + nlen]; off += (nlen + 3) & !3;
-            let _cookie = be32(&r, off); off += 4;
-            // Names are UTF-16LE.
-            let units: Vec<u16> = raw.chunks_exact(2)
-                .map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
-            let name = String::from_utf16_lossy(&units);
-            out.push(DirEntry { name, file_id });
+        let mut cookie = 0u32;
+        for _ in 0..10_000 {
+            let mut a = Vec::new();
+            a.extend_from_slice(fh);
+            a.extend_from_slice(&cookie.to_be_bytes());
+            a.extend_from_slice(&8192u32.to_be_bytes());  // count
+            let r = self.call(PROG_NFS, 2, 16, self.nfs_port, &a)?;
+            let status = be32(&r, 0);
+            if status != 0 { bail!("READDIR failed (status {status})"); }
+            let (entries, last, eof) = parse_readdir(&r[4..])?;
+            let progressed = !entries.is_empty();
+            out.extend(entries);
+            match last {
+                Some(c) if !eof && progressed => cookie = c,
+                _ => break,
+            }
         }
         Ok(out)
     }
+}
+
+/// One READDIR reply body (after the status): its entries, the last
+/// entry's cookie, and the eof flag.
+fn parse_readdir(r: &[u8]) -> Result<(Vec<DirEntry>, Option<u32>, bool)> {
+    let mut out = Vec::new();
+    let mut last = None;
+    let mut off = 0;
+    loop {
+        if off + 4 > r.len() { bail!("READDIR reply cut short"); }
+        let more = be32(r, off); off += 4;
+        if more == 0 { break; }
+        if off + 8 > r.len() { bail!("READDIR entry cut short"); }
+        let file_id = be32(r, off); off += 4;
+        let nlen = be32(r, off) as usize; off += 4;
+        if off + nlen + 4 > r.len() { bail!("READDIR name cut short"); }
+        let raw = &r[off..off + nlen]; off += (nlen + 3) & !3;
+        last = Some(be32(r, off)); off += 4;
+        // Names are UTF-16LE.
+        let units: Vec<u16> = raw.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+        out.push(DirEntry { name: String::from_utf16_lossy(&units), file_id });
+    }
+    let eof = off + 4 <= r.len() && be32(r, off) != 0;
+    Ok((out, last, eof))
 }
 
 /// Bind a UDP socket on a privileged local port (CDJ NFS wants source < 1024);
@@ -382,6 +405,32 @@ fn bind_privileged() -> Result<UdpSocket> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn entry(id: u32, name: &str, cookie: u32) -> Vec<u8> {
+        let units: Vec<u8> = name.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        let mut v = 1u32.to_be_bytes().to_vec();
+        v.extend(id.to_be_bytes());
+        v.extend((units.len() as u32).to_be_bytes());
+        v.extend(&units);
+        v.resize(v.len() + ((4 - units.len() % 4) % 4), 0);
+        v.extend(cookie.to_be_bytes());
+        v
+    }
+
+    #[test]
+    fn readdir_page_gives_entries_last_cookie_and_eof() {
+        let mut r = entry(5, "P001", 11);
+        r.extend(entry(6, "P00A", 12));
+        r.extend(0u32.to_be_bytes());          // no more entries
+        r.extend(0u32.to_be_bytes());          // not eof: ask again from cookie 12
+        let (e, last, eof) = parse_readdir(&r).unwrap();
+        assert_eq!(e.iter().map(|d| d.name.as_str()).collect::<Vec<_>>(), ["P001", "P00A"]);
+        assert_eq!((last, eof), (Some(12), false));
+        let mut end = 0u32.to_be_bytes().to_vec();
+        end.extend(1u32.to_be_bytes());
+        assert_eq!(parse_readdir(&end).unwrap(), (vec![], None, true));
+        assert!(parse_readdir(&entry(5, "P001", 11)).is_err(), "a cut-off reply is an error");
+    }
     // Gated: OPENDECK_TEST_NFS=192.168.68.58  (a linked CDJ/XDJ with a USB in it)
     #[test]
     fn reads_export_pdb_over_nfs() {

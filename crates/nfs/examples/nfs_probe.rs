@@ -4,6 +4,7 @@
 //!   cargo run -p opendeck-nfs --example nfs_probe -- 192.168.68.60 50111
 //!   cargo run -p opendeck-nfs --example nfs_probe -- 192.168.68.58
 //!   cargo run -p opendeck-nfs --example nfs_probe -- 172.20.10.6 50111 "/Users/me/Music/x.mp3"
+//!   cargo run -p opendeck-nfs --example nfs_probe -- 169.254.5.55 111 PIONEER/USBANLZ/   (list a folder)
 //!
 //! With a third argument the file is looked up under the first export and read
 //! in full (timed) — the path a dbserver 0x2102 reply gives for a track.
@@ -36,6 +37,13 @@ fn main() -> anyhow::Result<()> {
     for d in nfs.readdir(&root)?.iter().take(40) { println!("  {}", d.name); }
     if let Some(path) = args.next() {
         let t0 = std::time::Instant::now();
+        // A path ending in '/' lists that folder instead of reading a file.
+        if let Some(dir) = path.strip_suffix('/') {
+            let (fh, _) = nfs.lookup_path(&root, dir)?;
+            let names: Vec<String> = nfs.readdir(&fh)?.into_iter().map(|d| d.name).collect();
+            println!("{dir}/: {} entries\n  {}", names.len(), names.join("  "));
+            return Ok(());
+        }
         let (fh, size) = nfs.lookup_path(&root, &path)?;
         println!("lookup {path:?}: {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
         let t1 = std::time::Instant::now();
