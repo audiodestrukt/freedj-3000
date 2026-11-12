@@ -19,6 +19,14 @@ All notable changes to this project will be documented in this file.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
 ### Fixed
+- **A CDJ-3000 now lists OpenDeck's music in SOURCE** ("USB LINK2:
+  OPENDECK"). Five things stopped it, found against an emulated CDJ-3000:
+  our NFS export named no network (a player reads that as "not for you"),
+  the root file handle was all zeros, we could not read a CDJ's media query
+  (its layout differs from Beat Link's), our media answer put our IP where
+  the owning player's number goes, and our status claimed an SD card. Our
+  own media queries now use the player layout too, so OpenDeck learns what
+  is in a CDJ-3000's slots.
 - **Other devices could not show OpenDeck's track title or position.** Our
   status packets carried a track ID left over from the captured packet they
   were built from, so Beat Link, ShowKontrol and the players asked our

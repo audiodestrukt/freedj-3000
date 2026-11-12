@@ -102,6 +102,9 @@ mod status {
     pub const TRACK_TYPE: usize = 0x2a;  // 0 none, 1 rekordbox, 2 unanalysed, 5 CD
     pub const TRACK_ID:  usize = 0x2c;   // u32 BE rekordbox ID in the source's database
     pub const TRACK_NO:  usize = 0x32;   // u16 BE track number (CDs)
+    pub const USB_LOCAL: usize = 0x6f;   // Ul: 0x00 loaded, 0x04 none
+    pub const SD_LOCAL:  usize = 0x73;   // Sl: 0x00 loaded, 0x04 none
+    pub const LINK_MEDIA: usize = 0x75;  // L: 1 = Link media available
     pub const PLAY:      usize = 0x7b;   // P1, see PlayState
     pub const FIRMWARE:  usize = 0x7c;   // 4 ASCII bytes
     pub const SYNC_N:    usize = 0x84;   // u32 BE sync counter: a new master sets largest-seen + 1
@@ -194,6 +197,9 @@ pub struct StatusFields {
     /// The loaded track's source and ID; None with a track loaded reports
     /// our own USB with ID 0 (nothing to look up).
     pub track:        Option<TrackRef>,
+    /// We serve our music to other players: report a USB stick present (and
+    /// Link media available), so they list it.  Never an SD card.
+    pub serving:      bool,
     pub playing:      bool,
     pub track_loaded: bool,
     pub master:       bool,
@@ -263,28 +269,31 @@ impl ProDjLink {
     /// target player, slot)`.  Layout per Beat Link's `VirtualCdj`: header to
     /// 0x24, then 01 00 D 00 0c ip(4) 00 00 00 target 00 00 00 slot.
     pub fn parse_media_query(data: &[u8]) -> Option<(u8, Ipv4Addr, u8, u8)> {
-        (Self::packet_type(data)? == PKT_MEDIA_QUERY && data.len() >= 0x35).then(|| {
-            (data[0x26], Ipv4Addr::new(data[0x29], data[0x2a], data[0x2b], data[0x2c]), data[0x30], data[0x34])
-        })
+        if Self::packet_type(data)? != PKT_MEDIA_QUERY { return None; }
+        // Two layouts: a player's (0x30 bytes, as a CDJ-3000 sends it: D at
+        // 0x21, IP at 0x24, target and slot as u32 ending 0x2b / 0x2f) and
+        // ours / Beat Link's, the same fields five bytes on (0x35 bytes).
+        // Reading only the second, we ignored every query a CDJ sent.
+        let o = match data.len() { 0x30..=0x34 => 0, n if n >= 0x35 => 5, _ => return None };
+        Some((data[0x21 + o], Ipv4Addr::new(data[0x24 + o], data[0x25 + o], data[0x26 + o], data[0x27 + o]), data[0x2b + o], data[0x2f + o]))
     }
 
-    /// Build a media query (0x05 on port 50002, 0x35 bytes): "what is in
-    /// `slot` of player `target`?"  The mirror of [`parse_media_query`]; the
-    /// answer is a media response (0x06) sent to `our_ip`.
+    /// Build a media query (0x05 on port 50002, 0x30 bytes): "what is in
+    /// `slot` of player `target`?"  A player's layout, as a CDJ-3000 sends
+    /// it: D at 0x21, length 0x0c, our IP, then target and slot as u32.  The
+    /// answer is a media response (0x06) sent to `our_ip`.  (Our old 0x35-
+    /// byte layout put the same fields five bytes on; a CDJ-3000 ignored it.)
     pub fn build_media_query(&self, our_ip: Ipv4Addr, target: u8, slot: u8) -> Vec<u8> {
-        let mut pkt = vec![0u8; 0x35];
+        let mut pkt = vec![0u8; 0x30];
         pkt[..10].copy_from_slice(MAGIC);
         pkt[0x0a] = PKT_MEDIA_QUERY;
         pkt[0x0b..0x0b + 20].copy_from_slice(&self.device_name);
         pkt[0x1f] = 0x01;
         pkt[0x21] = self.player_num;
-        pkt[0x22..0x24].copy_from_slice(&((0x35u16) - 0x24).to_be_bytes());
-        pkt[0x24] = 0x01;
-        pkt[0x26] = self.player_num;
-        pkt[0x28] = 0x0c;
-        pkt[0x29..0x2d].copy_from_slice(&our_ip.octets());
-        pkt[0x30] = target;
-        pkt[0x34] = slot;
+        pkt[0x22..0x24].copy_from_slice(&0x0cu16.to_be_bytes());
+        pkt[0x24..0x28].copy_from_slice(&our_ip.octets());
+        pkt[0x28..0x2c].copy_from_slice(&(target as u32).to_be_bytes());
+        pkt[0x2c..0x30].copy_from_slice(&(slot as u32).to_be_bytes());
         pkt
     }
 
@@ -308,7 +317,10 @@ impl ProDjLink {
     /// (UTF-16BE, 64 bytes), 0x6c creation date (UTF-16BE, 24 bytes), 0xa6
     /// track count, 0xa8 colour, 0xaa media type (1 = rekordbox), 0xab
     /// "has My Settings", 0xae playlist count, 0xb0 total bytes, 0xb8 free.
-    pub fn build_media_response(&self, requester_ip: Ipv4Addr, slot: u8, name: &str, tracks: u16, playlists: u16, total: u64, free: u64) -> Vec<u8> {
+    pub fn build_media_response(&self, _requester_ip: Ipv4Addr, slot: u8, name: &str, tracks: u16, playlists: u16, total: u64, free: u64) -> Vec<u8> {
+        // Layout as a CDJ-3000 answers: 0x24 the owning player and 0x28 the
+        // slot, each a u32.  We had the requester's IP at 0x24, so the owner
+        // read as player 0xA9FE4D02 and no player listed our media.
         let mut pkt = vec![0u8; 0xc0];
         pkt[..10].copy_from_slice(MAGIC);
         pkt[0x0a] = PKT_MEDIA_RESP;
@@ -316,11 +328,11 @@ impl ProDjLink {
         pkt[0x1f] = 0x01;
         pkt[0x21] = self.player_num;
         pkt[0x22..0x24].copy_from_slice(&((0xc0u16) - 0x24).to_be_bytes());
-        pkt[0x24..0x28].copy_from_slice(&requester_ip.octets());
-        pkt[0x27] = self.player_num;
-        pkt[0x2b] = slot;
+        pkt[0x24..0x28].copy_from_slice(&(self.player_num as u32).to_be_bytes());
+        pkt[0x28..0x2c].copy_from_slice(&(slot as u32).to_be_bytes());
         for (i, u) in name.encode_utf16().take(31).enumerate() { pkt[0x2c + i * 2..0x2e + i * 2].copy_from_slice(&u.to_be_bytes()); }
-        for (i, u) in "2026/09/17".encode_utf16().take(11).enumerate() { pkt[0x6c + i * 2..0x6e + i * 2].copy_from_slice(&u.to_be_bytes()); }
+        for (i, u) in "2026-09-17".encode_utf16().take(13).enumerate() { pkt[0x6c + i * 2..0x6e + i * 2].copy_from_slice(&u.to_be_bytes()); }
+        for (i, u) in "1000".encode_utf16().enumerate() { pkt[0x84 + i * 2..0x86 + i * 2].copy_from_slice(&u.to_be_bytes()); }
         pkt[0xa6..0xa8].copy_from_slice(&tracks.to_be_bytes());
         pkt[0xa8] = 0;
         pkt[0xaa] = 0x01;
@@ -393,6 +405,11 @@ impl ProDjLink {
         p[status::TRACK_TYPE] = t.kind;
         p[status::TRACK_ID..status::TRACK_ID + 4].copy_from_slice(&t.id.to_be_bytes());
         p[status::TRACK_NO..status::TRACK_NO + 2].copy_from_slice(&0u16.to_be_bytes());
+        // Media slots: 0x00 = loaded, 0x04 = empty.  The template said both
+        // a USB and an SD card were loaded, served or not.
+        p[status::USB_LOCAL] = if f.serving { 0x00 } else { 0x04 };
+        p[status::SD_LOCAL] = 0x04;
+        p[status::LINK_MEDIA] = f.serving as u8;
         p[status::PLAY] = match (f.track_loaded, f.playing) {
             (false, _)   => 0x00,
             (true, true) => 0x03,
@@ -739,7 +756,7 @@ mod tests {
     fn status_round_trips_through_the_parser() {
         let link = ProDjLink::new(2);
         let f = StatusFields {
-            track: Some(TrackRef { player: 0, slot: 3, kind: 1, id: 4321 }),
+            track: Some(TrackRef { player: 0, slot: 3, kind: 1, id: 4321 }), serving: true,
             playing: true, track_loaded: true, master: true, sync: false, on_air: false,
             pitch: 1.02, bpm: Some(134.7), beat: Some(77), beat_in_bar: Some(3),
             handoff_to: None, counter: 9, sync_counter: 7,
@@ -762,6 +779,9 @@ mod tests {
         assert_eq!(ProDjLink::parse_status(&linked).unwrap().track, TrackRef { player: 1, slot: 2, kind: 1, id: 9 });
         let none = link.build_status(&StatusFields { track: None, ..f });
         assert_eq!(ProDjLink::parse_status(&none).unwrap().track.id, 0, "no leftover template ID");
+        assert_eq!((pkt[0x6f], pkt[0x73], pkt[0x75]), (0x00, 0x04, 0x01), "USB served, no SD");
+        let idle = link.build_status(&StatusFields { serving: false, ..f });
+        assert_eq!((idle[0x6f], idle[0x73], idle[0x75]), (0x04, 0x04, 0x00), "nothing served: no media");
         assert_eq!(&st.firmware, b"0.1 ");
         assert_eq!(st.counter, 9);
         assert_eq!(st.sync_counter, 7);
@@ -843,10 +863,44 @@ mod tests {
     }
 
     #[test]
+    fn parses_a_cdj_3000_media_query() {
+        // Captured from an emulated CDJ-3000 (player 1 at 169.254.5.55)
+        // asking player 2 about its USB slot.
+        let mut q = vec![0u8; 0x30];
+        q[..10].copy_from_slice(MAGIC);
+        q[0x0a] = PKT_MEDIA_QUERY;
+        q[0x0b..0x13].copy_from_slice(b"CDJ-3000");
+        q[0x1f] = 0x01; q[0x21] = 0x01; q[0x23] = 0x0c;
+        q[0x24..0x28].copy_from_slice(&[169, 254, 5, 55]);
+        q[0x2b] = 2; q[0x2f] = 3;
+        assert_eq!(ProDjLink::parse_media_query(&q), Some((1, Ipv4Addr::new(169, 254, 5, 55), 2, 3)));
+        assert_eq!(ProDjLink::parse_media_query(&q[..0x2c]), None, "cut short");
+    }
+
+    /// A CDJ-3000's media response (player 1, USB, 226 tracks, 1 playlist,
+    /// no name), captured from the emulated deck on 2026-11-12.
+    const CDJ3000_MEDIA_RESPONSE: &str = "5173707431576d4a4f4c0643444a2d33303030000000000000000000000000010001009c0000000100000003000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000032003000320036002d00300038002d00320035000000000031003000300030000000000000000000000000000000000000000000000000000000e20000010000000001000000007fbfc00000000000401dc000";
+
+    #[test]
+    fn our_media_response_matches_a_cdj_3000s() {
+        let cdj: Vec<u8> = (0..CDJ3000_MEDIA_RESPONSE.len()).step_by(2)
+            .map(|i| u8::from_str_radix(&CDJ3000_MEDIA_RESPONSE[i..i + 2], 16).unwrap()).collect();
+        assert_eq!(ProDjLink::parse_media_response(&cdj),
+                   Some(MediaInfo { player: 1, slot: 3, name: String::new(), tracks: 226, playlists: 1 }));
+        // Same structure from us as player 1: header, owner and slot words,
+        // the "1000" field, counts and type, sizes aside.
+        let ours = ProDjLink::new(1).build_media_response(Ipv4Addr::new(169, 254, 77, 1), 3, "", 226, 1, 0, 0);
+        assert_eq!(ours.len(), cdj.len());
+        assert_eq!(&ours[0x1f..0x2c], &cdj[0x1f..0x2c], "owner and slot as a player writes them");
+        assert_eq!(&ours[0x84..0x8c], &cdj[0x84..0x8c], "the '1000' field");
+        assert_eq!(&ours[0xa6..0xb0], &cdj[0xa6..0xb0], "tracks, colour, type, playlists");
+    }
+
+    #[test]
     fn media_query_and_response_round_trip() {
         let me = ProDjLink::new(2);
         let q = me.build_media_query(Ipv4Addr::new(10, 0, 0, 2), 3, 3);
-        assert_eq!(q.len(), 0x35);
+        assert_eq!(q.len(), 0x30);
         assert_eq!(ProDjLink::parse_media_query(&q), Some((2, Ipv4Addr::new(10, 0, 0, 2), 3, 3)));
         let src = ProDjLink::new(3);
         let r = src.build_media_response(Ipv4Addr::new(10, 0, 0, 2), 3, "OPENDECK", 226, 4, 32 << 30, 16 << 30);

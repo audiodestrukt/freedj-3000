@@ -84,8 +84,21 @@ fn unwide(b: &[u8]) -> String {
         String::from_utf16_lossy(&b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>())
     } else { String::from_utf8_lossy(b).into_owned() }
 }
-fn fh_of(idx: u32) -> [u8; 32] { let mut f = [0u8; 32]; f[..8].copy_from_slice(&(idx as u64).to_be_bytes()); f }
-fn idx_of(fh: &[u8]) -> Option<u32> { fh.get(..8).map(|x| u64::from_be_bytes(x.try_into().unwrap()) as u32) }
+/// File handles: a marker and the node index + 1.  The root's handle was
+/// all zeros, which a CDJ-3000 took for no handle at all: it mounted and
+/// then never sent an NFS call.
+const FH_MARK: [u8; 4] = *b"ODK1";
+fn fh_of(idx: u32) -> [u8; 32] {
+    let mut f = [0u8; 32];
+    f[..4].copy_from_slice(&FH_MARK);
+    f[4..8].copy_from_slice(&(idx + 1).to_be_bytes());
+    f
+}
+fn idx_of(fh: &[u8]) -> Option<u32> {
+    let f = fh.get(..8)?;
+    if f[..4] != FH_MARK { return None; }
+    u32::from_be_bytes(f[4..8].try_into().ok()?).checked_sub(1)
+}
 
 fn fattr(out: &mut Vec<u8>, idx: u32, n: &Node) {
     put32(out, if n.is_dir { 2 } else { 1 });                  // type NFDIR / NFREG
@@ -129,11 +142,34 @@ fn parse_call(d: &[u8]) -> Option<(u32, u32, u32, u32, usize)> {
 
 struct Ports { mountd: u16, nfsd: u16 }
 
+/// This host's IPv4 addresses and netmasks.
+fn local_v4() -> Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)> {
+    if_addrs::get_if_addrs().map(|v| v.into_iter().filter_map(|i| match i.addr {
+        if_addrs::IfAddr::V4(a) => Some((a.ip, a.netmask)),
+        _ => None,
+    }).collect()).unwrap_or_default()
+}
+
+/// The export group for a requester, as a CDJ writes it: the network of our
+/// interface that shares the requester's subnet ("169.254.0.0/255.255.0.0").
+/// A link-local requester with no matching interface gets 169.254/16; any
+/// other gets everything.
+pub fn export_group(requester: std::net::Ipv4Addr, local: &[(std::net::Ipv4Addr, std::net::Ipv4Addr)]) -> String {
+    use std::net::Ipv4Addr;
+    let net = |ip: Ipv4Addr, m: Ipv4Addr| Ipv4Addr::from(u32::from(ip) & u32::from(m));
+    if let Some((ip, m)) = local.iter().find(|(ip, m)| !ip.is_loopback() && net(*ip, *m) == net(requester, *m)) {
+        return format!("{}/{}", net(*ip, *m), m);
+    }
+    if requester.is_link_local() { return "169.254.0.0/255.255.0.0".into(); }
+    "0.0.0.0/0.0.0.0".into()
+}
+
 fn serve_portmap(sock: UdpSocket, ports: Ports) {
     let mut buf = [0u8; 2048];
     while let Ok((n, from)) = sock.recv_from(&mut buf) {
         let d = &buf[..n];
-        let Some((xid, prog, _vers, proc_, off)) = parse_call(d) else { continue };
+        let Some((xid, prog, _vers, proc_, off)) = parse_call(d) else { log::debug!("portmap: {from} unparsed {n} bytes"); continue };
+        log::debug!("portmap: {from} prog {prog} v{_vers} proc {proc_}");
         if prog != PROG_PORTMAP { continue; }
         let body = match proc_ {
             0 => Vec::new(),
@@ -160,7 +196,8 @@ fn serve_mountd(sock: UdpSocket, export: Vec<u8>) {
     let mut buf = [0u8; 4096];
     while let Ok((n, from)) = sock.recv_from(&mut buf) {
         let d = &buf[..n];
-        let Some((xid, prog, _v, proc_, off)) = parse_call(d) else { continue };
+        let Some((xid, prog, _v, proc_, off)) = parse_call(d) else { log::debug!("mountd: {from} unparsed {n} bytes"); continue };
+        log::debug!("mountd: {from} prog {prog} v{_v} proc {proc_}");
         if prog != PROG_MOUNT { continue; }
         let body = match proc_ {
             0 => Vec::new(),
@@ -170,8 +207,17 @@ fn serve_mountd(sock: UdpSocket, export: Vec<u8>) {
                 let mut b = Vec::new(); put32(&mut b, 0); b.extend_from_slice(&fh_of(0)); b
             }
             3 => { log::info!("mountd: {from} UMNT"); Vec::new() }
-            5 => { // EXPORT: one export, no group restriction
-                let mut b = Vec::new(); put32(&mut b, 1); put_opaque(&mut b, &export); put32(&mut b, 0); put32(&mut b, 0); b
+            5 => { // EXPORT: one export, open to the requester's network
+                // A player reads an empty group list as "not for you" and
+                // stops there (a CDJ-3000 asked for EXPORT and never sent
+                // MNT).  A CDJ names its subnet ("169.254.0.0/255.255.0.0"),
+                // so we name the one the requester is on.
+                let group = match from { std::net::SocketAddr::V4(f) => export_group(*f.ip(), &local_v4()), _ => "0.0.0.0/0.0.0.0".into() };
+                log::info!("mountd: {from} EXPORT → {group}");
+                let mut b = Vec::new();
+                put32(&mut b, 1); put_opaque(&mut b, &export);
+                put32(&mut b, 1); put_opaque(&mut b, group.as_bytes()); put32(&mut b, 0);
+                put32(&mut b, 0); b
             }
             _ => { let _ = sock.send_to(&reply_proc_unavail(xid), from); continue; }
         };
@@ -184,7 +230,8 @@ fn serve_nfsd(sock: UdpSocket, tree: Arc<Tree>) {
     let err = |code: u32| { let mut b = Vec::new(); put32(&mut b, code); b };
     while let Ok((n, from)) = sock.recv_from(&mut buf) {
         let d = &buf[..n];
-        let Some((xid, prog, _v, proc_, off)) = parse_call(d) else { continue };
+        let Some((xid, prog, _v, proc_, off)) = parse_call(d) else { log::debug!("nfsd: {from} unparsed {n} bytes"); continue };
+        log::debug!("nfsd: {from} prog {prog} v{_v} proc {proc_}");
         if prog != PROG_NFS { continue; }
         let node_at = |o: usize| d.get(o..o + 32).and_then(idx_of).and_then(|i| tree.nodes.get(i as usize).map(|nd| (i, nd)));
         let body = match proc_ {
@@ -288,5 +335,32 @@ impl NfsServer {
         thread::Builder::new().name("mountd".into()).spawn(move || serve_mountd(md, export))?;
         thread::Builder::new().name("nfsd".into()).spawn(move || serve_nfsd(nd, tree))?;
         Ok(ports)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_handles_are_never_blank_and_round_trip() {
+        for i in [0u32, 1, 41, 1_000_000] {
+            let fh = fh_of(i);
+            assert!(fh.iter().any(|b| *b != 0), "handle for {i} is blank");
+            assert_eq!(idx_of(&fh), Some(i));
+        }
+        assert_eq!(idx_of(&[0u8; 32]), None, "a blank handle names nothing");
+    }
+
+    #[test]
+    fn export_group_names_the_requesters_network() {
+        use std::net::Ipv4Addr as I;
+        let local = [(I::new(127, 0, 0, 1), I::new(255, 0, 0, 0)),
+                     (I::new(192, 168, 68, 64), I::new(255, 255, 252, 0)),
+                     (I::new(169, 254, 77, 1), I::new(255, 255, 0, 0))];
+        assert_eq!(export_group(I::new(169, 254, 5, 55), &local), "169.254.0.0/255.255.0.0");
+        assert_eq!(export_group(I::new(192, 168, 69, 10), &local), "192.168.68.0/255.255.252.0");
+        assert_eq!(export_group(I::new(169, 254, 5, 55), &[]), "169.254.0.0/255.255.0.0");
+        assert_eq!(export_group(I::new(10, 0, 0, 5), &local), "0.0.0.0/0.0.0.0");
     }
 }

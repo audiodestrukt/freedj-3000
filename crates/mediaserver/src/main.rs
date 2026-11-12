@@ -134,7 +134,7 @@ fn main() -> Result<()> {
                 }
                 if last.elapsed() >= Duration::from_millis(200) {
                     counter = counter.wrapping_add(1);
-                    let mut pkt = link.build_status(&StatusFields { track: None, playing: false, track_loaded: false, master: false, sync: false,
+                    let mut pkt = link.build_status(&StatusFields { track: None, serving: true, playing: false, track_loaded: false, master: false, sync: false,
                         on_air: false, pitch: 1.0, bpm: None, beat: None, beat_in_bar: None, handoff_to: None, counter, sync_counter: 0 });
                     pkt[0x6f] = 0x00;   // USB local state: loaded
                     pkt[0x73] = 0x04;   // SD: none

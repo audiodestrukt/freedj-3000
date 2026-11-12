@@ -1428,6 +1428,7 @@ impl ProDjSender {
                         let track = link.track.lock().ok().and_then(|t| *t);
                         let fields = StatusFields {
                             track,
+                            serving: link.serve_tracks.load(Ordering::Relaxed) > 0,
                             playing,
                             track_loaded: track.is_some() || cur_grid.is_some(),
                             master:  link.master.load(Ordering::Relaxed),
@@ -1442,11 +1443,7 @@ impl ProDjSender {
                             sync_counter: link.our_sync.load(Ordering::Relaxed),
                         };
                         counter = counter.wrapping_add(1);
-                        let mut pkt = me.build_status(&fields);
-                        if link.serve_tracks.load(Ordering::Relaxed) > 0 {
-                            pkt[0x6f] = 0x00;   // USB local state: loaded
-                            pkt[0x75] = 0x01;   // link media available
-                        }
+                        let pkt = me.build_status(&fields);
                         let peers: Vec<Ipv4Addr> = link.peers.lock().map(|p| p.values().copied().collect()).unwrap_or_default();
                         if flags_changed {
                             log::info!("ProDJ tx: status master={} sync={} → {} peer(s)", fields.master, fields.sync, peers.len());
