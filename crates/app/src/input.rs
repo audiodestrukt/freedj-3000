@@ -56,6 +56,9 @@ pub enum UiEvent {
     /// (`"PLAY"`, `"HOT_C"`, `"SEARCH_NEXT"`…).  From the deck's own sub-CPU
     /// (`surface::subucom`); `DeckApp` gives it the faceplate's behaviour.
     PanelKey { key: &'static str, pressed: bool },
+    /// A touch on the unit's LCD (the sub-CPU's touch panel), as fractions
+    /// of the screen from its top-left; `down: false` is the lift.
+    PanelTouch { x: f32, y: f32, down: bool },
     /// SEARCH: open it, or edit the text (the CDJ-3000's on-screen keyboard,
     /// or typing on a computer keyboard).
     Search(SearchEdit),

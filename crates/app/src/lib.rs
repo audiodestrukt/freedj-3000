@@ -410,6 +410,10 @@ struct DeckApp {
     script_held: Vec<String>,
     /// CDJ-3000 panel keys held down on the sub-CPU (`surface::subucom`).
     panel_held: Vec<PanelHeld>,
+    /// LCD touches from the panel (screen fractions, down), fed to egui as
+    /// pointer events on the next frame.
+    panel_touch: Vec<(f32, f32, bool)>,
+    panel_touch_down: bool,
     /// A pop-up message and when it goes (the CDJ-3000 screen's notices).
     notice: Option<(String, Instant)>,
     /// Where the loaded track parked its cue on load (the auto cue): TRACK
@@ -727,6 +731,8 @@ impl DeckApp {
             exit_after_capture: false,
             script_held: Vec::new(),
             panel_held: Vec::new(),
+            panel_touch: Vec::new(),
+            panel_touch_down: false,
             notice: None,
             load_cue: cue_point,
             script_lamps: None,
@@ -1332,6 +1338,7 @@ impl DeckApp {
                 self.screen_mode = ScreenMode::Browse;
             }
             Event::Ui(UiEvent::PanelKey { key, pressed }) => self.panel_key(key, pressed),
+            Event::Ui(UiEvent::PanelTouch { x, y, down }) => self.panel_touch.push((x, y, down)),
             Event::Ui(UiEvent::ShowBrowse(on)) => {
                 if let Some(m) = nav::follow_browse_level(self.screen_mode, on) {
                     if m == ScreenMode::Browse { self.browser.refresh(); }
@@ -2735,6 +2742,21 @@ impl DeckApp {
         // egui-winit sizes its screen rect from `inner_size`, which on iOS is
         // the safe area; hit-testing must cover the whole view like the layout.
         if cfg!(any(target_os = "ios", target_os = "android")) { raw.screen_rect = Some(win); }
+        // The unit's touch panel: the whole window is its LCD.
+        for (fx, fy, down) in self.panel_touch.drain(..) {
+            let pos = win.min + egui::vec2(fx * win.width(), fy * win.height());
+            raw.events.push(egui::Event::PointerMoved(pos));
+            if down {
+                // A drag is moves after one press.
+                if !self.panel_touch_down {
+                    raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+                }
+            } else {
+                raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+                raw.events.push(egui::Event::PointerGone);
+            }
+            self.panel_touch_down = down;
+        }
         let mut touch = Vec::new();
         let _t_run = Instant::now();
         let view = match self.screen_mode {

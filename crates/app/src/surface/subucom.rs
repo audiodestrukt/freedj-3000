@@ -68,6 +68,16 @@ mod at {
     pub const ROTARY: usize = 14;
     pub const TEMPO:  usize = 22;
     pub const JOG:    usize = 26;     // position u16, velocity u16, touch u8
+    pub const TOUCH:  usize = 16;     // x u16, y u16 (0..1000); (0, 0) = no touch
+}
+
+/// The LCD touch in a frame as screen fractions from the top-left, or
+/// `None`. The CDJ-3000's touch panel counts 0..1000 with x from the right
+/// edge (cdj3k-emu's `ModelSpec::touch_units`); (0, 0) is no touch.
+pub fn lcd_touch(f: &[u8; FRAME]) -> Option<(f32, f32)> {
+    let (x, y) = (u16le(f, at::TOUCH), u16le(f, at::TOUCH + 2));
+    if x == 0 && y == 0 { return None; }
+    Some((1.0 - (x.min(1000) as f32 / 1000.0), y.min(1000) as f32 / 1000.0))
 }
 
 /// CRC-16/X-25: reflected 0x1021, init and final XOR 0xFFFF.
@@ -114,6 +124,8 @@ pub struct Decoder {
     prev: Option<[u8; FRAME]>,
     jog: JogScaler,
     tempo_sent: u16,
+    /// The last LCD touch sent, as screen fractions.
+    touch: Option<(f32, f32)>,
     pub bad_frames: u64,
 }
 
@@ -123,7 +135,7 @@ impl Default for Decoder {
 
 impl Decoder {
     pub fn new() -> Self {
-        Decoder { prev: None, jog: JogScaler::per_rev(JOG_TICKS_PER_REV), tempo_sent: 0, bad_frames: 0 }
+        Decoder { prev: None, jog: JogScaler::per_rev(JOG_TICKS_PER_REV), tempo_sent: 0, touch: None, bad_frames: 0 }
     }
 
     pub fn feed(&mut self, f: &[u8; FRAME]) -> Vec<Event> {
@@ -166,6 +178,14 @@ impl Decoder {
             self.tempo_sent = tempo;
             out.push(deck(CE::TempoFader { position: tempo_position(tempo) }));
         }
+
+        let now = lcd_touch(f);
+        match (self.touch, now) {
+            (_, Some((x, y))) if self.touch != now => out.push(Event::Ui(UiEvent::PanelTouch { x, y, down: true })),
+            (Some((x, y)), None) => out.push(Event::Ui(UiEvent::PanelTouch { x, y, down: false })),
+            _ => {}
+        }
+        self.touch = now;
         out
     }
 }
@@ -482,5 +502,24 @@ mod tests {
         assert_eq!(crc16_x25(&f[..62]), u16le(&f, 62));
         let f = mosi_frame(&snap, &ScreenView::TagList, false, false);
         assert_eq!(f[4] & 0x30, 0x30, "TAG LIST full on its screen");
+    }
+
+    #[test]
+    fn lcd_touch_press_drag_lift() {
+        let mut d = Decoder::new();
+        let mut f = idle();
+        d.feed(&f);
+        let touches = |evs: Vec<Event>| evs.into_iter().filter_map(|e| match e {
+            Event::Ui(UiEvent::PanelTouch { x, y, down }) => Some(((x * 100.0).round(), (y * 100.0).round(), down)),
+            _ => None }).collect::<Vec<_>>();
+        // x counts from the right edge: 750 = a quarter of the way across.
+        f[16..18].copy_from_slice(&750u16.to_le_bytes());
+        f[18..20].copy_from_slice(&500u16.to_le_bytes());
+        f = stamp(f);
+        assert_eq!(touches(d.feed(&f)), vec![(25.0, 50.0, true)]);
+        assert_eq!(touches(d.feed(&f)), vec![]);
+        f[16..20].copy_from_slice(&[0; 4]);
+        f = stamp(f);
+        assert_eq!(touches(d.feed(&f)), vec![(25.0, 50.0, false)]);
     }
 }

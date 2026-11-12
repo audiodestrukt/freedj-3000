@@ -28,7 +28,8 @@ All notable changes to this project will be documented in this file.
   key and pad LEDs follow it. It is the same device on a real deck and in
   cdj3k-emu, so OpenDeck running as the emulator's guest gets the drawn
   panel. Keys behave as on the on-screen CDJ-3000 faceplate. Unit-tested on
-  synthetic frames; not yet run on the device. LCD touch is next.
+  synthetic frames; not yet run on the device. LCD touch (frame bytes
+  16–19) reaches the screen as pointer presses and drags.
 - **Key detection.** Tracks without a key tag get a detected key, named as
   rekordbox names it, shown in KEY and served to players. On a 226-track
   rekordbox stick it agrees exactly with rekordbox on 72 % (cross-validated);
