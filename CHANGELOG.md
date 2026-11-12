@@ -14,7 +14,9 @@ All notable changes to this project will be documented in this file.
   decrypt, firmware info, kernel pick, rootfs, and all of its patch
   scripts pass. Booted in QEMU with the emulator's kernel: OpenDeck starts
   in 7 s, opens the panel device and plays, drawing the CDJ-3000 screen.
-  Not yet installed through the emulator's wizard.
+  Installs with `cdj3k-emu --provision` from the plaintext ISO (no key).
+  Releases attach the ISO, and the encrypted UPD when the
+  `CDJ3000_UPD_KEY` secret is set (`.github/workflows/cdj3000.yml`).
 - **Bare CDJ-3000 screen on the unit.** With `OPENDECK_SUBUCOM` set (the
   real panel is attached) the CDJ-3000 skin draws only the 1280 x 720 LCD,
   no on-screen keys.

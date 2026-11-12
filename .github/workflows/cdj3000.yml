@@ -1,0 +1,159 @@
+name: CDJ-3000 emulator image
+
+# OpenDeck as cdj3k-emu firmware (docs/hardware/cdj-3000-upd.md):
+#   CDJ3Kv<NNN>-OPENDECK-EMU.iso   always: plaintext, no key needed. cdj3k-emu's
+#                                  wizard ("decrypted .iso") or
+#                                  `cdj3k-emu --instance N --model cdj3k --provision <iso>`
+#   CDJ3Kv<NNN>-OPENDECK-EMU.UPD   only when the CDJ3000_UPD_KEY secret is set:
+#                                  the same ISO in a LUKS1 container, as Pioneer ships
+#
+#   release.yml (tag v*) calls this with `version` and the aarch64 tarball's
+#   artifact name; both files land in the OpenDeck-* artifact it publishes.
+#   Actions tab → "CDJ-3000 emulator image" → Run workflow: builds its own
+#   aarch64 binary, run artifacts only.
+#
+# The key: the maintainer stores it as a base64 secret
+#   base64 -w0 /path/to/packaging.key | gh secret set CDJ3000_UPD_KEY
+# It is decoded to $RUNNER_TEMP for the one encryption step and deleted;
+# it is never echoed, cached or uploaded. Without it the job still
+# publishes the ISO.
+on:
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      version:
+        description: Version to name the image after (e.g. 0.4.0)
+        type: string
+        required: true
+      linux_aarch64_artifact:
+        description: Artifact holding OpenDeck-<version>-linux-aarch64.tar.gz (from linux.yml)
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+      fw: ${{ steps.ver.outputs.fw }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: ver
+        run: |
+          V="${{ inputs.version }}"
+          [ -n "$V" ] || V="0.0.0-$(git rev-parse --short HEAD)"
+          # CDJ3Kv<NNN>: the emulator shows NNN as the slot's firmware number.
+          IFS=.- read -r a b c _ <<<"$V"
+          FW=$(printf '%d%d%d' "${a:-0}" "${b:-0}" "${c:-0}")
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "fw=$FW" >> "$GITHUB_OUTPUT"
+          echo "OpenDeck $V → CDJ3Kv$FW"
+
+  # A manual run has no linux.yml artifact to reuse: cross-build the same way.
+  binary:
+    needs: version
+    if: inputs.linux_aarch64_artifact == ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - name: Cross-build (docker)
+        env:
+          OPENDECK_VERSION: ${{ needs.version.outputs.version }}
+        run: deploy/pi/cross/build.sh aarch64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cdj3000-opendeck-aarch64
+          path: target/aarch64-unknown-linux-gnu/release/opendeck-stripped
+          if-no-files-found: error
+
+  image:
+    needs: [version, binary]
+    if: always() && needs.version.result == 'success' && (needs.binary.result == 'success' || needs.binary.result == 'skipped')
+    runs-on: ubuntu-24.04-arm   # the arm64 rootfs builds natively
+    timeout-minutes: 60
+    env:
+      V: ${{ needs.version.outputs.version }}
+      FW: ${{ needs.version.outputs.fw }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends genisoimage python3-cryptography
+
+      - name: OpenDeck binary (from linux.yml)
+        if: inputs.linux_aarch64_artifact != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.linux_aarch64_artifact }}
+          path: bin-in
+      - name: OpenDeck binary (cross-built above)
+        if: inputs.linux_aarch64_artifact == ''
+        uses: actions/download-artifact@v4
+        with:
+          name: cdj3000-opendeck-aarch64
+          path: bin-in
+      - name: Unpack the binary
+        run: |
+          mkdir -p bin
+          if ls bin-in/*.tar.gz >/dev/null 2>&1; then
+            tar -xzf bin-in/*.tar.gz -C bin-in
+            cp "$(find bin-in -type f -name opendeck | head -1)" bin/opendeck
+          else
+            cp bin-in/opendeck-stripped bin/opendeck
+          fi
+          chmod 755 bin/opendeck
+          file bin/opendeck | grep -q "ARM aarch64"
+
+      - name: Rootfs
+        run: CONTAINER_ENGINE=docker deploy/cdj3000/emu/build-rootfs.sh target/upd/rootfs.tar
+
+      - name: ISO
+        run: |
+          python3 tools/upd/updpack.py emu --rootfs target/upd/rootfs.tar \
+            --add bin/opendeck:opt/opendeck/opendeck \
+            --add amplificate.mp3:opt/opendeck/amplificate.mp3 \
+            --version "$V" --fw "$FW" --out target/upd
+
+      # cdj3k-emu's own firmware code over the ISO: firmware info, kernel
+      # pick, rootfs extraction (its patch scripts run at install time).
+      - name: Check with cdj3k-emu's install code
+        run: |
+          cd tools/upd/emucheck
+          cargo run --release -q -- "../../../target/upd/CDJ3Kv$FW-OPENDECK-EMU.iso" "$RUNNER_TEMP/chk"
+
+      - name: Encrypt the UPD (only with the key secret)
+        env:
+          UPD_KEY: ${{ secrets.CDJ3000_UPD_KEY }}
+        run: |
+          if [ -z "$UPD_KEY" ]; then
+            echo "::notice::CDJ3000_UPD_KEY is not set: publishing the ISO only"
+            exit 0
+          fi
+          umask 077
+          K="$RUNNER_TEMP/upd.key"
+          printf '%s' "$UPD_KEY" | base64 -d > "$K"
+          trap 'shred -u "$K" 2>/dev/null || rm -f "$K"' EXIT
+          python3 tools/upd/updpack.py luks --key "$K" \
+            "target/upd/CDJ3Kv$FW-OPENDECK-EMU.iso" "target/upd/CDJ3Kv$FW-OPENDECK-EMU.UPD"
+          (cd tools/upd/emucheck && cargo run --release -q -- \
+            "../../../target/upd/CDJ3Kv$FW-OPENDECK-EMU.UPD" "$RUNNER_TEMP/chk-upd" --key "$K")
+
+      - name: Collect
+        run: |
+          mkdir -p out
+          cp target/upd/CDJ3Kv$FW-OPENDECK-EMU.iso out/
+          [ -f target/upd/CDJ3Kv$FW-OPENDECK-EMU.UPD ] && cp target/upd/CDJ3Kv$FW-OPENDECK-EMU.UPD out/ || true
+          (cd out && sha256sum * > CDJ3Kv$FW-OPENDECK-EMU.sha256)
+          ls -l out; cat out/*.sha256
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenDeck-${{ env.V }}-cdj3k-emu
+          path: out/*
+          if-no-files-found: error

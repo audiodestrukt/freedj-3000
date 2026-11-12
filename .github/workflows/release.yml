@@ -100,9 +100,19 @@ jobs:
       # A v* tag push always uploads; ios.yml reads this only on a dispatch.
       testflight: ${{ github.event_name != 'workflow_dispatch' || inputs.testflight }}
 
+  # OpenDeck as cdj3k-emu firmware: the ISO always, the encrypted UPD when
+  # the CDJ3000_UPD_KEY secret is set. Reuses linux.yml's aarch64 binary.
+  cdj3000:
+    needs: [version, linux]
+    uses: ./.github/workflows/cdj3000.yml
+    secrets: inherit
+    with:
+      version: ${{ needs.version.outputs.version }}
+      linux_aarch64_artifact: OpenDeck-${{ needs.version.outputs.version }}-linux-aarch64
+
   release:
     if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
-    needs: [version, linux, windows, macos, android, ios]
+    needs: [version, linux, windows, macos, android, ios, cdj3000]
     runs-on: ubuntu-latest
     steps:
       # Only the OpenDeck-* artifacts: this skips macos.yml's per-arch
@@ -157,6 +167,12 @@ jobs:
           **Side-loading the .ipa:** use [AltStore](https://altstore.io), [SideStore](https://sidestore.io) or [Sideloadly](https://sideloadly.io) to install it signed with your own Apple ID. With a free Apple ID, Apple makes side-loaded apps expire after 7 days. Refresh it in the tool to keep using it.
           MD
           fi
+          if has 'CDJ3K*-OPENDECK-EMU.iso'; then cat >> $N <<'MD'
+
+          ### CDJ-3000 emulator (cdj3k-emu)
+          OpenDeck as the firmware of a [cdj3k-emu](https://github.com/nsaintot/cdj3k-emu) slot, driven by the emulator's drawn CDJ-3000 panel. Install the `.iso` (no key needed) through the emulator's firmware wizard, or `cdj3k-emu --instance 3 --model cdj3k --provision CDJ3Kv…-OPENDECK-EMU.iso`; use a slot you don't mind replacing. The `.UPD` is the same image in Pioneer's encrypted container, for the wizard's usual UPD flow. **Emulator only: never put either file on a real CDJ.** Details in `docs/hardware/cdj-3000-upd.md`.
+          MD
+          fi
           cat $N
 
       - name: GitHub Release
@@ -164,7 +180,9 @@ jobs:
         with:
           name: OpenDeck ${{ needs.version.outputs.version }}
           body_path: dist/release-notes.md
-          files: dist/OpenDeck-*
+          files: |
+            dist/OpenDeck-*
+            dist/CDJ3K*-OPENDECK-EMU.*
           generate_release_notes: true
           make_latest: true
           fail_on_unmatched_files: true

@@ -10,7 +10,7 @@ steps for a real deck are in [cdj-3000-install.md](cdj-3000-install.md).
 | Sub-CPU panel surface (`OPENDECK_SUBUCOM`, keys / jog / fader / rotary / LEDs) | built, unit-tested, not yet run on the device ([control surface](#the-panel-is-the-same-device-in-both)) |
 | Emulator UPD (`deploy/cdj3000/emu/`, `tools/upd/updpack.py emu`) | built; passes cdj3k-emu's install code (`tools/upd/emucheck`) and boots in QEMU with the emulator's kernel; not yet installed through the wizard |
 | `make upd-deck` (deck overlay) | not built |
-| Release job attaching pre-built UPDs | not built |
+| Release job (`.github/workflows/cdj3000.yml`, called by `release.yml`) | built: every `v*` release attaches the plaintext `.iso`, plus the encrypted `.UPD` when the `CDJ3000_UPD_KEY` secret is set |
 
 ## The one thing to understand first
 
@@ -201,10 +201,14 @@ byte that would go into a UPD without having a key.
 - No key, key file, or key-derived value is ever committed. The repository
   `.gitignore` ignores every `*.key` file as a second line of defence.
 - The docs say where `KEY` goes, not where a key comes from.
-- **Pre-built UPDs.** Releases attach both UPDs, built by the maintainer
-  with the maintainer's own key from a private path outside the repository
-  (as the App Store signing material is). Anyone with a key of their own can
-  build the same files from the same source instead.
+- **Pre-built files.** Every release attaches the emulator image as a
+  plaintext `.iso`: cdj3k-emu installs it with no key (the wizard's
+  "decrypted .iso", or `cdj3k-emu --instance N --model cdj3k --provision
+  <iso>`). The encrypted `.UPD` is attached too when the maintainer's key
+  is stored as the `CDJ3000_UPD_KEY` repository secret (base64); CI
+  decodes it to a temp file for the one encryption step and deletes it.
+  Anyone with a key of their own can build the same files from the same
+  source instead.
 
 ### Naming
 
