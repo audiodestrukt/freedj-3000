@@ -269,8 +269,8 @@ impl AudioHandle {
         Self::open_inner(Some((decoded, file_sr, file_ch as usize)), tags)
     }
 
-    /// Open an empty deck: device up, no track, paused.  The deck rate/channels
-    /// follow the output device; a later LOAD resamples the track to them in
+    /// Open an empty deck: device up, no track, paused.  The deck rate follows
+    /// the output device and the deck is stereo; a later LOAD resamples to it in
     /// `finish_load`.  Lets freedj boot to a browse-and-load state like a CDJ.
     pub fn open_empty() -> Result<Self> {
         Self::open_inner(None, TrackTags::default())
@@ -289,11 +289,11 @@ impl AudioHandle {
         let device_sr = supported.sample_rate().0;
         let device_ch = supported.channels() as usize;
 
-        // ── 1. Initial track, or an empty deck.  Empty takes the device rate/ch
+        // ── 1. Initial track, or an empty deck.  Empty takes the device rate, in stereo
         //       and starts paused; the processor idles until a track loads. ─────
         let (mut decoded, mut file_sr, file_ch, playing_init) = match initial {
             Some((d, sr, ch)) => (d, sr, ch, true),
-            None              => (Vec::new(), device_sr, device_ch, false),
+            None              => (Vec::new(), device_sr, 2, false),
         };
         // The deck runs at the device's rate: there is no real-time SRC, so a
         // start-up track at another rate is converted here, as every later
@@ -628,7 +628,27 @@ fn block_ranges(len: usize, pos: usize, want: usize, lp: Option<(usize, usize)>)
 
 #[cfg(test)]
 mod loop_read_tests {
-    use super::{read_block, resample_interleaved};
+    use super::{decode_file, read_block, resample_interleaved, to_stereo};
+
+    #[test]
+    fn mono_alac_loads_as_stereo_at_its_rate() {
+        // A 0.5 s 440 Hz mono ALAC tone at 48 kHz: ALAC used to be refused
+        // outright, and mono tracks were refused by the stereo deck.
+        let f = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../decode/tests/fixtures/tone_mono_48k_alac.m4a");
+        let (pcm, sr, ch, _) = decode_file(&f).unwrap();
+        assert_eq!((sr, ch), (48_000, 2));
+        let frames = pcm.len() / 2;
+        assert!((frames as i64 - 24_000).abs() < 1_100, "{frames} frames");
+        assert!(pcm.chunks(2).all(|f| f[0] == f[1]));
+        assert!(pcm.iter().any(|x| x.abs() > 0.1), "silent");
+    }
+
+    #[test]
+    fn to_stereo_keeps_front_left_and_right() {
+        assert_eq!(to_stereo(vec![1.0, 2.0], 1), (vec![1.0, 1.0, 2.0, 2.0], 2));
+        assert_eq!(to_stereo(vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 6), (vec![1.0, 2.0], 2));
+        assert_eq!(to_stereo(vec![1.0, 2.0], 2), (vec![1.0, 2.0], 2));
+    }
 
     fn ramp(n: usize) -> Vec<f32> { (0..n).map(|i| i as f32).collect() }
 
@@ -1144,6 +1164,7 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize, TrackTags)> {
         }
     }
     let file_sr = true_rate(&decoder, file_sr);
+    let (samples, file_ch) = to_stereo(samples, file_ch);
     log::info!(
         "decoded {} frames ({:.1}s) at {}Hz {}ch",
         samples.len() / file_ch,
@@ -1151,6 +1172,17 @@ pub fn decode_file(path: &Path) -> Result<(Vec<f32>, u32, usize, TrackTags)> {
         file_sr, file_ch,
     );
     Ok((samples, file_sr, file_ch, tags))
+}
+
+/// The deck runs in stereo. A mono track is copied to both sides, and a
+/// track with more than two channels keeps its front left and right, so
+/// every track loads whatever its layout (a mono file used to be refused).
+pub fn to_stereo(samples: Vec<f32>, ch: usize) -> (Vec<f32>, usize) {
+    match ch {
+        2 => (samples, 2),
+        0 | 1 => (samples.iter().flat_map(|&x| [x, x]).collect(), 2),
+        n => (samples.chunks_exact(n).flat_map(|f| [f[0], f[1]]).collect(), 2),
+    }
 }
 
 /// The rate of the decoded audio itself. The container's rate is what the
@@ -1184,6 +1216,7 @@ pub fn decode_bytes(bytes: Vec<u8>, ext: Option<&str>) -> Result<(Vec<f32>, u32,
         }
     }
     let file_sr = true_rate(&decoder, file_sr);
+    let (samples, file_ch) = to_stereo(samples, file_ch);
     log::info!("decoded {} frames ({:.1}s) at {}Hz {}ch (from memory)",
         samples.len() / file_ch, samples.len() as f64 / file_ch as f64 / file_sr as f64, file_sr, file_ch);
     Ok((samples, file_sr, file_ch, tags))

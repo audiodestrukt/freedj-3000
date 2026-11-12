@@ -134,9 +134,8 @@ impl SymphoniaDecoder {
 
         let track_id   = track.id;
         let sample_rate = track.codec_params.sample_rate.unwrap_or(44100);
-        let channels   = track.codec_params.channels
-            .map(|c| c.count() as u8)
-            .unwrap_or(2);
+        let header_channels = track.codec_params.channels.map(|c| c.count() as u8);
+        let channels   = header_channels.unwrap_or(2);
         let total_frames = track.codec_params.n_frames;
 
         let dec_opts = DecoderOptions::default();
@@ -144,7 +143,7 @@ impl SymphoniaDecoder {
             .make(&track.codec_params, &dec_opts)
             .map_err(|e| DecodeError::Codec(e.to_string()))?;
 
-        Ok(Self {
+        let mut me = Self {
             format,
             decoder,
             track_id,
@@ -155,7 +154,40 @@ impl SymphoniaDecoder {
             buf_pos: 0,
             tags,
             decoded_rate: None,
-        })
+        };
+        // No channel count in the header (ALAC in MP4 has none): decode the
+        // first packet and take the layout from it. Guessing stereo read a
+        // mono file as half as many stereo frames, at double speed.
+        if header_channels.is_none() {
+            if let Some(spec) = me.prime()? {
+                me.channels = spec.channels.count() as u8;
+                me.sample_rate = spec.rate;
+            }
+        }
+        Ok(me)
+    }
+
+    /// Decode packets until one has audio, leaving it buffered for the first
+    /// `decode` call. Returns its spec, or None at end of stream.
+    fn prime(&mut self) -> Result<Option<symphonia::core::audio::SignalSpec>, DecodeError> {
+        loop {
+            let packet = match self.format.next_packet() {
+                Ok(p) => p,
+                Err(symphonia::core::errors::Error::IoError(e))
+                    if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
+                Err(e) => return Err(DecodeError::Codec(e.to_string())),
+            };
+            if packet.track_id() != self.track_id { continue; }
+            let Ok(decoded) = self.decoder.decode(&packet) else { continue };
+            let (spec, frames) = (*decoded.spec(), decoded.frames());
+            if frames == 0 { continue; }
+            let mut buf = SampleBuffer::<f32>::new(frames as u64, spec);
+            buf.copy_interleaved_ref(decoded);
+            self.sample_buf = Some(buf);
+            self.buf_pos = 0;
+            self.decoded_rate = Some(spec.rate);
+            return Ok(Some(spec));
+        }
     }
 
     /// The track's own metadata, as read at open.
