@@ -1,0 +1,14 @@
+[Unit]
+Description=OpenDeck
+# The emulator's patches create these: the sub-CPU panel device
+# (/dev/subucom_spi1.0) and the virtio sound card.
+Wants=insmod-subucom-virt.service insmod-virtio-snd.service usb-drive-mount.service
+After=insmod-subucom-virt.service insmod-virtio-snd.service usb-drive-mount.service systemd-networkd.service systemd-udev-settle.service
+
+[Service]
+ExecStart=/opt/opendeck/run.sh
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,33 @@
+# The OpenDeck guest userland for cdj3k-emu: a small Debian 12 arm64 rootfs.
+# Built by build-rootfs.sh (podman/docker, --platform linux/arm64); exported
+# as a tar and packed into the emulator UPD by tools/upd/updpack.py.
+#
+# What it must provide, from the emulator's side (docs/hardware/cdj-3000-upd.md):
+#   - systemd as /init (the emulator boots rdinit=/init; its patches write units)
+#   - /usr/bin/{bash,tar,find,readlink,mount,umount,cp} and /usr/bin/busybox:
+#     the provisioning guest runs the patch scripts with the image's own tools
+#   - /sbin/insmod (the subucom_virt and virtio_snd modules), losetup, blkid
+# What OpenDeck needs: ALSA, SDL2 on KMSDRM (Mesa's kms_swrast for EGL/GBM).
+FROM docker.io/library/debian:bookworm-slim
+
+RUN apt-get update \
+ && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+      systemd udev dbus busybox kmod util-linux mount iproute2 iputils-ping procps \
+      alsa-utils libasound2 libsdl2-2.0-0 \
+      libegl1 libgles2 libgbm1 libgl1-mesa-dri libdrm2 \
+      ca-certificates \
+ && apt-get clean \
+ && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/* /usr/share/info/* \
+           /usr/share/locale/* /var/cache/debconf/*-old
+
+COPY overlay/ /
+
+# /home/root/scripts: patch 20 writes a helper there (where the stock
+# firmware keeps its scripts).
+RUN ln -sf /usr/lib/systemd/systemd /init \
+ && mkdir -p /home/root/scripts \
+ && : > /etc/machine-id \
+ && echo opendeck > /etc/hostname \
+ && systemctl enable systemd-networkd.service opendeck.service wlan-monitor.service \
+ && systemctl mask getty@tty1.service systemd-timesyncd.service apt-daily.timer apt-daily-upgrade.timer \
+ && systemctl set-default multi-user.target

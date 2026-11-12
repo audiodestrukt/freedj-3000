@@ -1,6 +1,6 @@
 # OpenDeck as a CDJ-3000 `.UPD`: the emulator image and the deck overlay
 
-Status: **designed, not built** (2026-11-11). This page is the reference
+Status: **emulator UPD built and booted in QEMU** (2026-11-12); deck UPD designed, not built. This page is the reference
 for how OpenDeck is packaged as `.UPD` files: what kinds there are, what is
 inside each, how each is consumed, and how they are built. The install
 steps for a real deck are in [cdj-3000-install.md](cdj-3000-install.md).
@@ -8,8 +8,7 @@ steps for a real deck are in [cdj-3000-install.md](cdj-3000-install.md).
 | Piece | State |
 |---|---|
 | Sub-CPU panel surface (`OPENDECK_SUBUCOM`, keys / jog / fader / rotary / LEDs) | built, unit-tested, not yet run on the device ([control surface](#the-panel-is-the-same-device-in-both)) |
-| Probe UPD (tiny rootfs, proves the emulator accepts a non-Pioneer image) | not built: the next step |
-| `make upd-emu` (emulator image) | not built |
+| Emulator UPD (`deploy/cdj3000/emu/`, `tools/upd/updpack.py emu`) | built; passes cdj3k-emu's install code (`tools/upd/emucheck`) and boots in QEMU with the emulator's kernel; not yet installed through the wizard |
 | `make upd-deck` (deck overlay) | not built |
 | Release job attaching pre-built UPDs | not built |
 
@@ -103,8 +102,8 @@ The rootfs inside the carrier, as designed:
 
 | Part | What | Why |
 |---|---|---|
-| Userland | A small arm64 Linux userland (distribution not chosen yet) with systemd | The emulator's patches write systemd units and expect a systemd boot |
-| Display | Xorg with the modesetting driver, Mesa (llvmpipe) | The emulator's patch 16 configures Xorg on its virtual GPU, and that is what its window shows; OpenDeck draws through wgpu with `WGPU_BACKEND=gl` |
+| Userland | Debian 12 arm64 with systemd as `/init`, plus `busybox` (`deploy/cdj3000/emu/Containerfile`) | The emulator's patches write systemd units; its provisioning guest runs them with the image's own `bash`, `tar` and `busybox`. Patch 20 needs `/home/root/scripts/`; a no-op `wlan-monitor` unit is there for the older patch 23 that required one |
+| Display | No X server: SDL's software renderer off-screen, each frame copied to `/dev/fb0` (`OPENDECK_FBDEV`) | SDL's KMSDRM page flips never reach the emulator's scanout; the kernel's fbdev emulation does. No GL means no llvmpipe threads competing with audio under TCG (one core instead of four) |
 | Audio | ALSA | The emulator's `virtio_snd` (patch 17) is a normal ALSA card |
 | OpenDeck | `/opt/opendeck/opendeck` and its unit, started once X is up | |
 | Panel | Nothing extra: `OPENDECK_SUBUCOM=/dev/subucom_spi1.0` in the unit | `subucom_virt` (patch 08) creates the device; the emulator's drawn panel feeds it |
@@ -125,18 +124,30 @@ is why the emulator is a faithful rehearsal of the deck for the controls:
 same device, same frames. The frame layout is cdj3k-emu's published one
 (`docs/subucom.md` there).
 
-### Open questions the probe answers
+### What the checks answered
 
-- Does a patch script failing on a non-Pioneer rootfs stop the install, or
-  is it skipped? Some scripts may expect Pioneer's files or units.
-- Does the emulator check `MINILOADER.IMG` or `CABINET.IMG` contents, or
-  only read them? (The cabinet image is keyed to the slot's SoC serial on
-  stock firmware.)
-- Does the carrier `Image` have to be a bootable kernel at all, or only
-  hold the cpio?
+- A failing patch script stops the install (`patch-rootfs.sh` runs with
+  `set -e`). With the two shims above, all of them pass on our rootfs.
+- `CABINET.IMG` is optional: without it the wizard stages nothing.
+  `MINILOADER.IMG` is only hashed.
+- The carrier `Image` is never booted, only searched for the largest
+  embedded gzip cpio.
+- ISO names: `-relaxed-filenames` keeps `CDJ3K-RK3399.ISO`, and
+  `-allow-multidot` keeps `IMAGES.TAR.GZ` (plain ISO 9660 turns it into
+  `IMAGES_TAR.GZ`, which the emulator does not find).
 
-The probe UPD is the emulator layout above with a rootfs that only logs
-that it booted and opens `/dev/subucom_spi1.0`. It goes into a spare slot.
+### Building and checking it
+
+```sh
+deploy/pi/cross/build.sh aarch64                       # OpenDeck, aarch64
+deploy/cdj3000/emu/build-rootfs.sh target/upd/rootfs.tar
+python3 tools/upd/updpack.py emu --rootfs target/upd/rootfs.tar \
+    --add target/aarch64-unknown-linux-gnu/release/opendeck-stripped:opt/opendeck/opendeck \
+    --add amplificate.mp3:opt/opendeck/amplificate.mp3 \
+    --version 0.0.0-dev --out target/upd [--key /path/to/packaging.key]
+# cdj3k-emu's own install pipeline over the result (RES = its patch/ + tools/):
+(cd tools/upd/emucheck && cargo run --release -- ../../../target/upd/CDJ3Kv999-OPENDECK-EMU.iso /tmp/chk --patch RES)
+```
 
 ## The deck UPD
 

@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **OpenDeck as cdj3k-emu firmware (emulator UPD).** `deploy/cdj3000/emu/`
+  builds a small Debian arm64 rootfs and `tools/upd/updpack.py` packs it,
+  with OpenDeck, into the layout of a CDJ-3000 firmware release
+  (`CDJ3Kv###-OPENDECK-EMU.UPD`). Without a key it stops at the plaintext
+  ISO; the LUKS1 container is written in Python (no root, no cryptsetup).
+  `tools/upd/emucheck` runs cdj3k-emu's own install code over the result:
+  decrypt, firmware info, kernel pick, rootfs, and all of its patch
+  scripts pass. Booted in QEMU with the emulator's kernel: OpenDeck starts
+  in 7 s, opens the panel device and plays, drawing the CDJ-3000 screen.
+  Not yet installed through the emulator's wizard.
+- **Bare CDJ-3000 screen on the unit.** With `OPENDECK_SUBUCOM` set (the
+  real panel is attached) the CDJ-3000 skin draws only the 1280 x 720 LCD,
+  no on-screen keys.
+- **Framebuffer output for the SDL renderer** (`OPENDECK_FBDEV=/dev/fb0`):
+  each frame is copied to a Linux framebuffer, for displays where DRM page
+  flips do not reach the screen (cdj3k-emu's virtio-gpu).
 - **The CDJ-3000's panel as a control surface.** With
   `OPENDECK_SUBUCOM=/dev/subucom_spi1.0`, OpenDeck reads the CDJ-3000's
   sub-CPU directly, as the deck's own player does: every key, the jog (turn

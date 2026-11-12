@@ -1,0 +1,8 @@
+[Match]
+Name=eth* en*
+
+[Network]
+# Pro DJ Link players use link-local (169.254/16) when there is no DHCP.
+DHCP=ipv4
+LinkLocalAddressing=ipv4
+IPv6AcceptRA=no

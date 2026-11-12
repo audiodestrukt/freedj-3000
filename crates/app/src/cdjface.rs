@@ -40,6 +40,15 @@ pub const DECK_ASPECT: Vec2 = Vec2::new(1255.0, 1721.0);
 /// The side layout: the 1280 × 720 screen with a key column each side.
 pub const SIDE_ASPECT: Vec2 = Vec2::new(1280.0 + 2.0 * SIDE_W, 720.0);
 const SIDE_W: f32 = 170.0;
+/// The unit's own LCD.
+pub const SCREEN_ASPECT: Vec2 = Vec2::new(1280.0, 720.0);
+
+/// Running on a CDJ-3000 (or cdj3k-emu) with its real panel: draw the bare
+/// 1280 x 720 screen, no drawn keys. The panel is the sub-CPU device that
+/// `OPENDECK_SUBUCOM` names (surface/subucom.rs).
+pub fn bare_screen() -> bool {
+    std::env::var_os("OPENDECK_SUBUCOM").is_some_and(|v| !v.is_empty())
+}
 
 /// How long a press must last to count as a long press (MENU → LOAD
 /// PREVIOUS TRACK, TIME MODE → AUTO CUE).

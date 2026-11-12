@@ -1,0 +1,14 @@
+# Runs cdj3k-emu's own firmware-install code over an OpenDeck emulator UPD
+# (or its plaintext ISO), up to the patch scripts: everything the emulator's
+# wizard does before it boots the slot. Not a workspace member, so the main
+# build never fetches cdj3k-emu. See tools/upd/README.md.
+[package]
+name = "upd-emucheck"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[dependencies]
+cdj3k-emu-firmware = { git = "https://github.com/nsaintot/cdj3k-emu", rev = "9a1471a" }

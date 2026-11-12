@@ -1,0 +1,9 @@
+[Unit]
+Description=Placeholder for cdj3k-emu patch 23 (masked at install)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/wlan-monitor.sh
+
+[Install]
+WantedBy=multi-user.target

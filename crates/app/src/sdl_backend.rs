@@ -334,6 +334,9 @@ pub struct SdlRenderer {
     lut:        Lut,
 
     capture:    Option<std::path::PathBuf>,
+    /// OPENDECK_FBDEV: each finished frame is also copied to this framebuffer.
+    #[cfg(target_os = "linux")]
+    fb:         Option<crate::fbdev::Fb>,
 }
 
 impl SdlRenderer {
@@ -364,6 +367,10 @@ impl SdlRenderer {
             pix: Vec::new(),
             lut: Lut::new(),
             capture: None,
+            #[cfg(target_os = "linux")]
+            fb: std::env::var("OPENDECK_FBDEV").ok().filter(|p| !p.is_empty()).and_then(|p| {
+                crate::fbdev::Fb::open(&p).map_err(|e| log::error!("fbdev: {e:#}")).ok()
+            }),
         })
     }
 
@@ -632,6 +639,15 @@ impl Renderer for SdlRenderer {
         }
 
         let t_present = Instant::now();
+        #[cfg(target_os = "linux")]
+        if let Some(fb) = self.fb.as_mut() {
+            if let Ok((w, h)) = self.canvas.output_size() {
+                match self.canvas.read_pixels(None, PixelFormatEnum::ARGB8888) {
+                    Ok(px) => fb.blit_argb(&px, w, h),
+                    Err(e) => log::warn!("fbdev read pixels: {e}"),
+                }
+            }
+        }
         self.canvas.present();
         crate::perf_accum("present", t_present.elapsed());
     }
