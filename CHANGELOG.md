@@ -13,6 +13,16 @@ All notable changes to this project will be documented in this file.
   cdj3k-emu, so OpenDeck running as the emulator's guest gets the drawn
   panel. Keys behave as on the on-screen CDJ-3000 faceplate. Unit-tested on
   synthetic frames; not yet run on the device. LCD touch is next.
+- **Key detection.** Tracks without a key tag get a detected key, named as
+  rekordbox names it, shown in KEY and served to players. On a 226-track
+  rekordbox stick it agrees exactly with rekordbox on 72 % (cross-validated);
+  most misses are the right tonic in the other mode. About 60 ms a track.
+- **Phrase analysis (first cut).** OpenDeck detects phrases (intro, verse /
+  up / down, chorus, outro; mood high / mid / low) and serves them as
+  rekordbox's PSSI section, so a CDJ-3000 can colour the waveform by phrase.
+  The encoder matches rekordbox's (masked) format byte for byte; the
+  detector itself is not yet measured against rekordbox's phrases
+  (`examples/phrase_vs_rekordbox` does that, given a source with them).
 - **Colour waveforms for other players.** OpenDeck's analysis now also
   makes the waveforms newer players draw: the CDJ-3000's 3-band preview and
   detail (PWV6 / PWV7) and the nexus 2 RGB preview and detail (PWV4 /
@@ -66,7 +76,7 @@ All notable changes to this project will be documented in this file.
   plus relative, plus a fifth either way); HISTORY lists what this deck
   played from its own library this session; MATCHING suggests tracks in a
   related key within 6 % of the chosen player's tempo. Request formats as
-  captured from a CDJ-3000. Keys come from tags until key detection lands.
+  captured from a CDJ-3000. Keys come from tags, or key detection for untagged tracks.
 - **Other devices could not show OpenDeck's track title or position.** Our
   status packets carried a track ID left over from the captured packet they
   were built from, so Beat Link, ShowKontrol and the players asked our
