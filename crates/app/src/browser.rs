@@ -1477,7 +1477,9 @@ mod tests {
         let Ok(ip) = std::env::var("OPENDECK_TEST_LINK") else { return };
         let ip: Ipv4Addr = ip.parse().unwrap();
         let link = crate::prodj::LinkState::new(1);
-        link.peers.lock().unwrap().insert(3, ip);
+        // OPENDECK_TEST_LINK_PLAYER: the peer's player number (rekordbox is 41).
+        let player = std::env::var("OPENDECK_TEST_LINK_PLAYER").ok().and_then(|p| p.parse().ok()).unwrap_or(3);
+        link.peers.lock().unwrap().insert(player, ip);
         let mut b = Browser::new(&std::env::temp_dir(), link);
 
         let li = b.entries().iter().position(|e| e.name == "LINK").expect("LINK row");
@@ -1500,7 +1502,9 @@ mod tests {
         };
         assert_eq!(tip, ip);
 
-        let mut db = DbClient::discover(ip, 1).unwrap();
+        // A second session as device 1 would clash with the browser's own (a
+        // server drops one of two sessions from one device number): check as 2.
+        let mut db = DbClient::discover(ip, 2).unwrap();
         let slot = if rekordbox { Slot::Collection } else { Slot::Usb };
         let path = db.file_path(slot, id).unwrap().expect("file path");
         let pm = if rekordbox { opendeck_nfs::PORTMAP_REKORDBOX } else { opendeck_nfs::PORTMAP_PLAYER };

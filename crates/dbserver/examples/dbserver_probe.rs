@@ -21,7 +21,8 @@ fn main() -> anyhow::Result<()> {
     let port = query_db_port(ip)?;
     let mut c = Client::connect(ip, port, device)?;
     let mut args = vec![c.dmst(menu, slot, TrackType::Rekordbox)];
-    if explicit { args.extend(extra); } else { args.push(Field::U32(id)); }
+    let rest: Vec<Field> = if explicit { extra } else { vec![Field::U32(id)] };
+    args.extend(rest.clone());
     println!("-> 0x{ty:04x} {args:?}");
     let r = c.request(ty, args)?;
     println!("<- 0x{:04x} {:?}", r.kind, r.args.iter().map(short).collect::<Vec<_>>());
@@ -34,7 +35,7 @@ fn main() -> anyhow::Result<()> {
         let count = r.args.get(1).map(|f| f.as_u32()).unwrap_or(0);
         println!("   menu with {count} items; rendering");
         // Render like Client::menu does, but print raw rows so unknown item shapes show.
-        let items = c.menu(ty, slot, TrackType::Rekordbox, vec![Field::U32(id)])?;
+        let items = c.menu(ty, slot, TrackType::Rekordbox, rest)?;
         for i in items { println!("   [{:>10}] {:<12} type=0x{:04x} {:?} {:?} flags={} art={} pos={}", i.id, i.type_name(), i.item_type, i.label, i.label2, i.flags, i.artwork_id, i.position); }
     }
     Ok(())
