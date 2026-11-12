@@ -652,14 +652,20 @@ pub struct ClaimGuard {
     defended_against: Vec<(Ipv4Addr, u16)>,
     /// Collisions already acted on, once per device.
     warned: Vec<(Ipv4Addr, u16)>,
+    /// This host's addresses: a machine on wired and Wi-Fi in one subnet
+    /// sends its broadcasts out of either, so our own packets arrive from
+    /// any of them (our sender port tells them apart from another program).
+    pub local_ips: Vec<Ipv4Addr>,
 }
 
 impl ClaimGuard {
     pub fn on_packet(&mut self, link: &LinkState, data: &[u8], from: Option<(Ipv4Addr, u16)>) -> ClaimAction {
         let own_src = link.own_src.lock().ok().and_then(|g| *g);
         // Our own broadcasts come back to us; a peer is anyone else.
-        if from.is_some() && from == own_src { return ClaimAction::Done; }
-        if from.is_some_and(|f| Some(f.1) == self.defend_port && Some(f.0) == own_src.map(|o| o.0)) { return ClaimAction::Done; }
+        let ours_ip = |ip: Ipv4Addr| Some(ip) == own_src.map(|o| o.0) || self.local_ips.contains(&ip);
+        if from.is_some_and(|f| ours_ip(f.0) && (Some(f.1) == own_src.map(|o| o.1) || Some(f.1) == self.defend_port)) {
+            return ClaimAction::Done;
+        }
         let ours = link.player();
         let holding = link.claimed.load(Ordering::Relaxed);
         if let Some(n) = ProDjLink::parse_defense(data) {
@@ -715,7 +721,8 @@ fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
     log::info!("ProDJ Link: listening for announces on port {PORT_ANNOUNCE}");
     // Defenses go back to the claimant's port 50000 from a socket of our own.
     let defend_sock = UdpSocket::bind("0.0.0.0:0").ok();
-    let mut guard = ClaimGuard { defend_port: defend_sock.as_ref().and_then(|d| d.local_addr().ok()).map(|a| a.port()), ..Default::default() };
+    let local_ips = if_addrs::get_if_addrs().map(|v| v.into_iter().filter_map(|i| match i.addr { if_addrs::IfAddr::V4(a) => Some(a.ip), _ => None }).collect()).unwrap_or_default();
+    let mut guard = ClaimGuard { defend_port: defend_sock.as_ref().and_then(|d| d.local_addr().ok()).map(|a| a.port()), local_ips, ..Default::default() };
     spawn("prodj-rx-50000", PORT_ANNOUNCE, sock, move |data, addr| {
         log::trace!("ProDJ rx :50000 {} bytes from {addr} — {:02X?}", data.len(), data);
         diag_packet(50000, addr, data);
@@ -1539,6 +1546,13 @@ mod claim_tests {
         assert_eq!(ClaimGuard::default().on_packet(&link, &d, Some(US)), ClaimAction::Done);
         let mut g = ClaimGuard { defend_port: Some(50555), ..Default::default() };
         assert_eq!(g.on_packet(&link, &d, Some((US.0, 50555))), ClaimAction::Done, "our defense socket's echo");
+        // Our broadcast back through the host's other interface (Wi-Fi beside
+        // ethernet): same sender port, another of our addresses.
+        let wifi = Ipv4Addr::new(192, 168, 68, 57);
+        let mut g = ClaimGuard { local_ips: vec![wifi], ..Default::default() };
+        let held = deck(1, true, true);
+        assert_eq!(g.on_packet(&held, &announce(1, US.0), Some((wifi, US.1))), ClaimAction::Done);
+        assert!(!held.reclaim.load(Ordering::Relaxed), "not a collision with ourselves");
         assert_eq!(link.defended.load(Ordering::Relaxed), 0);
     }
 
