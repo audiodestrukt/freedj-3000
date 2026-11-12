@@ -67,6 +67,13 @@ All notable changes to this project will be documented in this file.
 - **Apple Lossless (ALAC) tracks load.** They were refused.
 
 ### Changed
+- **BROWSE remembers where you were.** Each source (the home folder, each
+  stick) keeps its own place, folder and highlighted row: going to another
+  source and back, or relaunching, returns there (saved by name in
+  `browse.json`, so it survives a rescan or a re-read export). BACK lands on
+  the folder it came out of instead of the top of the list. The USB / BROWSE
+  key returns to the source browsed last; a stick mounted since no longer
+  takes it over (pick the stick from SOURCE, or its row in the list).
 - **Tracks are playable almost at once, as on a CDJ.** A load used to
   decode the whole file, resample it, build its waveform and detect its grid
   before the deck could play. Now the deck is playable once the audio four

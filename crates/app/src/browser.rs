@@ -261,6 +261,30 @@ pub struct Browser {
     /// once per folder searched).
     search_query: String,
     fs_index:  std::cell::RefCell<Option<(PathBuf, Vec<PathBuf>)>>,
+    /// Per stack level, the name of the row that led there ("" for the
+    /// first level and for levels opened automatically, such as a rekordbox
+    /// stick's category list).  BACK highlights the row it came out of;
+    /// a saved position replays these names.
+    names:     Vec<String>,
+    /// The last position in each local source (the home folder, each
+    /// stick), by the source's root: opening the source again returns there.
+    positions: std::collections::HashMap<PathBuf, BrowsePos>,
+    /// The source browsed last: the USB / BROWSE key goes back to it rather
+    /// than to whatever stick was mounted most recently.
+    last_root: Option<PathBuf>,
+}
+
+/// Where the browser stood in a local source, by names (rows survive a
+/// rescan, a restart and a re-read export, where indices and ids may not).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct BrowsePos {
+    /// The source's root folder: the home folder or a stick's mount.
+    pub root:     PathBuf,
+    /// Rows entered from the root, in order ("" = a level the browser opens
+    /// on its own, a rekordbox stick's categories).
+    pub names:    Vec<String>,
+    /// The highlighted row there.
+    pub selected: String,
 }
 
 /// Most files indexed for a folder SEARCH (a big library stays responsive).
@@ -294,6 +318,9 @@ impl Browser {
             played: Vec::new(),
             search_query: String::new(),
             fs_index: Default::default(),
+            names: Vec::new(),
+            positions: Default::default(),
+            last_root: None,
         };
         b.rebuild();
         b
@@ -373,6 +400,7 @@ impl Browser {
     }
 
     fn rebuild(&mut self) {
+        self.names.resize(self.stack.len(), String::new());
         let entries = match self.stack.last().cloned() {
             Some(Loc::Fs(dir))        => self.fs_entries(&dir),
             Some(Loc::Link)           => self.link_entries(),
@@ -840,6 +868,8 @@ impl Browser {
                 if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_)) { self.db_title = sel_name.clone(); }
                 let from_usb_row = sel_name.starts_with("USB: ");
                 self.stack.push(loc);
+                self.names.resize(self.stack.len() - 1, String::new());
+                self.names.push(sel_name.clone());
                 self.selected = 0;
                 self.rebuild();
                 // A rekordbox stick opens on its categories, as on the units;
@@ -931,6 +961,12 @@ impl Browser {
         let rows = self.sources();
         let Some(row) = rows.get(i) else { return false };
         if row.kind == SourceKind::Usb && row.path.is_none() { media::request_access(); return false; }
+        self.remember();
+        if let Some(root) = row.path.clone().filter(|_| row.kind != SourceKind::Link) {
+            if let Some(pos) = self.positions.get(&root).cloned() {
+                if self.restore(&pos) { return true; }
+            }
+        }
         self.stack = vec![Loc::Fs(self.home.clone())];
         self.selected = 0;
         match row.kind {
@@ -974,6 +1010,7 @@ impl Browser {
     /// The LINK source key: jump to the list of linked players (from wherever
     /// the browser is).
     pub fn go_link(&mut self) {
+        self.remember();
         self.stack.truncate(1);
         self.stack.push(Loc::Link);
         self.selected = 0;
@@ -990,10 +1027,17 @@ impl Browser {
         }
     }
 
-    /// The USB source key: onto the stick when exactly one is mounted (on
-    /// its rekordbox categories when it has an export), else back to the
-    /// local root folder.
+    /// The USB source key: back to the local source browsed last, where it
+    /// was left; with none (or it is gone), onto the stick when exactly one
+    /// is mounted (on its rekordbox categories when it has an export), else
+    /// the local root folder.
     pub fn go_root(&mut self) {
+        // Back to the source browsed last, where it was left, while it is
+        // still there: a stick mounted since does not take the key over.
+        self.remember();
+        if let Some(pos) = self.last_root.as_ref().and_then(|r| self.positions.get(r)).cloned() {
+            if self.restore(&pos) { return; }
+        }
         self.stack.truncate(1);
         let ready: Vec<&Mount> = self.media.iter().filter(|m| m.access == Access::Ready).collect();
         if let [m] = ready.as_slice() {
@@ -1058,11 +1102,103 @@ impl Browser {
                 && matches!(self.rb_source, Some(RbSource::Link(_))))
     }
 
+    /// The browse positions file: the source browsed last, then the last
+    /// position in each local source.
+    fn positions_file() -> PathBuf { crate::taglist::app_data_dir().join("browse.json") }
+
+    /// Save where the browser is (and was in each local source), so the
+    /// next launch opens BROWSE there.  Not in tests.
+    pub fn save_positions(&mut self) {
+        self.remember();
+        if cfg!(test) { return; }
+        let mut all: Vec<BrowsePos> = Vec::new();
+        if let Some(p) = self.last_root.as_ref().and_then(|r| self.positions.get(r)) { all.push(p.clone()); }
+        all.extend(self.positions.values().filter(|p| Some(&p.root) != self.last_root.as_ref()).cloned());
+        match serde_json::to_vec_pretty(&all) {
+            Ok(b) => if let Err(e) = std::fs::write(Self::positions_file(), b) { log::warn!("browse positions: {e}"); },
+            Err(e) => log::warn!("browse positions: {e}"),
+        }
+    }
+
+    /// At launch: the saved positions, and BROWSE back where it was left
+    /// when that source is still there (a stick that is not inserted is
+    /// skipped; its position waits for it).
+    pub fn load_positions(&mut self) {
+        if cfg!(test) { return; }
+        let Ok(b) = std::fs::read(Self::positions_file()) else { return };
+        let Ok(all) = serde_json::from_slice::<Vec<BrowsePos>>(&b) else { return };
+        for p in &all { self.positions.insert(p.root.clone(), p.clone()); }
+        if let Some(last) = all.first() {
+            if self.restore(last) { log::info!("browse: back at {} / {}", last.root.display(), last.names.join(" / ")); }
+        }
+    }
+
+    /// Highlight the row called `name`, if the list has one.
+    fn select_named(&mut self, name: &str) {
+        if name.is_empty() { return; }
+        if let Some(i) = self.entries.iter().position(|e| e.name == name) { self.selected = i; }
+    }
+
+    /// The position in a local source, if the browser is in one: the root
+    /// is the home folder or the stick whose folder is on the stack.
+    pub fn position(&self) -> Option<BrowsePos> {
+        if self.stack.iter().any(|l| matches!(l, Loc::Link | Loc::DbRoot | Loc::Search)) || self.on_link() { return None; }
+        if matches!(self.rb_source, Some(RbSource::Link(_))) && self.stack.iter().any(|l| !matches!(l, Loc::Fs(_))) { return None; }
+        // The source's base: the deepest folder that is a mount, else the
+        // first (the home folder, or wherever BACK climbed to).
+        let base = self.stack.iter().rposition(|l| matches!(l, Loc::Fs(p) if self.media.iter().any(|m| m.path == *p)))
+            .unwrap_or(0);
+        let Some(Loc::Fs(root)) = self.stack.get(base) else { return None };
+        Some(BrowsePos {
+            root: root.clone(),
+            names: self.names.get(base + 1..).map(|n| n.to_vec()).unwrap_or_default(),
+            selected: self.selected_entry().map(|e| e.name.clone()).unwrap_or_default(),
+        })
+    }
+
+    /// Note where the browser is, for its source (see `positions`).
+    pub fn remember(&mut self) {
+        if let Some(p) = self.position() {
+            self.last_root = Some(p.root.clone());
+            self.positions.insert(p.root.clone(), p);
+        }
+    }
+
+    /// Go to a saved position: its source's root, then the same rows by
+    /// name.  Stops where a row is gone (a renamed folder, another stick),
+    /// staying as deep as it got.  False when the root itself is gone.
+    pub fn restore(&mut self, pos: &BrowsePos) -> bool {
+        if !pos.root.is_dir() { return false; }
+        let is_mount = self.media.iter().any(|m| m.path == pos.root && m.access == Access::Ready);
+        if pos.root != self.home && !is_mount && !pos.root.starts_with(&self.home) { return false; }
+        self.stack = vec![Loc::Fs(self.home.clone())];
+        if pos.root != self.home { self.stack.push(Loc::Fs(pos.root.clone())); }
+        self.names.clear();
+        self.selected = 0;
+        self.rebuild();
+        for name in &pos.names {
+            if name.is_empty() {
+                // A level the browser opened on its own: a stick's categories.
+                if !matches!(self.stack.last(), Some(Loc::RbRoot)) { self.into_rb_root(); }
+                continue;
+            }
+            let Some(i) = self.entries.iter().position(|e| &e.name == name) else { break };
+            if !matches!(self.entries[i].kind, EntryKind::Descend(_)) { break; }
+            self.selected = i;
+            if !matches!(self.enter(), Enter::Folder) { break; }
+        }
+        self.select_named(&pos.selected);
+        self.last_root = Some(pos.root.clone());
+        true
+    }
+
     pub fn back(&mut self) {
         if self.stack.len() > 1 {
             self.stack.pop();
-            self.rebuild();
+            let came_from = self.names.pop().unwrap_or_default();
             self.selected = 0;
+            self.rebuild();
+            self.select_named(&came_from);
         } else if let Some(Loc::Fs(dir)) = self.stack.last().cloned() {
             if self.floor.as_deref() == Some(dir.as_path()) { return; }
             if let Some(parent) = dir.parent().map(Path::to_path_buf) {
@@ -1187,9 +1323,9 @@ mod tests {
             if path.starts_with(&stick) && a.starts_with(&stick) && a.ends_with("ANLZ0000.DAT")),
             "paths resolve on the stick with its ANLZ grid");
 
-        // The USB source key lands on the stick when it is the only one.
+        // The USB source key keeps the place on the stick being browsed.
         b.go_root();
-        assert!(matches!(b.stack.last(), Some(Loc::RbRoot)), "on its categories");
+        assert_eq!(b.title(), "TRACK", "the key returns where the stick was left");
         assert!(matches!(b.stack.get(1), Some(Loc::Fs(p)) if *p == stick));
 
         // Pull the stick: the row vanishes and the browser is back at home.
@@ -1446,6 +1582,64 @@ mod tests {
         assert_eq!(b.title(), "REKORDBOX", "stays on the categories");
     }
 
+    /// A stick inserted while browsing the home folder does not take the
+    /// USB / BROWSE key over; each source keeps its own place, and a saved
+    /// position (by names) puts a fresh browser back on the same row.
+    #[test]
+    fn a_new_stick_does_not_take_over_and_sources_keep_their_place() {
+        let _env = MEDIA_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let empty = crate::media::tests::tempfile_like::Dir::new("browser-nomedia");
+        std::env::set_var("OPENDECK_MEDIA_DIRS", empty.path());
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-keep");
+        std::fs::create_dir_all(home.path().join("Crate")).unwrap();
+        for f in ["a.mp3", "b.mp3"] { std::fs::write(home.path().join("Crate").join(f), b"").unwrap(); }
+        let mut b = Browser::new(home.path(), crate::prodj::LinkState::new(1));
+        b.selected = b.entries().iter().position(|e| e.name == "Crate").unwrap();
+        b.enter();
+        b.selected = b.entries().iter().position(|e| e.name == "b.mp3").unwrap();
+
+        // A stick goes in.
+        let (root, stick) = crate::media::tests::fake_media_root("browser-keep-usb");
+        std::env::set_var("OPENDECK_MEDIA_DIRS", root.path());
+        assert!(b.force_media_rescan());
+        b.go_root();
+        assert_eq!((b.title().as_str(), b.selected_entry().unwrap().name.as_str()), ("Crate", "b.mp3"),
+                   "the key stays on the folder being browsed");
+
+        // Over to the stick from SOURCE, into TRACK; back to home: Crate.
+        let usb = b.sources().iter().position(|r| r.kind == SourceKind::Usb && r.path.as_deref() == Some(stick.as_path())).unwrap();
+        assert!(b.open_source(usb));
+        assert_eq!(b.title(), "ARTIST", "a rekordbox stick opens on ARTIST, as a CDJ");
+        b.back();
+        b.selected = b.entries().iter().position(|e| e.name.starts_with("TRACK")).unwrap();
+        assert!(matches!(b.enter(), Enter::Folder));
+        b.selected = 1;
+        assert_eq!(b.title(), "TRACK");
+        assert!(b.open_source(0));
+        assert_eq!(b.title(), "Crate");
+        // And the stick again: TRACK, second row.
+        assert!(b.open_source(usb));
+        assert_eq!((b.title().as_str(), b.selected), ("TRACK", 1));
+        // The USB key now means the stick (browsed last).
+        b.open_source(0);
+        b.open_source(usb);
+        b.go_root();
+        assert_eq!(b.title(), "TRACK");
+
+        // Saved by names, restored in a fresh browser (the next launch).
+        let pos = b.position().expect("a local position");
+        assert_eq!(pos.root, stick);
+        let mut fresh = Browser::new(home.path(), crate::prodj::LinkState::new(1));
+        assert!(fresh.restore(&pos));
+        assert_eq!((fresh.title().as_str(), fresh.selected_entry().unwrap().name.as_str()),
+                   ("TRACK", b.selected_entry().unwrap().name.as_str()));
+        // A position on a stick that is gone is not restored.
+        std::fs::remove_dir_all(&stick).unwrap();
+        assert!(fresh.force_media_rescan());
+        assert!(!fresh.restore(&pos));
+        std::env::remove_var("OPENDECK_MEDIA_DIRS");
+    }
+
     #[test]
     fn source_screen_lists_home_and_opens_it_from_anywhere() {
         let home = crate::media::tests::tempfile_like::Dir::new("browser-sources");
@@ -1459,12 +1653,17 @@ mod tests {
         let local = Load::Local { path: home.path().join("Crate").join("t.mp3"), analyze: None };
         assert!(rows[0].holds(&local));
         assert!(!rows[0].holds(&Load::Db { ip: Ipv4Addr::LOCALHOST, id: 1, title: String::new(), rekordbox: false, sd: false }));
-        // Wander into a folder, then pick the local source: back at the top.
+        // Wander into a folder, then pick the local source again: still
+        // there, on the same row; BACK climbs out onto the folder's row.
         b.selected = b.entries().iter().position(|e| e.name == "Crate").unwrap();
         b.enter();
         assert_eq!(b.title(), "Crate");
         assert!(b.open_source(0));
+        assert_eq!(b.title(), "Crate", "the source opens where it was left");
+        assert_eq!(b.selected_entry().unwrap().name, "t.mp3");
+        b.back();
         assert_eq!(b.title(), home.path().file_name().unwrap().to_str().unwrap());
+        assert_eq!(b.selected_entry().unwrap().name, "Crate", "BACK highlights the folder it left");
         assert!(!b.open_source(rows.len()), "no such row");
     }
 

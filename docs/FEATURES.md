@@ -19,6 +19,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | Instant load: playable once 4 s past the cue are decoded, the rest streams in behind playback (8.8-min MP3: 19 ms on a desktop) | ✅ desktop measured; iOS / emulator not yet timed | All |
 | Any sample rate (44.1, 48, 96 kHz…), converted to the output's rate on load | ✅ | All |
 | BROWSE a music folder; LOAD; LOAD PREVIOUS TRACK; TAG LIST; track INFO; cover art | ✅ | All |
+| BROWSE remembers its place: per source (home folder, each stick), across launches, BACK lands on the folder it left; a new stick does not take over the USB key | ✅ | All |
 | SEARCH with the on-screen keyboard (CDJ-3000 skin; `/` on the desktop) | ✅ | All |
 | rekordbox USB sticks: export.pdb categories (ARTIST, ALBUM, TRACK, KEY, PLAYLIST, HISTORY, FOLDER), beat grids, memory and hot cues, preview waveforms, covers | ✅ | All |
 | USB drives plugged into the device (iOS: "USB: ADD DRIVE…" picker, remembered; Android: "All files access") | ✅ | iOS, And, D, Pi |

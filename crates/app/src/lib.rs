@@ -821,7 +821,8 @@ impl DeckApp {
         indicators:   Arc<surface::Indicators>,
         settings:     settings::Settings,
     ) -> Self {
-        let browser = Browser::new(browse_root.as_deref().unwrap_or(&path), std::sync::Arc::clone(&link));
+        let mut browser = Browser::new(browse_root.as_deref().unwrap_or(&path), std::sync::Arc::clone(&link));
+        browser.load_positions();
         let loaded = path.is_file().then(|| Load::Local { path: std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone()), analyze: None });
         let mut browser = browser;
         if let Some(l) = &loaded { browser.note_played(l); }
@@ -1863,7 +1864,11 @@ impl DeckApp {
     /// Dispatch a browser selection: a local file, or a track on a linked player.
     fn load_selected(&mut self, load: Load) -> Result<()> {
         let r = self.load_selected_inner(load.clone());
-        if r.is_ok() { self.note_loaded(load); }
+        if r.is_ok() {
+            self.note_loaded(load);
+            // BROWSE opens here next time, this launch or the next.
+            self.browser.save_positions();
+        }
         r
     }
 
