@@ -15,7 +15,7 @@
 //! audio thread is never touched.
 
 use opendeck_link::prodj::{
-    ActiveLoop, ProDjLink, Status, StatusFields, wants_cdj3000_status, BECOME_MASTER, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS,
+    AbsPosition, ActiveLoop, ProDjLink, Status, StatusFields, wants_cdj3000_status, BECOME_MASTER, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS,
     SYNC_OFF, SYNC_ON, PKT_MEDIA_QUERY, MediaInfo};
 use arc_swap::ArcSwap;
 use opendeck_types::{BeatGrid, EngineSnapshot};
@@ -97,6 +97,9 @@ pub struct LinkState {
     pub peers:         Mutex<HashMap<u8, Ipv4Addr>>,
     /// player → device name from its announce ("XDJ-1000MK2", "rekordbox", …).
     pub peer_names:    Mutex<HashMap<u8, String>>,
+    /// Each player's latest Absolute Position (a CDJ-3000 or an OpenDeck,
+    /// ~33 a second, sent straight to us) and when it came.
+    pub positions:     Mutex<HashMap<u8, (AbsPosition, Instant)>>,
     /// Tracks we serve as a Link media source (0 = not serving).  Non-zero
     /// answers media queries and flags our USB slot loaded in status.
     pub serve_tracks:  AtomicU32,
@@ -228,6 +231,7 @@ impl LinkState {
             yielded_from: AtomicU32::new(0),
             peers: Mutex::new(HashMap::new()),
             peer_names: Mutex::new(HashMap::new()),
+            positions: Mutex::new(HashMap::new()),
             serve_tracks: AtomicU32::new(0),
             peer_media: Mutex::new(HashMap::new()),
             beat2_beat_ms: AtomicU64::new(0),
@@ -789,6 +793,27 @@ fn loop_fields(start: u64, end: u64, ch: u32, sr: u32, bpm: Option<f64>) -> Opti
     Some(ActiveLoop { start_ms, end_ms, beats })
 }
 
+/// Keep a peer's Absolute Position packet; true if `data` was one.
+fn note_position(link: &LinkState, data: &[u8], now: Instant) -> bool {
+    let Some(p) = ProDjLink::parse_abs_position(data) else { return false };
+    if p.player != link.player() {
+        if let Ok(mut m) = link.positions.lock() { m.insert(p.player, (p, now)); }
+    }
+    true
+}
+
+impl LinkState {
+    /// A player's playhead in ms now, from its latest position packet run
+    /// forward at its pitch while it plays; None without a recent one (1 s).
+    /// `playing` comes from its status.
+    pub fn playhead_ms(&self, player: u8, playing: bool, now: Instant) -> Option<f64> {
+        let (p, at) = self.positions.lock().ok()?.get(&player).copied()?;
+        let age = now.checked_duration_since(at)?;
+        if age > Duration::from_secs(1) { return None; }
+        Some(p.playhead_ms as f64 + if playing { age.as_secs_f64() * 1000.0 * p.pitch as f64 } else { 0.0 })
+    }
+}
+
 /// Where a CDJ-3000 sends its Absolute Position packets: every device that
 /// has announced itself, except ourselves, each address once.
 fn position_targets(peers: &HashMap<u8, Ipv4Addr>, me: u8) -> Vec<Ipv4Addr> {
@@ -815,6 +840,7 @@ fn listen_beat(
         log::debug!("ProDJ rx :50001 {} bytes from {addr} — {:02X?}", data.len(), data);
         diag_packet(50001, addr, data);
 
+        if note_position(&link, data, Instant::now()) { return; }
         if let Some(b) = ProDjLink::parse_beat(data) {
             if b.player == link.player() { return; }           // our own broadcast
             // An OpenDeck sends each beat by broadcast AND unicast (see the
@@ -2007,5 +2033,27 @@ mod loop_field_tests {
         assert_eq!(loop_fields(s(1.0), s(3.0), 2, 48_000, Some(120.0)), Some(ActiveLoop { start_ms: 1000.0, end_ms: 3000.0, beats: 4 }));
         assert_eq!(loop_fields(s(1.0), s(1.3), 2, 48_000, Some(120.0)).unwrap().beats, 0, "not whole beats");
         assert_eq!(loop_fields(s(2.0), s(1.0), 2, 48_000, None), None, "no loop");
+    }
+}
+
+#[cfg(test)]
+mod position_rx_tests {
+    use super::*;
+
+    /// A peer's position packet is kept (ours ignored) and its playhead runs
+    /// forward at its pitch while it plays; stale after a second.
+    #[test]
+    fn keeps_peer_positions() {
+        let link = LinkState::new(2);
+        let t0 = Instant::now();
+        assert!(note_position(&link, &ProDjLink::new(1).build_abs_position(220, 25_000, 1000, Some(1386)), t0));
+        assert!(note_position(&link, &ProDjLink::new(2).build_abs_position(10, 5, 0, None), t0));
+        assert!(!note_position(&link, &ProDjLink::new(1).build_announce(Ipv4Addr::new(169, 254, 1, 1), [0; 6]), t0), "not a position packet");
+        let at = |ms: u64, playing: bool| link.playhead_ms(1, playing, t0 + Duration::from_millis(ms));
+        assert_eq!(at(0, true), Some(25_000.0));
+        assert!((at(100, true).unwrap() - 25_110.0).abs() < 0.01, "+10 %: 110 ms in 100");
+        assert_eq!(at(100, false), Some(25_000.0));
+        assert_eq!(at(1500, true), None, "stale");
+        assert_eq!(link.playhead_ms(2, true, t0), None, "our own is not kept");
     }
 }

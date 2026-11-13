@@ -178,6 +178,20 @@ pub struct Status {
     /// it has seen on the network plus one; the old master yields only to a
     /// claim with a higher value.
     pub sync_counter: u32,
+    /// The active loop, from a CDJ-3000's long status (None otherwise).
+    pub active_loop:  Option<ActiveLoop>,
+}
+
+/// A CDJ-3000's Absolute Position packet (0x0b), about 33 a second.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AbsPosition {
+    pub player:      u8,
+    pub track_len_s: u32,
+    pub playhead_ms: u32,
+    /// 1.0 = +0%.
+    pub pitch:       f32,
+    /// Effective tempo, pitch included; None when unknown.
+    pub bpm:         Option<f32>,
 }
 
 /// Which track a status packet says is loaded: where it lives and its ID
@@ -706,6 +720,25 @@ impl ProDjLink {
             firmware:     [data[status::FIRMWARE], data[status::FIRMWARE + 1], data[status::FIRMWARE + 2], data[status::FIRMWARE + 3]],
             counter:      u32_at(status::COUNTER),
             sync_counter: u32_at(status::SYNC_N),
+            active_loop:  (data.len() >= 0x1ca && data[0x1b0] == 1).then(|| ActiveLoop {
+                start_ms: u32_at(0x1b8) as f64 / 1000.0,
+                end_ms:   u32_at(0x1c0) as f64 / 1000.0,
+                beats:    u16::from_be_bytes([data[0x1c8], data[0x1c9]]),
+            }),
+        })
+    }
+
+    /// Parse an Absolute Position packet (see [`build_abs_position`](Self::build_abs_position)).
+    pub fn parse_abs_position(data: &[u8]) -> Option<AbsPosition> {
+        if Self::packet_type(data)? != PKT_ABS_POSITION || data.len() < 0x3c { return None; }
+        let u32_at = |o: usize| u32::from_be_bytes(data[o..o + 4].try_into().unwrap());
+        let bpm = u32_at(0x38);
+        Some(AbsPosition {
+            player:      data[0x21],
+            track_len_s: u32_at(0x24),
+            playhead_ms: u32_at(0x28),
+            pitch:       1.0 + u32_at(0x2c) as i32 as f32 / 10_000.0,
+            bpm:         (bpm != 0xffff_ffff).then(|| bpm as f32 / 10.0),
         })
     }
 
@@ -1043,5 +1076,22 @@ mod cdj3000_status_tests {
     fn who_gets_the_long_status() {
         for n in ["CDJ-3000", "CDJ-3000X", "DJM-V10", "rekordbox", "Beat Link", "OpenDeck", "freedj-3000"] { assert!(wants_cdj3000_status(n), "{n}"); }
         for n in ["XDJ-1000MK2", "CDJ-2000NXS2", "CDJ-900", "XDJ-XZ"] { assert!(!wants_cdj3000_status(n), "{n}"); }
+    }
+
+    /// Incoming: a CDJ-3000's position packet (captured) and the loop of a
+    /// long status read back as built.
+    #[test]
+    fn reads_position_and_loop_from_a_cdj3000() {
+        let pkt = unhex(concat!("5173707431576d4a4f4c0b43444a2d33", "30303000000000000000000000000002",
+                                "00010018000000dc0000635c00000000", "0000000000000000000004ec"));
+        assert_eq!(ProDjLink::parse_abs_position(&pkt), Some(AbsPosition { player: 1, track_len_s: 220, playhead_ms: 25436, pitch: 1.0, bpm: Some(126.0) }));
+        let ours = ProDjLink::new(2).build_abs_position(180, 1234, -250, Some(1300));
+        let back = ProDjLink::parse_abs_position(&ours).unwrap();
+        assert_eq!((back.player, back.track_len_s, back.playhead_ms, back.bpm), (2, 180, 1234, Some(130.0)));
+        assert!((back.pitch - 0.975).abs() < 1e-6);
+        let lp = ActiveLoop { start_ms: 9256.0, end_ms: 9717.0, beats: 1 };
+        let st = ProDjLink::parse_status(&ProDjLink::new(2).build_status_cdj3000(&fields(), Some(lp))).unwrap();
+        assert_eq!(st.active_loop, Some(lp));
+        assert_eq!(ProDjLink::parse_status(&ProDjLink::new(2).build_status(&fields())).unwrap().active_loop, None);
     }
 }

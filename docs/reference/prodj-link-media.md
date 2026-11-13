@@ -246,7 +246,41 @@ over the same NFS. The presentation differs, and #32 tracks closing the gap:
   any `0x4003` / "unhandled" we send, and whether the served waveforms draw
   (see the encoding note above).
 - Confirm port binding on the iPad (TestFlight 0.1.14).
-- Cue lists (`0x2104` / `0x2b04`) once the deck has memory cues of its own
-  to share; colour waveforms (`0x2c04` PWV4/PWV5) are not produced.
+- Cue lists are served (hot and memory cues; layouts below).  Still
+  answered "no data", and a CDJ-3000 loads and plays without them:
+  - `0x2c04` PQT2.EXT, the extended grid.  From a CDJ-3000 (track of 463
+    beats, 126 BPM): header 0x38; at 0x10 `01000002`; two 8-byte entries,
+    first and last beat (beat-in-bar u16, BPM×100 u16, ms u32); the beat
+    count; an unknown u32; then one u16 per beat whose values always fall
+    on twelfths of 1,000 (0, 83, 166, 250, …).  Their meaning is not known
+    (pyrekordbox: "not yet known"), so nothing is served rather than guesses.
+  - `0x2504`: a 1,604-byte blob, all zero but 4 bytes at 0x640
+    (`80 7d a1 00` for that track).  Unknown.
+
+### Cue lists as a CDJ-3000 answers them
+
+Captured 2026-11-12 (memory cue, hot cues A and B, loop hot cue C):
+
+- `0x2104` → `0x4702`: args `[req, 0, len, blob, 0x24, hot count, memory
+  count, pairs length, pairs]`.  Blob: memory cues then hot cues, 36 bytes
+  each — `[loop?, 1, hot#, 0×5, ff×4, start u32 LE, loop end u32 LE or ff×4,
+  ff×16]`, positions in half-frames (1/150 s).  Pairs: `(ms, loop end ms or
+  ffffffff)` u32 LE per entry, same order.
+- `0x2b04` → `0x4e02`: args `[req, 0, len, blob, count]`.  Hot cues then
+  memory cues; entry size u32 LE at 0 (84 hot, 76 memory), hot# u16 at 4,
+  kind at 6 (1 cue, 2 loop), `e8 03` at 0x0a, start / loop end ms at
+  0x0c / 0x10, `ff`×20 at 0x20, 0x1a / 0x12 at 0x34; a hot cue ends with
+  its colour at 0x4e (code, R, G, B: green, a loop orange).  No cues:
+  status 0x32 ("no data").
+
+### CDJ-3000 status and position
+
+- Status to other players is 1,152 bytes (type 0x08 at 0x20, length 0x045c).
+  Active loop: `01 ff 8c` at 0x1b0, start / end µs (u32 BE) at 0x1b8 /
+  0x1c0, beats u16 at 0x1c8 (Beat Link reads 0x1b6 / 0x1be ×65536/1000).
+  The region also keeps earlier loops in repeated blocks.
+- Absolute Position (0x0b, 60 bytes) goes unicast to each device that has
+  announced, ~33 a second, never broadcast; a CDJ alone on the network
+  sends only announces and beats.
 - Client: BPM / KEY / SEARCH categories, colour labels, art in the detail pane
   (#32's remaining scope).
