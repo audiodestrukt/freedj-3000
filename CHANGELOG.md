@@ -39,6 +39,12 @@ All notable changes to this project will be documented in this file.
   `--screen-only` still override it for one run.
 
 ### Fixed
+- 96 kHz (and 88.2 / 176.4 / 192 kHz) files got a beat grid about 4 ms
+  early when analysed at their own rate, as the media server does for
+  tracks it serves to other decks: the beat finder works in fixed
+  512-sample steps.  It now halves the rate to 48 kHz or less first; a
+  track at 48, 96 and 192 kHz gets the same grid to the hundredth of a ms.
+  The analysis cache is rebuilt once to pick this up.
 - Beat packets reported a pitched OpenDeck's tempo twice: the BPM field
   carried the heard tempo instead of the track's, and receivers multiply it
   by the pitch.  Synced to a 126 BPM CDJ-3000 at −3 %, OpenDeck advertised

@@ -744,7 +744,14 @@ mod loop_read_tests {
 
     #[test]
     fn resampling_keeps_length_and_pitch() {
-        let (src, dst, secs) = (48_000u32, 44_100u32, 1.0f64);
+        // 96 kHz files on 48 / 44.1 kHz outputs, and the common pair both ways.
+        for (src, dst) in [(48_000, 44_100), (44_100, 48_000), (96_000, 48_000), (96_000, 44_100), (88_200, 44_100)] {
+            resample_case(src, dst);
+        }
+    }
+
+    fn resample_case(src: u32, dst: u32) {
+        let secs = 1.0f64;
         let n = (src as f64 * secs) as usize;
         let mut stereo = Vec::with_capacity(n * 2);
         for i in 0..n {
@@ -759,7 +766,7 @@ mod loop_read_tests {
         let mid = &left[dst as usize / 10..dst as usize * 9 / 10];
         let rising = mid.windows(2).filter(|w| w[0] < 0.0 && w[1] >= 0.0).count();
         let hz = rising as f64 / (mid.len() as f64 / dst as f64);
-        assert!((hz - 1000.0).abs() < 5.0, "came out at {hz:.1} Hz");
+        assert!((hz - 1000.0).abs() < 5.0, "{src} → {dst}: came out at {hz:.1} Hz");
         // Channels stay channels.
         assert!(out.chunks(2).skip(1000).take(100).all(|c| (c[0] + c[1]).abs() < 1e-3));
         // Same rate: untouched.
@@ -773,7 +780,7 @@ mod loop_read_tests {
         assert_eq!(out.len() / 2, (n as f64 * dst as f64 / src as f64).round() as usize, "exact length");
         let peak = out.chunks(2).enumerate().max_by(|a, b| a.1[0].total_cmp(&b.1[0])).unwrap().0;
         let want = (0.5 * dst as f64).round() as i64;
-        assert!((peak as i64 - want).abs() <= 1, "click moved to frame {peak}, want {want}");
+        assert!((peak as i64 - want).abs() <= 1, "{src} → {dst}: click moved to frame {peak}, want {want}");
     }
 
     #[test]

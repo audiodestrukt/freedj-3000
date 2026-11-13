@@ -749,6 +749,57 @@ mod perf {
 
     /// `in / speed` frames per push, real audio, and after a reset full
     /// level from the seek point.
+    /// Key lock: a 440 Hz tone stays 440 Hz at every tempo a DJ plays at,
+    /// steady over time, in all three engines.  Pitch is measured from
+    /// interpolated zero crossings in 100 ms windows, after 0.5 s of warm-up.
+    /// `cargo test --release -p opendeck-timestretch key_lock -- --nocapture`
+    /// prints the table.
+    #[test]
+    fn key_lock_holds_pitch() {
+        const HZ: f64 = 440.0;
+        let tone: Vec<f32> = (0..SR as usize * 4)
+            .flat_map(|i| { let v = 0.5 * (2.0 * std::f64::consts::PI * HZ * i as f64 / SR as f64).sin() as f32; [v, v] })
+            .collect();
+        let mut engines: Vec<(&str, fn() -> Box<dyn PipelineStage>)> = vec![
+            ("rubberband", || Box::new(TimestretechStage::new(SR, CH as u8))),
+            ("wsola", || Box::new(WsolaStage::new(SR, CH as u8))),
+        ];
+        #[cfg(feature = "bungee")]
+        engines.push(("bungee", || Box::new(BungeeStage::new(SR, CH as u8))));
+        for (name, make) in engines {
+            for speed in [0.84f32, 0.92, 0.97, 1.03, 1.08, 1.16] {
+                let mut st = make();
+                let mut out = Vec::new();
+                for chunk in tone.chunks(BLOCK * CH) { st.set_speed(speed); st.process(chunk, &mut out); }
+                let left: Vec<f32> = out.chunks(CH).map(|f| f[0]).collect();
+                let left = &left[SR as usize / 2..];
+                // Rising zero crossings, to a fraction of a sample.
+                let xs: Vec<f64> = left.windows(2).enumerate()
+                    .filter(|(_, w)| w[0] < 0.0 && w[1] >= 0.0)
+                    .map(|(i, w)| i as f64 + (w[0] / (w[0] - w[1])) as f64)
+                    .collect();
+                let win = SR as f64 / 10.0;
+                let mut cents = Vec::new();
+                let mut k = 0;
+                while k < xs.len() {
+                    let end = xs[k] + win;
+                    let j = xs[k..].iter().position(|&x| x >= end).map_or(xs.len(), |p| k + p);
+                    if j >= xs.len() { break; }
+                    let f = (j - 1 - k) as f64 / ((xs[j - 1] - xs[k]) / SR as f64);
+                    cents.push(1200.0 * (f / HZ).log2());
+                    k = j;
+                }
+                let mean = cents.iter().sum::<f64>() / cents.len() as f64;
+                let worst = cents.iter().fold(0f64, |m, c| m.max(c.abs()));
+                println!("{name:<10} {:+5.1} %  mean {mean:+6.2} cents  worst 100 ms {worst:5.2} cents  ({} windows)",
+                         (speed - 1.0) * 100.0, cents.len());
+                assert!(cents.len() >= 10, "{name} at {speed}: too little output");
+                assert!(mean.abs() < 1.0, "{name} at {speed}: pitch {mean:+.2} cents off");
+                assert!(worst < 5.0, "{name} at {speed}: a 100 ms window {worst:.2} cents off");
+            }
+        }
+    }
+
     fn frame_accounting_and_signal(stage: &mut dyn PipelineStage, speed: f32) {
         {
             stage.set_speed(speed);

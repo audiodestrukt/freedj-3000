@@ -27,8 +27,16 @@ const WARM_UP_SEC: f32 = 5.0;
 const STABLE_SEC: f32 = 15.0;
 
 pub struct BeatAnalyzerImpl {
+    /// The rate analysed at: the input's, halved until it is 48 kHz or less.
     sample_rate: u32,
-    /// Accumulated mono samples (downmixed).
+    /// Input samples per analysed sample (1, 2 or 4).  The onset detector
+    /// works in fixed 512-sample hops and FFT bins, so at 96 kHz it would see
+    /// half the time and different bands, and put the grid ~4 ms off the one
+    /// it finds for the same music at 48 kHz.
+    decim:       usize,
+    /// Mono sum of the input samples toward the next analysed one.
+    acc:         (f32, usize),
+    /// Accumulated mono samples (downmixed, decimated).
     samples:     Vec<f32>,
     /// Current best grid estimate.
     grid:        Option<Arc<BeatGrid>>,
@@ -38,8 +46,13 @@ pub struct BeatAnalyzerImpl {
 
 impl BeatAnalyzerImpl {
     pub fn new(sample_rate: u32) -> Self {
+        let mut decim = 1usize;
+        while sample_rate as usize / decim > 48_000 { decim *= 2; }
+        let sample_rate = sample_rate / decim as u32;
         Self {
             sample_rate,
+            decim,
+            acc: (0.0, 0),
             samples: Vec::with_capacity(sample_rate as usize * 60),
             grid: None,
             stable: false,
@@ -94,7 +107,8 @@ impl BeatAnalyzerImpl {
 
         // MiniBPM doesn't return a confidence score; use a fixed value.
         const CONFIDENCE: f32 = 0.8;
-        let mut grid = BeatGrid::new_constant(anchor_sample as u64, bpm);
+        // The grid is in the caller's samples, not the decimated ones.
+        let mut grid = BeatGrid::new_constant(anchor_sample as u64 * self.decim as u64, bpm);
         grid.confidence = CONFIDENCE;
 
         self.stable = self.seconds_accumulated() >= STABLE_SEC;
@@ -105,7 +119,7 @@ impl BeatAnalyzerImpl {
 impl BeatAnalyzer for BeatAnalyzerImpl {
     fn push(&mut self, samples: &[f32], sample_rate: u32) {
         // Downmix to mono and accumulate.
-        debug_assert_eq!(sample_rate, self.sample_rate,
+        debug_assert_eq!(sample_rate, self.sample_rate * self.decim as u32,
             "sample rate changed mid-stream — re-create the analyzer");
 
         // Assume interleaved stereo input.
@@ -117,7 +131,16 @@ impl BeatAnalyzer for BeatAnalyzerImpl {
             } else {
                 chunk[0]
             };
-            self.samples.push(mono);
+            if self.decim == 1 { self.samples.push(mono); continue; }
+            // Average each run of `decim` samples: a box filter, enough to
+            // keep what lies above the new Nyquist (little, in music) out of
+            // the onsets.
+            self.acc.0 += mono;
+            self.acc.1 += 1;
+            if self.acc.1 == self.decim {
+                self.samples.push(self.acc.0 / self.decim as f32);
+                self.acc = (0.0, 0);
+            }
         }
 
         // Re-run analysis once per second of new data after warm-up.
@@ -358,6 +381,30 @@ mod tests {
     fn drum_and_bass_reads_at_full_tempo() {
         let g = analyse(&groove(174.0, 0.25, 40.0, 0.0));
         assert!((g.bpm - 174.0).abs() < 0.1, "got {}", g.bpm);
+    }
+
+    /// The same music at 96 kHz gets the grid it gets at 48 kHz.  The onset
+    /// hops are fixed in samples, so at 96 kHz the grid sat ~4 ms early
+    /// (a real track: 461.5 vs 457.3 ms); the analyser now halves the rate.
+    #[test]
+    fn a_96k_file_gets_the_48k_grid() {
+        let pcm48 = groove(126.0, 0.3, 40.0, 1.0);
+        // Up to 96 kHz by linear interpolation, per channel.
+        let mut pcm96 = Vec::with_capacity(pcm48.len() * 2);
+        for f in 0..pcm48.len() / 2 {
+            let nxt = (f + 1).min(pcm48.len() / 2 - 1);
+            for half in [0.0f32, 0.5] {
+                for c in 0..2 { pcm96.push(pcm48[f * 2 + c] * (1.0 - half) + pcm48[nxt * 2 + c] * half); }
+            }
+        }
+        let g48 = analyse(&pcm48);
+        let mut a = BeatAnalyzerImpl::new(2 * SR);
+        a.push(&pcm96, 2 * SR);
+        let g96 = a.beat_grid().expect("a grid");
+        let per = 60_000.0 / g48.bpm;
+        let d = (g96.anchor_sample as f64 / (2 * SR) as f64 * 1000.0 - g48.anchor_sample as f64 / SR as f64 * 1000.0).rem_euclid(per);
+        assert!((g96.bpm - g48.bpm).abs() < 0.01, "{} vs {}", g96.bpm, g48.bpm);
+        assert!(d.min(per - d) < 0.5, "grids {:.2} ms apart", d.min(per - d));
     }
 
     /// Under the warm-up (5 s) there is no grid yet; the deck shows none.

@@ -396,7 +396,8 @@ const CACHE_MAGIC: &[u8; 4] = b"ODLA";
 // 2: MP3s decode with the encoder delay kept (the rekordbox / player timeline).
 // 3: tempo + phase fitted together, grids on rekordbox's timing.
 // 4: 3-band waveforms, 5: RGB waveforms, 6: phrases, 7: detected keys for untagged tracks.
-const CACHE_VERSION: u16 = 7;
+// 8: grids of 88.2 kHz+ files analysed at ≤48 kHz (were ~4 ms early).
+const CACHE_VERSION: u16 = 8;
 
 fn cache_key(path: &Path) -> Option<String> {
     let md = std::fs::metadata(path).ok()?;

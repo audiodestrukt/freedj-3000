@@ -17,7 +17,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 |---|---|---|
 | Formats: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF, OGG Vorbis; mono and multichannel play as stereo | ✅ | All |
 | Instant load: playable once 4 s past the cue are decoded, the rest streams in behind playback (8.8-min MP3: 19 ms on a desktop) | ✅ desktop measured; iOS / emulator not yet timed | All |
-| Any sample rate (44.1, 48, 96 kHz…), converted to the output's rate on load | ✅ | All |
+| Any sample rate (44.1, 48, 96, 192 kHz…, 16–32 bit), converted to the output's rate on load; the same grid at every rate | ✅ | All |
 | BROWSE a music folder; LOAD; LOAD PREVIOUS TRACK; TAG LIST; track INFO; cover art | ✅ | All |
 | BROWSE remembers its place: per source (home folder, each stick), across launches, BACK lands on the folder it left; a new stick does not take over the USB key | ✅ | All |
 | SEARCH with the on-screen keyboard (CDJ-3000 skin; `/` on the desktop) | ✅ | All |
@@ -55,7 +55,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | Scrub audio: a paused jog (or a VINYL scratch) plays the audio under the playhead | ✅ | All |
 | Drag the big waveform to seek | ✅ | All |
 | Tempo fader ±6 / ±10 / ±16 / WIDE; MASTER TEMPO key lock | ✅ | All |
-| Key-lock engines: Rubber Band R3 (default), Bungee, WSOLA (low-power boards) | ✅ | All (WSOLA for Pi Zero) |
+| Key-lock engines: Rubber Band R3 (default), Bungee, WSOLA (low-power boards); a tone holds its pitch within 0.2 cents from −16 % to +16 % in all three | ✅ | All (WSOLA for Pi Zero) |
 | Vinyl brake, key lock off (varispeed), real-time sample-rate conversion | 📋 | — |
 
 ## Screens and controls
