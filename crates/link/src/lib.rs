@@ -1,5 +1,6 @@
 pub mod prodj;
 mod status_template;
+mod status_template_cdj3000;
 pub mod ableton;
 pub mod lanhid;
 // The CDJ session handshake presents as rekordbox: kept out of the iOS

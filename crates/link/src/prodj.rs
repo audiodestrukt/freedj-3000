@@ -222,6 +222,25 @@ pub struct StatusFields {
     pub sync_counter: u32,
 }
 
+/// The loop a CDJ-3000 reports as active in its status.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ActiveLoop {
+    pub start_ms: f64,
+    pub end_ms:   f64,
+    /// Length in beats (0 when not a whole number of beats).
+    pub beats:    u16,
+}
+
+/// Whether a device gets the CDJ-3000's long status from us: anything but
+/// an older Pioneer player (XDJ-*, CDJ-2000/900/850…), which gets the
+/// status of its own generation.  A CDJ-3000, a mixer, rekordbox, a tool
+/// (Beat Link reads the loop only from the long form) or another OpenDeck
+/// gets the long one.
+pub fn wants_cdj3000_status(name: &str) -> bool {
+    let n = name.trim().to_ascii_uppercase();
+    !(n.starts_with("XDJ") || (n.starts_with("CDJ") && !n.starts_with("CDJ-3000")))
+}
+
 pub struct ProDjLink {
     player_num:  u8,
     device_name: [u8; 20],
@@ -403,6 +422,33 @@ impl ProDjLink {
     /// Build a CDJ status packet (0x0a) from the XDJ-1000MK2 template,
     /// overwriting the documented dynamic fields.  Unicast to every known
     /// device's port 50002 about five times a second.
+    /// A CDJ-3000's status (1,152 bytes): the common fields as
+    /// [`build_status`](Self::build_status) writes them, the type byte and
+    /// length a CDJ-3000 sends, then its own region from a capture
+    /// (`status_template_cdj3000`), with the active loop filled in as one
+    /// reports it: flag and colour at 0x1b0, start and end in microseconds
+    /// at 0x1b8 / 0x1c0 (Beat Link reads them at 0x1b6 / 0x1be as
+    /// 65.536 ms units, the same field), the length in beats at 0x1c8, and
+    /// the flags the unit sets while a loop runs.
+    pub fn build_status_cdj3000(&self, f: &StatusFields, lp: Option<ActiveLoop>) -> Vec<u8> {
+        use crate::status_template_cdj3000::{STATUS_CDJ3000_EXT as X, STATUS_CDJ3000_LEN as N};
+        let mut p = self.build_status(f);
+        p[0x20] = 0x08;
+        p[0x22..0x24].copy_from_slice(&((N - 0x24) as u16).to_be_bytes());
+        p.extend_from_slice(&X);
+        if let Some(l) = lp {
+            p[0x1b0..0x1b4].copy_from_slice(&[0x01, 0xff, 0x8c, 0x00]);
+            p[0x1b8..0x1bc].copy_from_slice(&((l.start_ms * 1000.0).round() as u32).to_be_bytes());
+            p[0x1c0..0x1c4].copy_from_slice(&((l.end_ms * 1000.0).round() as u32).to_be_bytes());
+            p[0x1c4..0x1c8].copy_from_slice(&[1, 1, 1, 1]);
+            p[0x1c8..0x1ca].copy_from_slice(&l.beats.to_be_bytes());
+            for (i, v) in [(0x1cb, 1), (0x1cc, 1), (0x1cd, 2), (0x1ce, 1), (0x1cf, 2), (0x1d1, 1), (0x1d7, 1), (0x1db, 4), (0x1eb, 1), (0x1ef, 3)] {
+                p[i] = v;
+            }
+        }
+        p
+    }
+
     pub fn build_status(&self, f: &StatusFields) -> Vec<u8> {
         use crate::status_template::STATUS_TEMPLATE as T;
         let mut p = T.to_vec();
@@ -952,5 +998,50 @@ mod abs_position_tests {
         let p = ProDjLink::new(1).build_abs_position(0, 0, -150, None);
         assert_eq!(i32::from_be_bytes(p[0x2c..0x30].try_into().unwrap()), -150);
         assert_eq!(&p[0x38..0x3c], &[0xff; 4]);
+    }
+}
+
+#[cfg(test)]
+mod cdj3000_status_tests {
+    use super::*;
+
+    fn unhex(s: &str) -> Vec<u8> { (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect() }
+
+    fn fields() -> StatusFields {
+        StatusFields { track: None, serving: false, playing: true, track_loaded: true, master: false, sync: false,
+                       on_air: false, pitch: 1.0, bpm: Some(130.0), beat: Some(20), beat_in_bar: Some(1),
+                       handoff_to: None, counter: 7, sync_counter: 0 }
+    }
+
+    /// The long status keeps every common field of the short one, has the
+    /// length and type byte a CDJ-3000 sends, and without a loop its own
+    /// region is the capture's.
+    #[test]
+    fn long_status_extends_the_short_one() {
+        let l = ProDjLink::new(2);
+        let (short, long) = (l.build_status(&fields()), l.build_status_cdj3000(&fields(), None));
+        assert_eq!((short.len(), long.len()), (0x124, 1152));
+        assert_eq!((long[0x20], u16::from_be_bytes([long[0x22], long[0x23]])), (0x08, 0x045c));
+        assert_eq!(&long[0x24..0x124], &short[0x24..], "common fields unchanged");
+        assert_eq!(&long[0x124..], &crate::status_template_cdj3000::STATUS_CDJ3000_EXT[..]);
+        assert_eq!(&long[0x1b0..0x1f0], &[0u8; 0x40][..], "no loop");
+    }
+
+    /// With a loop, the loop block is what a CDJ-3000 sent with a one-beat
+    /// loop from 9256 to 9717 ms (captured), and Beat Link's reading of it
+    /// (0x1b6 / 0x1be × 65536 / 1000, beats at 0x1c8) comes out right.
+    #[test]
+    fn loop_block_matches_a_cdj3000() {
+        let p = ProDjLink::new(2).build_status_cdj3000(&fields(), Some(ActiveLoop { start_ms: 9256.0, end_ms: 9717.0, beats: 1 }));
+        assert_eq!(&p[0x1b0..0x1f0], &unhex("01ff8c0000000000008d3c4000000000009445080101010100010001010201020001000000000001000000040000000000000000000000000000000100000003")[..]);
+        let bl = |o: usize| u32::from_be_bytes(p[o..o + 4].try_into().unwrap()) as u64 * 65536 / 1000;
+        assert_eq!((bl(0x1b6), bl(0x1be), u16::from_be_bytes([p[0x1c8], p[0x1c9]])), (9240, 9699, 1));
+    }
+
+    /// Older players keep the status of their own generation.
+    #[test]
+    fn who_gets_the_long_status() {
+        for n in ["CDJ-3000", "CDJ-3000X", "DJM-V10", "rekordbox", "Beat Link", "OpenDeck", "freedj-3000"] { assert!(wants_cdj3000_status(n), "{n}"); }
+        for n in ["XDJ-1000MK2", "CDJ-2000NXS2", "CDJ-900", "XDJ-XZ"] { assert!(!wants_cdj3000_status(n), "{n}"); }
     }
 }

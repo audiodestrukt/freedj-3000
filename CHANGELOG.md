@@ -12,6 +12,11 @@ All notable changes to this project will be documented in this file.
   memory point. Before, every cue list was served empty.
 - Absolute Position packets go straight to each device on the network, as a
   CDJ-3000 sends them (captured), instead of being broadcast.
+- CDJ-3000 status: devices other than older players (XDJs, NXS2 and
+  earlier) now get the CDJ-3000's 1,152-byte status, with the active loop
+  (start, end, length in beats) where a CDJ-3000 reports it; Beat Link and
+  tools built on it read loops only from this form.  Older players keep
+  the status of their generation.
 - **CDJ-3000 Absolute Position packets.** While a track is loaded (playing
   or not) OpenDeck now sends, every 30 ms on UDP 50001, what a CDJ-3000
   sends: the playhead in ms, the track length, pitch and BPM. Lighting,

@@ -4087,6 +4087,9 @@ pub fn run(cfg: Config) -> Result<()> {
         grid:        Arc::clone(&link_grid),
         samples:     Arc::clone(&audio.samples),
         total_hint:  Arc::clone(&audio.total_hint),
+        loop_active: Arc::clone(&audio.loop_active),
+        loop_start:  Arc::clone(&audio.loop_start),
+        loop_end:    Arc::clone(&audio.loop_end),
     });
 
     // ── 5. Input bus: control surfaces (MIDI, I2C) forward controls into this

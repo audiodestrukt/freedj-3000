@@ -15,7 +15,7 @@
 //! audio thread is never touched.
 
 use opendeck_link::prodj::{
-    ProDjLink, Status, StatusFields, BECOME_MASTER, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS,
+    ActiveLoop, ProDjLink, Status, StatusFields, wants_cdj3000_status, BECOME_MASTER, PORT_ANNOUNCE, PORT_BEAT, PORT_STATUS,
     SYNC_OFF, SYNC_ON, PKT_MEDIA_QUERY, MediaInfo};
 use arc_swap::ArcSwap;
 use opendeck_types::{BeatGrid, EngineSnapshot};
@@ -320,6 +320,11 @@ pub struct SenderState {
     /// streams in: the Absolute Position packet's track length.
     pub samples:     Arc<ArcSwap<Vec<f32>>>,
     pub total_hint:  Arc<AtomicU64>,
+    /// The deck's loop, [start, end) in interleaved samples, for the
+    /// CDJ-3000 status.
+    pub loop_active: Arc<AtomicBool>,
+    pub loop_start:  Arc<AtomicU64>,
+    pub loop_end:    Arc<AtomicU64>,
 }
 
 // ── The other deck's beat phase ───────────────────────────────────────────────
@@ -764,6 +769,24 @@ fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
             }
         }
     })
+}
+
+/// The deck's loop as a CDJ-3000 status reports it, in ms, with its
+/// length in beats when that is a whole number on the grid.
+fn active_loop(st: &SenderState, grid: Option<&BeatGrid>) -> Option<ActiveLoop> {
+    if !st.loop_active.load(Ordering::Relaxed) { return None; }
+    let (a, b) = (st.loop_start.load(Ordering::Relaxed), st.loop_end.load(Ordering::Relaxed));
+    loop_fields(a, b, st.channels as u32, st.sample_rate, grid.map(|g| g.bpm))
+}
+
+fn loop_fields(start: u64, end: u64, ch: u32, sr: u32, bpm: Option<f64>) -> Option<ActiveLoop> {
+    if end <= start { return None; }
+    let ms = |s: u64| s as f64 / ch.max(1) as f64 / sr.max(1) as f64 * 1000.0;
+    let (start_ms, end_ms) = (ms(start), ms(end));
+    let beats = bpm.filter(|b| *b > 0.0).map(|b| (end_ms - start_ms) / (60_000.0 / b)).map_or(0, |n| {
+        if (n - n.round()).abs() < 0.02 && n.round() >= 1.0 { n.round() as u16 } else { 0 }
+    });
+    Some(ActiveLoop { start_ms, end_ms, beats })
 }
 
 /// Where a CDJ-3000 sends its Absolute Position packets: every device that
@@ -1506,13 +1529,19 @@ impl ProDjSender {
                             sync_counter: link.our_sync.load(Ordering::Relaxed),
                         };
                         counter = counter.wrapping_add(1);
+                        let active_loop = active_loop(&st, cur_grid.as_ref());
                         let pkt = me.build_status(&fields);
-                        let peers: Vec<Ipv4Addr> = link.peers.lock().map(|p| p.values().copied().collect()).unwrap_or_default();
+                        let long = me.build_status_cdj3000(&fields, active_loop);
+                        let peers: Vec<(u8, Ipv4Addr)> = link.peers.lock().map(|p| p.iter().map(|(k, v)| (*k, *v)).collect()).unwrap_or_default();
+                        let names = link.peer_names.lock().map(|n| n.clone()).unwrap_or_default();
                         if flags_changed {
                             log::info!("ProDJ tx: status master={} sync={} → {} peer(s)", fields.master, fields.sync, peers.len());
                         }
-                        for ip in peers {
-                            let _ = sock.send_to(&pkt, (ip, PORT_STATUS));
+                        // Each device the status of its generation: a CDJ-3000's
+                        // (with the loop) to all but older players.
+                        for (pl, ip) in peers {
+                            let name = names.get(&pl).map(String::as_str).unwrap_or("");
+                            let _ = sock.send_to(if wants_cdj3000_status(name) { &long } else { &pkt }, (ip, PORT_STATUS));
                         }
                         last_status = now;
                     }
@@ -1962,5 +1991,21 @@ mod position_target_tests {
         let peers = HashMap::from([(1u8, a), (2, me), (0x21, tool), (5, a)]);
         assert_eq!(position_targets(&peers, 2), vec![a, tool]);
         assert!(position_targets(&HashMap::from([(2u8, me)]), 2).is_empty(), "alone: nothing sent, as a CDJ");
+    }
+}
+
+#[cfg(test)]
+mod loop_field_tests {
+    use super::loop_fields;
+    use opendeck_link::prodj::ActiveLoop;
+
+    /// A deck loop in stereo samples at 48 kHz becomes ms, with its length
+    /// in beats when whole (4 beats at 120 BPM), else 0.
+    #[test]
+    fn deck_loop_to_status_loop() {
+        let s = |secs: f64| (secs * 48_000.0) as u64 * 2;
+        assert_eq!(loop_fields(s(1.0), s(3.0), 2, 48_000, Some(120.0)), Some(ActiveLoop { start_ms: 1000.0, end_ms: 3000.0, beats: 4 }));
+        assert_eq!(loop_fields(s(1.0), s(1.3), 2, 48_000, Some(120.0)).unwrap().beats, 0, "not whole beats");
+        assert_eq!(loop_fields(s(2.0), s(1.0), 2, 48_000, None), None, "no loop");
     }
 }
