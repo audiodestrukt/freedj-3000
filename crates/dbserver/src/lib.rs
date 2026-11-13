@@ -31,6 +31,8 @@ use std::time::Duration;
 
 /// TCP port that answers "which port is your database server on?".
 pub const PORT_QUERY: u16 = 12_523;
+/// The database port players listen on (what 12523 reports on a CDJ).
+pub const DB_PORT: u16 = 1051;
 const MAGIC: u32 = 0x8723_49ae;
 const TIMEOUT: Duration = Duration::from_secs(5);
 

@@ -164,7 +164,7 @@ pub struct AudioHandle {
     /// The track's expected length in samples while it streams in (from the
     /// file's header), so the needle search, remaining time and seek clamps
     /// see the whole track; 0 once complete.  See [`len`](Self::len).
-    total_hint:      Arc<AtomicU64>,
+    pub total_hint:  Arc<AtomicU64>,
     pub sample_rate: u32,
     pub channels:    u8,
     /// Tags of the track decoded at open (the startup track); the deck copies

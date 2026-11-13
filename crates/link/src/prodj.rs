@@ -58,6 +58,10 @@ impl MediaInfo {
     }
 }
 pub const PKT_BEAT:       u8 = 0x28;
+/// CDJ-3000 Absolute Position (port 50001, every 30 ms while a track is
+/// loaded, playing or not).  Layout per Deep Symmetry's protocol analysis
+/// (dysentery, "Absolute Position Packets").
+pub const PKT_ABS_POSITION: u8 = 0x0b;
 pub const PKT_STATUS:     u8 = 0x0A;
 /// Tempo-master handoff: request (to the current master, port 50001) and
 /// its yield response (back to the requester, port 50001).
@@ -373,6 +377,26 @@ impl ProDjLink {
         pkt[beat::BPM..beat::BPM + 2].copy_from_slice(&bpm_raw.to_be_bytes());
         pkt[beat::BEAT] = beat_in_bar.clamp(1, 4);
         pkt[beat::DEVICE2] = self.player_num;
+        pkt
+    }
+
+    /// Build an Absolute Position packet (0x0b, 0x3c bytes): the loaded
+    /// track's length in whole seconds, the playhead in ms, the pitch as
+    /// signed percent × 100 (+3.26 % = 326) and the effective BPM × 10
+    /// (`None` = unknown, sent as ffffffff).  What lighting, video and
+    /// timecode tools follow a CDJ-3000 by, between and instead of beats.
+    pub fn build_abs_position(&self, track_len_s: u32, playhead_ms: u32, pitch_x100: i32, bpm_x10: Option<u32>) -> Vec<u8> {
+        let mut pkt = vec![0u8; 0x3c];
+        pkt[..10].copy_from_slice(MAGIC);
+        pkt[0x0a] = PKT_ABS_POSITION;
+        pkt[0x0b..0x0b + 20].copy_from_slice(&self.device_name);
+        pkt[0x1f] = 0x02;
+        pkt[0x21] = self.player_num;
+        pkt[0x22..0x24].copy_from_slice(&((0x3c - 0x24) as u16).to_be_bytes());
+        pkt[0x24..0x28].copy_from_slice(&track_len_s.to_be_bytes());
+        pkt[0x28..0x2c].copy_from_slice(&playhead_ms.to_be_bytes());
+        pkt[0x2c..0x30].copy_from_slice(&pitch_x100.to_be_bytes());
+        pkt[0x38..0x3c].copy_from_slice(&bpm_x10.unwrap_or(0xffff_ffff).to_be_bytes());
         pkt
     }
 
@@ -906,5 +930,27 @@ mod tests {
         let r = src.build_media_response(Ipv4Addr::new(10, 0, 0, 2), 3, "OPENDECK", 226, 4, 32 << 30, 16 << 30);
         assert_eq!(ProDjLink::parse_media_response(&r), Some(MediaInfo { player: 3, slot: 3, name: "OPENDECK".into(), tracks: 226, playlists: 4 }));
         assert_eq!(ProDjLink::parse_media_response(&q), None);
+    }
+}
+
+#[cfg(test)]
+mod abs_position_tests {
+    use super::*;
+
+    /// Field by field against the documented layout.
+    #[test]
+    fn absolute_position_matches_the_cdj3000_layout() {
+        let p = ProDjLink::new(4).build_abs_position(313, 65_432, 326, Some(1202));
+        assert_eq!(p.len(), 0x3c);
+        assert_eq!(&p[..10], MAGIC);
+        assert_eq!((p[0x0a], p[0x1f], p[0x21]), (0x0b, 0x02, 4));
+        assert_eq!(u16::from_be_bytes([p[0x22], p[0x23]]), 0x18, "length of the rest");
+        let u = |o: usize| u32::from_be_bytes(p[o..o + 4].try_into().unwrap());
+        assert_eq!((u(0x24), u(0x28), u(0x2c), u(0x38)), (313, 65_432, 326, 1202));
+        assert!(p[0x30..0x38].iter().all(|&b| b == 0));
+        // Negative pitch, unknown BPM.
+        let p = ProDjLink::new(1).build_abs_position(0, 0, -150, None);
+        assert_eq!(i32::from_be_bytes(p[0x2c..0x30].try_into().unwrap()), -150);
+        assert_eq!(&p[0x38..0x3c], &[0xff; 4]);
     }
 }

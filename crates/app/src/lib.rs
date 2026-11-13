@@ -4008,7 +4008,10 @@ pub fn run(cfg: Config) -> Result<()> {
     // + NFS, like a CDJ with a stick in it).  OPENDECK_SERVE=0 disables; a port
     // we cannot bind (111 needs privilege on Linux) just logs and skips.
     if std::env::var("OPENDECK_SERVE").map(|v| v != "0").unwrap_or(true) {
-        let serve_root = browse_root.clone().or_else(|| track.as_ref().and_then(|t| t.parent().map(|p| p.to_path_buf())));
+        // A bare file name ("opendeck track.mp3") has an empty parent: that
+        // is the current folder, not a path to scan.
+        let serve_root = browse_root.clone().or_else(|| track.as_ref().and_then(|t| t.parent()
+            .map(|p| if p.as_os_str().is_empty() { PathBuf::from(".") } else { p.to_path_buf() })));
         if let Some(root) = serve_root {
             let l = Arc::clone(&link);
             match start_media_server(&root, Arc::new(move || l.player()), &link) {
@@ -4050,6 +4053,8 @@ pub fn run(cfg: Config) -> Result<()> {
         sample_rate: audio.sample_rate,
         channels:    audio.channels,
         grid:        Arc::clone(&link_grid),
+        samples:     Arc::clone(&audio.samples),
+        total_hint:  Arc::clone(&audio.total_hint),
     });
 
     // ── 5. Input bus: control surfaces (MIDI, I2C) forward controls into this

@@ -316,6 +316,10 @@ pub struct SenderState {
     /// Live beat grid — updated by the deck on every track load so the
     /// sender's sync/broadcast use the CURRENT track, not the startup one.
     pub grid:        Arc<ArcSwap<Option<BeatGrid>>>,
+    /// The loaded track (empty = none) and its expected length while it
+    /// streams in: the Absolute Position packet's track length.
+    pub samples:     Arc<ArcSwap<Vec<f32>>>,
+    pub total_hint:  Arc<AtomicU64>,
 }
 
 // ── The other deck's beat phase ───────────────────────────────────────────────
@@ -1121,6 +1125,7 @@ impl ProDjSender {
                 let mut last_media_query = Instant::now() - Duration::from_secs(5);
                 let mut last_status   = Instant::now() - Duration::from_secs(5);
                 let mut last_request  = Instant::now() - Duration::from_secs(5);
+                let mut last_abs      = Instant::now() - Duration::from_secs(5);
                 // When MASTER is pressed we may not have heard the current
                 // master's status yet (it arrives every ~200 ms, announces
                 // every 1.5 s).  Wait before concluding nobody is master.
@@ -1234,6 +1239,36 @@ impl ProDjSender {
                             last_beat = Some(beat);
                         }
                     } }
+
+                    // ── Absolute Position (CDJ-3000) ─────────────────────────
+                    // Every 30 ms while a track is loaded, playing or not, to
+                    // everyone on 50001: the heard playhead in ms, the track
+                    // length, pitch and effective BPM.  Lighting, video and
+                    // timecode tools follow a CDJ-3000 by these, not beats.
+                    if send_full && now.duration_since(last_abs) >= Duration::from_millis(30) {
+                        let decoded = st.samples.load().len() as u64;
+                        if decoded > 0 {
+                            last_abs = now;
+                            let ch = st.channels.max(1) as u64;
+                            let sr = st.sample_rate.max(1) as f64;
+                            let total = decoded.max(st.total_hint.load(Ordering::Relaxed)) / ch;
+                            // The heard position: the free-running beat
+                            // estimate while it runs (smooth between decoder
+                            // blocks), else the decoder cursor less what is
+                            // still queued.
+                            let frames = if playing && est_frames >= 0.0 { est_frames } else {
+                                let pos = st.position.load(Ordering::Relaxed);
+                                (pos.saturating_sub(st.in_flight.load(Ordering::Relaxed)) / ch) as f64
+                            };
+                            let pkt = me.build_abs_position(
+                                (total as f64 / sr) as u32,
+                                (frames.max(0.0) * 1000.0 / sr) as u32,
+                                ((fader - 1.0) * 10_000.0).round() as i32,
+                                cur_grid.as_ref().map(|g| (g.bpm * fader * 10.0).round() as u32),
+                            );
+                            let _ = sock.send_to(&pkt, (bcast, PORT_BEAT));
+                        }
+                    }
 
                     // ── Announce ─────────────────────────────────────────────
                     if now.duration_since(last_announce) >= Duration::from_millis(1500) {

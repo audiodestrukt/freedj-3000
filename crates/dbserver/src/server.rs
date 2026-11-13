@@ -553,8 +553,17 @@ impl Server {
 
     /// As `start`, but our player number is read per client, for a deck
     /// whose number is claimed (PLAYER No. AUTO) after the server is up.
+    /// `db_port` 0 = the port players use, 1051, else any free one.  Peers
+    /// should ask 12523 for it, and rekordbox and the players do; some tools
+    /// go straight to 1051, so we sit there whenever it is free.
     pub fn start_live(lib: SharedLibrary, device: DeviceNumber, db_port: u16) -> Result<Server> {
-        let db = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, db_port)).context("bind dbserver")?;
+        let bind = |p: u16| TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, p));
+        let db = if db_port == 0 {
+            bind(crate::DB_PORT).or_else(|e| {
+                log::info!("dbserver: {} is taken ({e}); using another port (12523 reports it)", crate::DB_PORT);
+                bind(0)
+            })
+        } else { bind(db_port) }.context("bind dbserver")?;
         let db_port = db.local_addr()?.port();
         let pq = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, crate::PORT_QUERY)).context("bind 12523")?;
         log::info!("dbserver: port query on 12523, database on {db_port}, {} tracks", lib.read().unwrap().tracks.len());

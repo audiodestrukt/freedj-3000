@@ -17,7 +17,7 @@ and the player that wants the track pulls from both:
 
 | channel | transport | used for | our crate |
 |---|---|---|---|
-| **dbserver** ("remote database") | TCP; port query on 12523, database port dynamic (players usually 1051) | browsing menus, metadata, the track's **file path**, beat grid, waveforms, cues, artwork | `crates/dbserver` (client + server) |
+| **dbserver** ("remote database") | TCP; port query on 12523, database port dynamic (players usually 1051; OpenDeck takes 1051 when free, since some tools skip the query) | browsing menus, metadata, the track's **file path**, beat grid, waveforms, cues, artwork | `crates/dbserver` (client + server) |
 | **NFSv2** | UDP; portmap 111 (players) or **50111** (rekordbox), then mountd + nfsd | the audio bytes | `crates/nfs` (client + server) |
 
 Discovery rides the Link packets we already speak: announces on UDP 50000

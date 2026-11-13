@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- **CDJ-3000 Absolute Position packets.** While a track is loaded (playing
+  or not) OpenDeck now sends, every 30 ms on UDP 50001, what a CDJ-3000
+  sends: the playhead in ms, the track length, pitch and BPM. Lighting,
+  video and timecode tools follow a CDJ-3000 by these; a tester's tool saw
+  no playback position from OpenDeck. Measured: one every 30.6 ms, the
+  playhead in step with playback.
 - **WAVEFORM COLOR in MENU** (BLUE, RGB, 3BAND), saved, and **3BAND by
   default**, as the CDJ-3000 shows it: lows blue, mids amber, highs white.
   The waveforms were blue unless you knew the `C` key, which did not stick
@@ -15,6 +21,16 @@ All notable changes to this project will be documented in this file.
   to the new shape, fitted to the screen, and the choice is saved; the full
   deck stays the default on the Mac and Windows. `--faceplate` /
   `--screen-only` still override it for one run.
+
+### Fixed
+- **Track title and artist for tools that go straight to TCP 1051.** Our
+  track database (dbserver) took a random port and reported it on 12523, as
+  the protocol allows; rekordbox and the players ask there, but some tools
+  connect to 1051, where every player has it, and got nothing. It now
+  listens on 1051 whenever the port is free.
+- **The shared music folder when started with a bare file name**
+  (`opendeck track.mp3`): its folder was taken as an empty path, so nothing
+  was served.
 
 ## [0.3.10] — 2026-11-12
 
