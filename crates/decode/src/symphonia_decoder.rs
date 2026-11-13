@@ -297,6 +297,51 @@ mod tests {
         b
     }
 
+    /// A stereo WAV at `sr` from frames of (L, R) in -1..1: `fmt` 1 = integer
+    /// PCM at 32 bits, 3 = 32-bit float.
+    fn wav32(sr: u32, fmt: u16, frames: &[(f64, f64)]) -> Vec<u8> {
+        let data_len = (frames.len() * 8) as u32;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF"); b.extend_from_slice(&(36 + data_len).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt "); b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&fmt.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&sr.to_le_bytes());
+        b.extend_from_slice(&(sr * 8).to_le_bytes());
+        b.extend_from_slice(&8u16.to_le_bytes()); b.extend_from_slice(&32u16.to_le_bytes());
+        b.extend_from_slice(b"data"); b.extend_from_slice(&data_len.to_le_bytes());
+        for &(l, r) in frames {
+            for v in [l, r] {
+                if fmt == 3 { b.extend_from_slice(&(v as f32).to_le_bytes()); }
+                else { b.extend_from_slice(&((v * 2_147_483_647.0).round() as i32).to_le_bytes()); }
+            }
+        }
+        b
+    }
+
+    /// 32-bit WAV, integer and float, at 96 kHz: the rate, the length and the
+    /// samples come through (studio bounces are often 32-bit float).
+    #[test]
+    fn thirty_two_bit_wav_integer_and_float() {
+        let frames: Vec<(f64, f64)> = (0..9_600)
+            .map(|i| { let v = 0.8 * (i as f64 * 0.01).sin(); (v, -v * 0.5) }).collect();
+        for fmt in [1u16, 3] {
+            let mut d = SymphoniaDecoder::open_bytes(wav32(96_000, fmt, &frames), Some("wav")).unwrap();
+            assert_eq!((d.sample_rate(), d.channels()), (96_000, 2), "format {fmt}");
+            let mut out = vec![0f32; 4096];
+            let mut got = Vec::new();
+            loop {
+                let n = d.decode(&mut out).unwrap();
+                if n == 0 { break; }
+                got.extend_from_slice(&out[..n * 2]);
+            }
+            assert_eq!(got.len(), frames.len() * 2, "format {fmt}");
+            for (f, &(l, r)) in got.chunks(2).zip(&frames) {
+                assert!((f[0] as f64 - l).abs() < 1e-6 && (f[1] as f64 - r).abs() < 1e-6, "format {fmt}");
+            }
+        }
+    }
+
     /// Packets larger than the caller's buffer must be delivered in full
     /// across calls, never truncated (this once lost ~11 % of every FLAC).
     #[test]
