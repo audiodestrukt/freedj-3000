@@ -297,8 +297,15 @@ full track.
 - VOLUME's blue fill could not be checked: the emulator's touch control
   cannot drag.
 
+**"S" in BROWSE** (built 2026-11-13). With STEMS on, the CDJ skin's lists
+and track tables mark a local track with prepared stems with a small "S"
+low on the left of its ♪. `stems::StemMarks` reads each stick's
+`index.json` once and caches the answer per file; a stick coming or going
+clears it. The unit also draws a stock "H" above the S; freedj doesn't
+draw it yet.
+
 **Not yet:**
-- The "S" badge in BROWSE, the grey EQ key, and the checkered key faces.
+- The grey EQ key and the checkered key faces.
 - Controller actions (`controllers.toml`) for the hardware deck.
 
 ## Open questions for Dan

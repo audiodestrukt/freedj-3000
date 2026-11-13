@@ -5,6 +5,8 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Stems: BROWSE marks tracks that have stems with a small "S" beside the ♪,
+  as OverCue does on the unit (CDJ-3000 screen, with MENU → STEMS on).
 - Stems: the enlarged waveform now shows the stems you're playing, at their
   levels, as OverCue's does. Muting the drums takes the kicks out of the
   picture, and every stem off leaves a thin grey line. The overview below

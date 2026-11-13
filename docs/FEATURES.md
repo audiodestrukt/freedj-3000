@@ -28,7 +28,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | rekordbox USB sticks: export.pdb categories (ARTIST, ALBUM, TRACK, KEY, PLAYLIST, HISTORY, FOLDER), beat grids, memory and hot cues, preview waveforms, covers | ✅ | All |
 | USB drives plugged into the device (iOS: "USB: ADD DRIVE…" picker, remembered; Android: "All files access") | ✅ | iOS, And, D, Pi |
 | Files-app music folder with a bundled demo track | ✅ | iOS (Android: Music folder) |
-| Stems prepared with OverCue Desktop: mute / solo / level per stem (MENU → STEMS, off by default); the enlarged waveform follows the stem mix | ✅ | All |
+| Stems prepared with OverCue Desktop: mute / solo / level per stem (MENU → STEMS, off by default); the enlarged waveform follows the stem mix; BROWSE marks stem tracks "S" | ✅ | All |
 | Sorting, TRACK FILTER, KEY SHIFT (CDJ-3000 screen) | 📋 | — |
 | OneLibrary sticks (rekordbox's new encrypted USB library, read by the CDJ-3000X); today OpenDeck reads the Device Library (`export.pdb`) that rekordbox 7.2.11+ writes alongside it | 📋 | — |
 

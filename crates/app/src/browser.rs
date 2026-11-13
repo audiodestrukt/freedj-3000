@@ -272,6 +272,8 @@ pub struct Browser {
     /// The source browsed last: the USB / BROWSE key goes back to it rather
     /// than to whatever stick was mounted most recently.
     last_root: Option<PathBuf>,
+    /// Which local tracks have OverCue stems (the "S" mark in lists).
+    stem_marks: std::cell::RefCell<crate::stems::StemMarks>,
 }
 
 /// Where the browser stood in a local source, by names (rows survive a
@@ -321,6 +323,7 @@ impl Browser {
             names: Vec::new(),
             positions: Default::default(),
             last_root: None,
+            stem_marks: Default::default(),
         };
         b.rebuild();
         b
@@ -333,6 +336,13 @@ impl Browser {
         if !self.played.contains(l) { self.played.push(l.clone()); }
     }
     pub fn was_played(&self, l: &Load) -> bool { self.played.contains(l) }
+    /// A local track with OverCue stems prepared (lists mark it "S").
+    pub fn has_stems(&self, l: &Load) -> bool {
+        match l {
+            Load::Local { path, .. } => self.stem_marks.borrow_mut().has_stems(path),
+            _ => false,
+        }
+    }
     pub fn selected_entry(&self) -> Option<&Entry> { self.entries.get(self.selected) }
 
     pub fn title(&self) -> String {
@@ -1076,6 +1086,7 @@ impl Browser {
             log::info!("media inserted: {}{}", new.path.display(), if new.rekordbox { " (rekordbox)" } else { "" });
         }
         self.media = now;
+        self.stem_marks.get_mut().clear();
         if matches!(self.stack.last(), Some(Loc::Fs(_))) { self.rebuild(); }
         true
     }

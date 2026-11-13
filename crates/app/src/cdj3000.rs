@@ -1171,8 +1171,15 @@ const PLAYED: Color32 = Color32::from_rgb(0, 255, 0);
 #[derive(Clone, Copy, PartialEq)]
 enum RowIcon { Folder, Track, Person, Disc, Key, List, History, None }
 
+/// A track row's ♪, with OverCue's small "S" low on its left when the track
+/// has prepared stems (as the unit marks them with OverCue installed).
+fn track_icon(ui: &Ui, c: Pos2, stems: bool, u: f32) {
+    label(ui, c, Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
+    if stems { label(ui, Pos2::new(c.x - 13.0 * u, c.y + 4.0 * u), Align2::CENTER_CENTER, "S", 15.0, u, TEXT); }
+}
+
 /// One row of a list: icon, text, and an optional right-hand value.
-struct Row<'a> { icon: RowIcon, text: &'a str, value: Option<String>, tagged: bool, played: bool }
+struct Row<'a> { icon: RowIcon, text: &'a str, value: Option<String>, tagged: bool, played: bool, stems: bool }
 
 /// The status strip every list screen keeps at the bottom: PLAYER, time,
 /// the overview (the shader draws it into `lay.strip_overview`), MT, range,
@@ -1311,7 +1318,7 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
         let cy = rr.center().y;
         match row.icon {
             RowIcon::Folder => folder(ui, Pos2::new(rr.min.x + 22.0 * u, cy), u, TEXT),
-            RowIcon::Track => { label(ui, Pos2::new(rr.min.x + 22.0 * u, cy), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT); }
+            RowIcon::Track => track_icon(ui, Pos2::new(rr.min.x + 22.0 * u, cy), row.stems, u),
             RowIcon::Person => icon(ui, Icon::Person, Pos2::new(rr.min.x + 22.0 * u, cy), u),
             RowIcon::Disc => icon(ui, Icon::Disc, Pos2::new(rr.min.x + 22.0 * u, cy), u),
             RowIcon::Key => boxed(ui, "b#", Pos2::new(rr.min.x + 22.0 * u, cy), u),
@@ -1561,6 +1568,7 @@ fn usb_icon(ui: &Ui, c: Pos2, u: f32) {
 /// BROWSE: the source's lists, two panes. The right pane shows what LOAD on
 /// the highlighted row would act on: a track's details and a LOAD key.
 fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &TagList, u: f32, out: &mut Vec<Event>) {
+    let stems_on = snap.stems.state != StemsState::Off;   // OverCue's "S" mark only with MENU → STEMS on
     use crate::browser::RbField;
     if b.in_search() { return draw_search(ui, snap, lay, b, tags, u, out); }
     let sc = lay.screen;
@@ -1579,6 +1587,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         icon: if e.is_dir { dir_icon } else { RowIcon::Track }, text: &e.name, value: None,
         tagged: e.load().map_or(false, |l| tags.contains(l)),
         played: e.load().map_or(false, |l| b.was_played(l)),
+        stems: stems_on && e.load().is_some_and(|l| b.has_stems(l)),
     }).collect();
     // The unit titles a category's name list BROWSE, a track list by its name.
     let title = if names.is_some() || b.on_rb_history() { "BROWSE".to_string() } else { b.title() };
@@ -1661,14 +1670,14 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
             // A rekordbox name: an artist's albums, else its tracks.
             let (head, items) = b.rb_preview().unwrap();
             let icon = if head == "ALBUM" { RowIcon::Disc } else { RowIcon::Track };
-            let rows: Vec<Row> = items.iter().map(|n| Row { icon, text: n, value: None, tagged: false, played: false }).collect();
+            let rows: Vec<Row> = items.iter().map(|n| Row { icon, text: n, value: None, tagged: false, played: false, stems: false }).collect();
             draw_list(ui, right, head, &rows, usize::MAX, "", u, None);
         }
         _ => {
             // A folder: what is in it, as the next level would list it.
             let peek = b.preview().unwrap_or_default();
             let rows: Vec<Row> = peek.iter().map(|(d, n)| Row {
-                icon: if *d { RowIcon::Folder } else { RowIcon::Track }, text: n, value: None, tagged: false, played: false,
+                icon: if *d { RowIcon::Folder } else { RowIcon::Track }, text: n, value: None, tagged: false, played: false, stems: false,
             }).collect();
             draw_list(ui, right, "FOLDER", &rows, usize::MAX, "", u, None);
         }
@@ -1830,7 +1839,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
         if tap(ui, title, &format!("cdj-trk-{i}")).0 {
             out.push(Event::Deck(if lit { ControlEvent::Load } else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - sel as i32 } }));
         }
-        label(ui, Pos2::new(sc.min.x + (tr + 23.0) * u, cy), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
+        track_icon(ui, Pos2::new(sc.min.x + (tr + 23.0) * u, cy), r.stems, u);
         p.with_clip_rect(title.shrink2(Vec2::new(0.0, 0.0)).intersect(Rect::from_min_max(at(tr, y), at(1075.0, y + ROW_H))))
             .text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), if r.played { PLAYED } else { TEXT });
         if r.tagged { p.circle_filled(Pos2::new(sc.min.x + 1068.0 * u, cy), 5.0 * u, BARS_ORANGE); }
@@ -1862,6 +1871,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
 /// as the track table (six rows, no category column) and the keyboard below,
 /// with a 123 page for digits and symbols.
 fn draw_search(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &TagList, u: f32, out: &mut Vec<Event>) {
+    let stems_on = snap.stems.state != StemsState::Off;   // OverCue's "S" mark only with MENU → STEMS on
     use crate::input::SearchEdit as S;
     let sc = lay.screen;
     let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
@@ -1887,6 +1897,7 @@ fn draw_search(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         icon: RowIcon::Track, text: &e.name, value: None,
         tagged: e.load().map_or(false, |l| tags.contains(l)),
         played: e.load().map_or(false, |l| b.was_played(l)),
+        stems: stems_on && e.load().is_some_and(|l| b.has_stems(l)),
     }).collect();
     draw_track_table(ui, lay, b, &rows, 0.0, 439.0, 3, u, out);
 
@@ -1938,7 +1949,7 @@ fn draw_search(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
 fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: f32, out: &mut Vec<Event>) {
     let sc = lay.screen;
     let rows: Vec<Row> = tags.entries().iter().map(|e| Row {
-        icon: RowIcon::Track, text: &e.name, value: e.artist.clone(), tagged: false, played: false,
+        icon: RowIcon::Track, text: &e.name, value: e.artist.clone(), tagged: false, played: false, stems: false,
     }).collect();
     draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
@@ -1952,7 +1963,7 @@ fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: 
 fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings, cursor: usize, u: f32, out: &mut Vec<Event>) {
     let sc = lay.screen;
     let rows: Vec<Row> = MENU.iter().map(|(s, name)| Row {
-        icon: RowIcon::None, text: name, value: Some(settings.value(*s)), tagged: false, played: false,
+        icon: RowIcon::None, text: name, value: Some(settings.value(*s)), tagged: false, played: false, stems: false,
     }).collect();
     draw_list_header(ui, snap, lay, "UTILITY", false, u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));

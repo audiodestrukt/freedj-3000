@@ -22,6 +22,7 @@
 use anyhow::{bail, ensure, Context, Result};
 use arc_swap::ArcSwapOption;
 use opendeck_stems::{self as oc, Role};
+use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -143,6 +144,32 @@ pub fn find_stick(file: &Path) -> Option<(PathBuf, String)> {
         }
     }
     None
+}
+
+/// Which local files have prepared stems, for the "S" mark in BROWSE lists
+/// (as OverCue marks them on the unit).  Each stick's `CDJMODS/index.json`
+/// is read once; each file is looked up once.
+#[derive(Default)]
+pub struct StemMarks {
+    sticks: HashMap<PathBuf, Option<oc::Index>>,
+    files:  HashMap<PathBuf, bool>,
+}
+
+impl StemMarks {
+    pub fn has_stems(&mut self, file: &Path) -> bool {
+        if let Some(v) = self.files.get(file) { return *v; }
+        let v = find_stick(file).is_some_and(|(root, rel)| {
+            let index = self.sticks.entry(root.clone()).or_insert_with(|| {
+                oc::Index::read(&mut oc::DirMedia::new(&root)).ok().flatten()
+            });
+            index.as_ref().is_some_and(|i| i.by_path(&rel).ok().flatten().is_some())
+        });
+        self.files.insert(file.to_path_buf(), v);
+        v
+    }
+
+    /// A stick came or went: read the indexes again.
+    pub fn clear(&mut self) { self.sticks.clear(); self.files.clear(); }
 }
 
 /// Build the bank for a local file just loaded as `track` (interleaved,
@@ -427,11 +454,20 @@ mod tests {
             assert!((s as f32 / 32768.0 - track[i]).abs() < 4.0 / 32768.0, "sample {i}");
         }
 
+        // BROWSE marks the prepared track "S"; a track beside it without
+        // stems, and a file on no stick, are not marked.
+        let plain = d.path().join("Contents/Artist/Other.mp3");
+        std::fs::write(&plain, b"x").unwrap();
+        let elsewhere = tempfile::NamedTempFile::new().unwrap();
+        let mut marks = StemMarks::default();
+        assert!(marks.has_stems(&file));
+        assert!(!marks.has_stems(&plain));
+        assert!(!marks.has_stems(elsewhere.path()));
+        assert!(marks.has_stems(&file), "cached answer");
         // A changed original (re-exported) is refused.
         std::fs::write(&file, b"another version").unwrap();
         assert!(load_local(&file, &track, 48_000, 2).is_err());
         // A file not on a prepared stick has no stems.
-        let elsewhere = tempfile::NamedTempFile::new().unwrap();
         assert!(load_local(elsewhere.path(), &track, 48_000, 2).unwrap().is_none());
     }
 
