@@ -13,6 +13,9 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 
 ## Tracks and library
 
+Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
+[AUDIO-FORMATS.md](AUDIO-FORMATS.md).
+
 | Feature | Status | Where |
 |---|---|---|
 | Formats: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF, OGG Vorbis; mono and multichannel play as stereo | ✅ | All |

@@ -59,7 +59,9 @@ protocol, media sharing and both screens work; the physical control surface
 and the sampler features are the roadmap. What is left on the CDJ-3000 side
 is listed in [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md).
 The full, current feature list by area and platform is
-[docs/FEATURES.md](docs/FEATURES.md).
+[docs/FEATURES.md](docs/FEATURES.md); the audio formats, bit depths and
+sample rates it plays, and how pitch and key lock measure, are in
+[docs/AUDIO-FORMATS.md](docs/AUDIO-FORMATS.md).
 
 | Feature | Status |
 |---|---|
