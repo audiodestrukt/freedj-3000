@@ -39,6 +39,12 @@ All notable changes to this project will be documented in this file.
   `--screen-only` still override it for one run.
 
 ### Fixed
+- Beat packets reported a pitched OpenDeck's tempo twice: the BPM field
+  carried the heard tempo instead of the track's, and receivers multiply it
+  by the pitch.  Synced to a 126 BPM CDJ-3000 at −3 %, OpenDeck advertised
+  122.12 BPM instead of 126.  Decks synced to a pitched OpenDeck master, and
+  lighting tools, were told the wrong tempo.  It now sends the track's BPM
+  and the pitch, as a CDJ-3000 does.
 - CDJ-3000 screen: the 16 and 32 under the waveform stay still, 16 and 32
   beats ahead of the playhead, as on the unit; they used to ride on a beat
   and jump back one beat at every beat.

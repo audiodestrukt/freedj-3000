@@ -282,5 +282,25 @@ Captured 2026-11-12 (memory cue, hot cues A and B, loop hot cue C):
 - Absolute Position (0x0b, 60 bytes) goes unicast to each device that has
   announced, ~33 a second, never broadcast; a CDJ alone on the network
   sends only announces and beats.
+- Beat packet BPM (0x5a) is the track's tempo; pitch (0x54) beside it.
+  The heard tempo is their product.
+
+### Sync phase measured (wired, emulated CDJ-3000 master)
+
+2026-11-12, OpenDeck as player 2 synced to an emulated CDJ-3000 on a private
+bridge, both decks' beat packets captured at the CDJ's NIC (QEMU
+filter-dump), each follower beat compared with a line fitted through the
+master's beats:
+
+| Run | Master | OpenDeck vs master: mean / sd / max |
+|---|---|---|
+| 2 min, tempo steps 126 → 120.8 → 126 | 126 BPM, 0 % | +1.3 / 1.6 / 5.8 ms (steps: ≤15 ms, back within 2 beats) |
+| 90 s | 126 BPM, −2.05 % | +1.2 / 2.3 / 7.0 ms |
+
+The emulated CDJ's own beats jitter by 5 ms (sd) around its line, and its
+Absolute Position packets by as much, so in the emulator they are no steadier
+per packet than beats.  On a wire, sync from beat packets alone is already
+well under the ~10 ms where two kicks start to flam; using Absolute Position
+for phase is not needed there.  Wi-Fi is unmeasured.
 - Client: BPM / KEY / SEARCH categories, colour labels, art in the detail pane
   (#32's remaining scope).

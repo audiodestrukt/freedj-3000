@@ -382,8 +382,11 @@ impl ProDjLink {
 
     /// Build a beat packet (0x28) for the beat that is happening now.
     ///
-    /// `snap.bpm` is the effective tempo; `beat_in_bar` is 1–4.  The six
-    /// countdown fields are derived from the beat period.
+    /// `snap.bpm` is the effective tempo and `snap.speed` the pitch;
+    /// `beat_in_bar` is 1–4.  The six countdown fields are derived from the
+    /// effective beat period.  The BPM field is the track's own tempo, the
+    /// pitch beside it: receivers (CDJs, beat-link, our own listener)
+    /// multiply the two, as a CDJ-3000 sends them.
     pub fn build_beat(&self, snap: &EngineSnapshot, beat_in_bar: u8) -> Vec<u8> {
         let mut pkt = vec![0u8; beat::SIZE];
         pkt[..10].copy_from_slice(MAGIC);
@@ -406,7 +409,8 @@ impl ProDjLink {
 
         let pitch = (snap.speed.max(0.0) * PITCH_UNITY as f32) as u32;
         pkt[beat::PITCH..beat::PITCH + 4].copy_from_slice(&pitch.to_be_bytes());
-        let bpm_raw = (snap.bpm * 100.0).round() as u16;
+        let track_bpm = snap.bpm / if snap.speed > 0.0 { snap.speed } else { 1.0 };
+        let bpm_raw = (track_bpm * 100.0).round() as u16;
         pkt[beat::BPM..beat::BPM + 2].copy_from_slice(&bpm_raw.to_be_bytes());
         pkt[beat::BEAT] = beat_in_bar.clamp(1, 4);
         pkt[beat::DEVICE2] = self.player_num;
@@ -752,7 +756,7 @@ impl ProDjLink {
                     position: 0,
                     ghost_position: 0,
                     speed: b.pitch,
-                    bpm: b.bpm,
+                    bpm: b.bpm * b.pitch,
                     beat_phase: 0.0,
                     bar_phase: (b.beat_in_bar - 1) as f32 / 4.0,
                     is_playing: true,
@@ -922,10 +926,32 @@ mod tests {
         assert_eq!(pkt.len(), 0x60);
         let b = ProDjLink::parse_beat(&pkt).unwrap();
         assert_eq!(b.player, 3);
-        assert_eq!(b.bpm, 130.0);
         assert_eq!(b.beat_in_bar, 3);
         assert!((b.pitch - 1.02).abs() < 1e-4);
-        assert_eq!(b.next_beat_ms, 462);   // 60_000 / 130
+        assert_eq!(b.next_beat_ms, 462);   // 60_000 / 130, the heard beat
+        // The BPM field is the track's tempo; × pitch gives back the heard one.
+        assert!((b.bpm - 127.45).abs() < 0.006, "{}", b.bpm);
+        assert!((b.bpm * b.pitch - 130.0).abs() < 0.02);
+        let (_, s) = ProDjLink::parse_packet(&pkt).unwrap();
+        assert!((s.bpm - 130.0).abs() < 0.02);
+    }
+
+    /// A pitched deck must not report its pitch twice.  A CDJ-3000 at
+    /// −4.10 % on a 126 BPM track sends 126.00 and the pitch (captured
+    /// 2026-11-12); OpenDeck sent 120.83 and the pitch, so a deck synced to
+    /// it read 115.88.
+    #[test]
+    fn beat_bpm_field_is_the_track_tempo_like_a_cdj() {
+        let link = ProDjLink::new(2);
+        let speed = 1.0 - 0.0410;
+        let snap = EngineSnapshot {
+            position: 0, ghost_position: 0, speed, bpm: 126.0 * speed,
+            beat_phase: 0.0, bar_phase: 0.0, is_playing: true,
+            slip_active: false, key_lock: true, deck_id: 2, timestamp_ns: 0,
+        };
+        let b = ProDjLink::parse_beat(&link.build_beat(&snap, 1)).unwrap();
+        assert_eq!(b.bpm, 126.0);
+        assert!((b.bpm * b.pitch - 120.83).abs() < 0.01);
     }
 
     #[test]
