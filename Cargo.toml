@@ -55,7 +55,7 @@ hidapi      = "2"
 rtrb        = "0.3"
 
 # Audio decoding — pure Rust, no system lib dependency
-symphonia   = { version = "0.5", features = [
+symphonia   = { version = "0.6.1", features = [
     "mp3", "aac", "alac", "isomp4", "flac", "wav", "aiff", "ogg", "vorbis"
 ] }
 
@@ -116,3 +116,6 @@ opt-level   = 1   # faster builds, still reasonable audio perf for dev
 # Vendored rekordcrate (MPL-2.0) with pdb/anlz struct fields made pub so we can
 # read track metadata programmatically. See third_party/rekordcrate.
 rekordcrate = { path = "third_party/rekordcrate" }
+# Symphonia's FLAC crate with upstream PR #587 (32-bit FLAC stereo decoded
+# exactly). See third_party/symphonia-bundle-flac/VENDOR.md.
+symphonia-bundle-flac = { path = "third_party/symphonia-bundle-flac" }

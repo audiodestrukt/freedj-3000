@@ -441,7 +441,7 @@ The project is a Cargo workspace. Each crate has a single responsibility.
 ```
 crates/
   types/        — Core traits: Decoder, BeatAnalyzer, TimecodeDecoder
-  decode/       — Audio decoding via Symphonia (MP3, FLAC, AAC, OGG, WAV, AIFF)
+  decode/       — Audio decoding via Symphonia 0.6 (MP3, FLAC, AAC, ALAC, OGG, WAV, AIFF; FLAC crate vendored for 32-bit, third_party/symphonia-bundle-flac)
   analysis/     — Waveform FFT, beat grid computation
   minibpm-sys/  — Bindings to MiniBPM for tempo estimation
   engine/       — Real-time audio transport

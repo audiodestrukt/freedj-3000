@@ -38,7 +38,23 @@ All notable changes to this project will be documented in this file.
   deck stays the default on the Mac and Windows. `--faceplate` /
   `--screen-only` still override it for one run.
 
+### Changed
+- Audio decoding moved to Symphonia 0.6.1.  Checked against 0.5 on 23 files
+  (MP3 CBR / VBR / 44.1 kHz and two real tracks, AAC, ALAC, FLAC, WAV, AIFF
+  at 16 / 24 / 32-bit and float, Vorbis, 5.1): every format decodes to the
+  same samples, at the same length and in the same place; AAC and Vorbis
+  differ only by float rounding (−134 dB).  MP3 and Vorbis are still clipped
+  at full scale and keep the MP3 encoder delay, as before; tags read as before.
+
 ### Fixed
+- 32-bit FLAC (FLAC 1.4 and later) loads and plays.  Symphonia 0.5 refused
+  it and 0.6.1 decodes its stereo wrongly; the FLAC crate is vendored with
+  the open upstream fix (Symphonia PR #587), and decodes bit for bit as the
+  reference `flac` does.
+- AIFF tags: title, artist and the rest no longer end in a stray NUL, and the
+  key, BPM and cover art are read; an AIFF with an ID3 chunk no longer gains
+  two frames of noise at the end.  An OGG Vorbis file with tags no longer
+  fails to open.
 - 96 kHz (and 88.2 / 176.4 / 192 kHz) files got a beat grid about 4 ms
   early when analysed at their own rate, as the media server does for
   tracks it serves to other decks: the beat finder works in fixed

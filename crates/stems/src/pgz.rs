@@ -181,27 +181,27 @@ fn flac_page(data: &[u8], rate: u32, want: usize) -> Result<Vec<u8>> {
             && info & ((1 << 36) - 1) == want as u64 / 4,
             "FLAC must be {rate} Hz, stereo, 16-bit with the page's exact frame count");
 
-    use symphonia::core::audio::SampleBuffer;
-    use symphonia::core::codecs::{Decoder, DecoderOptions};
-    use symphonia::core::formats::{FormatOptions, FormatReader};
+    use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+    use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
     use symphonia::core::io::{MediaSourceStream, MediaSourceStreamOptions};
     let mss = MediaSourceStream::new(Box::new(std::io::Cursor::new(data.to_vec())), MediaSourceStreamOptions::default());
-    let mut reader = symphonia::default::formats::FlacReader::try_new(mss, &FormatOptions::default()).context("FLAC page")?;
-    let params = reader.default_track().ok_or_else(|| anyhow!("FLAC page has no track"))?.codec_params.clone();
-    let mut dec = symphonia::default::codecs::FlacDecoder::try_new(&params, &DecoderOptions { verify: true })?;
+    let mut reader = symphonia::default::formats::FlacReader::try_new(mss, FormatOptions::default()).context("FLAC page")?;
+    let params = reader.default_track(TrackType::Audio)
+        .and_then(|t| t.codec_params.as_ref()).and_then(|p| p.audio()).cloned()
+        .ok_or_else(|| anyhow!("FLAC page has no track"))?;
+    let mut dec = symphonia::default::codecs::FlacDecoder::try_new(&params, &AudioDecoderOptions::default().verify(true))?;
     let mut out: Vec<u8> = Vec::with_capacity(want);
-    let mut buf: Option<SampleBuffer<i16>> = None;
+    let mut buf: Vec<i16> = Vec::new();
     loop {
         let packet = match reader.next_packet() {
-            Ok(p) => p,
+            Ok(Some(p)) => p,
+            Ok(None) => break,
             Err(symphonia::core::errors::Error::IoError(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
             Err(e) => return Err(e).context("FLAC page"),
         };
         let decoded = dec.decode(&packet).context("FLAC frame")?;
-        let b = buf.get_or_insert_with(|| SampleBuffer::new(decoded.capacity() as u64, *decoded.spec()));
-        if b.capacity() < decoded.capacity() * 2 { *b = SampleBuffer::new(decoded.capacity() as u64, *decoded.spec()); }
-        b.copy_interleaved_ref(decoded);
-        for s in b.samples() { out.extend_from_slice(&s.to_le_bytes()); }
+        decoded.copy_to_vec_interleaved(&mut buf);
+        for s in &buf { out.extend_from_slice(&s.to_le_bytes()); }
         ensure!(out.len() <= want, "FLAC page decodes past its length");
     }
     ensure!(out.len() == want, "FLAC page decoded {} bytes, expected {want}", out.len());

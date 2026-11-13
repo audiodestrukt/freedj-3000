@@ -18,8 +18,7 @@ Raspberry Pi (5, and Zero W via the SDL backend) · **iOS** iPhone and iPad
 | Formats: MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF, OGG Vorbis; mono and multichannel play as stereo | ✅ | All |
 | Instant load: playable once 4 s past the cue are decoded, the rest streams in behind playback (8.8-min MP3: 19 ms on a desktop) | ✅ desktop measured; iOS / emulator not yet timed | All |
 | Any sample rate (44.1, 48, 96, 192 kHz…), converted to the output's rate on load; the same grid at every rate | ✅ | All |
-| Bit depth: WAV / AIFF 16, 24, 32-bit integer and 32 / 64-bit float; FLAC and ALAC 16 and 24-bit | ✅ | All |
-| 32-bit FLAC (FLAC 1.4+): the decoder does not read it yet; the track does not load | 📋 | — |
+| Bit depth: WAV / AIFF 16, 24, 32-bit integer and 32 / 64-bit float; FLAC 16, 24 and 32-bit (FLAC 1.4+, bit-exact against `flac`); ALAC 16 and 24-bit (32-bit untested) | ✅ | All |
 | BROWSE a music folder; LOAD; LOAD PREVIOUS TRACK; TAG LIST; track INFO; cover art | ✅ | All |
 | BROWSE remembers its place: per source (home folder, each stick), across launches, BACK lands on the folder it left; a new stick does not take over the USB key | ✅ | All |
 | SEARCH with the on-screen keyboard (CDJ-3000 skin; `/` on the desktop) | ✅ | All |
