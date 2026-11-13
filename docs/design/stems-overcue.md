@@ -247,7 +247,7 @@ default, so the XDJ and CDJ skins stay what the stock units are.
   the TOGGLE / VOLUME selector, then DRUMS, VOCAL and HARMONICS, two slots
   wide each.
   - TOGGLE: a tap mutes or unmutes a stem (dark = muted).
-  - VOLUME: each stem is a horizontal fader with a blue fill and a %.
+  - VOLUME: each stem is a horizontal fader with a blue fill.
   - The selector goes back to TOGGLE only when every stem is fully on or
     off, as OverCue's does.
 - `OPENDECK_CDJ_PANEL=stems` opens the panel at startup.
@@ -304,8 +304,18 @@ low on the left of its ♪. `stems::StemMarks` reads each stick's
 clears it. The unit also draws a stock "H" above the S; freedj doesn't
 draw it yet.
 
+**Panel faces** (built 2026-11-13). The panel takes OverCue's own key
+spacing (`stem_keys`, measured on the unit: FULL MIX 18–97, the selector
+116–238 split at 423–424, the stems 257–502 / 517–762 / 777–1022, EQ
+1064–1207, rows 383–466). Keys use the unit's 4-px checker from each key's
+corner, dark square first: blue (0,100,165)/(0,125,225), grey
+(35,35,35)/(50,50,50). The faces match the unit pixel for pixel. VOLUME
+fills the blue from the left to the level, with no percentage (manual
+p. 12). EQ is grey and inert. The unit sets its labels in bold; freedj has
+no bold face yet.
+
 **Not yet:**
-- The grey EQ key and the checkered key faces.
+- Bold panel labels, the stock "H" mark in lists.
 - Controller actions (`controllers.toml`) for the hardware deck.
 
 ## Open questions for Dan

@@ -865,68 +865,117 @@ fn tap_pos(ui: &Ui, r: Rect, name: &str) -> Option<Pos2> {
     resp.clicked().then(|| resp.interact_pointer_pos()).flatten()
 }
 
+/// The STEMS panel's keys, measured on OverCue 0.14.6 (unit grid): FULL
+/// MIX, the TOGGLE / VOLUME halves, DRUMS / VOCAL / HARMONICS and EQ.  The
+/// panel has its own spacing, not the BEAT LOOP slots.
+struct StemKeys { full: Rect, toggle: Rect, volume: Rect, stems: [Rect; 3], eq: Rect }
+
+fn stem_keys(lay: &Layout) -> StemKeys {
+    let s = lay.screen.height() / ASPECT.y;
+    let (x, y) = (lay.screen.min.x, lay.panel[0].min.y - 383.0 * s);
+    let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(Pos2::new(x + x0 * s, y + y0 * s), Pos2::new(x + x1 * s, y + y1 * s));
+    StemKeys {
+        full: r(18.0, 383.0, 98.0, 467.0),
+        toggle: r(116.0, 383.0, 239.0, 423.0),
+        volume: r(116.0, 425.0, 239.0, 465.0),
+        stems: [r(257.0, 383.0, 503.0, 467.0), r(517.0, 383.0, 763.0, 467.0), r(777.0, 383.0, 1023.0, 467.0)],
+        eq: r(1064.0, 383.0, 1208.0, 467.0),
+    }
+}
+
+/// The unit's checkered key face: 4-px squares from the key's top-left
+/// corner, dark first.  (dark, light) per state, measured on the unit.
+const CHECK_LIT: (Color32, Color32) = (Color32::from_rgb(0, 100, 165), Color32::from_rgb(0, 125, 225));
+const CHECK_OFF: (Color32, Color32) = (Color32::from_rgb(35, 35, 35), Color32::from_rgb(50, 50, 50));
+const EQ_TEXT: Color32 = Color32::from_rgb(125, 137, 145);
+
+/// Fill `area` (inside the key at `key`) with the checker counted from the
+/// key's corner, so a partial fill lines up with the rest of the key.  Too
+/// small to show 4-px squares, it is the flat average.
+fn checker(ui: &Ui, key: Rect, area: Rect, (dark, light): (Color32, Color32), u: f32) {
+    let p = ui.painter();
+    let area = area.intersect(key);
+    if area.width() <= 0.0 || area.height() <= 0.0 { return; }
+    let sq = 4.0 * u;
+    if sq < 2.0 {
+        let avg = |a: u8, b: u8| ((a as u16 + b as u16) / 2) as u8;
+        p.rect_filled(area, 0.0, Color32::from_rgb(avg(dark.r(), light.r()), avg(dark.g(), light.g()), avg(dark.b(), light.b())));
+        return;
+    }
+    p.rect_filled(area, 0.0, dark);
+    let mut mesh = egui::Mesh::default();
+    let (i0, j0) = (((area.min.x - key.min.x) / sq).floor() as i32, ((area.min.y - key.min.y) / sq).floor() as i32);
+    let (i1, j1) = (((area.max.x - key.min.x) / sq).ceil() as i32, ((area.max.y - key.min.y) / sq).ceil() as i32);
+    for j in j0..j1 {
+        for i in i0..i1 {
+            if (i + j) % 2 == 1 {
+                let q = Rect::from_min_size(key.min + Vec2::new(i as f32 * sq, j as f32 * sq), Vec2::splat(sq)).intersect(area);
+                if q.width() > 0.0 && q.height() > 0.0 { mesh.add_colored_rect(q, light); }
+            }
+        }
+    }
+    p.add(Shape::mesh(mesh));
+}
+
 fn stems_volume_id() -> Id { Id::new("cdj3k-stems-volume") }
 
-/// STEMS: FULL MIX, the TOGGLE / VOLUME selector, then DRUMS, VOCAL and
-/// HARMONICS two slots wide each.  TOGGLE: a tap mutes a stem or brings it
-/// back (dark = muted).  VOLUME: each stem is a horizontal fader; a drag
-/// moves its level from where it is.  The selector goes back to TOGGLE
-/// only when every stem is fully on or off.  Everything is grey and inert
-/// until the track's stems are ready.
+/// STEMS, as OverCue draws it: FULL MIX, the TOGGLE / VOLUME selector,
+/// DRUMS / VOCAL / HARMONICS and a grey EQ key (Stems EQ needs a mixer
+/// OverCue supports; ours does nothing).  TOGGLE: a tap mutes a stem or
+/// brings it back (blue = playing, grey = muted).  VOLUME: each stem is a
+/// horizontal fader, the blue filling from the left to its level; a drag
+/// moves the level from where it is.  The selector goes back to TOGGLE only
+/// when every stem is fully on or off (its label greys until then).
+/// Everything is grey and inert until the track's stems are ready.
 fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
     let ready = snap.stems.state == StemsState::Ready;
     let mut volume: bool = ctx.data(|d| d.get_temp(stems_volume_id())).unwrap_or(false);
     if !snap.stems.all_on_or_off() { volume = true; }
     let text_c = if ready { TEXT } else { DIM };
+    let k = stem_keys(lay);
 
     // FULL MIX
-    let full = lay.panel[0];
-    if tap(ui, full, "cdj-stems-full").0 && ready { out.push(Event::Ui(UiEvent::StemsFullMix)); }
-    ui.painter().rect_filled(full, 0.0, PANEL_FACE);
-    outline(ui, full, DIM, u);
-    label(ui, Pos2::new(full.center().x, full.center().y - 12.0 * u), Align2::CENTER_CENTER, "FULL", 22.0, u, text_c);
-    label(ui, Pos2::new(full.center().x, full.center().y + 14.0 * u), Align2::CENTER_CENTER, "MIX", 22.0, u, text_c);
+    if tap(ui, k.full, "cdj-stems-full").0 && ready { out.push(Event::Ui(UiEvent::StemsFullMix)); }
+    checker(ui, k.full, k.full, CHECK_OFF, u);
+    label(ui, Pos2::new(k.full.center().x, k.full.center().y - 12.0 * u), Align2::CENTER_CENTER, "FULL", 22.0, u, text_c);
+    label(ui, Pos2::new(k.full.center().x, k.full.center().y + 12.0 * u), Align2::CENTER_CENTER, "MIX", 22.0, u, text_c);
 
-    // TOGGLE / VOLUME: a tap anywhere flips it.
-    let sel = lay.panel[1];
-    if tap(ui, sel, "cdj-stems-mode").0 && ready && (!volume || snap.stems.all_on_or_off()) {
+    // TOGGLE / VOLUME: a tap anywhere on the selector flips it.
+    let sel = k.toggle.union(k.volume);
+    let can_toggle = snap.stems.all_on_or_off();
+    if tap(ui, sel, "cdj-stems-mode").0 && ready && (!volume || can_toggle) {
         ctx.data_mut(|d| d.insert_temp(stems_volume_id(), !volume));
     }
-    ui.painter().rect_filled(sel, 0.0, PANEL_FACE);
-    outline(ui, sel, DIM, u);
-    for (i, (name, on)) in [("TOGGLE", !volume), ("VOLUME", volume)].into_iter().enumerate() {
-        let half = Rect::from_min_max(Pos2::new(sel.min.x, sel.min.y + sel.height() * i as f32 / 2.0),
-                                      Pos2::new(sel.max.x, sel.min.y + sel.height() * (i + 1) as f32 / 2.0)).shrink(4.0 * u);
-        if on { ui.painter().rect_filled(half, 0.0, if ready { KEY_LIT } else { KEY_FACE }); }
-        label(ui, half.center(), Align2::CENTER_CENTER, name, 17.0, u, if on { TEXT } else { DIM });
+    for (r, name, on) in [(k.toggle, "TOGGLE", !volume), (k.volume, "VOLUME", volume)] {
+        checker(ui, r, r, if on && ready { CHECK_LIT } else { CHECK_OFF }, u);
+        let c = if !ready || (name == "TOGGLE" && !can_toggle) { DIM } else { TEXT };
+        label(ui, r.center(), Align2::CENTER_CENTER, name, 21.0, u, c);
     }
 
     // DRUMS / VOCAL / HARMONICS
-    for (i, name) in STEM_NAMES.iter().enumerate() {
-        let r = lay.panel[2 + 2 * i].union(lay.panel[3 + 2 * i]);
+    for (i, (name, r)) in STEM_NAMES.iter().zip(k.stems).enumerate() {
         let g = snap.stems.gains[i];
         if let Some(gain) = stem_touch(ui, r, &format!("cdj-stem{i}"), g, true, !volume, ready) {
             // TOGGLE takes taps only; a drag there changes nothing.
             if volume || gain == 0.0 || gain == 1.0 { out.push(Event::Ui(UiEvent::StemGain { stem: i, gain })); }
         }
-        let p = ui.painter();
-        p.rect_filled(r, 0.0, PANEL_FACE);
+        checker(ui, r, r, CHECK_OFF, u);
         if ready && g > 0.0 {
             let fill = if volume { Rect::from_min_max(r.min, Pos2::new(r.min.x + r.width() * g, r.max.y)) } else { r };
-            p.rect_filled(fill.shrink(2.0 * u), 0.0, KEY_LIT);
+            checker(ui, r, fill, CHECK_LIT, u);
         }
-        outline(ui, r, if ready && g > 0.0 { KEY_LIT } else { DIM }, u);
-        let c = if !ready { DIM } else if g > 0.0 { TEXT } else { LABEL };
-        let lift = if volume || !ready { 10.0 } else { 0.0 };
-        label(ui, Pos2::new(r.center().x, r.center().y - lift * u), Align2::CENTER_CENTER, *name, 24.0, u, c);
+        label(ui, r.center(), Align2::CENTER_CENTER, *name, 22.0, u, text_c);
         let sub = match snap.stems.state {
-            StemsState::Ready if volume => format!("{:.0}%", g * 100.0),
-            StemsState::Ready => String::new(),
-            StemsState::Loading => "LOADING".into(),
-            _ => "NO STEMS".into(),
+            StemsState::Loading => "LOADING",
+            StemsState::None => "NO STEMS",
+            _ => "",
         };
-        if !sub.is_empty() { label(ui, Pos2::new(r.center().x, r.center().y + 20.0 * u), Align2::CENTER_CENTER, sub, 17.0, u, c); }
+        if !sub.is_empty() { label(ui, Pos2::new(r.center().x, r.center().y + 24.0 * u), Align2::CENTER_CENTER, sub, 15.0, u, DIM); }
     }
+
+    // EQ: grey; Stems EQ comes from a mixer we do not support.
+    checker(ui, k.eq, k.eq, CHECK_OFF, u);
+    label(ui, k.eq.center(), Align2::CENTER_CENTER, "EQ", 22.0, u, EQ_TEXT);
 }
 
 /// BEAT LOOP: eight lengths per page; the running loop's key is lit, and
@@ -2189,11 +2238,14 @@ mod stems_panel_tests {
         snap.stems = StemsView { state: StemsState::Ready, gains: [1.0; 3] };
         click(&ctx, &snap, &lay, lay.stems_key.center());
         assert_eq!(panel(&ctx), Panel::Stems);
-        let drums = lay.panel[2].union(lay.panel[3]).center();
+        let keys = stem_keys(&lay);
+        let drums = keys.stems[0].center();
         let out = click(&ctx, &snap, &lay, drums);
         assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::StemGain { stem: 0, gain })] if *gain == 0.0), "{out:?}");
-        let out = click(&ctx, &snap, &lay, lay.panel[0].center());
+        let out = click(&ctx, &snap, &lay, keys.full.center());
         assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::StemsFullMix)]), "{out:?}");
+        // EQ does nothing (no mixer to drive Stems EQ).
+        assert!(click(&ctx, &snap, &lay, keys.eq.center()).is_empty());
         // While loading, the stems are inert.
         snap.stems.state = StemsState::Loading;
         assert!(click(&ctx, &snap, &lay, drums).is_empty());

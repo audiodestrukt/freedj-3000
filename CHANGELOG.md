@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Stems: the CDJ-3000 STEMS panel now matches OverCue's on the unit: its own
+  key spacing, the unit's checkered key faces (blue playing, grey muted),
+  and a grey EQ key. In VOLUME mode the blue fills each key from the left
+  to its level, with no percentage, as OverCue's manual shows; TOGGLE greys
+  out while it can't be chosen.
 - Stems: BROWSE marks tracks that have stems with a small "S" beside the ♪,
   as OverCue does on the unit (CDJ-3000 screen, with MENU → STEMS on).
 - Stems: the enlarged waveform now shows the stems you're playing, at their
