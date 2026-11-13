@@ -478,9 +478,9 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
 
     wave_touch(ui, snap, lay.wave, out);
 
-    // Grid ticks above and below the waveform, red on downbeats, with the
-    // beat numbers 16 / 32 under them — on the same column → x mapping the
-    // shader uses, so they sit on the waveform's beats.
+    // Grid ticks above and below the waveform, red on downbeats — on the
+    // same column → x mapping the shader uses, so they sit on the waveform's
+    // beats — and the 16 / 32 marks under them.
     if let (Some(g), true) = (snap.beat_grid, snap.total_samples > 0) {
         let hop = opendeck_analysis::waveform::HOP_SIZE as f64;
         let ch = snap.channels.max(1) as f64;
@@ -493,9 +493,6 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         let k0 = ((first_frame - g.anchor_sample as f64) / period).floor() as i64;
         let k1 = k0 + (cols * hop / period).ceil() as i64 + 2;
         let stroke = |c| Stroke::new((1.5 * u).max(1.0), c);
-        // The beat the playhead is in; the unit numbers the 16th and 32nd
-        // beats ahead of it.
-        let here = ((play_col * hop - g.anchor_sample as f64) / period).floor() as i64;
         for k in k0..=k1 {
             let x = x_of(g.sample_of_beat(k, snap.sample_rate) as f64);
             if x < w.min.x || x > w.max.x { continue; }
@@ -503,8 +500,13 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
             for t in [lay.ticks_top, lay.ticks_bot] {
                 p.line_segment([Pos2::new(x, t.min.y), Pos2::new(x, t.max.y)], stroke(if down { RED } else { TICK }));
             }
-            if k == here + 16 || k == here + 32 {
-                let num = if k == here + 16 { "16" } else { "32" };
+        }
+        // 16 and 32 beats ahead of the playhead, not on a particular beat: a
+        // CDJ-3000 keeps them still while the waveform scrolls under them,
+        // past the track's end too (2026-11-12, at 3.1, 5.3 and 8.0 s).
+        for (n, num) in [(16.0, "16"), (32.0, "32")] {
+            let x = ahead_x(w, n * period / hop, cols);
+            if x <= w.max.x {
                 label(ui, Pos2::new(x, lay.ticks_bot.max.y + 8.0 * u), Align2::CENTER_CENTER, num, 17.0, u, TEXT);
             }
         }
@@ -655,9 +657,27 @@ fn grid_keys_lit(have_grid: bool, cue_set: bool, sync_offset: f32, grid_edited: 
     ]
 }
 
+/// Where a mark `cols_ahead` waveform columns past the playhead sits on the
+/// enlarged waveform `w` showing `cols` columns: the playhead is centred, so
+/// it depends on the tempo and zoom only, never on the position.
+fn ahead_x(w: Rect, cols_ahead: f64, cols: f64) -> f32 {
+    w.min.x + (cols_ahead / cols.max(1.0) + 0.5) as f32 * w.width()
+}
+
 #[cfg(test)]
 mod helper_tests {
     use super::*;
+
+    /// The 16 / 32 marks: 16 and 32 beats right of the centred playhead,
+    /// 32 twice as far as 16, wherever the playhead is (they are computed
+    /// without it), as a CDJ-3000 draws them.
+    #[test]
+    fn beat_marks_sit_still_ahead_of_the_playhead() {
+        let w = Rect::from_min_size(Pos2::new(0.0, 0.0), egui::vec2(1280.0, 200.0));
+        let (x16, x32) = (ahead_x(w, 160.0, 1280.0), ahead_x(w, 320.0, 1280.0));
+        assert_eq!((x16, x32), (800.0, 960.0));
+        assert!((x32 - 640.0 - 2.0 * (x16 - 640.0)).abs() < 1e-3);
+    }
 
     /// The panels' pages as read off the unit (page 2 of BEAT LOOP is not in
     /// the manual).

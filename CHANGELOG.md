@@ -30,6 +30,9 @@ All notable changes to this project will be documented in this file.
   `--screen-only` still override it for one run.
 
 ### Fixed
+- CDJ-3000 screen: the 16 and 32 under the waveform stay still, 16 and 32
+  beats ahead of the playhead, as on the unit; they used to ride on a beat
+  and jump back one beat at every beat.
 - **Track title and artist for tools that go straight to TCP 1051.** Our
   track database (dbserver) took a random port and reported it on 12523, as
   the protocol allows; rekordbox and the players ask there, but some tools
