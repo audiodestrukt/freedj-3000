@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Stems: the enlarged waveform now shows the stems you're playing, at their
+  levels, as OverCue's does. Muting the drums takes the kicks out of the
+  picture, and every stem off leaves a thin grey line. The overview below
+  stays the full track, and FULL MIX brings the track's own waveform back.
 - Cue points for other decks: a player or tool that loads one of our
   tracks now gets its hot cues (A–H) and memory cues, in both the plain cue
   list and the CDJ-3000's extended one, encoded like a CDJ-3000's (byte-exact

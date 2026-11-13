@@ -29,6 +29,7 @@ use crate::waveform_cpu::{self, Kind, Lut, OverviewKey, PxRect, WaveCache, WaveU
 use crate::{DeckApp, Host};
 use anyhow::{anyhow, Context, Result};
 use opendeck_analysis::WaveformCache;
+use opendeck_analysis::waveform::WaveformColumn;
 use sdl2::event::{Event as SdlEvent, WindowEvent};
 use sdl2::keyboard::Scancode;
 use sdl2::pixels::{Color, PixelFormatEnum};
@@ -316,6 +317,8 @@ pub struct SdlRenderer {
 
     // Waveform
     cols:       Vec<u32>,
+    /// The stem mix the enlarged waveform draws instead of `cols` (`set_detail`).
+    detail:     Option<Vec<u32>>,
     num_cols:   u32,
     amp_gain:   f32,
     color_mode: ColorMode,
@@ -353,6 +356,7 @@ impl SdlRenderer {
             textures: HashMap::new(),
             verts: Vec::new(),
             num_cols: cols.len() as u32,
+            detail: None,
             cols,
             amp_gain,
             color_mode: ColorMode::Blue,
@@ -445,7 +449,8 @@ impl SdlRenderer {
         if redraw {
             let t = Instant::now();
             let changed = match (kind, self.wave_cache.as_mut()) {
-                (Kind::Wave, Some(cache)) => waveform_cpu::draw_wave_cached(&self.lut, p, &self.cols, px, cache, &mut self.pix),
+                (Kind::Wave, Some(cache)) => waveform_cpu::draw_wave_cached(&self.lut, p, self.detail.as_deref().unwrap_or(&self.cols), px, cache, &mut self.pix),
+                (Kind::Wave, None) => { waveform_cpu::draw(&self.lut, p, self.detail.as_deref().unwrap_or(&self.cols), kind, px, &mut self.pix); true }
                 _ => { waveform_cpu::draw(&self.lut, p, &self.cols, kind, px, &mut self.pix); true }
             };
             crate::perf_accum("wave_cpu", t.elapsed());
@@ -482,7 +487,7 @@ impl SdlRenderer {
         let t = Instant::now();
         let c0 = thread_cpu_ns();
         let cache = self.wave_cache.as_mut().expect("checked by caller");
-        let update = waveform_cpu::update_wave_cache(&self.lut, p, &self.cols, px, cache, false);
+        let update = waveform_cpu::update_wave_cache(&self.lut, p, self.detail.as_deref().unwrap_or(&self.cols), px, cache, false);
         // Wall vs this thread's CPU time: on a one-core board the gap is the
         // compositor and the audio threads taking their turn right after
         // present, not the raster (measured 12 ms vs 0.3 ms on a Zero W).
@@ -570,8 +575,18 @@ impl Renderer for SdlRenderer {
         let (peak, gain) = display_gain(&self.cols);
         self.amp_gain = gain;
         self.over_key = None;   // new columns: both waveforms must be drawn again
+        self.detail = None;     // the app sends the stem mix again
         if let Some(c) = self.wave_cache.as_mut() { c.invalidate(); }
         log::info!("waveform reloaded: {} columns, peak {:.2} → gain {:.2}", self.num_cols, peak, gain);
+    }
+
+    fn set_detail(&mut self, detail: Option<&[WaveformColumn]>) {
+        self.detail = detail.map(|d| {
+            let mut v: Vec<u32> = d.iter().take(self.cols.len()).map(|c| u32::from_le_bytes(*c)).collect();
+            v.resize(self.cols.len(), 0);
+            v
+        });
+        if let Some(c) = self.wave_cache.as_mut() { c.invalidate(); }
     }
 
     /// The canvas tracks the window itself; this just refreshes the cached
@@ -585,8 +600,9 @@ impl Renderer for SdlRenderer {
     fn render(&mut self, snap: &DeckSnapshot, vp: &Viewports, egui_ctx: &egui::Context, full_output: egui::FullOutput) {
         let ppp = full_output.pixels_per_point;
         let (sw, sh) = self.size;
-        let params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
-                                                self.num_cols, sw, sh);
+        let mut params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
+                                                    self.num_cols, sw, sh);
+        if self.detail.is_some() { params.detail_off = self.num_cols as f32; }
 
         // ── Ground + waveforms (the shader's pass 1) ─────────────────────
         self.canvas.set_clip_rect(None);

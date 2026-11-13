@@ -23,9 +23,13 @@ controls and audio path." So the plan is:
 - **freedj reads `CDJMODS/`** from a local stick, and later from a linked
   player's stick over NFS.
 - **freedj plays stems through its own engine**, with its own STEMS panel.
-- **Nothing is written to the stick.** The Pioneer firmware, the OverCue
-  firmware and their installer are never involved. The clean-room rule is
-  untouched: we implement a published MIT spec.
+- **Nothing is written to the stick.** freedj never runs or links the
+  Pioneer firmware, the OverCue firmware or their installer. The clean-room
+  rule is untouched: we implement a published MIT spec.
+- **Reference only:** to see how the unit behaves, Dan's OverCue 0.14.6
+  ran on cdj3k-emu (his call, 2026-11-13). freedj's code comes from what the
+  screen showed and from OverCue's public manual, not from OverCue's files.
+  None of them are in this repo.
 
 ## The format in brief (read FORMAT.md for the details)
 
@@ -258,19 +262,51 @@ default, so the XDJ and CDJ skins stay what the stock units are.
 **Shared widget:** `screen::stem_touch`. A drag moves the level from where
 it is (with 6 pt of slop), so a touch never jumps it; a tap toggles.
 
+**Stem waveform** (built 2026-11-13). The enlarged waveform shows the
+stems playing at their levels, as OverCue's does; the overview stays the
+full track.
+- The stems job also runs the deck's waveform analysis on each stem
+  (`stems::stem_waves`, one thread per stem).
+- `stems::mix_columns` mixes them by level. A column band is an energy, and
+  separate stems' energies add, so each band is √Σ(gᵢ·eᵢ)². One stem at
+  full is that stem's own columns.
+- At full mix the enlarged waveform is the track's own columns.
+- Where the mix is silent, a 2-px grey line (128,128,128) runs through the
+  middle, as on the unit. Where some stem still plays, OverCue draws that
+  line in the waveform's own colour; ours stays grey.
+- Both renderers keep the track's columns for the overview. wgpu stores the
+  mix in the second half of its column buffer (`detail_off`); the SDL
+  backend keeps a second column list.
+- The app recomputes the mix only when the bank, a level or the waveform
+  changes (`sync_stem_wave`), so a VOLUME drag costs one pass over the
+  columns per frame.
+
+**Seen on OverCue 0.14.6** (cdj3k-emu, Dan's CDJ2 stick):
+- The panel: FULL MIX, the TOGGLE/VOLUME selector, DRUMS / VOCAL /
+  HARMONICS, and an EQ key on the right (grey without a compatible mixer).
+- Stem keys use the unit's checkered key face: blue when playing, the same
+  dark grey as an unlit key when muted, white text on both.
+- The enlarged waveform shrinks to a strip above the panel. OverCue draws
+  it from a precomputed waveform per stem combination on the stick
+  (`stems-<combo>-waveform.EXT/.2EX`, rekordbox ANLZ). freedj builds its
+  own from the stems instead, which also covers partial levels.
+- The STEMS tab gets a blue underline when the mix is changed and another
+  tab is open; at full mix it is grey again.
+- BROWSE lists mark tracks that have stems with a small "S" under the "H"
+  of the track icon.
+- VOLUME's blue fill could not be checked: the emulator's touch control
+  cannot drag.
+
 **Not yet:**
-- The enlarged waveform doesn't follow the stem mix. OverCue redraws it
-  from the stems you're playing; ours still shows the full mix.
+- The "S" badge in BROWSE, the grey EQ key, and the checkered key faces.
 - Controller actions (`controllers.toml`) for the hardware deck.
 
 ## Open questions for Dan
 
-1. **Test stick:** can you prepare one with OverCue Desktop on the Mac (phase
-   0)? It's the only way to test real banks and real timing.
-2. **OverCue on the emulator:** phase 5 needs a player running OverCue.
-   Installing it on cdj3k-emu means putting a firmware mod on Pioneer's
-   firmware in the emulator. That's your call, and we can skip phase 5
-   entirely.
+1. **Test stick:** answered. Dan's CDJ2 stick has six tracks prepared with
+   OverCue Desktop.
+2. **OverCue on the emulator:** answered. Dan approved it; it runs in
+   cdj3k-emu as a launch-only mod (see "Seen on OverCue 0.14.6" above).
 3. **Stretcher latency:** if mutes under Bungee feel late, do we accept it or
    pay for per-stem stretching while a stem is changed?
 4. **Store text:** decided 2026-11-10: name OverCue. Use it in the

@@ -604,6 +604,9 @@ struct DeckApp {
     fetch_rx:          Option<mpsc::Receiver<LoadMsg>>,
     /// The stems job for the loaded track (see `stems.rs`).
     stems_rx:          Option<mpsc::Receiver<Result<Option<stems::StemBank>>>>,
+    /// What the enlarged waveform shows now: the stem mix of (bank, gains,
+    /// column count), or None for the track's own.
+    stem_wave_key:     Option<(usize, [u32; 3], usize)>,
     pub loading:       Option<String>,
     /// Counts LOADs; an in-flight load stops when it is no longer the latest.
     load_gen:          Arc<AtomicU64>,
@@ -955,6 +958,7 @@ impl DeckApp {
             indicators,
             fetch_rx: None,
             stems_rx: None,
+            stem_wave_key: None,
             loading: None,
             load_gen: Arc::new(AtomicU64::new(0)),
             play_on_load: false,
@@ -2388,6 +2392,7 @@ impl DeckApp {
     fn apply_grow(&mut self, g: Grow) {
         self.audio.extend_samples(Arc::clone(&g.samples), g.done);
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&g.waveform); }
+        self.stem_wave_key = None;
         self.waveform = g.waveform;
         if !g.done { return; }
         if let Some(grid) = g.grid {
@@ -2423,6 +2428,24 @@ impl DeckApp {
             let _ = tx.send(stems::load_local(&path, &track, sr, ch));
         });
         if spawned.is_ok() { self.stems_rx = Some(rx); }
+    }
+
+    /// The enlarged waveform follows the STEMS panel: the stems playing at
+    /// their levels while the mix is changed, the track's own at full mix.
+    /// Recomputed only when the bank, a level or the waveform changes.
+    fn sync_stem_wave(&mut self) {
+        let Some(r) = self.renderer.as_mut() else { return };
+        let gains = self.audio.stems.gains();
+        let n = self.waveform.columns.len();
+        let bank = self.audio.stems.bank().filter(|b| b.is_for(&self.audio.current()) && gains.iter().any(|g| *g < 1.0));
+        let want = bank.as_ref().map(|b| (Arc::as_ptr(b) as usize, gains.map(f32::to_bits), n));
+        if want == self.stem_wave_key { return; }
+        self.stem_wave_key = want;
+        match bank {
+            Some(b) => r.set_detail(Some(&stems::mix_columns(&b.waves, gains, n))),
+            None => r.set_detail(None),
+        }
+        self.request_redraw();
     }
 
     /// Hand a finished stems job to the processor, if its track is still
@@ -2473,6 +2496,7 @@ impl DeckApp {
         if p.total > 0 { self.audio.load_streaming(Arc::clone(&p.samples), p.total, deck_sr, p.ch as u8)?; }
         else { self.audio.load_samples(Arc::clone(&p.samples), deck_sr, p.ch as u8)?; }
         if let Some(r) = self.renderer.as_mut() { r.set_waveform(&p.waveform); }
+        self.stem_wave_key = None;
         self.waveform     = p.waveform;
         self.grid_orig    = p.beat_grid.clone();
         self.beat_grid    = match self.grids.get(&self.path.to_string_lossy()) {
@@ -3172,6 +3196,7 @@ impl DeckApp {
             if !track.is_empty() { self.start_stems(&track, self.audio.channels as usize); }
         }
         self.poll_stems();
+        self.sync_stem_wave();
         self.browser.poll_media();   // USB inserted / removed → source rows
         // Jog nudge snap-back: once the wheel has been still past the window,
         // return to the pitch-fader speed.

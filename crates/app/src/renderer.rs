@@ -10,6 +10,7 @@
 
 use anyhow::{Context, Result};
 use opendeck_analysis::WaveformCache;
+use opendeck_analysis::waveform::WaveformColumn;
 use crate::snapshot::DeckSnapshot;
 use std::sync::Arc;
 use wgpu::util::DeviceExt;
@@ -64,7 +65,12 @@ pub struct WaveformParams {
     pub slip_col:         f32,
     /// 0 = XDJ look, 1 = CDJ-3000 look (amber loop shading, no loop lines).
     pub style:            f32,
-    pub _pad:             f32,
+    /// Where the enlarged waveform's columns start in the column buffer: 0 =
+    /// the track's own, `num_cols` = the stem mix stored after them (the
+    /// STEMS panel's levels).  Non-zero also draws a thin grey line where
+    /// the stem mix is silent, as OverCue does.  The overview always reads
+    /// the track's own.
+    pub detail_off:       f32,
 }
 
 /// Where the shader draws its two waveforms, in physical pixels.
@@ -87,8 +93,13 @@ pub enum ColorMode { Rgb = 0, ThreeBand = 1, Blue = 2 }
 /// What the deck needs from a render backend.  Everything above this trait —
 /// the snapshot, the layouts, screen.rs — is backend-neutral.
 pub trait Renderer {
-    /// A freshly analysed track replaces the waveform columns.
+    /// A freshly analysed track replaces the waveform columns (and drops
+    /// any stem mix).
     fn set_waveform(&mut self, waveform: &WaveformCache);
+    /// The enlarged waveform draws these columns instead of the track's
+    /// (the stem mix; same length), or the track's again with `None`.  The
+    /// overview keeps the track's.
+    fn set_detail(&mut self, detail: Option<&[WaveformColumn]>);
     fn resize(&mut self, width: u32, height: u32);
     /// Write the next rendered frame to `path` as a PNG.
     fn request_capture(&mut self, path: std::path::PathBuf);
@@ -162,12 +173,23 @@ impl WaveformParams {
             loop_end_col:      if snap.loop_active { snap.loop_end   as f32 / channels / hop_size } else { 0.0 },
             slip_col:          snap.slip_shadow.map_or(-1.0, |v| v as f32 / channels / hop_size),
             style:             if vp.cdj { 1.0 } else { 0.0 },
-            _pad:              0.0,
+            detail_off:        0.0,
         }
     }
 }
 
 // ── wgpu renderer ─────────────────────────────────────────────────────────────
+
+/// The column buffer: `data`, then as many zero columns for the stem mix.
+fn column_buffer(device: &wgpu::Device, data: &[u32]) -> wgpu::Buffer {
+    let mut both = data.to_vec();
+    both.resize(data.len() * 2, 0);
+    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label:    Some("waveform_data"),
+        contents: bytemuck::cast_slice(&both),
+        usage:    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+    })
+}
 
 pub struct WgpuRenderer {
     /// None while suspended (Android drops its native window in the background).
@@ -184,6 +206,12 @@ pub struct WgpuRenderer {
     waveform_bgl:        wgpu::BindGroupLayout,
     params_buf:          wgpu::Buffer,
     num_cols:            u32,
+    /// The column buffer: the track's columns, then room for as many again
+    /// for the stem mix (`set_detail`).
+    waveform_buf:        wgpu::Buffer,
+    /// The stem mix is in the buffer's second half and the enlarged
+    /// waveform draws it.
+    detail_on:           bool,
 
     // egui pass
     egui_renderer:  egui_wgpu::Renderer,
@@ -330,11 +358,7 @@ impl WgpuRenderer {
         let (peak, amp_gain) = display_gain(&waveform_data);
         log::info!("waveform peak {:.2} → display gain {:.2}", peak, amp_gain);
 
-        let waveform_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label:    Some("waveform_data"),
-            contents: bytemuck::cast_slice(&waveform_data),
-            usage:    wgpu::BufferUsages::STORAGE,
-        });
+        let waveform_buf = column_buffer(&device, &waveform_data);
 
         // ── Params uniform buffer ─────────────────────────────────────────────
         let initial_params = WaveformParams {
@@ -359,7 +383,7 @@ impl WgpuRenderer {
             loop_end_col:     0.0,
             slip_col:         -1.0,
             style:            0.0,
-            _pad:             0.0,
+            detail_off:       0.0,
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -466,6 +490,8 @@ impl WgpuRenderer {
             waveform_bgl: bind_group_layout,
             params_buf,
             num_cols,
+            waveform_buf,
+            detail_on: false,
             egui_renderer,
             egui_screen,
             max_dim,
@@ -522,11 +548,7 @@ impl Renderer for WgpuRenderer {
         self.num_cols = num_cols;
         log::info!("waveform reloaded: {} columns, peak {:.2} → gain {:.2}", num_cols, peak, self.amp_gain);
 
-        let waveform_buf = self.device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label:    Some("waveform_data"),
-            contents: bytemuck::cast_slice(&data),
-            usage:    wgpu::BufferUsages::STORAGE,
-        });
+        let waveform_buf = column_buffer(&self.device, &data);
         self.waveform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:  Some("waveform_bg"),
             layout: &self.waveform_bgl,
@@ -535,6 +557,21 @@ impl Renderer for WgpuRenderer {
                 wgpu::BindGroupEntry { binding: 1, resource: self.params_buf.as_entire_binding() },
             ],
         });
+        self.waveform_buf = waveform_buf;
+        self.detail_on = false;   // new columns: the app sends the stem mix again
+    }
+
+    fn set_detail(&mut self, detail: Option<&[WaveformColumn]>) {
+        let n = self.num_cols as usize;
+        match detail {
+            Some(d) if n > 0 => {
+                let mut data: Vec<u32> = d.iter().take(n).map(|c| u32::from_le_bytes(*c)).collect();
+                data.resize(n, 0);
+                self.queue.write_buffer(&self.waveform_buf, (n * 4) as u64, bytemuck::cast_slice(&data));
+                self.detail_on = true;
+            }
+            _ => self.detail_on = false,
+        }
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -567,8 +604,9 @@ impl Renderer for WgpuRenderer {
         let textures_delta   = full_output.textures_delta;
 
         // ── Update waveform scroll params ─────────────────────────────────────
-        let params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
+        let mut params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
                                                 self.num_cols, self.surface_config.width, self.surface_config.height);
+        if self.detail_on { params.detail_off = self.num_cols as f32; }
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
         // ── Get surface texture ───────────────────────────────────────────────
@@ -767,7 +805,7 @@ struct Params {
     loop_end_col:       f32,
     slip_col:           f32,  // SLIP shadow playhead column; < 0 = none
     style:              f32,  // 0 XDJ look, 1 CDJ-3000 look
-    _p2: f32,
+    detail_off:         f32,  // enlarged waveform's first column in the buffer; > 0 = stem mix
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
@@ -794,6 +832,7 @@ fn loop_lines() -> bool { return p.style < 0.5; }                  // the CDJ sh
 fn slip_color() -> vec4<f32> { return srgb(200.0, 110.0, 255.0); } // SLIP shadow playhead (violet)
 fn in_loop(col: f32) -> bool { return p.loop_end_col > p.loop_start_col && col >= p.loop_start_col && col < p.loop_end_col; }
 fn white() -> vec4<f32>    { return srgb(244.0, 246.0, 248.0); }
+fn silence_line() -> vec4<f32> { return srgb(128.0, 128.0, 128.0); }  // stem mix at silence
 fn band_low() -> vec4<f32> { return srgb(58.0, 123.0, 240.0); }  // 3-band blue
 fn band_mid() -> vec4<f32> { return srgb(240.0, 160.0, 48.0); }  // 3-band amber
 // BLUE mode: blue body tinted toward white where the high band is strong,
@@ -906,12 +945,17 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
     // Bilinear between adjacent columns so the scroll is sub-pixel smooth.
     let col_lo = u32(col_f);
     let col_hi = min(col_lo + 1u, u32(p.num_cols) - 1u);
-    let c      = mix(unpack(waveform[col_lo]), unpack(waveform[col_hi]), col_f - f32(col_lo));
+    let off    = u32(p.detail_off);
+    let c      = mix(unpack(waveform[col_lo + off]), unpack(waveform[col_hi + off]), col_f - f32(col_lo));
 
     let dist = abs(sy - 0.5) * 2.0;
     let bar  = bar_color(c, dist);
     if bar.a > 0.0 {
         return bar;
+    }
+    // Stem mix: a thin grey line where it is silent (2 px, as OverCue).
+    if off > 0u && abs(sy - 0.5) * wave_h < 1.0 {
+        return silence_line();
     }
 
     // Beat grid as edge ticks only — top and bottom of the field, red and

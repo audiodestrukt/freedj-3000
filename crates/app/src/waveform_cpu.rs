@@ -75,7 +75,7 @@ impl Default for Lut { fn default() -> Self { Self::new() } }
 /// The shader's palette, resolved through the LUT once per draw call.
 struct Palette {
     ground: Rgba, playhead: Rgba, cue: Rgba, loop_line: Rgba, loop_bg: Rgba, loop_bg_cdj: Rgba, slip: Rgba,
-    white: Rgba, band_low: Rgba, band_mid: Rgba, cyan: Rgba, strip_bg: Rgba, tick_hi: Rgba, down_hi: Rgba,
+    white: Rgba, silence: Rgba, band_low: Rgba, band_mid: Rgba, cyan: Rgba, strip_bg: Rgba, tick_hi: Rgba, down_hi: Rgba,
 }
 
 impl Palette {
@@ -89,6 +89,7 @@ impl Palette {
             loop_bg_cdj: l.rgb(72.0, 52.0, 10.0),     // CDJ-3000 look: amber shade
             slip:      l.rgb(200.0, 110.0, 255.0),    // SLIP shadow playhead (violet)
             white:     l.rgb(244.0, 246.0, 248.0),
+            silence:   l.rgb(128.0, 128.0, 128.0),    // stem mix at silence (OverCue's line)
             band_low:  l.rgb(58.0, 123.0, 240.0),     // 3-band blue
             band_mid:  l.rgb(240.0, 160.0, 48.0),     // 3-band amber
             cyan:      l.rgb(0.0, 216.0, 216.0),
@@ -285,6 +286,7 @@ fn fill_columns(l: &Lut, pal: &Palette, p: &WaveformParams, g: &WaveGeom, rect: 
         let qy   = rect.y as f32 + y as f32 + 0.5;
         let yy   = qy - r[1];
         let dist = (yy / g.wave_h - 0.5).abs() * 2.0;
+        let silence_line = p.detail_off > 0.0;
         let row  = &mut out[y * stride + out_x..y * stride + out_x + columns.len()];
         if strip && qy > r[1] + r[3] - B2_STRIP_PX {
             // External-deck beat strip along the bottom edge (disabled today —
@@ -304,6 +306,8 @@ fn fill_columns(l: &Lut, pal: &Palette, p: &WaveformParams, g: &WaveGeom, rect: 
                 Column::Solid(c) => *c,
                 Column::Field { bar, bg, tick } => match bar.as_ref().and_then(|b| b.at(l, pal, dist)) {
                     Some(c) => c,
+                    // Stem mix: a thin grey line where it is silent.
+                    None if silence_line && bar.is_some() && (yy - g.wave_h * 0.5).abs() < 1.0 => pal.silence,
                     None => match tick {
                         Some((is_down, len)) if yy < *len || yy > g.wave_h - *len => if *is_down { pal.down_hi } else { pal.tick_hi },
                         _ => *bg,
@@ -550,11 +554,35 @@ mod tests {
             screen_w: 1024.0, screen_h: 600.0, beat_anchor_col: 0.0, beat_period_cols: 100.0,
             downbeat_offset: 0.0, beats_per_bar: 4.0, beat2_phase_beats: 0.0, beat2_period_cols: 0.0,
             color_mode: ColorMode::Blue as u32 as f32, wave_rect: wave, over_rect: over, amp_gain: 1.0,
-            dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 0.0, _pad: 0.0,
+            dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 0.0, detail_off: 0.0,
         }
     }
 
     fn px(out: &[u32], w: usize, x: usize, y: usize) -> [u8; 4] { out[y * w + x].to_ne_bytes() }
+
+    /// A silent stem mix draws OverCue's thin grey line through the middle
+    /// of the track's span (2 px), and nothing outside the track; the track's
+    /// own silent columns draw nothing.
+    #[test]
+    fn silent_stem_mix_draws_a_thin_line() {
+        let lut = Lut::new(); let pal = Palette::new(&lut);
+        let cols = vec![0u32; 2000];
+        let mut p = params(2000, [100.0, 50.0, 800.0, 200.0], [0.0; 4]);
+        p.beat_period_cols = 0.0;
+        let rect = PxRect::from_f32(p.wave_rect).unwrap();
+        let w = rect.w as usize;
+        let mut out = Vec::new();
+        draw(&lut, &p, &cols, Kind::Wave, rect, &mut out);
+        assert_eq!(px(&out, w, 200, 100), pal.ground, "track's own silence: no line");
+        p.detail_off = 2000.0;
+        draw(&lut, &p, &cols, Kind::Wave, rect, &mut out);
+        let line: Vec<usize> = (0..200).filter(|&y| px(&out, w, 200, y) == pal.silence).collect();
+        assert_eq!(line, vec![99, 100], "a 2-px line at the centre");
+        // Before the track starts (playhead at 0, left half): no line.
+        p.playhead_col = 0.0;
+        draw(&lut, &p, &cols, Kind::Wave, rect, &mut out);
+        assert_eq!(px(&out, w, 100, 100), pal.ground);
+    }
 
     #[test]
     fn playhead_cue_and_bars_land_where_the_shader_puts_them() {

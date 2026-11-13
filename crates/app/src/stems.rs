@@ -14,6 +14,10 @@
 //!   `CDJMODS`, reads and checks the bank, and measures its offset against
 //!   the deck's decode by cross-correlating OverCue's full-mix copy.  It is
 //!   refused (the original keeps playing) when anything does not check out.
+//! - **Waveform.** The load also builds each stem's waveform columns; the
+//!   enlarged waveform then shows the stems playing at their levels
+//!   ([`mix_columns`]), as OverCue's does, while the overview stays the
+//!   full track.
 
 use anyhow::{bail, ensure, Context, Result};
 use arc_swap::ArcSwapOption;
@@ -22,6 +26,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Weak};
+use opendeck_analysis::waveform::{WaveformBuilder, WaveformColumn};
 
 /// Stem order everywhere in the deck: drums, vocal, harmonics.
 pub const ROLES: [Role; 3] = Role::STEMS;
@@ -34,6 +39,9 @@ pub struct StemBank {
     /// Frames the bank was shifted by to line up (for the log and tests).
     #[cfg_attr(not(test), allow(dead_code))]
     pub offset_frames: isize,
+    /// Each stem's waveform columns (same analysis as the track's own), for
+    /// the enlarged waveform while the mix is changed.
+    pub waves: [Vec<WaveformColumn>; 3],
 }
 
 impl StemBank {
@@ -162,9 +170,45 @@ pub fn build(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32>>
     for (s, r) in ROLES.iter().enumerate() {
         data[s] = shift(&role_at(media, entry, *r, deck_sr)?, offset, track.len());
     }
+    let waves = stem_waves(&data, deck_sr);
     log::info!("stems: bank {} ready, offset {offset} frames ({:.2} ms), {:.1}s",
                entry.bundle, offset as f64 * 1e3 / deck_sr as f64, t0.elapsed().as_secs_f32());
-    Ok(StemBank { track: Arc::downgrade(track), data, offset_frames: offset })
+    Ok(StemBank { track: Arc::downgrade(track), data, offset_frames: offset, waves })
+}
+
+/// Each stem's waveform columns, built as the track's own are (one thread
+/// per stem).
+pub fn stem_waves(data: &[Vec<i16>; 3], sr: u32) -> [Vec<WaveformColumn>; 3] {
+    std::thread::scope(|sc| {
+        let jobs: Vec<_> = data.iter().map(|d| sc.spawn(move || {
+            let mut b = WaveformBuilder::new(sr);
+            let mut buf = Vec::with_capacity(8192);
+            for chunk in d.chunks(8192) {
+                buf.clear();
+                buf.extend(chunk.iter().map(|v| *v as f32 / 32768.0));
+                b.push(&buf);
+            }
+            b.finish().columns
+        })).collect();
+        let mut out: [Vec<WaveformColumn>; 3] = Default::default();
+        for (o, j) in out.iter_mut().zip(jobs) { *o = j.join().unwrap_or_default(); }
+        out
+    })
+}
+
+/// The enlarged waveform for a stem mix: `len` columns of the stems at
+/// `gains`.  Each band is an energy (the analysis stores √(rms·boost) in
+/// 0–255), and the energies of separate stems add, so a band of the mix is
+/// √Σ(gᵢ·eᵢ)², stored back the same way.  One stem at full gives that stem's
+/// columns exactly; every stem off gives silence.
+pub fn mix_columns(waves: &[Vec<WaveformColumn>; 3], gains: [f32; 3], len: usize) -> Vec<WaveformColumn> {
+    (0..len).map(|c| std::array::from_fn(|k| {
+        let e2: f32 = (0..3).map(|s| {
+            let v = waves[s].get(c).map_or(0.0, |col| (col[k] as f32 / 255.0).powi(2));
+            (gains[s].clamp(0.0, 1.0) * v).powi(2)
+        }).sum();
+        (e2.sqrt().sqrt().clamp(0.0, 1.0) * 255.0).round() as u8
+    })).collect()
 }
 
 /// One role, checked, at the deck rate.
@@ -280,7 +324,7 @@ mod tests {
     fn mixer_passes_the_original_untouched_at_full() {
         let x: Vec<f32> = (0..200).map(|i| i as f32 / 1000.0).collect();
         let t = Arc::new(x.clone());
-        let bank = StemBank { track: Arc::downgrade(&t), data: [vec![100; 200], vec![200; 200], vec![300; 200]], offset_frames: 0 };
+        let bank = StemBank { track: Arc::downgrade(&t), data: [vec![100; 200], vec![200; 200], vec![300; 200]], offset_frames: 0, waves: Default::default() };
         let mut m = Mixer::default();
         let mut out = Vec::new();
         assert!(!m.mix(&x, Some(&bank), [1.0; 3], &[0..200], &mut out));
@@ -293,7 +337,7 @@ mod tests {
         let x = vec![0.5f32; n];
         let t = Arc::new(x.clone());
         let s = |v: i16| vec![v; n];
-        let bank = StemBank { track: Arc::downgrade(&t), data: [s(8192), s(4096), s(4096)], offset_frames: 0 }; // sums to 0.5
+        let bank = StemBank { track: Arc::downgrade(&t), data: [s(8192), s(4096), s(4096)], offset_frames: 0, waves: Default::default() }; // sums to 0.5
         let mut m = Mixer::default();
         let mut out = Vec::new();
         // Mute drums: ramps from the original (0.5) to vocal+harmonics (0.25) across the block.
@@ -313,7 +357,7 @@ mod tests {
     fn mixer_follows_loop_ranges() {
         let x: Vec<f32> = (0..100).map(|i| i as f32).collect();
         let t = Arc::new(x.clone());
-        let bank = StemBank { track: Arc::downgrade(&t), data: [(0..100).map(|i| i as i16).collect(), vec![0; 100], vec![0; 100]], offset_frames: 0 };
+        let bank = StemBank { track: Arc::downgrade(&t), data: [(0..100).map(|i| i as i16).collect(), vec![0; 100], vec![0; 100]], offset_frames: 0, waves: Default::default() };
         let mut m = Mixer { g: [1.0, 0.0, 0.0], m: 1.0 };
         let mut out = Vec::new();
         m.mix(&x, Some(&bank), [1.0, 0.0, 0.0], &[80..84, 10..12], &mut out);
@@ -325,7 +369,7 @@ mod tests {
     fn a_bank_only_plays_with_its_own_track() {
         let a = Arc::new(vec![0f32; 4]);
         let b = Arc::new(vec![0f32; 4]);
-        let bank = StemBank { track: Arc::downgrade(&a), data: Default::default(), offset_frames: 0 };
+        let bank = StemBank { track: Arc::downgrade(&a), data: Default::default(), offset_frames: 0, waves: Default::default() };
         assert!(bank.is_for(&a));
         assert!(!bank.is_for(&b));
     }
@@ -390,4 +434,47 @@ mod tests {
         let elsewhere = tempfile::NamedTempFile::new().unwrap();
         assert!(load_local(elsewhere.path(), &track, 48_000, 2).unwrap().is_none());
     }
+
+    /// The enlarged waveform follows the stems: one stem alone is that
+    /// stem's columns, every stem off is silence, and two equal stems are
+    /// louder than either (their energies add) but not double.
+    #[test]
+    fn stem_waveform_follows_the_mix() {
+        let waves: [Vec<WaveformColumn>; 3] = [
+            vec![[200, 10, 0, 180], [0, 0, 0, 0]],
+            vec![[0, 120, 90, 100], [0, 50, 50, 50]],
+            vec![[0, 120, 90, 100], [7, 7, 7, 7]],
+        ];
+        assert_eq!(mix_columns(&waves, [1.0, 0.0, 0.0], 2), waves[0]);
+        assert_eq!(mix_columns(&waves, [0.0, 1.0, 0.0], 2), waves[1]);
+        assert_eq!(mix_columns(&waves, [0.0; 3], 2), vec![[0u8; 4]; 2]);
+        let both = mix_columns(&waves, [0.0, 1.0, 1.0], 2)[0];
+        assert!(both[3] > 100 && both[3] < 200, "two equal stems: {both:?}");
+        assert_eq!(both[0], 0, "no stem has bass here");
+        // Half level: the energy halves, so the stored value drops by √2.
+        let half = mix_columns(&waves, [0.5, 0.0, 0.0], 2)[0];
+        assert!((half[3] as f32 - 180.0 / 2f32.sqrt()).abs() <= 1.0, "{half:?}");
+        // Shorter stems than the track pad with silence.
+        assert_eq!(mix_columns(&waves, [1.0, 0.0, 0.0], 3)[2], [0; 4]);
+    }
+
+    /// A bank's stem waveforms come out the same length as the track's own
+    /// (the same analysis over the same number of frames).
+    #[test]
+    fn stem_waves_match_the_track_columns() {
+        let sr = 48_000;
+        let tone: Vec<i16> = (0..sr as usize * 2).flat_map(|n| {
+            let v = ((n as f32 * 440.0 * std::f32::consts::TAU / sr as f32).sin() * 8000.0) as i16;
+            [v, v]
+        }).collect();
+        let data = [tone.clone(), vec![0; tone.len()], tone.clone()];
+        let w = stem_waves(&data, sr);
+        let mut b = WaveformBuilder::new(sr);
+        b.push(&tone.iter().map(|v| *v as f32 / 32768.0).collect::<Vec<_>>());
+        let own = b.finish().columns;
+        assert_eq!(w[0], own);
+        assert_eq!(w[2], own);
+        assert!(w[1].iter().all(|c| c[3] == 0), "a silent stem draws nothing");
+    }
+
 }
