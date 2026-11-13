@@ -57,6 +57,9 @@ pub struct Track {
     /// 2 bytes), served as `.EXT` sections.  Empty = none.
     pub rgb_preview: Vec<u8>,
     pub rgb_detail:  Vec<u8>,
+    /// Hot and memory cues, served as the cue lists a player asks for when
+    /// it loads the track (`0x2104`, and `0x2b04` from a CDJ-3000).
+    pub cues:       Vec<Cue>,
     /// Phrase analysis (song structure): the `.EXT` PSSI section as it sits
     /// in a rekordbox file, fourcc to end, masked as rekordbox 6+ writes it.
     /// Empty = none.
@@ -414,6 +417,85 @@ pub fn no_data(txid: u32, req: u16) -> Message {
     Message { txid, kind: want, args }
 }
 
+/// A hot cue (`hot` 1–8 = A–H) or memory cue (`hot` 0), in milliseconds;
+/// with `loop_end_ms` it is a loop.  `rgb` is the hot cue's colour (None:
+/// green, a loop orange, as a CDJ-3000 colours its own).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Cue {
+    pub hot:         u8,
+    pub ms:          u32,
+    pub loop_end_ms: Option<u32>,
+    pub rgb:         Option<(u8, u8, u8)>,
+}
+
+/// Milliseconds to the half-frames (1/150 s) of the plain cue list.
+fn half_frames(ms: u32) -> u32 { (ms as u64 * 3 / 20) as u32 }
+
+/// The plain cue list (0x4702), as a CDJ-3000 answers it (captured
+/// 2026-11-12): memory cues first, then hot cues A–H; 36-byte entries
+/// (loop flag, 1, hot number, …, start and loop end in half-frames, 0xff
+/// fill), then the entry size, the hot and memory counts, and the same
+/// points again as (ms, loop end ms) pairs.  No cues: [`empty_cue_list`].
+fn cue_list(txid: u32, cues: &[Cue]) -> Message {
+    if cues.is_empty() { return empty_cue_list(txid); }
+    let mut order: Vec<&Cue> = cues.iter().filter(|c| c.hot == 0).collect();
+    order.sort_by_key(|c| c.ms);
+    let mut hot: Vec<&Cue> = cues.iter().filter(|c| c.hot != 0).collect();
+    hot.sort_by_key(|c| c.hot);
+    let n_hot = hot.len() as u32;
+    let n_mem = order.len() as u32;
+    order.extend(hot);
+    let (mut entries, mut pairs) = (Vec::new(), Vec::new());
+    for c in order {
+        let mut e = vec![0xffu8; 36];
+        e[..8].copy_from_slice(&[c.loop_end_ms.is_some() as u8, 1, c.hot, 0, 0, 0, 0, 0]);
+        e[12..16].copy_from_slice(&half_frames(c.ms).to_le_bytes());
+        if let Some(end) = c.loop_end_ms { e[16..20].copy_from_slice(&half_frames(end).to_le_bytes()); }
+        entries.extend(e);
+        pairs.extend(c.ms.to_le_bytes());
+        pairs.extend(c.loop_end_ms.unwrap_or(u32::MAX).to_le_bytes());
+    }
+    Message { txid, kind: kind::CUES_BLOB, args: vec![
+        u(kind::CUES as u32), u(0), u(entries.len() as u32), Field::Blob(entries),
+        u(0x24), u(n_hot), u(n_mem), u(pairs.len() as u32), Field::Blob(pairs),
+    ] }
+}
+
+/// The extended cue list (0x4e02) a CDJ-3000 asks for (`0x2b04`), as one
+/// answers it: hot cues A–H then memory cues, variable-size entries — size,
+/// hot number, kind (1 cue, 2 loop), start and loop end in ms; a hot cue
+/// (84 bytes) ends with its colour (0x4e: code, red, green, blue), which
+/// Beat Link reads too.  Fields we have no value for keep the captured
+/// defaults.  None when there are no cues (then "no data", as a CDJ says).
+fn ext_cue_list(txid: u32, cues: &[Cue]) -> Option<Message> {
+    if cues.is_empty() { return None; }
+    let mut hot: Vec<&Cue> = cues.iter().filter(|c| c.hot != 0).collect();
+    hot.sort_by_key(|c| c.hot);
+    let mut mem: Vec<&Cue> = cues.iter().filter(|c| c.hot == 0).collect();
+    mem.sort_by_key(|c| c.ms);
+    let mut blob = Vec::new();
+    for c in hot.iter().chain(mem.iter()) {
+        let size = if c.hot != 0 { 0x54 } else { 0x4c };
+        let mut e = vec![0u8; size];
+        e[0..4].copy_from_slice(&(size as u32).to_le_bytes());
+        e[4..6].copy_from_slice(&(c.hot as u16).to_le_bytes());
+        e[6] = if c.loop_end_ms.is_some() { 2 } else { 1 };
+        e[0x0a..0x0c].copy_from_slice(&1000u16.to_le_bytes());
+        e[0x0c..0x10].copy_from_slice(&c.ms.to_le_bytes());
+        e[0x10..0x14].copy_from_slice(&c.loop_end_ms.unwrap_or(u32::MAX).to_le_bytes());
+        e[0x20..0x34].fill(0xff);
+        e[0x34] = if c.hot != 0 { 0x1a } else { 0x12 };
+        if c.hot != 0 {
+            e[0x4a] = 4;
+            let (r, g, b) = c.rgb.unwrap_or(if c.loop_end_ms.is_some() { (0xff, 0x8c, 0) } else { (0, 0xff, 0) });
+            e[0x4f..0x52].copy_from_slice(&[r, g, b]);
+        }
+        blob.extend(e);
+    }
+    let n = (hot.len() + mem.len()) as u32;
+    Some(Message { txid, kind: kind::CUES_EXT_BLOB, args: vec![u(kind::CUES_EXT as u32), u(0), u(blob.len() as u32), Field::Blob(blob), u(n)] })
+}
+
 /// A cue list (0x4702) with no entries: request, 0, length 0, an empty blob,
 /// the entry size (36), zero hot cues, zero memory points.
 fn empty_cue_list(txid: u32) -> Message {
@@ -492,16 +574,21 @@ fn serve_client(lib: SharedLibrary, device: DeviceNumber, stream: TcpStream) -> 
                     None => reply(&mut w, Message { txid: m.txid, kind: kind::ARTWORK_BLOB, args: vec![u(m.kind as u32), u(0), u(0), Field::Blob(Vec::new())] })?,
                 }
             }
-            // Cue lists and raw ANLZ sections: nothing to serve (no memory
-            // cues of our own yet; colour waveforms are not produced).
-            // The plain cue list must be answered: a CDJ-3000 loading one of
-            // our tracks asked for it ~1,700 times when told "unavailable"
-            // and never left NOW LOADING.  We have no memory or hot cues, so
-            // the list is empty: no 36-byte entries, zero hot cues, zero
-            // memory points (Beat Link reads the counts at args 5 and 6).
+            // Cue lists: the track's hot and memory cues.  The plain list
+            // must always be answered: a CDJ-3000 loading one of our tracks
+            // asked for it ~1,700 times when told "unavailable" and never
+            // left NOW LOADING; with no cues it is the empty list (Beat Link
+            // reads the counts at args 5 and 6).  The extended list with no
+            // cues falls through to "no data", as a CDJ-3000 answers it.
             kind::CUES => {
-                log::debug!("dbserver: {peer:?} cue list for track {} — empty", arg(1));
-                reply(&mut w, empty_cue_list(m.txid))?;
+                let cues = lib.read().unwrap().track(arg(1)).map(|t| t.cues.clone()).unwrap_or_default();
+                log::debug!("dbserver: {peer:?} cue list for track {} — {} cues", arg(1), cues.len());
+                reply(&mut w, cue_list(m.txid, &cues))?;
+            }
+            kind::CUES_EXT if lib.read().unwrap().track(arg(1)).is_some_and(|t| !t.cues.is_empty()) => {
+                let cues = lib.read().unwrap().track(arg(1)).map(|t| t.cues.clone()).unwrap_or_default();
+                log::debug!("dbserver: {peer:?} extended cue list for track {} — {} cues", arg(1), cues.len());
+                reply(&mut w, ext_cue_list(m.txid, &cues).unwrap())?;
             }
             // Nothing to serve: answer as a player does when a track has no
             // such data (captured from a CDJ-3000): the reply type with status
@@ -764,5 +851,60 @@ mod tests {
         assert_eq!(name_id("Ann"), name_id("Ann"));
         assert_ne!(name_id("Ann"), name_id("Bob"));
         assert!(name_id("") != 0 && name_id("") != 0xffff_ffff);
+    }
+
+    /// The cues of the CDJ-3000 capture (2026-11-12, track 63 of the test
+    /// stick): a memory cue at 20 ms, hot cues A and B, hot cue C a loop.
+    fn captured_cues() -> Vec<Cue> {
+        vec![
+            Cue { hot: 0, ms: 20, ..Default::default() },
+            Cue { hot: 1, ms: 3356, ..Default::default() },
+            Cue { hot: 2, ms: 6213, ..Default::default() },
+            Cue { hot: 3, ms: 8594, loop_end_ms: Some(10499), ..Default::default() },
+        ]
+    }
+
+    fn unhex(s: &str) -> Vec<u8> { (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect() }
+
+    /// The plain cue list matches what the CDJ-3000 answered, byte for byte,
+    /// but for one loop end a half-frame off (its internal position is finer
+    /// than the ms it reports).
+    #[test]
+    fn plain_cue_list_matches_a_cdj3000() {
+        let want = unhex("0001000000000000ffffffff03000000ffffffffffffffffffffffffffffffffffffffff0001010000000000fffffffff7010000ffffffffffffffffffffffffffffffffffffffff0001020000000000ffffffffa3030000ffffffffffffffffffffffffffffffffffffffff0101030000000000ffffffff0905000025060000ffffffffffffffffffffffffffffffff");
+        let m = cue_list(9, &captured_cues());
+        assert_eq!(m.kind, kind::CUES_BLOB);
+        let Field::Blob(mut got) = m.args[3].clone() else { panic!() };
+        assert_eq!(got[3 * 36 + 16], 0x26, "loop end: 10499 ms = 1574 half-frames");
+        got[3 * 36 + 16] = 0x25;
+        assert_eq!(got, want);
+        let n: Vec<u32> = [0, 1, 2, 4, 5, 6, 7].iter().map(|&i| m.args[i].as_u32()).collect();
+        assert_eq!(n, vec![0x2104, 0, 144, 0x24, 3, 1, 32], "request, status, length, entry size, hot, memory, pair bytes");
+        let Field::Blob(pairs) = &m.args[8] else { panic!() };
+        assert_eq!(pairs, &unhex("14000000ffffffff1c0d0000ffffffff45180000ffffffff9221000003290000"));
+        assert_eq!(cue_list(9, &[]).args, empty_cue_list(9).args, "no cues: the empty list");
+    }
+
+    /// The extended list (CDJ-3000 0x2b04) matches the capture, with the
+    /// fields we have no value for masked: 0x3c..0x40 (a per-cue value the
+    /// player keeps) and, for the loop, its length in beats at 0x42.
+    #[test]
+    fn extended_cue_list_matches_a_cdj3000() {
+        let want = unhex("54000000010001000000e8031c0d0000ffffffff000000000000000000000000ffffffffffffffffffffffffffffffffffffffff1a00000000000000f401000000000000000000000000040000000000ff00000054000000020001000000e80345180000ffffffff000000000000000000000000ffffffffffffffffffffffffffffffffffffffff1a000000000000009a02000000000000000000000000040000000000ff00000054000000030002000000e8039221000003290000000000000000000000000000ffffffffffffffffffffffffffffffffffffffff1a0000000000000047024d01000004000100000000000400000000ff8c0000004c000000000001000000e80314000000ffffffff000000000000000000000000ffffffffffffffffffffffffffffffffffffffff120000000000000000000000000000000000000000000000");
+        let m = ext_cue_list(3, &captured_cues()).unwrap();
+        assert_eq!(m.kind, kind::CUES_EXT_BLOB);
+        let Field::Blob(got) = m.args[3].clone() else { panic!() };
+        assert_eq!(got.len(), want.len());
+        let mut w = want.clone();
+        for e in [0usize, 0x54, 0xa8] { w[e + 0x3c..e + 0x40].fill(0); }
+        w[0xa8 + 0x42] = 0; w[0xa8 + 0x44] = 0;
+        assert_eq!(got, w);
+        assert_eq!(m.args[4].as_u32(), 4, "entry count");
+        // As Beat Link reads it: hot number, kind, start, colour (green;
+        // the loop orange).
+        assert_eq!((got[4], got[6], u32::from_le_bytes(got[12..16].try_into().unwrap())), (1, 1, 3356));
+        assert_eq!(&got[0x4f..0x52], &[0, 0xff, 0]);
+        assert_eq!(&got[0xa8 + 0x4f..0xa8 + 0x52], &[0xff, 0x8c, 0]);
+        assert!(ext_cue_list(3, &[]).is_none(), "no cues: 'no data', as a CDJ answers");
     }
 }

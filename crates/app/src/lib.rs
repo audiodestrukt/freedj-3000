@@ -165,6 +165,15 @@ fn serve_grid(link: &prodj::LinkState, path: &std::path::Path, grid: Option<&Bea
     update_served(link, path, |t| { t.beats = beats; t.bpm = bpm; });
 }
 
+/// The cues a peer reads for the loaded track: its hot cues A–H and memory
+/// cues, from interleaved sample positions (`ch` channels at `sr`).
+fn served_cues(hot: &[Option<u64>; 8], memory: &[u64], sr: u32, ch: u32) -> Vec<opendeck_dbserver::server::Cue> {
+    let ms = |pos: u64| (pos as f64 / ch.max(1) as f64 / sr.max(1) as f64 * 1000.0).round() as u32;
+    let mut v: Vec<_> = memory.iter().map(|&p| opendeck_dbserver::server::Cue { hot: 0, ms: ms(p), ..Default::default() }).collect();
+    v.extend(hot.iter().enumerate().filter_map(|(i, c)| c.map(|p| opendeck_dbserver::server::Cue { hot: i as u8 + 1, ms: ms(p), ..Default::default() })));
+    v
+}
+
 /// The library our dbserver serves; started empty, dbserver only, when no
 /// media server is running yet.  None when serving is off
 /// (`OPENDECK_SERVE=0`) or the ports are taken.
@@ -299,6 +308,18 @@ mod track_ref_tests {
         let l = lib.read().unwrap();
         let t = l.track(id).unwrap();
         assert_eq!((t.bpm, t.beats.iter().map(|b| b.2).collect::<Vec<_>>()), (120.0, vec![100, 600, 1100, 1600]));
+        drop(l);
+        // Cues: the deck's hot and memory cues (stereo samples at 1 kHz)
+        // become the served row's cue list, and a later key refresh keeps it.
+        let mut hot = [None; 8];
+        hot[0] = Some(2 * 1500);
+        hot[2] = Some(2 * 250);
+        let cues = super::served_cues(&hot, &[2 * 40], 1000, 2);
+        let c = |hot: u8, ms: u32| opendeck_dbserver::server::Cue { hot, ms, ..Default::default() };
+        assert_eq!(cues, vec![c(0, 40), c(1, 1500), c(3, 250)]);
+        super::update_served(&link, &outside, |t| t.cues = cues.clone());
+        super::refresh_served(&link, &outside, &a);
+        assert_eq!(lib.read().unwrap().track(id).unwrap().cues, cues);
     }
 }
 
@@ -1144,6 +1165,7 @@ impl DeckApp {
                     self.memory_cues.sort_unstable();
                     let sr_ch = self.audio.sample_rate as f64 * ch as f64;
                     log::info!("memory: set at {:.2}s ({} points)", c as f64 / sr_ch, self.memory_cues.len());
+                    self.serve_deck_cues();
                 }
             }
             Event::Deck(ControlEvent::MemoryCueCall { next }) => {
@@ -1175,6 +1197,7 @@ impl DeckApp {
                     Some(i) => {
                         self.memory_cues.remove(i);
                         log::info!("memory: deleted point at cue ({} left)", self.memory_cues.len());
+                        self.serve_deck_cues();
                     }
                     None => log::info!("memory: no point at the cue to delete"),
                 }
@@ -1188,6 +1211,7 @@ impl DeckApp {
                     self.hot_cues[s] = Some(pos);
                     let sr_ch = self.audio.sample_rate as f64 * ch as f64;
                     log::info!("hot cue {}: set at {:.2}s", (b'A' + slot) as char, pos as f64 / sr_ch);
+                    self.serve_deck_cues();
                 }
             }
             Event::Deck(ControlEvent::HotCueTrigger { slot, .. }) => {
@@ -1204,6 +1228,7 @@ impl DeckApp {
                 if let Some(c) = self.hot_cues.get_mut(slot as usize) {
                     *c = None;
                     log::info!("hot cue {}: deleted", (b'A' + slot) as char);
+                    self.serve_deck_cues();
                 }
                 self.perform_delete = false;
             }
@@ -1690,6 +1715,13 @@ impl DeckApp {
         // Only a served local file has a row (`served` is keyed by local path).
         let frames = self.audio.len() as u64 / self.audio.channels.max(1) as u64;
         serve_grid(&self.link, &self.path, self.beat_grid.as_ref(), self.audio.sample_rate, frames);
+        self.serve_deck_cues();
+    }
+
+    /// Serve the loaded track's hot and memory cues (see [`served_cues`]).
+    fn serve_deck_cues(&self) {
+        let cues = served_cues(&self.hot_cues, &self.memory_cues, self.audio.sample_rate, self.audio.channels as u32);
+        update_served(&self.link, &self.path, |t| t.cues = cues);
     }
 
     /// After a GRID ADJUST edit: the Link sender follows the new grid, and it

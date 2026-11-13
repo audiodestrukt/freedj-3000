@@ -766,6 +766,15 @@ fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
     })
 }
 
+/// Where a CDJ-3000 sends its Absolute Position packets: every device that
+/// has announced itself, except ourselves, each address once.
+fn position_targets(peers: &HashMap<u8, Ipv4Addr>, me: u8) -> Vec<Ipv4Addr> {
+    let mut v: Vec<Ipv4Addr> = peers.iter().filter(|(p, _)| **p != me).map(|(_, a)| *a).collect();
+    v.sort();
+    v.dedup();
+    v
+}
+
 /// 50001: beats from peers (→ B2 strip, → sync phase reference), and the
 /// handoff / sync-control packets.
 fn listen_beat(
@@ -1241,10 +1250,13 @@ impl ProDjSender {
                     } }
 
                     // ── Absolute Position (CDJ-3000) ─────────────────────────
-                    // Every 30 ms while a track is loaded, playing or not, to
-                    // everyone on 50001: the heard playhead in ms, the track
-                    // length, pitch and effective BPM.  Lighting, video and
-                    // timecode tools follow a CDJ-3000 by these, not beats.
+                    // Every 30 ms while a track is loaded, playing or not: the
+                    // heard playhead in ms, the track length, pitch and
+                    // effective BPM.  Lighting, video and timecode tools follow
+                    // a CDJ-3000 by these, not beats.  Like a CDJ-3000, sent
+                    // straight to each device that has announced itself on
+                    // 50001, not broadcast (captured from one, 2026-11-12); a
+                    // tool announces itself to receive them.
                     if send_full && now.duration_since(last_abs) >= Duration::from_millis(30) {
                         let decoded = st.samples.load().len() as u64;
                         if decoded > 0 {
@@ -1266,7 +1278,10 @@ impl ProDjSender {
                                 ((fader - 1.0) * 10_000.0).round() as i32,
                                 cur_grid.as_ref().map(|g| (g.bpm * fader * 10.0).round() as u32),
                             );
-                            let _ = sock.send_to(&pkt, (bcast, PORT_BEAT));
+                            let peers = link.peers.lock().map(|p| p.clone()).unwrap_or_default();
+                            for pip in position_targets(&peers, player) {
+                                let _ = sock.send_to(&pkt, (pip, PORT_BEAT));
+                            }
                         }
                     }
 
@@ -1927,5 +1942,25 @@ mod sync_offset_tests {
             let f = i as f64 / 100.0;
             assert!(phase_err(f, 0.37).abs() <= 0.5 + 1e-9);
         }
+    }
+}
+
+#[cfg(test)]
+mod position_target_tests {
+    use super::position_targets;
+    use std::collections::HashMap;
+    use std::net::Ipv4Addr;
+
+    /// Like a CDJ-3000: every announced device gets the position packet
+    /// unicast, a tool or mixer included, but not we ourselves, and an
+    /// address shared by two numbers only once.
+    #[test]
+    fn every_other_device_once() {
+        let a = Ipv4Addr::new(169, 254, 5, 55);
+        let tool = Ipv4Addr::new(169, 254, 9, 9);
+        let me = Ipv4Addr::new(169, 254, 77, 1);
+        let peers = HashMap::from([(1u8, a), (2, me), (0x21, tool), (5, a)]);
+        assert_eq!(position_targets(&peers, 2), vec![a, tool]);
+        assert!(position_targets(&HashMap::from([(2u8, me)]), 2).is_empty(), "alone: nothing sent, as a CDJ");
     }
 }

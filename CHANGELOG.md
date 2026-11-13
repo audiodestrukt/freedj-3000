@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Cue points for other decks: a player or tool that loads one of our
+  tracks now gets its hot cues (A–H) and memory cues, in both the plain cue
+  list and the CDJ-3000's extended one, encoded like a CDJ-3000's (byte-exact
+  against a capture).  An emulated CDJ-3000 shows them and cues to the first
+  memory point. Before, every cue list was served empty.
+- Absolute Position packets go straight to each device on the network, as a
+  CDJ-3000 sends them (captured), instead of being broadcast.
 - **CDJ-3000 Absolute Position packets.** While a track is loaded (playing
   or not) OpenDeck now sends, every 30 ms on UDP 50001, what a CDJ-3000
   sends: the playhead in ms, the track length, pitch and BPM. Lighting,
