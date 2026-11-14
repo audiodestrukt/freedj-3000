@@ -166,9 +166,11 @@ impl Message {
         Field::U32(self.txid).encode(&mut out);
         Field::U16(self.kind).encode(&mut out);
         Field::U8(self.args.len() as u8).encode(&mut out);
-        let mut tags = [0u8; 12];
-        for (i, a) in self.args.iter().take(12).enumerate() { tags[i] = a.arg_tag(); }
-        Field::Blob(tags.to_vec()).encode(&mut out);
+        // One type tag per argument, at least 12 (zero-filled): a CDJ-3000's
+        // 16-field menu rows carry a 16-byte list.
+        let mut tags = vec![0u8; self.args.len().max(12)];
+        for (i, a) in self.args.iter().enumerate() { tags[i] = a.arg_tag(); }
+        Field::Blob(tags).encode(&mut out);
         for a in &self.args { a.encode(&mut out); }
         out
     }
@@ -212,6 +214,10 @@ pub struct MenuItem {
     pub flags:      u32,
     pub artwork_id: u32,
     pub position:   u32,
+    /// A CDJ-3000's track rows carry 16 fields; the tail holds the key's
+    /// name (label 3) and the tempo ×100.  Empty / 0 on shorter rows.
+    pub key:        String,
+    pub bpm_x100:   u32,
 }
 
 impl MenuItem {
@@ -226,6 +232,8 @@ impl MenuItem {
             flags:      m.args[7].as_u32(),
             artwork_id: m.args[8].as_u32(),
             position:   m.args[9].as_u32(),
+            key:        m.args.get(14).map(|f| f.as_str().to_string()).unwrap_or_default(),
+            bpm_x100:   m.args.get(15).map(|f| f.as_u32()).unwrap_or(0),
         })
     }
     /// Human name for `item_type` (the low 16 bits; the upper ones carry flags).

@@ -124,14 +124,32 @@ pub fn name_id(name: &str) -> u32 {
     match h { 0 => 1, 0xffff_ffff => 0xffff_fffe, h => h }
 }
 
-/// A menu row (`0x4101`): parent, id, len1, label1, len2, label2, type, flags,
-/// artwork, position, 0, 0.
+/// A menu row (`0x4101`) as a CDJ-3000 sends it, 16 fields: parent, id,
+/// len1, label1, len2, label2, type, flags, artwork, then four numbers, len3,
+/// label3 and one more number.  Only track rows fill the tail
+/// ([`track_row`]); every other row leaves it 0, "" and 0, as captured.
 fn row(parent: u32, id: u32, label: &str, label2: &str, item_type: u32, art: u32) -> Vec<Field> {
-    vec![u(parent), u(id), slen(label), s(label), slen(label2), s(label2), u(item_type), u(0), u(art), u(0), u(0), u(0)]
+    vec![u(parent), u(id), slen(label), s(label), slen(label2), s(label2), u(item_type), u(0), u(art),
+         u(0), u(0), u(0), u(0), slen(""), s(""), u(0)]
 }
 
+/// A track in a list, shaped as a CDJ-3000 lists the tracks on its stick
+/// (captured 2026-11-14, a CDJ-3000 3.22 browsing another's TRACK list):
+/// type 0x10004 with flag 0x0100_0000, then 1, 0x100, the key's id
+/// ([`key_id`]) twice (a player sends its database's key row id second, the
+/// same id its metadata 0x000f row carries), the key's name as label 3 and
+/// the tempo ×100 last.  A CDJ-3000 fills its KEY and BPM columns from these
+/// fields, not from the track's metadata: with the 12-field row we sent,
+/// the KEY column stayed empty.  Label 2 keeps the artist, which our own
+/// LINK browser shows (a CDJ sends it empty and ignores it).
 fn track_row(t: &Track, label: &str) -> Vec<Field> {
-    row(0, t.id, label, &t.artist, 0x0004, if t.has_art { t.id } else { 0 })
+    let key = key_id(&t.key);
+    let key_name = key.map(|k| KEYS[k as usize - 1]).unwrap_or("");
+    let mut r = row(0, t.id, label, &t.artist, 0x0001_0004, if t.has_art { t.id } else { 0 });
+    r[7] = u(0x0100_0000);
+    r[9..16].clone_from_slice(&[u(1), u(0x100), u(key.unwrap_or(0)), u(key.unwrap_or(0)), slen(key_name), s(key_name),
+                                u((t.bpm * 100.0).round() as u32)]);
+    r
 }
 
 /// Distinct non-empty names as (id, name), sorted by name.
@@ -298,7 +316,7 @@ fn menu_rows(lib: &Library, kind_: u16, args: &[Field]) -> Option<Vec<Vec<Field>
                 row(0, name_id(&t.album), &t.album, "", 0x0002, 0),
                 row(0, t.duration_s, "", "", 0x000b, 0),
                 row(0, (t.bpm * 100.0).round() as u32, "", "", 0x000d, 0),
-                row(0, 0, &t.key, "", 0x000f, 0),
+                row(0, key_id(&t.key).unwrap_or(0), &t.key, "", 0x000f, 0),
                 row(0, 0, "", "", 0x000a, 0),
                 row(0, 0, "", "", 0x0013, 0),
                 row(0, 0, "", "", 0x0006, 0),
@@ -781,6 +799,46 @@ mod tests {
         assert_eq!(raw[0][3], s("\u{fffa}ARTIST\u{fffb}"));
         assert!(items(menu_rows(&lib(), 0x1014, &[dmst(), u(0)]).unwrap()).iter().all(|r| r.type_name() == "key"), "0x1014 is the KEY menu, not a track list");
         assert_eq!(menu_rows(&lib(), 0x1400, &[dmst(), u(0), u(0)]).unwrap().len(), 5, "sort choices");
+    }
+
+    /// A track row as a CDJ-3000 sends one, byte for byte (captured
+    /// 2026-11-14: "About It", Em, 126 BPM, from a CDJ-3000 3.22's TRACK
+    /// list), but for the two ids that are the player's own database rows:
+    /// its artwork id and its key row id.
+    #[test]
+    fn track_rows_match_a_cdj3000() {
+        let t = Track { id: 0x52, title: "About It".into(), key: "Em".into(), bpm: 126.0, ..Default::default() };
+        let mut r = track_row(&t, &t.title);
+        assert_eq!((r.len(), r[11].as_u32(), r[12].as_u32()), (16, 17, 17), "16 fields; Em is key 17");
+        r[8] = u(0x50);
+        r[12] = u(5);
+        let got = Message { txid: 0xc, kind: kind::MENU_ITEM, args: r }.encode();
+        assert_eq!(got, unhex("11872349ae110000000c1041010f10140000001006060602060206060606060606060206110000000011000000521100000012260000000900410062006f0075007400200049007400001100000002260000000100001100010004110100000011000000501100000001110000010011000000111100000005110000000626000000030045006d00001100003138"));
+        // No key: id 0 and an empty label, as a player's no-key metadata row.
+        let r = track_row(&Track { id: 1, title: "x".into(), ..Default::default() }, "x");
+        assert_eq!((r[11].as_u32(), r[14].as_str(), r[15].as_u32()), (0, "", 0));
+        // Every other row has the same 16-field shape, its tail empty.
+        let root = menu_rows(&lib(), kind::ROOT_MENU, &[dmst(), u(0), u(0)]).unwrap();
+        assert!(root.iter().all(|r| r.len() == 16 && r[13] == slen("") && r[15] == u(0)));
+    }
+
+    /// The KEY and BPM columns of a CDJ-3000's track list come from the
+    /// rows: a player browsing us over the wire reads each track's key and
+    /// tempo in the list itself (they were missing; the KEY column stayed
+    /// empty for every track we served).
+    #[test]
+    fn a_player_browsing_us_reads_key_and_tempo_in_the_track_list() {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let mut lib = lib();
+        for (t, (k, bpm)) in lib.tracks.iter_mut().zip([("Am", 124.0), ("F#", 128.5), ("", 0.0)]) { t.key = k.into(); t.bpm = bpm; }
+        let lib = lib.shared();
+        thread::spawn(move || { let (c, _) = l.accept().unwrap(); let _ = serve_client(lib, Arc::new(|| 3), c); });
+        let mut c = crate::Client::connect(Ipv4Addr::LOCALHOST, port, 2).unwrap();
+        let rows = c.all_tracks(Slot::Usb, 0).unwrap();
+        let got: Vec<_> = rows.iter().map(|r| (r.label.as_str(), r.key.as_str(), r.bpm_x100, r.item_type)).collect();
+        assert_eq!(got, [("Alpha", "F#", 12850, 0x10004), ("Beta", "Am", 12400, 0x10004), ("Gamma", "", 0, 0x10004)]);
+        assert_eq!(rows[0].type_name(), "track");
     }
 
     #[test]

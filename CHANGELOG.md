@@ -75,6 +75,11 @@ All notable changes to this project will be documented in this file.
   at full scale and keep the MP3 encoder delay, as before; tags read as before.
 
 ### Fixed
+- A CDJ-3000 browsing OpenDeck's music now shows each track's key in its
+  track list (the KEY column was empty, though the key showed once the track
+  was loaded). The track rows now have the 16 fields a CDJ-3000 sends for
+  its own tracks, with the key and the tempo. The player also stops asking
+  for every listed track's details one by one.
 - SLIP works with hot cues and scratching: hold a hot cue (or hold the
   platter in VINYL mode) with SLIP on and the track carries on underneath;
   letting go returns to where it would have been. Before, SLIP only

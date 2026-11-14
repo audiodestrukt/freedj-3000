@@ -144,6 +144,20 @@ stand-alone as `opendeck-serve`. What "serving" means:
    waveform detail (`0x4a02`), artwork (`0x4002`), paged render. Cue lists
    and raw ANLZ tags answer `0x4003`; so does anything unknown, logged, so an
    unexpected request from a real player shows up in the log.
+
+   Menu rows (`0x4101`) have the 16 fields a CDJ-3000 sends (its argument
+   tag list is 16 bytes, not 12). A track row in a list (captured from a
+   CDJ-3000 3.22 listing another's TRACK menu): parent 0, id, title, label 2
+   (empty from a CDJ; we keep the artist), type `0x10004`, flags
+   `0x0100_0000`, artwork id, then 1 (meaning unknown; 2 and 5 also seen),
+   `0x100`, the key id in Camelot order (Abm 1, B 2, ...), the database's
+   key row id (the id its metadata `0x000f` row carries), the key name as
+   label 3, and tempo ×100. The CDJ-3000 fills its BPM and KEY columns from
+   these fields. With the old 12-field rows it asked for `0x2002` metadata for
+   every row and left KEY empty. For the PREVIEW column it asks, for each
+   visible row, for `0x2c04` PWV4 `.EXT` (menu 8). If that has no data it
+   falls back to `0x2004`, the monochrome preview. A row answered "no data"
+   stays black until the list is opened again.
 4. **NFSv2** (`crates/nfs/src/server.rs`): portmap (NULL / GETPORT / DUMP),
    mountd (MNT accepts any name and returns the root handle, EXPORT lists one
    export), nfsd (NULL / GETATTR / LOOKUP / READ ≤ 8 KB / READDIR / STATFS).

@@ -89,7 +89,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | MASTER, handoff both ways | ✅ tested on an XDJ-1000MK2 | All |
 | LINK: browse and load from other players' USB / SD and from rekordbox (dbserver + NFS), with their grids and cues | ✅ | All |
 | Players browsing OpenDeck: ARTIST, ALBUM, TRACK, KEY, PLAYLIST, HISTORY, MATCHING, FILE NAME | ✅ CDJ-3000 (emulator) | All |
-| Serve our own music to other decks (metadata, grid, waveforms, art, hot and memory cues) | ✅ OpenDeck→OpenDeck; a CDJ-3000 lists, browses (ARTIST, ALBUM, TRACK, PLAYLIST, FILE NAME), loads and plays it with its waveforms (emulator); XDJ untested | All |
+| Serve our own music to other decks (metadata, grid, waveforms, art, hot and memory cues) | ✅ OpenDeck→OpenDeck; a CDJ-3000 lists, browses (ARTIST, ALBUM, TRACK, PLAYLIST, FILE NAME, with PREVIEW, BPM and KEY columns), loads and plays it with its waveforms (emulator); XDJ untested | All |
 | The playing track's metadata, grid, waveforms and phrases answer a lookup by the ID our status names, from the moment it loads, wherever the file came from (for other players and Pro DJ Link lighting controllers) | ✅ unit-tested; lighting hardware untested | All |
 | CDJ-3000 Absolute Position packets (playhead ms, length, pitch, BPM every 30 ms on 50001, to each device as a CDJ-3000 sends them) for lighting / video / timecode tools | ✅ measured on a test network; untested with the tester's tool | All |
 | Works over Wi-Fi or ethernet; survives iOS backgrounding | ✅ | All |
