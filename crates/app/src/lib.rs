@@ -1803,7 +1803,7 @@ impl DeckApp {
                 }
             }
             Event::Ui(UiEvent::BrowseDetail) => self.browser.cycle_detail(),
-            Event::Ui(UiEvent::BrowseInfo) => self.browser.toggle_info(),
+            Event::Ui(UiEvent::BrowseInfo) => if self.screen_mode == ScreenMode::Browse { self.browser.toggle_info() },
             Event::Ui(UiEvent::BrowseCategory(i)) => {
                 self.browser.open_rb_category(i);
                 self.screen_mode = ScreenMode::Browse;
@@ -3109,6 +3109,7 @@ impl DeckApp {
         let mode = match self.settings.wave_color {
             settings::WaveColor::Blue => M::Blue, settings::WaveColor::Rgb => M::Rgb, settings::WaveColor::ThreeBand => M::ThreeBand,
         };
+        cdj3000::set_wave_mode(mode as u8);
         if let Some(r) = &mut self.renderer { r.set_color_mode(mode); }
     }
 

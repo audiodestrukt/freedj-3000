@@ -113,7 +113,7 @@ impl Entry {
 
 /// What a linked player's library knows about one track: its metadata and
 /// the cover bytes (JPEG / PNG) when it has one.
-struct DbInfo { meta: opendeck_dbserver::TrackMeta, art: Option<Vec<u8>>, wave: Option<Arc<Vec<(u8, u8)>>> }
+struct DbInfo { meta: opendeck_dbserver::TrackMeta, art: Option<Vec<u8>>, wave: Option<Arc<Vec<(u8, u8)>>>, bands: Option<Arc<Vec<[u8; 3]>>> }
 
 #[derive(Clone)]
 enum EntryKind {
@@ -508,7 +508,17 @@ impl Browser {
                 }
                 Err(e) => { log::info!("LINK preview {id}: {e:#}"); None }
             };
-            Ok(DbInfo { meta, art, wave })
+            // CDJ-3000 3-band preview (.2EX PWV6: 1,200 columns of low, mid, high).
+            let bands = match c.anlz_tag(s, id, b"PWV6", b"2EX") {
+                Ok(b) => {
+                    if verbose { log::info!("LINK preview3 {id}: {} bytes", b.len()); }
+                    let d = if b.len() % 3 != 0 { &b[b.len() - b.len() / 3 * 3..] } else { &b[..] };
+                    let d = if d.len() > 3600 { &d[d.len() - 3600..] } else { d };
+                    Some(Arc::new(d.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect::<Vec<_>>())).filter(|w| w.iter().any(|c| c.iter().any(|&v| v > 0)))
+                }
+                Err(e) => { if verbose { log::info!("LINK preview3 {id}: {e:#}"); } None }
+            };
+            Ok(DbInfo { meta, art, wave, bands })
         }).and_then(|r| r.map_err(|e| log::info!("LINK metadata {id}: {e:#}")).ok());
         self.meta_cache.insert(key, info);
     }
@@ -575,9 +585,9 @@ impl Browser {
     pub fn toggle_info(&mut self) { self.info = !self.info; }
     pub fn playlist_only(&self) -> bool { self.playlist_only }
     /// The table's second-row key: off → ARTIST → ALBUM → GENRE → off.
-    pub fn cycle_detail(&mut self) { self.detail = (self.detail + 1) % 4; }
+    pub fn cycle_detail(&mut self) { self.detail = (self.detail + 1) % 3; }
     pub fn detail_name(&self) -> Option<&'static str> {
-        [None, Some("ARTIST"), Some("ALBUM"), Some("GENRE")][self.detail as usize]
+        [None, Some("ARTIST"), Some("ALBUM")][self.detail as usize]
     }
     /// What the second row shows for an entry (empty when not known yet).
     pub fn detail_text(&self, e: &Entry) -> String {
@@ -585,11 +595,14 @@ impl Browser {
         match self.detail {
             1 => e.artist.clone().or_else(|| tags.and_then(|t| t.artist)).unwrap_or_default(),
             2 => tags.and_then(|t| t.album).unwrap_or_default(),
-            3 => tags.and_then(|t| t.genre).unwrap_or_default(),
             _ => String::new(),
         }
     }
     /// The blue preview of a linked track, once fetched.
+    /// The 3-band preview (low, mid, high per column) of a linked track.
+    pub fn db_bands(&self, l: &Load) -> Option<Arc<Vec<[u8; 3]>>> {
+        self.meta_cache.get(&Self::meta_key(l)?)?.as_ref()?.bands.clone()
+    }
     pub fn db_wave(&self, l: &Load) -> Option<Arc<Vec<(u8, u8)>>> {
         self.meta_cache.get(&Self::meta_key(l)?)?.as_ref()?.wave.clone()
     }

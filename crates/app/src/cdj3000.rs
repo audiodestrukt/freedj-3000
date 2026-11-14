@@ -1895,33 +1895,67 @@ fn file_art(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::Texture
 
 /// The PREVIEW cell of a track row: the blue preview bottom-anchored on black
 /// (unit: 192×44 at x 92), then the cover in the 47 px square at x 284.
+/// The colour mode of the waveforms (the renderer's `ColorMode` as a number:
+/// 0 RGB, 1 3-band, 2 blue), for the track table's previews.
+static WAVE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+pub fn set_wave_mode(m: u8) { WAVE_MODE.store(m, std::sync::atomic::Ordering::Relaxed); }
+
 fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32) {
     let p = ui.painter();
+    // The whole PREVIEW cell but the cover: the wave runs edge to edge.
     let wave = Rect::from_min_max(Pos2::new(x0 + 1.0 * u, y0 + 2.0 * u), Pos2::new(x0 + 191.0 * u, y0 + 46.0 * u));
     p.rect_filled(wave, 0.0, Color32::BLACK);
     let anlz = match e.load() { Some(crate::browser::Load::Local { analyze: Some(a), .. }) => Some(a.clone()), _ => None };
-    let wave_data = anlz.as_deref().and_then(|a| rb_wave(ui.ctx(), a))
-        .or_else(|| e.load().and_then(|l| b.db_wave(l)));
-    if let Some(w) = wave_data {
+    let mode = WAVE_MODE.load(std::sync::atomic::Ordering::Relaxed);
+    let bands = if mode == 2 { None } else { e.load().and_then(|l| b.db_bands(l)) };
+    let cols = (wave.width() / u).floor().max(1.0) as usize;   // one stroke per unit pixel
+    let step = wave.width() / cols as f32;
+    if let Some(w) = bands {
         let n = w.len().max(1);
-        let cols = wave.width().floor().max(1.0) as usize;
+        for c in 0..cols {
+            let (a, z) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
+            let m = w[a..z].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])]);
+            let top = *m.iter().max().unwrap_or(&0) as f32;
+            if top <= 0.0 { continue; }
+            let h = wave.height() * (top / 127.0).min(1.0);
+            let col = if mode == 0 {
+                // RGB: bass red, mid green, high blue, scaled to full brightness.
+                let k = 255.0 / top;
+                Color32::from_rgb((m[0] as f32 * k) as u8, (m[1] as f32 * k) as u8, (m[2] as f32 * k) as u8)
+            } else {
+                // 3-band: the loudest band's colour (blue low, amber mid, white high).
+                match m.iter().position(|&v| v as f32 == top) {
+                    Some(0) => Color32::from_rgb(58, 123, 240),
+                    Some(1) => Color32::from_rgb(240, 160, 48),
+                    _ => Color32::from_rgb(235, 235, 235),
+                }
+            };
+            let x = wave.min.x + (c as f32 + 0.5) * step;
+            p.line_segment([Pos2::new(x, wave.max.y), Pos2::new(x, wave.max.y - h)], Stroke::new(step.max(1.0), col));
+        }
+    } else if let Some(w) = anlz.as_deref().and_then(|a| rb_wave(ui.ctx(), a)).or_else(|| e.load().and_then(|l| b.db_wave(l))) {
+        let n = w.len().max(1);
         for c in 0..cols {
             // The loudest source column under each pixel column.
-            let (a, b) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
-            let (h, wh) = w[a..b].iter().fold((0u8, 0u8), |m, &(h, wh)| if h > m.0 { (h, wh) } else { m });
+            let (a, z) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
+            let (h, wh) = w[a..z].iter().fold((0u8, 0u8), |m, &(h, wh)| if h > m.0 { (h, wh) } else { m });
             if h == 0 { continue; }
             let top = wave.max.y - wave.height() * h as f32 / 31.0;
-            let x = wave.min.x + c as f32 + 0.5;
+            let x = wave.min.x + (c as f32 + 0.5) * step;
             // Unit colours: blue (18,96,151) brightening with whiteness.
             let k = wh as f32 / 7.0;
             let col = Color32::from_rgb((18.0 + 90.0 * k) as u8, (96.0 + 90.0 * k) as u8, (151.0 + 80.0 * k) as u8);
-            p.line_segment([Pos2::new(x, top), Pos2::new(x, wave.max.y)], Stroke::new(1.0, col));
+            p.line_segment([Pos2::new(x, top), Pos2::new(x, wave.max.y)], Stroke::new(step.max(1.0), col));
         }
     }
     let art = Rect::from_min_size(Pos2::new(x0 + 192.0 * u, y0 + 0.5 * u), Vec2::splat(47.0 * u));
-    match e.art.as_deref().and_then(|a| file_art(ui.ctx(), a)) {
-        Some(tex) => { p.image(tex.id(), art, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE); }
-        None => { p.rect_filled(art, 0.0, Color32::from_rgb(30, 30, 30)); }
+    if let Some(tags) = e.load().and_then(|l| b.db_tags(l)).filter(|t| t.artwork.is_some()) {
+        draw_art(ui, ui.ctx(), &tags, &format!("row-{}", e.name), art);
+    } else {
+        match e.art.as_deref().and_then(|a| file_art(ui.ctx(), a)) {
+            Some(tex) => { p.image(tex.id(), art, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE); }
+            None => { p.rect_filled(art, 0.0, Color32::from_rgb(30, 30, 30)); }
+        }
     }
 }
 
@@ -1953,8 +1987,8 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
     label(ui, Pos2::new(tx + 22.0 * u, th.center().y), Align2::LEFT_CENTER, format!("[{:0w$}]", rows.len(), w = count_digits), 21.0, u, LABEL);
     up(label(ui, at(1090.0, 122.0), Align2::LEFT_CENTER, "BPM", 21.0, u, LABEL), LABEL);
     up(label(ui, at(1200.0, 122.0), Align2::LEFT_CENTER, "KEY", 21.0, u, LABEL), LABEL);
-    // INFO key, left of the second-row key.
-    let ib = Rect::from_min_max(at(940.0, 98.0), at(1005.0, 146.0));
+    // INFO key, in the PREVIEW cell (the pane never covers it).
+    let ib = Rect::from_min_max(at(left + 150.0, 98.0), at(left + 230.0, 146.0));
     p.rect_filled(ib, 0.0, if b.info_on() { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });
     outline(ui, ib, Color32::BLACK, u);
     label(ui, ib.center(), Align2::CENTER_CENTER, "INFO", 15.0, u, TEXT);
@@ -1963,8 +1997,11 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
     let sb = Rect::from_min_max(at(1011.0, 98.0), at(1069.0, 146.0));
     p.rect_filled(sb, 0.0, if b.detail_name().is_some() { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });
     if tap(ui, sb, "cdj-trk-detail").0 { out.push(Event::Ui(UiEvent::BrowseDetail)); }
-    if let Some(n) = b.detail_name() {
-        label(ui, at(left + 11.0, 140.0), Align2::LEFT_CENTER, n, 12.0, u, LABEL);
+    // The second column beside TRACK (ARTIST or ALBUM), when switched on.
+    let dx = b.detail_name().map(|_| tr + (1079.0 - tr) * 0.5);
+    if let (Some(n), Some(dx)) = (b.detail_name(), dx) {
+        p.line_segment([at(dx, 92.0), at(dx, 152.0)], Stroke::new(1.5 * u, Color32::BLACK));
+        label(ui, at(dx + 11.0, 122.0), Align2::LEFT_CENTER, n, 21.0, u, LABEL);
     }
     outline(ui, sb, Color32::BLACK, u);
     let (cx, cy) = (sb.center().x, sb.center().y);
@@ -2001,13 +2038,14 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
             out.push(Event::Deck(if lit { ControlEvent::Load } else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - sel as i32 } }));
         }
         track_icon(ui, Pos2::new(sc.min.x + (tr + 23.0) * u, cy), r.stems, u);
-        let clip = p.with_clip_rect(title.intersect(Rect::from_min_max(at(tr, y), at(1075.0, y + ROW_H))));
         let tcol = if r.played { PLAYED } else { TEXT };
-        if b.detail_name().is_some() {
-            clip.text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy - 9.0 * u), Align2::LEFT_CENTER, r.text, FontId::proportional(22.0 * u), tcol);
-            clip.text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy + 13.0 * u), Align2::LEFT_CENTER, b.detail_text(e), FontId::proportional(16.0 * u), LABEL);
-        } else {
-            clip.text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), tcol);
+        let title_end = dx.map_or(1075.0, |d| d - 4.0);
+        p.with_clip_rect(Rect::from_min_max(at(tr, y), at(title_end, y + ROW_H)))
+            .text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), tcol);
+        if let Some(d) = dx {
+            p.line_segment([at(d, y), at(d, y + ROW_H)], Stroke::new(1.0 * u, Color32::from_rgb(70, 70, 70)));
+            p.with_clip_rect(Rect::from_min_max(at(d + 2.0, y), at(1075.0, y + ROW_H)))
+                .text(Pos2::new(sc.min.x + (d + 10.0) * u, cy), Align2::LEFT_CENTER, b.detail_text(e), FontId::proportional(24.0 * u), LABEL);
         }
         if r.tagged { p.circle_filled(Pos2::new(sc.min.x + 1068.0 * u, cy), 5.0 * u, BARS_ORANGE); }
         rules(lit);
