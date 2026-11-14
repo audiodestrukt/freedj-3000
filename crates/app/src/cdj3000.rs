@@ -1750,6 +1750,11 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
             label(ui, Pos2::new(hb.min.x + 11.0 * u, hb.center().y), Align2::LEFT_CENTER, "INFO", 21.0, u, LABEL);
             let tags = match e.load() {
                 Some(crate::browser::Load::Local { path, .. }) => browse_tags(ui.ctx(), path),
+                // A linked player's track: what its library knows.
+                Some(l @ crate::browser::Load::Db { .. }) => b.db_meta(l).map(|m| opendeck_decode::TrackTags {
+                    title: m.title.clone(), artist: m.artist.clone(), album: m.album.clone(), genre: m.genre.clone(),
+                    key: m.key.clone(), year: m.year.clone(), bpm: m.bpm, ..Default::default()
+                }),
                 _ => None,
             }.unwrap_or_default();
             let title = tags.title.clone().unwrap_or_else(|| e.name.clone());

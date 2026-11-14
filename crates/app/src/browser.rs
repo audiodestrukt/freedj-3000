@@ -337,6 +337,9 @@ pub struct Browser {
     /// descend), and the source's own label ("3 USB: OPENDECK") for the root.
     db_title:  String,
     db_label:  String,
+    /// Library metadata of tracks shown in a dbserver list, fetched as each
+    /// is highlighted (a list row carries only title and artist).
+    meta_cache: std::collections::HashMap<(Ipv4Addr, u8, u32), Option<opendeck_dbserver::TrackMeta>>,
     link:      Arc<LinkState>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
@@ -406,6 +409,7 @@ impl Browser {
             media_at: Some(Instant::now()),
             db_title: String::new(),
             db_label: String::new(),
+            meta_cache: Default::default(),
             link,
             preview: Default::default(),
             home: start.clone(),
@@ -443,6 +447,27 @@ impl Browser {
         }
     }
     pub fn selected_entry(&self) -> Option<&Entry> { self.entries.get(self.selected) }
+
+    /// Fetch the highlighted dbserver track's library metadata once (title,
+    /// artist, album, key, BPM, year) for the INFO pane.  Call each frame;
+    /// it asks the player only when the highlight lands on a new track.
+    pub fn prefetch_meta(&mut self) {
+        let Some(Entry { kind: EntryKind::Track(Load::Db { ip, id, .. }), .. }) = self.entries.get(self.selected) else { return };
+        let Some((cur, _, slot)) = self.db.as_ref() else { return };
+        if cur != ip { return; }
+        let key = (*ip, *slot as u8, *id);
+        if self.meta_cache.contains_key(&key) { return; }
+        let id = *id;
+        let m = self.db_call(|c, s| c.track_meta(s, id)).and_then(|r| r.map_err(|e| log::info!("LINK metadata {id}: {e:#}")).ok());
+        self.meta_cache.insert(key, m);
+    }
+
+    /// The library metadata fetched for a dbserver track, if any.
+    pub fn db_meta(&self, l: &Load) -> Option<&opendeck_dbserver::TrackMeta> {
+        let Load::Db { ip, id, sd, rekordbox, .. } = l else { return None };
+        let slot = if *rekordbox { Slot::Collection } else if *sd { Slot::Sd } else { Slot::Usb };
+        self.meta_cache.get(&(*ip, slot as u8, *id))?.as_ref()
+    }
 
     pub fn title(&self) -> String {
         match self.stack.last() {
@@ -901,13 +926,19 @@ impl Browser {
     /// tracks whose title or artist contains it (the unit's SEARCH). In a
     /// folder: audio files anywhere below it whose name contains it.
     /// An empty query has no results, as on the unit.
-    fn search_entries(&self) -> Vec<Entry> {
+    fn search_entries(&mut self) -> Vec<Entry> {
         let q = self.search_query.to_lowercase();
         if q.is_empty() { return Vec::new(); }
         if self.stack.iter().any(|l| matches!(l, Loc::RbRoot)) {
             return self.rb_track_entries(|e| e.tracks.iter()
                 .filter(|t| t.title.to_lowercase().contains(&q) || t.artist.to_lowercase().contains(&q))
                 .collect());
+        }
+        // A linked player's library: its own search.
+        if self.db.is_some() && self.stack.iter().any(|l| matches!(l, Loc::DbRoot | Loc::DbFolder(_) | Loc::DbCat(..) | Loc::DbAllTracks)) {
+            if q.chars().count() < 2 { return Vec::new(); }
+            let text = self.search_query.clone();
+            return self.db_track_entries(|c, s| c.search(s, &text));
         }
         let Some(dir) = self.stack.iter().rev().find_map(|l| match l { Loc::Fs(p) => Some(p.clone()), _ => None }) else { return Vec::new() };
         let mut idx = self.fs_index.borrow_mut();

@@ -55,6 +55,8 @@ pub mod kind {
     /// Tracks listed by file name (args: dmst, sort).
     pub const FILENAME_MENU:  u16 = 0x1013;
     pub const KEY_MENU:       u16 = 0x1014;
+    /// Search by substring (args: dmst, sort, text byte size, text, 0).
+    pub const SEARCH:         u16 = 0x1300;
     pub const ORIG_ARTIST_MENU: u16 = 0x1302;
     pub const REMIXER_MENU:   u16 = 0x1602;
     /// Albums of one artist (args: dmst, sort, artist id).
@@ -456,6 +458,16 @@ impl Client {
     /// folded into title, artist, album, genre, key, BPM and year.
     pub fn track_meta(&mut self, slot: Slot, rekordbox_id: u32) -> Result<TrackMeta> {
         Ok(TrackMeta::from_rows(&self.metadata(slot, rekordbox_id)?))
+    }
+
+    /// SEARCH: the tracks whose title, artist or album contain `text` (the
+    /// player's own search, 0x1300; the text goes up in upper case, as a
+    /// player's screen sends it).
+    pub fn search(&mut self, slot: Slot, text: &str) -> Result<Vec<MenuItem>> {
+        let upper = text.to_uppercase();
+        let bytes = (upper.encode_utf16().count() as u32 + 1) * 2;
+        self.menu(kind::SEARCH, slot, TrackType::Rekordbox,
+                  vec![Field::U32(0), Field::U32(bytes), Field::Str(upper), Field::U32(0)])
     }
 
     /// FILENAME category: every track, labelled by file name.

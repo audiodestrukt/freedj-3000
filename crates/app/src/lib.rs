@@ -1612,7 +1612,11 @@ impl DeckApp {
                                 let entry = taglist::TagEntry { name: e.name.clone(), artist: e.artist.clone(), load: load.clone() };
                                 let tagged = self.tag_list.toggle(entry);
                                 log::info!("tag list: {} {}", if tagged { "tagged" } else { "removed" }, e.name);
+                            } else {
+                                log::info!("tag list: {:?} is not a track, nothing to tag", e.name);
                             }
+                        } else {
+                            log::info!("tag list: nothing highlighted to tag");
                         }
                     }
                     ScreenMode::TagList => {
@@ -3647,6 +3651,7 @@ impl DeckApp {
         self.poll_stems();
         self.sync_stem_wave();
         self.browser.poll_media();   // USB inserted / removed → source rows
+        if self.screen_mode == ScreenMode::Browse { self.browser.prefetch_meta(); }
         // Jog nudge snap-back: once the wheel has been still past the window,
         // return to the pitch-fader speed.
         if let Some(until) = self.jog_until {
