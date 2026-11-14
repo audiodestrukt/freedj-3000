@@ -57,6 +57,8 @@ pub mod kind {
     pub const KEY_MENU:       u16 = 0x1014;
     /// Search by substring (args: dmst, sort, text byte size, text, 0).
     pub const SEARCH:         u16 = 0x1300;
+    /// The folder tree of the media (args: dmst, sort, folder id, 0; id 0 = root).
+    pub const FOLDER_MENU:    u16 = 0x2006;
     pub const ORIG_ARTIST_MENU: u16 = 0x1302;
     pub const REMIXER_MENU:   u16 = 0x1602;
     /// Albums of one artist (args: dmst, sort, artist id).

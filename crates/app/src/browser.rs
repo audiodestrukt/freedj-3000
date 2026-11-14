@@ -67,6 +67,8 @@ fn db_category(i: &opendeck_dbserver::MenuItem) -> &'static str {
         "HISTORY" => "root-history",
         "KEY" => "root-key",
         "ORIGINAL ARTIST" => "root-orig-artist",
+        "FOLDER" => "root-folder",
+        "SEARCH" => "root-search",
         "REMIXER" => "root-remixer",
         _ => i.type_name(),
     }
@@ -169,6 +171,8 @@ enum Loc {
     /// picked so far.  Fewer than `Cat::depth` of them is a list of names to
     /// pick from; all of them is the tracks.
     DbCat(Cat, Vec<u32>),
+    /// The player's folder tree (FOLDER): folder id, 0 = the root.
+    DbTree(u32),
 }
 
 /// A dbserver category beyond the ones with their own `Loc`: the menu that
@@ -524,6 +528,8 @@ impl Browser {
             Some(Loc::DbFilenames) => "FILENAME".to_string(),
             Some(Loc::DbCat(c, ids)) if ids.is_empty() => c.label().to_string(),
             Some(Loc::DbCat(..)) => self.db_title.clone(),
+            Some(Loc::DbTree(0)) => "FOLDER".to_string(),
+            Some(Loc::DbTree(_)) => self.db_title.clone(),
             Some(Loc::DbFolder(_)) | Some(Loc::DbPlaylist(_)) | Some(Loc::DbArtist(_)) | Some(Loc::DbAlbum(_)) => self.db_title.clone(),
             None => "/".to_string(),
         }
@@ -586,6 +592,7 @@ impl Browser {
             Some(Loc::DbAlbum(id))    => self.db_track_entries(|c, s| c.tracks_for_album(s, id)),
             Some(Loc::DbFilenames)    => self.db_track_entries(|c, s| c.filenames(s)),
             Some(Loc::DbCat(c, ids))  => self.db_cat_entries(c, ids),
+            Some(Loc::DbTree(id))     => self.db_tree_entries(id),
             None                      => Vec::new(),
         };
         self.entries = entries;
@@ -709,6 +716,8 @@ impl Browser {
                 "root-artist"   => EntryKind::Descend(Loc::DbArtists),
                 "root-album"    => EntryKind::Descend(Loc::DbAlbums),
                 "root-filename" => EntryKind::Descend(Loc::DbFilenames),
+                "root-folder"   => EntryKind::Descend(Loc::DbTree(0)),
+                "root-search"   => EntryKind::Descend(Loc::Search),
                 other => match Cat::of_root(other) {
                     Some(c) => EntryKind::Descend(Loc::DbCat(c, Vec::new())),
                     None    => EntryKind::Unsupported,
@@ -737,6 +746,25 @@ impl Browser {
                 Entry { name, is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(Loc::DbCat(cat, next)) }
             }).collect(),
             Err(e) => { log::warn!("LINK {}: 0x{kind:04x} {ids:x?}: {e:#}", cat.label()); Vec::new() }
+        }
+    }
+
+    /// FOLDER: one level of the player's folder tree, folders then the
+    /// tracks in them.
+    fn db_tree_entries(&mut self, folder: u32) -> Vec<Entry> {
+        let Some(r) = self.db_call(|c, s| c.browse(opendeck_dbserver::kind::FOLDER_MENU, s, &[folder, 0])) else { return Vec::new() };
+        let Some((ip, _, slot)) = self.db.as_ref() else { return Vec::new() };
+        let (ip, slot) = (*ip, *slot);
+        match r {
+            Ok(items) => items.into_iter().filter_map(|i| match i.type_name() {
+                "folder" => Some(Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None,
+                                         kind: EntryKind::Descend(Loc::DbTree(i.id)) }),
+                "track" => Some(Entry { name: i.label.clone(), is_dir: false,
+                    artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None, art: None,
+                    kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }) }),
+                other => { log::info!("LINK folder {folder}: row {:?} of type {other} (0x{:x}) skipped", i.label, i.item_type); None }
+            }).collect(),
+            Err(e) => { log::warn!("LINK folder {folder}: {e:#}"); Vec::new() }
         }
     }
 
@@ -1069,8 +1097,9 @@ impl Browser {
             EntryKind::Unsupported => { log::info!("BROWSE: {:?} is not browsable here yet", sel_name); Enter::Nothing }
             EntryKind::Grant => { media::request_access(); Enter::Nothing }
             EntryKind::Descend(loc) => {
-                if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_) | Loc::DbCat(..)) { self.db_title = sel_name.clone(); }
+                if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_) | Loc::DbCat(..) | Loc::DbTree(_)) { self.db_title = sel_name.clone(); }
                 let from_usb_row = sel_name.starts_with("USB: ");
+                if matches!(loc, Loc::Search) { self.search_query.clear(); }
                 self.stack.push(loc);
                 self.names.resize(self.stack.len() - 1, String::new());
                 self.names.push(sel_name.clone());
