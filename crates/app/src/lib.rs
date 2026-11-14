@@ -1579,7 +1579,8 @@ impl DeckApp {
                     return;
                 }
                 if self.link.master.load(Ordering::Relaxed) {
-                    log::info!("already master");
+                    // MASTER again lets go of it.
+                    self.link.release_master("MASTER pressed while master");
                 } else {
                     // Enable Link sending: you can't lead without broadcasting
                     // beats/status. Off by default (pure follower) until MASTER.

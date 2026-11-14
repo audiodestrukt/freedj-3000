@@ -284,6 +284,18 @@ impl LinkState {
         v
     }
 
+    /// Give the master role up (MASTER pressed while master): our status
+    /// stops carrying the flag.  Nobody is master until a player takes it.
+    pub fn release_master(&self, why: &str) {
+        self.master.store(false, Ordering::Relaxed);
+        self.want_master.store(false, Ordering::Relaxed);
+        self.handoff_to.store(0, Ordering::Relaxed);
+        if self.master_player.load(Ordering::Relaxed) == self.player() as u32 {
+            self.master_player.store(0, Ordering::Relaxed);
+        }
+        log::info!("ProDJ Link: master released ({why})");
+    }
+
     /// Assert the master role with a sync counter newer than anything seen.
     fn take_master(&self, why: &str) {
         let n = self.largest_sync.load(Ordering::Relaxed) + 1;
