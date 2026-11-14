@@ -244,7 +244,7 @@ impl Settings {
             Setting::Skin         => self.skin.label().into(),
             Setting::WaveColor    => format!("{}   (C)", self.wave_color.label()),
             Setting::DeckView     => if self.full_deck { "FULL DECK   (F)".into() } else { "SCREEN ONLY   (F)".into() },
-            Setting::Stems        => if self.stems { "ON   (prepared stems)".into() } else { "OFF".into() },
+            Setting::Stems        => if self.stems { "ON".into() } else { "OFF".into() },
             Setting::PerfLog      => if self.perf_log { "ON   (Documents/opendeck-perf.log)".into() } else { "OFF".into() },
         }
     }
