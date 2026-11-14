@@ -2351,7 +2351,16 @@ impl DeckApp {
 
     /// Step a MENU setting and apply whatever it controls at runtime.
     fn cycle_setting(&mut self, s: settings::Setting) {
+        let old_range = self.settings.tempo_range;
         self.settings.cycle(s, 1);
+        if s == settings::Setting::TempoRange {
+            // The fader stays put; the tempo follows the new range.
+            let speed = f32::from_bits(self.fader_speed.load(Ordering::Relaxed));
+            let speed = input::speed_after_range_change(speed, old_range, self.settings.tempo_range);
+            self.fader_speed.store(speed.to_bits(), Ordering::Relaxed);
+            self.audio.speed_store(speed);
+            log::info!("tempo range {} → tempo {:+.2}%", settings::Settings::range_label(self.settings.tempo_range), (speed - 1.0) * 100.0);
+        }
         cpumeter::set_file_log(self.settings.perf_log);
         if s == settings::Setting::DeckView { self.apply_deck_view(); }
         if s == settings::Setting::WaveColor { self.apply_wave_color(); }

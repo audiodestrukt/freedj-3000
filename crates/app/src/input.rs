@@ -132,6 +132,13 @@ pub fn speed_to_fader(speed: f32, range: f32) -> f32 {
     (0.5 - (speed - 1.0) / (2.0 * range)).clamp(0.0, 1.0)
 }
 
+/// TEMPO RANGE changed: the fader is a physical part and stays where it is,
+/// so the tempo follows the new range (+3 % on ±6 is +8 % on ±16, as on a
+/// CDJ).
+pub fn speed_after_range_change(speed: f32, old_range: f32, new_range: f32) -> f32 {
+    fader_to_speed(speed_to_fader(speed, old_range), new_range)
+}
+
 /// Audio time one **canonical** jog tick scrubs the playhead (deck paused, or
 /// VINYL while playing); the tempo-nudge law scales off the same tick. Each
 /// jog source normalises its device's native resolution to this tick (the
@@ -139,3 +146,19 @@ pub fn speed_to_fader(speed: f32, range: f32) -> f32 {
 /// single feel serves every controller. Tune this to change scrub feel
 /// everywhere at once.
 pub const JOG_SECS_PER_TICK: f64 = 0.020;
+
+#[cfg(test)]
+mod range_tests {
+    use super::*;
+
+    #[test]
+    fn a_range_change_keeps_the_fader_where_it_is() {
+        // Half way down on ±6 (+3 %) is +8 % on ±16 and +5 % on ±10.
+        assert!((speed_after_range_change(1.03, 0.06, 0.16) - 1.08).abs() < 1e-5);
+        assert!((speed_after_range_change(1.08, 0.16, 0.10) - 1.05).abs() < 1e-5);
+        for (speed, a, b) in [(0.97f32, 0.10, 1.00), (1.06, 0.06, 0.16), (1.0, 0.16, 0.06), (0.9, 0.16, 0.10)] {
+            let after = speed_after_range_change(speed, a, b);
+            assert!((speed_to_fader(after, b) - speed_to_fader(speed, a)).abs() < 1e-5, "{speed} {a}→{b}");
+        }
+    }
+}

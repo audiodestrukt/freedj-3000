@@ -75,6 +75,9 @@ All notable changes to this project will be documented in this file.
   at full scale and keep the MP3 encoder delay, as before; tags read as before.
 
 ### Fixed
+- TEMPO RANGE no longer moves the tempo fader. The fader stays where it
+  is and the tempo follows the new range, as on a CDJ: +3 % on ±6 becomes
+  +8 % on ±16.
 - 32-bit FLAC (FLAC 1.4 and later) loads and plays.  Symphonia 0.5 refused
   it and 0.6.1 decodes its stereo wrongly; the FLAC crate is vendored with
   the open upstream fix (Symphonia PR #587), and decodes bit for bit as the
