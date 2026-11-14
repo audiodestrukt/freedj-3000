@@ -770,7 +770,7 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
                     if m[3] > 0 {
                         let col = Color32::from_rgb(m[0] * 36, m[1] * 36, m[2] * 36);
                         let hh = half * m[3] as f32 / 31.0;
-                        p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0, col));
+                        p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0_f32, col));
                     }
                 }
             } else if coloured {
@@ -778,7 +778,7 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
                     let m = bands[a..b.max(a + 1).min(bands.len())].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])]);
                     if let Some((col, frac)) = band_style(mode, m) {
                         let hh = half * frac;
-                        p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0, col));
+                        p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0_f32, col));
                     }
                 }
             } else if a < n {
@@ -790,7 +790,7 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
                     let k = wh as f32 / 7.0;
                     let col = Color32::from_rgb((18.0 + 190.0 * k) as u8, (96.0 + 120.0 * k) as u8, (151.0 + 80.0 * k) as u8);
                     let hh = half * h as f32 / 31.0;
-                    p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0, col));
+                    p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0_f32, col));
                 }
             }
             x += 1.0;
@@ -806,7 +806,7 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
             p.line_segment([Pos2::new(x, r.min.y + 2.0 * u), Pos2::new(x, r.min.y + 2.0 * u + len)], Stroke::new(2.0 * u, col));
             p.line_segment([Pos2::new(x, r.max.y - 2.0 * u), Pos2::new(x, r.max.y - 2.0 * u - len)], Stroke::new(2.0 * u, col));
             p.line_segment([Pos2::new(x, r.min.y + 14.0 * u), Pos2::new(x, r.max.y - 14.0 * u)],
-                           Stroke::new(1.0, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
+                           Stroke::new(1.0_f32, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
         }
     }
     else if snap.beat2_bpm > 0.0 && !snap.master {
@@ -824,7 +824,7 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
             p.line_segment([Pos2::new(x, r.min.y + 2.0 * u), Pos2::new(x, r.min.y + 2.0 * u + len)], Stroke::new(2.0 * u, col));
             p.line_segment([Pos2::new(x, r.max.y - 2.0 * u), Pos2::new(x, r.max.y - 2.0 * u - len)], Stroke::new(2.0 * u, col));
             p.line_segment([Pos2::new(x, r.min.y + 14.0 * u), Pos2::new(x, r.max.y - 14.0 * u)],
-                           Stroke::new(1.0, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
+                           Stroke::new(1.0_f32, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
         }
     }
     p.line_segment([Pos2::new(cx, r.min.y + 2.0 * u), Pos2::new(cx, r.max.y - 2.0 * u)], Stroke::new(2.5 * u, TEXT));
@@ -1417,7 +1417,7 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
     draw_art(ui, ctx, t, if remote { "deck-remote" } else { "deck" }, r(222.0, 112.0, 312.0, 202.0));
     for i in 0..5 { star(ui, at(155.0 + 33.0 * i as f32, 237.0), 13.0 * u, u); }
     for y in [262.0, 313.0, 364.0, 415.0] {
-        p.line_segment([at(140.0, y), at(312.0, y)], Stroke::new(1.0, RULE));
+        p.line_segment([at(140.0, y), at(312.0, y)], Stroke::new(1.0_f32, RULE));
     }
     boxed(ui, "BPM", at(159.0, 288.0), u);
     let bpm_shown = if remote { rv.and_then(|v| v.bpm) } else { snap.beat_grid.map(|g| g.bpm as f32) };
@@ -1447,7 +1447,7 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
             None => { label(ui, at(379.0, y), Align2::CENTER_CENTER, "♪", 30.0, u, TEXT); }
         }
         clip.text(at(400.0, y), Align2::LEFT_CENTER, text, FontId::proportional(30.0 * u), TEXT);
-        p.line_segment([at(362.0, y + 25.0), at(1228.0, y + 25.0)], Stroke::new(1.0, RULE));
+        p.line_segment([at(362.0, y + 25.0), at(1228.0, y + 25.0)], Stroke::new(1.0_f32, RULE));
     }
 
     // Detail columns: genre / label / remixer / original artist; bitrate,
@@ -1456,18 +1456,18 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
                       (390.0, Icon::Person, String::new()), (441.0, Icon::Person, String::new())] {
         icon(ui, k, at(379.0, y), u);
         label(ui, at(400.0, y), Align2::LEFT_CENTER, v, 24.0, u, TEXT);
-        p.line_segment([at(362.0, y + 25.0), at(650.0, y + 25.0)], Stroke::new(1.0, RULE));
+        p.line_segment([at(362.0, y + 25.0), at(650.0, y + 25.0)], Stroke::new(1.0_f32, RULE));
     }
     boxed(ui, "bps", at(716.0, 288.0), u);
-    p.line_segment([at(700.0, 313.0), at(860.0, 313.0)], Stroke::new(1.0, RULE));
+    p.line_segment([at(700.0, 313.0), at(860.0, 313.0)], Stroke::new(1.0_f32, RULE));
     icon(ui, Icon::Bubble, at(716.0, 340.0), u);
     p.with_clip_rect(r(740.0, 320.0, 1228.0, 360.0))
         .text(at(740.0, 338.0), Align2::LEFT_CENTER, dash(&t.comment), FontId::proportional(22.0 * u), TEXT);
     icon(ui, Icon::Calendar, at(907.0, 288.0), u);
-    p.line_segment([at(893.0, 313.0), at(1003.0, 313.0)], Stroke::new(1.0, RULE));
+    p.line_segment([at(893.0, 313.0), at(1003.0, 313.0)], Stroke::new(1.0_f32, RULE));
     icon(ui, Icon::Calendar, at(1067.0, 288.0), u);
     label(ui, at(1090.0, 288.0), Align2::LEFT_CENTER, dash(&t.year), 22.0, u, TEXT);
-    p.line_segment([at(1050.0, 313.0), at(1228.0, 313.0)], Stroke::new(1.0, RULE));
+    p.line_segment([at(1050.0, 313.0), at(1228.0, 313.0)], Stroke::new(1.0_f32, RULE));
 }
 
 // ── List screens (BROWSE, TAG LIST, UTILITY) ─────────────────────────────────
@@ -1840,7 +1840,7 @@ fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: 
                 };
                 label(ui, right, Align2::RIGHT_CENTER, v, 28.0, u, TEXT);
             }
-            ui.painter().line_segment([at(949.0, y + 22.0), at(1260.0, y + 22.0)], Stroke::new(1.0, Color32::BLACK));
+            ui.painter().line_segment([at(949.0, y + 22.0), at(1260.0, y + 22.0)], Stroke::new(1.0_f32, Color32::BLACK));
         };
         line(120.0, "Songs", Some((songs, "")));
         line(166.0, "Playlists", Some((lists, "")));
@@ -2062,7 +2062,7 @@ fn draw_browse_info(ui: &Ui, b: &Browser, e: &crate::browser::Entry, sc: Rect, r
     let artist = tags.artist.clone().or_else(|| e.artist.clone()).unwrap_or_default();
     let bpm = tags.bpm.or(e.bpm).map(|b| format!("{b:.1}")).unwrap_or_default();
     let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
-    let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0, Color32::from_rgb(70, 70, 70)));
+    let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0_f32, Color32::from_rgb(70, 70, 70)));
     let time = dur.map(|d| format!("{:02}:{:02}", d / 60, d % 60)).unwrap_or_default();
     let rows: [(&str, String); 7] = [
         ("person", artist),
@@ -2753,7 +2753,7 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
                     label(ui, Pos2::new(x - 4.0 * u, ru.center().y), Align2::RIGHT_CENTER, format!("{}:00", half / 2), 14.0, u, LABEL);
                 }
             } else {
-                p.line_segment([Pos2::new(x, ru.min.y + 2.0 * u), Pos2::new(x, ru.max.y - 5.0 * u)], Stroke::new(1.0, DIM));
+                p.line_segment([Pos2::new(x, ru.min.y + 2.0 * u), Pos2::new(x, ru.max.y - 5.0 * u)], Stroke::new(1.0_f32, DIM));
             }
             half += 1;
         }

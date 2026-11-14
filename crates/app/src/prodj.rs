@@ -1008,6 +1008,7 @@ impl LinkState {
     /// A player's playhead in ms now, from its latest position packet run
     /// forward at its pitch while it plays; None without a recent one (1 s).
     /// `playing` comes from its status.
+    #[cfg(test)]   // superseded in the app by RemoteWave::smooth_playhead
     pub fn playhead_ms(&self, player: u8, playing: bool, now: Instant) -> Option<f64> {
         let (p, at) = self.positions.lock().ok()?.get(&player).copied()?;
         let age = now.checked_duration_since(at)?;

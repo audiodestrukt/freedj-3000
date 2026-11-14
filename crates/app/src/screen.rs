@@ -607,7 +607,7 @@ fn draw_phone_side(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, sd: &Phone
     cap(sd.browse, "BROWSE");   // CUE / PLAY carry their own glyphs; no room for captions
     for (r, label, name, lit) in [(sd.tag_track, "TAG TRACK", "fp-tag", sel_tagged), (sd.back, "BACK", "fp-back", false)] {
         p.rect_filled(r, 3.0, KEY_LO);
-        p.rect_stroke(r, 3.0, Stroke::new(1.0, FAINT));
+        p.rect_stroke(r, 3.0, Stroke::new(1.0_f32, FAINT));
         let resp = ui.interact(r, Id::new(name), Sense::click());
         if lit { p.rect_filled(r, 3.0, tint(BLUE, 120)); }
         else if resp.is_pointer_button_down_on() { p.rect_filled(r, 3.0, tint(TEXT, 70)); }
@@ -650,7 +650,7 @@ fn draw_phone_strip(ui: &Ui, snap: &DeckSnapshot, st: &PhoneStrip, out: &mut Vec
     let (mt_tap, _) = tap(ui, mt, "phone-mt");
     if mt_tap { out.push(Event::Deck(ControlEvent::KeyLockToggle)); }
     if snap.key_lock { p.rect_filled(mt, 2.0, RED); text(ui, mt.center(), Align2::CENTER_CENTER, "MT", cap * 0.8, TEXT); }
-    else { p.rect_stroke(mt, 2.0, Stroke::new(1.0, FAINT)); text(ui, mt.center(), Align2::CENTER_CENTER, "MT", cap * 0.8, FAINT); }
+    else { p.rect_stroke(mt, 2.0, Stroke::new(1.0_f32, FAINT)); text(ui, mt.center(), Align2::CENTER_CENTER, "MT", cap * 0.8, FAINT); }
     let v = snap.tempo_percent();
     let s = if v.abs() < 0.005 { "0.00".to_string() } else { format!("{:+.2}", v) };
     let big = te.height() * 0.58;
@@ -740,7 +740,7 @@ fn play_pause_glyph(p: &egui::Painter, c: Pos2, s: f32, col: Color32) {
 fn fader_slot(p: &egui::Painter, ft: Rect) {
     let round = ft.width() * 0.22;
     p.rect_filled(ft, round, Color32::from_rgb(0x0a, 0x0b, 0x0d));
-    p.rect_stroke(ft, round, Stroke::new(1.5, Color32::from_rgb(0x2c, 0x2e, 0x33)));
+    p.rect_stroke(ft, round, Stroke::new(1.5_f32, Color32::from_rgb(0x2c, 0x2e, 0x33)));
     // Centre travel groove.
     let cx = ft.center().x;
     let inset = ft.width() * 0.22;
@@ -864,11 +864,11 @@ pub(crate) fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, 
     // column — TIME, AUTO CUE, TAG TRACK, BACK — labelled inside the slab.
     let slab = |r: Rect| {
         p.rect_filled(r, 3.0, KEY_LO);
-        p.rect_stroke(r, 3.0, Stroke::new(1.0, FAINT));
+        p.rect_stroke(r, 3.0, Stroke::new(1.0_f32, FAINT));
     };
     if let Some(r) = f.jog_mode {
         slab(r);
-        if snap.jog_vinyl { p.rect_stroke(r.expand(1.5), 4.0, Stroke::new(2.0, tint(ORANGE, 110))); }
+        if snap.jog_vinyl { p.rect_stroke(r.expand(1.5), 4.0, Stroke::new(2.0_f32, tint(ORANGE, 110))); }
         text(ui, r.center(), Align2::CENTER_CENTER, "VINYL", lbl * 0.85, if snap.jog_vinyl { ORANGE } else { DIM });
     }
     for (rect, s) in [(f.time_mode, "TIME"), (f.auto_cue, "AUTO CUE"), (f.tag_track, "TAG TRACK"), (f.back, "BACK")] {
@@ -1378,7 +1378,7 @@ fn draw_info_screen(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32) {
         text(ui, Pos2::new(val_x, y), Align2::LEFT_CENTER, v, fs, TEXT);
         if i + 1 < rows.len() {
             let ly = body.min.y + pad + row_h * (i as f32 + 1.0);
-            p.line_segment([Pos2::new(lbl_x, ly), Pos2::new(body.max.x - pad, ly)], Stroke::new(1.0, FAINT));
+            p.line_segment([Pos2::new(lbl_x, ly), Pos2::new(body.max.x - pad, ly)], Stroke::new(1.0_f32, FAINT));
         }
     }
 }
@@ -1442,17 +1442,17 @@ fn draw_jog_center(p: &egui::Painter, center: Pos2, radius: f32, snap: &DeckSnap
         if d > PI { d -= TAU; }
         if d.abs() < gap_half { continue; }          // leave the notch dark
         p.line_segment([center + dir(a) * spoke_in, center + dir(a) * spoke_out],
-                       Stroke::new(1.2, grey));
+                       Stroke::new(1.2_f32, grey));
     }
     // Bright leading edge of the notch = exact playback position (kept in-band).
     p.line_segment([center + dir(pos_ang) * spoke_in, center + dir(pos_ang) * spoke_out],
-                   Stroke::new(2.2, Color32::WHITE));
+                   Stroke::new(2.2_f32, Color32::WHITE));
 
     // Cue-point hash (red): a short bold tick on the outer edge, fixed on the
     // platter at the cue angle.
     p.line_segment([center + dir(cue_ang) * (spoke_in + (spoke_out - spoke_in) * 0.45),
                     center + dir(cue_ang) * spoke_out],
-                   Stroke::new(3.2, RED));
+                   Stroke::new(3.2_f32, RED));
 
     // White segmented inner ring.
     let segs = 36;
@@ -1463,22 +1463,22 @@ fn draw_jog_center(p: &egui::Painter, center: Pos2, radius: f32, snap: &DeckSnap
         for s in 1..=3 {
             let a = a0 + (a1 - a0) * s as f32 / 3.0;
             let cur = center + dir(a) * ring_r;
-            p.line_segment([prev, cur], Stroke::new(2.0, Color32::from_gray(0xeb)));
+            p.line_segment([prev, cur], Stroke::new(2.0_f32, Color32::from_gray(0xeb)));
             prev = cur;
         }
     }
-    p.circle_stroke(center, ring_r * 0.86, Stroke::new(1.5, Color32::from_gray(0xd2)));
+    p.circle_stroke(center, ring_r * 0.86, Stroke::new(1.5_f32, Color32::from_gray(0xd2)));
 
     // Hub badge: blue "Vinyl" in JOG MODE = VINYL, a plain dark hub in CDJ mode
     // (the unit only shows the badge in vinyl mode).
     if snap.jog_vinyl {
         p.circle_filled(center, badge_r, Color32::from_rgb(0x60, 0x96, 0xc4));
-        p.circle_stroke(center, badge_r, Stroke::new(1.5, Color32::from_gray(0xe6)));
+        p.circle_stroke(center, badge_r, Stroke::new(1.5_f32, Color32::from_gray(0xe6)));
         p.text(center, Align2::CENTER_CENTER, "Vinyl",
                FontId::proportional(badge_r * 0.62), Color32::from_rgb(0x14, 0x1e, 0x2d));
     } else {
         p.circle_filled(center, badge_r, Color32::from_gray(0x22));
-        p.circle_stroke(center, badge_r, Stroke::new(1.5, Color32::from_gray(0x80)));
+        p.circle_stroke(center, badge_r, Stroke::new(1.5_f32, Color32::from_gray(0x80)));
     }
 }
 
@@ -1570,9 +1570,9 @@ fn bracket_caption(ui: &Ui, r: Rect, s: &str, h: f32) {
     let tw = s.len() as f32 * h * 0.010;
     let p = ui.painter();
     for (x0, x1) in [(r.min.x, r.center().x - tw), (r.center().x + tw, r.max.x)] {
-        p.line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], Stroke::new(1.0, FAINT));
-        p.line_segment([Pos2::new(x0, y), Pos2::new(x0, y + 4.0)], Stroke::new(1.0, FAINT));
-        p.line_segment([Pos2::new(x1, y), Pos2::new(x1, y + 4.0)], Stroke::new(1.0, FAINT));
+        p.line_segment([Pos2::new(x0, y), Pos2::new(x1, y)], Stroke::new(1.0_f32, FAINT));
+        p.line_segment([Pos2::new(x0, y), Pos2::new(x0, y + 4.0)], Stroke::new(1.0_f32, FAINT));
+        p.line_segment([Pos2::new(x1, y), Pos2::new(x1, y + 4.0)], Stroke::new(1.0_f32, FAINT));
     }
 }
 
@@ -1594,7 +1594,7 @@ fn draw_left(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, perform: bool, 
         let l = lay.logo;
         p.rect_filled(l, 2.0, KEY_LO);
         let c = Pos2::new(l.center().x, l.center().y - h * 0.02);
-        p.circle_stroke(c, h * 0.022, Stroke::new(2.0, TEXT));
+        p.circle_stroke(c, h * 0.022, Stroke::new(2.0_f32, TEXT));
         p.circle_filled(c, h * 0.008, TEXT);
         text(ui, Pos2::new(l.center().x, l.max.y - h * 0.022), Align2::CENTER_CENTER, "freedj", h * 0.018, TEXT);
 
@@ -1661,7 +1661,7 @@ fn draw_keys(ui: &Ui, lay: &Layout, h: f32, active: Option<TopScreen>, out: &mut
 fn expand_glyph(ui: &Ui, key_rect: Rect, h: f32) {
     let c = Pos2::new(key_rect.max.x - h * 0.020, key_rect.min.y + h * 0.020);
     let d = h * 0.009;
-    let st = Stroke::new(1.5, TEXT);
+    let st = Stroke::new(1.5_f32, TEXT);
     let p = ui.painter();
     p.line_segment([Pos2::new(c.x - d, c.y + d), Pos2::new(c.x + d, c.y - d)], st);
     p.line_segment([Pos2::new(c.x + d, c.y - d), Pos2::new(c.x + d * 0.2, c.y - d)], st);
@@ -1818,7 +1818,7 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
         let running = snap.loop_active && (snap.loop_beats - beats).abs() < 1e-3;
         let (clicked, down) = tap(ui, *r, &format!("pf-bl{i}"));
         p.rect_filled(*r, 3.0, if running { amber } else if down { KEY_HI } else { KEY });
-        p.rect_stroke(*r, 3.0, Stroke::new(1.0, if running { amber } else { tint(amber, 110) }));
+        p.rect_stroke(*r, 3.0, Stroke::new(1.0_f32, if running { amber } else { tint(amber, 110) }));
         text(ui, r.center(), Align2::CENTER_CENTER, label, h * 0.036, if running { Color32::BLACK } else { TEXT });
         if clicked { out.push(Event::Deck(ControlEvent::BeatLoop { beats, held: false })); }
     }
@@ -1959,10 +1959,10 @@ fn draw_phase_boxes(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
         let bot = Rect::from_min_size(Pos2::new(x, r.min.y + row_h + gap), Vec2::new(cell_w, row_h));
         // Top: bar within phrase.
         if bar == Some(i + 1) { p.rect_filled(top, 1.0, BLUE); }
-        else                  { p.rect_stroke(top, 1.0, Stroke::new(1.0, Color32::from_rgb(0x24, 0x3a, 0x5c))); }
+        else                  { p.rect_stroke(top, 1.0, Stroke::new(1.0_f32, Color32::from_rgb(0x24, 0x3a, 0x5c))); }
         // Bottom: beat within bar.
         if beat == Some(i + 1) { p.rect_filled(bot, 1.0, beat_lit); }
-        else                   { p.rect_stroke(bot, 1.0, Stroke::new(1.0, BLUE)); }
+        else                   { p.rect_stroke(bot, 1.0, Stroke::new(1.0_f32, BLUE)); }
     }
 }
 
@@ -2007,7 +2007,7 @@ fn draw_phase_ticks(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
         (r.min.y + r.height() * 0.78, snap.beat_phase(), our_bib, BLUE),
     ];
     for (y, phase, row_bib, bar_col) in rows {
-        p.line_segment([Pos2::new(x0, y), Pos2::new(r.max.x, y)], Stroke::new(1.0, FAINT));
+        p.line_segment([Pos2::new(x0, y), Pos2::new(r.max.x, y)], Stroke::new(1.0_f32, FAINT));
         let Some(ph) = phase else { continue };
         for i in -4..=4i32 {
             let x = cx + (i as f32 - ph) * beat_px;
@@ -2017,11 +2017,11 @@ fn draw_phase_ticks(ui: &Ui, snap: &DeckSnapshot, r: Rect, h: f32) {
             let is_bar = (i + row_bib - 1).rem_euclid(4) == 0;
             let len = if is_bar { h * 0.020 } else { h * 0.011 };
             let col = if is_bar { bar_col } else { DIM };
-            p.line_segment([Pos2::new(x, y - len), Pos2::new(x, y)], Stroke::new(1.5, col));
+            p.line_segment([Pos2::new(x, y - len), Pos2::new(x, y)], Stroke::new(1.5_f32, col));
         }
     }
     // Playhead.
-    p.line_segment([Pos2::new(cx, r.min.y), Pos2::new(cx, r.max.y)], Stroke::new(1.5, TEXT));
+    p.line_segment([Pos2::new(cx, r.min.y), Pos2::new(cx, r.max.y)], Stroke::new(1.5_f32, TEXT));
 }
 
 // ── Enlarged waveform: zoom by wheel; and the column to its right ────────────
@@ -2150,7 +2150,7 @@ fn draw_info(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
     // A.CUE — shown only while AUTO CUE is on (on by default on the unit).
     if snap.auto_cue {
         let a = lay.acue;
-        ui.painter().rect_stroke(a, 2.0, Stroke::new(1.0, TEXT));
+        ui.painter().rect_stroke(a, 2.0, Stroke::new(1.0_f32, TEXT));
         text(ui, a.center(), Align2::CENTER_CENTER, "A.CUE", h * 0.018, TEXT);
     }
 
@@ -2176,7 +2176,7 @@ fn draw_info(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec<E
         ui.painter().rect_filled(mt, 2.0, RED);
         text(ui, mt.center(), Align2::CENTER_CENTER, "MT", h * 0.018, TEXT);
     } else {
-        ui.painter().rect_stroke(mt, 2.0, Stroke::new(1.0, FAINT));
+        ui.painter().rect_stroke(mt, 2.0, Stroke::new(1.0_f32, FAINT));
         text(ui, mt.center(), Align2::CENTER_CENTER, "MT", h * 0.018, FAINT);
     }
     let v = snap.tempo_percent();
@@ -2206,7 +2206,7 @@ pub(crate) fn needle_touch(ui: &Ui, ov: Rect, out: &mut Vec<Event>) {
         }
     }
     if let (true, Some(pos)) = (resp.hovered(), resp.hover_pos()) {
-        ui.painter().line_segment([Pos2::new(pos.x, ov.min.y), Pos2::new(pos.x, ov.max.y)], Stroke::new(1.0, FAINT));
+        ui.painter().line_segment([Pos2::new(pos.x, ov.min.y), Pos2::new(pos.x, ov.max.y)], Stroke::new(1.0_f32, FAINT));
     }
 }
 

@@ -68,7 +68,7 @@ name = "test_pdb_num_rows"
 path = "tests/test_pdb_num_rows.rs"
 
 [dependencies.binrw]
-version = "0.14"
+version = "0.15"
 
 [dependencies.chrono]
 version = "0.4"

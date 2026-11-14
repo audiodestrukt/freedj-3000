@@ -154,8 +154,10 @@ pub trait Renderer {
     /// Android: the native window is gone (app backgrounded).  Drop the
     /// surface before the OS frees the window; nothing renders until
     /// `resume_surface`.  The device, pipelines and egui textures stay.
+    #[allow(dead_code)]   // called on Android only
     fn suspend_surface(&mut self) {}
     /// Android: a new native window exists; build a surface on it.
+    #[allow(dead_code)]   // called on Android only
     fn resume_surface(&mut self) {}
 }
 
@@ -237,7 +239,9 @@ fn column_buffer(device: &wgpu::Device, data: &[u32]) -> wgpu::Buffer {
 pub struct WgpuRenderer {
     /// None while suspended (Android drops its native window in the background).
     surface:        Option<wgpu::Surface<'static>>,
+    #[allow(dead_code)]   // held so the GPU objects below outlive the surface
     instance:       wgpu::Instance,
+    #[allow(dead_code)]
     adapter:        wgpu::Adapter,
     surface_config: wgpu::SurfaceConfiguration,
     device:         wgpu::Device,

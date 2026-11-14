@@ -618,22 +618,22 @@ fn draw_keys(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, keys: &[(Rect, K
             Shape::Slab => {
                 let round = r.height() * 0.12;
                 p.rect_filled(*r, round, face);
-                p.rect_stroke(*r, round, Stroke::new(1.0, KEY_EDGE));
+                p.rect_stroke(*r, round, Stroke::new(1.0_f32, KEY_EDGE));
                 if matches!(lamp, Lamp::Full | Lamp::Blink) {
                     p.rect_filled(r.shrink(1.5), round, glow(90));
-                    p.rect_stroke(r.expand(1.0), round, Stroke::new(2.0, col));
+                    p.rect_stroke(r.expand(1.0), round, Stroke::new(2.0_f32, col));
                 }
             }
             Shape::Round => {
                 let (c, rad) = (r.center(), r.width() * 0.5);
                 p.circle_filled(c, rad, face);
-                p.circle_stroke(c, rad, Stroke::new(1.0, KEY_EDGE));
+                p.circle_stroke(c, rad, Stroke::new(1.0_f32, KEY_EDGE));
                 match lamp {
                     Lamp::Full | Lamp::Blink => {
                         p.circle_filled(c, rad - 1.5, glow(110));
-                        p.circle_stroke(c, rad + 1.0, Stroke::new(2.0, col));
+                        p.circle_stroke(c, rad + 1.0, Stroke::new(2.0_f32, col));
                     }
-                    Lamp::Dim => { p.circle_stroke(c, rad + 0.5, Stroke::new(1.5, glow(120))); }
+                    Lamp::Dim => { p.circle_stroke(c, rad + 0.5, Stroke::new(1.5_f32, glow(120))); }
                     Lamp::Off => {}
                 }
             }
@@ -707,7 +707,7 @@ fn draw_pads(ui: &Ui, snap: &DeckSnapshot, pads: &[Rect; 8], call_delete: Option
         let set = snap.hot_cues[i];
         let round = r.height() * 0.14;
         p.rect_filled(*r, round, if down { KEY_DOWN } else { KEY_FACE });
-        p.rect_stroke(*r, round, Stroke::new(1.0, KEY_EDGE));
+        p.rect_stroke(*r, round, Stroke::new(1.0_f32, KEY_EDGE));
         // The letter top-left and the lamp bar along the bottom, as on the unit.
         let bar = Rect::from_min_max(Pos2::new(r.min.x + r.width() * 0.08, r.max.y - r.height() * 0.2),
                                      Pos2::new(r.max.x - r.width() * 0.08, r.max.y - r.height() * 0.12));
