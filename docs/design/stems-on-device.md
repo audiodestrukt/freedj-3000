@@ -88,8 +88,11 @@ The app quit during the first split of a local track. iOS kills an app that
 passes its memory limit without a crash report, so 0.3.12 writes each step
 (start, model ready, chunks) with the memory in use to the test file, line
 by line, runs the model on the GPU only (the Neural Engine attempt costs
-compile time and memory for nothing), and declares
-`com.apple.developer.kernel.increased-memory-limit`.
+compile time and memory for nothing). 0.3.12 meant to declare
+`com.apple.developer.kernel.increased-memory-limit` too, but the project
+signs with no entitlements file by default (`FREEDJ_ENTITLEMENTS=""`, to
+keep the ungranted multicast entitlement out), so the key never reached the
+app. 0.3.13 signs with `freedj-memory.entitlements`, which holds only it.
 
 ## Open
 

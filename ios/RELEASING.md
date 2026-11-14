@@ -122,7 +122,10 @@ Local backup of the key + issuer lives in `~/private_keys/` on the dev box
   testing the UI + Pro DJ Link, but testers hear nothing until there's an in-app
   way to load a track (or a track you own the rights to is bundled). The
   faceplate photo IS tracked, so it still bundles.
-- **Multicast entitlement is off by default** (`FREEDJ_ENTITLEMENTS=""`). Link
+- **Entitlements:** every build carries `freedj/freedj-memory.entitlements`
+  (the increased memory limit, for splitting stems on the device).
+- **Multicast entitlement is off by default** (`MULTICAST=1` switches
+  `FREEDJ_ENTITLEMENTS` to `freedj/freedj.entitlements`). Link
   works without it over wired ethernet. Turning it on needs a separate Apple
   approval, so leave it off unless Wi-Fi multicast discovery is actually needed.
 - **Bundle id is permanent**; the app name is not — rename freely in App Store

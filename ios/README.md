@@ -172,7 +172,8 @@ freedj announces, receives the XDJ's broadcast beat clock, and the XDJ syncs.
 
 The multicast entitlement is **not** needed for wired ethernet. If you ever do
 want it (Wi-Fi multicast), the entitlements file is off by default —
-`CODE_SIGN_ENTITLEMENTS` reads `$(FREEDJ_ENTITLEMENTS)`, empty unless you opt in
+`CODE_SIGN_ENTITLEMENTS` reads `$(FREEDJ_ENTITLEMENTS)`, the memory-limit-only
+`freedj-memory.entitlements` unless you opt in
 with `make ios-device MULTICAST=1` once Apple grants it for your App ID.
 
 Note the simulator shares the Mac's network stack, so Link working there says

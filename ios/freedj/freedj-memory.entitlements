@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- The entitlements every build carries (FREEDJ_ENTITLEMENTS points
+         here). Splitting stems on the device (crates/app/src/separate.rs)
+         holds a 400 MB model plus its working memory; without this, iOS
+         caps the app well below the iPad's RAM and kills it mid-split. No
+         Apple approval needed. The multicast entitlement is separate
+         (freedj.entitlements) and stays off until Apple grants it. -->
+    <key>com.apple.developer.kernel.increased-memory-limit</key>
+    <true/>
+</dict>
+</plist>

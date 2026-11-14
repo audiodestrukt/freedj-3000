@@ -8,9 +8,8 @@
          See ios/README.md. -->
     <key>com.apple.developer.networking.multicast</key>
     <true/>
-    <!-- Splitting stems on the device (crates/app/src/separate.rs) holds a
-         400 MB model plus its working memory; without this, iOS caps the
-         app well below the iPad's RAM and kills it mid-split. -->
+    <!-- Also in freedj-memory.entitlements, the default; this file replaces
+         it in MULTICAST=1 builds, so it carries the memory limit too. -->
     <key>com.apple.developer.kernel.increased-memory-limit</key>
     <true/>
 </dict>
