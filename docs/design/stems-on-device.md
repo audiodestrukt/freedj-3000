@@ -6,8 +6,10 @@ supplied. Code: `crates/app/src/separate.rs`, shim in `ios/freedj/main.m`.
 
 ## What it does
 
-A track loaded with MENU → STEMS on, and no OverCue stems on its stick, is
-split by a separation model on the deck itself. The stems play through the
+A track with no OverCue stems on its stick is split by a separation model on
+the deck itself, starting when its STEMS panel (or the XDJ screen's STEMS
+pad mode) is opened; loading a track never starts a split. STEMS is on by
+default since 2026-11-14. The stems play through the
 same engine as OverCue's (`stems.rs`): the model's output becomes an
 ordinary `StemBank`.
 

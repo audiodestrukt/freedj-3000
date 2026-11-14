@@ -1,4 +1,4 @@
-STEMS: split any track into drums, vocals and the rest, right on your iPad. Turn on MENU > STEMS and the app fetches its separation model by itself the first time (about 290 MB, once). Stems play while the track is still being split, and the model no longer stays in memory after a split. Stems prepared on a USB stick with OverCue now play within a fraction of a second of loading.
+STEMS: split any track into drums, vocals and the rest, right on your iPad. Open the STEMS panel and the track starts splitting; the first time, the app fetches its separation model by itself (about 290 MB, once). Stems play while the track is still being split, and the model no longer stays in memory after a split. Stems prepared on a USB stick with OverCue now play within a fraction of a second of loading.
 
 KEY SHIFT: move the track up or down a semitone at a time without touching the tempo, with RESET to go back. The KEY readouts show the new key.
 

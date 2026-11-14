@@ -5,8 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
-- Stems on the iPad and iPhone without copying files: the first time STEMS is
-  on and a track has no prepared stems, the app downloads the stem model
+- STEMS is on by default (MENU → STEMS turns it off; an older settings file
+  with it off turns on once). Loading a track splits nothing: prepared stems
+  on a stick play as the track loads, and a track without them is split on
+  the device when its STEMS panel (or the XDJ screen's STEMS pad mode) is
+  opened, so nobody pays the download, heat or battery for stems they never
+  asked for.
+- Stems on the iPad and iPhone without copying files: the first time the
+  STEMS panel is opened for a track with no prepared stems, the app downloads the stem model
   itself (287 MB, once), checks it against a pinned hash, and starts
   splitting the loaded track as soon as it is in. While it downloads, the
   STEMS panel says so across its keys ("DOWNLOADING STEM MODEL 123 / 287 MB ·

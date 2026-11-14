@@ -714,6 +714,8 @@ struct DeckApp {
     stems_await_model: bool,
     /// This device could not give a split the memory it needs.
     stems_no_memory: bool,
+    /// A split has been started (or refused) for the loaded track.
+    stems_split_tried: bool,
     /// An on-device split in progress (progress, cancel), see `separate.rs`.
     stems_job:         Option<Arc<separate::Job>>,
     /// What the enlarged waveform shows now: the stem mix of (bank, gains,
@@ -1082,6 +1084,7 @@ impl DeckApp {
             stems_rx: None,
             stems_await_model: false,
             stems_no_memory: false,
+            stems_split_tried: false,
             stems_job: None,
             stem_wave_key: None,
             loading: None,
@@ -2617,21 +2620,29 @@ impl DeckApp {
 
     /// Look for prepared stems for the track just loaded, off the UI
     /// thread.  Local files only for now; LINK loads come in phase 4.
-    /// `OPENDECK_STEMS=0` turns stems off.
-    fn start_stems(&mut self, track: &Arc<Vec<f32>>, ch: usize) {
+    /// `OPENDECK_STEMS=0` turns stems off.  A track without prepared stems
+    /// is not split here: that waits for its STEMS panel ([`Self::stems_wanted`]).
+    fn start_stems(&mut self, track: &Arc<Vec<f32>>, ch: usize) { self.start_stems_job(track, ch, false); }
+
+    /// The stems job: prepared stems if the stick has them, else (with
+    /// `split`) a split on the device, fetching the model first if needed.
+    fn start_stems_job(&mut self, track: &Arc<Vec<f32>>, ch: usize, split: bool) {
         self.stop_stems();
+        self.stems_split_tried = split;
         if !self.settings.stems || std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") || !self.path.is_file() { return; }
-        // First use: fetch the stem model (iOS) in the background; until it
-        // is in, a track without prepared stems waits for it.
-        modelfetch::ensure();
-        self.stems_await_model = cfg!(target_os = "ios") && !separate::model::present();
+        if split {
+            // First use: fetch the stem model (iOS) in the background; the
+            // split waits for it.
+            modelfetch::ensure();
+            self.stems_await_model = cfg!(target_os = "ios") && !separate::model::present();
+        }
         let (tx, rx) = mpsc::channel();
         let (path, track, sr) = (self.path.clone(), Arc::clone(track), self.audio.sample_rate);
         let job = Arc::new(separate::Job { on_start: Some(split_start_trace), on_chunk: Some(split_chunk_trace), ..Default::default() });
         let j = Arc::clone(&job);
         let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
             let got = match stems::load_local(&path, &track, sr, ch, Some(&j)) {
-                Ok(None) if ch == 2 => split_on_device(&path, &track, sr, &j),
+                Ok(None) if ch == 2 && split => split_on_device(&path, &track, sr, &j),
                 r => r,
             };
             let _ = tx.send(got);
@@ -2671,15 +2682,31 @@ impl DeckApp {
 
     /// Hand a finished stems job to the processor, if its track is still
     /// the one playing.
+    /// The DJ is at the stems: the CDJ-3000 STEMS panel or the XDJ STEMS
+    /// pad mode is open.  That is when a track without prepared stems is
+    /// split, so nobody pays the download, heat or battery for stems they
+    /// never asked for.
+    fn stems_wanted(&self) -> bool {
+        self.settings.stems
+            && (cdj3000::panel(&self.egui_ctx) == cdj3000::Panel::Stems || self.perform_mode == input::PerformMode::Stems)
+    }
+
     fn poll_stems(&mut self) {
         // The model just finished downloading: split the track that waited.
         if self.stems_await_model && self.stems_rx.is_none() && modelfetch::state() == modelfetch::Fetch::Ready {
             self.stems_await_model = false;
             let (t, ch) = (self.audio.current(), self.audio.channels as usize);
-            if !t.is_empty() { self.start_stems(&t, ch); }
+            if !t.is_empty() { self.start_stems_job(&t, ch, true); }
             return;
         }
-        if self.settings.stems { modelfetch::ensure(); }
+        // The stems were opened for a track with none prepared: split it
+        // (once per load; the stick lookup finishes first).
+        if !self.stems_split_tried && self.stems_rx.is_none() && self.stems_wanted()
+            && self.audio.stems.bank().filter(|b| b.is_for(&self.audio.current())).is_none() {
+            let (t, ch) = (self.audio.current(), self.audio.channels as usize);
+            if !t.is_empty() { self.start_stems_job(&t, ch, true); }
+            return;
+        }
         // A split in progress: play the stems it has written so far.
         if let Some(b) = self.stems_job.as_ref().and_then(|j| j.bank.get()) {
             let have = self.audio.stems.bank().is_some_and(|h| Arc::ptr_eq(&h, b));
@@ -4848,6 +4875,33 @@ mod deck_tests {
     use super::deck_harness::*;
     use super::*;
     use opendeck_protocol::ControlEvent as C;
+
+    /// Loading a track never splits it: the split waits until the DJ opens
+    /// the stems (here the XDJ's STEMS pad mode), then starts once.
+    #[test]
+    fn a_split_waits_for_the_stems_to_be_opened() {
+        let mut d = deck(2.0);
+        d.settings.stems = true;
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("t.wav");
+        super::stream_load_tests::wav(&wav, SR, 6.0, 0.0);
+        let prep = Prep { deck_sr: SR, deck_ch: 2, auto_cue: false, auto_cue_level_db: -48.0,
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+        let (tx, rx) = mpsc::channel();
+        DeckApp::prepare_local(prep, wav, None, &tx).unwrap();
+        drop(tx);
+        let Some(LoadMsg::Ready(p)) = rx.into_iter().next() else { panic!("loaded") };
+        d.apply_prepared(p).unwrap();
+        let t = d.audio.current();
+        d.start_stems(&t, 2);
+        for _ in 0..200 { d.poll_stems(); if d.stems_rx.is_none() { break; } std::thread::sleep(Duration::from_millis(5)); }
+        assert!(!d.stems_split_tried, "no split on load");
+        d.poll_stems();
+        assert!(!d.stems_split_tried, "still none with the stems closed");
+        d.perform_mode = PerformMode::Stems;
+        d.poll_stems();
+        assert!(d.stems_split_tried, "opening the stems starts the split");
+    }
 
     /// KEY SHIFT sets the audio's semitones (an octave at most), leaves the
     /// tempo alone, and a new track starts in its own key.

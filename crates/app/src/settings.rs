@@ -121,10 +121,11 @@ pub struct Settings {
     pub full_deck: bool,
     /// Waveform Color (both waveforms); the C key cycles it too.
     pub wave_color: WaveColor,
-    /// Play prepared stems (OverCue's open USB format) and show their
-    /// controls: a STEMS key and panel on the CDJ-3000 screen, a STEMS pad
-    /// mode in the XDJ's PERFORM screen.  Off by default, so both skins look
-    /// and behave as the stock units do.
+    /// Stems: a STEMS key and panel on the CDJ-3000 screen, a STEMS pad mode
+    /// in the XDJ's PERFORM screen.  Prepared stems on a stick play as the
+    /// track loads; a track without them is split on the device once its
+    /// STEMS panel is opened.  On by default since seed 4 (people install
+    /// the app for stems); OFF gives the stock units' look.
     pub stems: bool,
     /// Which player-number seeding this file has had (0 = written before
     /// 0.2.1, when every iOS device was seeded to 3).  Lets a later default
@@ -141,17 +142,41 @@ pub struct Settings {
 /// (never changed by the user) becomes AUTO.
 /// 3: the CDJ-3000 screen became the default; a file still on the old
 /// default (XDJ-1000MK2) moves to it once.  SCREEN switches back.
-const SEED: u8 = 3;
+/// 4: STEMS became on by default; a file with it off (the old default)
+/// turns it on once.  MENU → STEMS turns it off again.
+const SEED: u8 = 4;
 
 impl Default for Settings {
     fn default() -> Self {
         Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000,
-               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, stems: false, seed: 0, phone: false }
+               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, stems: true, seed: 0, phone: false }
     }
 }
 
 impl Settings {
     fn path() -> PathBuf { app_data_dir().join("settings.json") }
+
+    /// Bring a file written by an older build up to this one's defaults,
+    /// once (see [`SEED`]); only values still at an old default move.
+    fn migrate(&mut self, default_player: u8) {
+        if self.seed < 1 && cfg!(target_os = "ios") && self.player == 3 && default_player != 3 {
+            log::info!("settings: PLAYER No. re-seeded {} → {default_player} for this device", self.player);
+            self.player = default_player;
+        }
+        if self.seed < 2 && self.player == default_player {
+            log::info!("settings: PLAYER No. {} was the default; now AUTO", self.player);
+            self.player = 0;
+        }
+        if self.seed < 3 && self.skin == Skin::Xdj1000Mk2 {
+            log::info!("settings: SCREEN was the old default (XDJ-1000MK2); now CDJ-3000");
+            self.skin = Skin::Cdj3000;
+        }
+        if self.seed < 4 && !self.stems {
+            log::info!("settings: STEMS was the old default (off); now on");
+            self.stems = true;
+        }
+        self.seed = SEED;
+    }
 
     /// Load the persisted settings; `default_player` seeds the player number
     /// when no file exists yet (1 on the desktop, 3 on an iPad, 4 on an
@@ -166,19 +191,7 @@ impl Settings {
                 Ok(mut s) => {
                     log::info!("settings: {:?} from {}", s, path.display());
                     if s.seed < SEED {
-                        if s.seed < 1 && cfg!(target_os = "ios") && s.player == 3 && default_player != 3 {
-                            log::info!("settings: PLAYER No. re-seeded {} → {default_player} for this device", s.player);
-                            s.player = default_player;
-                        }
-                        if s.seed < 2 && s.player == default_player {
-                            log::info!("settings: PLAYER No. {} was the default; now AUTO", s.player);
-                            s.player = 0;
-                        }
-                        if s.seed < 3 && s.skin == Skin::Xdj1000Mk2 {
-                            log::info!("settings: SCREEN was the old default (XDJ-1000MK2); now CDJ-3000");
-                            s.skin = Skin::Cdj3000;
-                        }
-                        s.seed = SEED;
+                        s.migrate(default_player);
                         s.save();
                     }
                     s
@@ -260,16 +273,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stems_are_off_until_turned_on() {
+    fn stems_are_on_by_default_and_turn_off() {
         let s = Settings::default();
-        assert!(!s.stems, "stock units have no stems: off by default");
+        assert!(s.stems, "on by default: people install the app for stems");
         assert!(MENU.iter().any(|(m, n)| *m == Setting::Stems && *n == "STEMS"));
-        let on = s.cycled(Setting::Stems, 1);
-        assert!(on.stems);
-        assert!(!on.cycled(Setting::Stems, -1).stems);
-        // A settings file from before the row existed reads as off.
+        let off = s.cycled(Setting::Stems, 1);
+        assert!(!off.stems);
+        assert!(off.cycled(Setting::Stems, -1).stems);
+        // A file from before the row existed reads as on.
         let old: Settings = serde_json::from_str(r#"{"quantize":true}"#).unwrap();
-        assert!(!old.stems);
+        assert!(old.stems);
+        // A file saved with the old default (off) turns on once; turned off
+        // again after that, it stays off.
+        let mut was: Settings = serde_json::from_str(r#"{"stems":false,"seed":3}"#).unwrap();
+        was.migrate(1);
+        assert!(was.stems && was.seed == SEED);
+        was.stems = false;
+        was.migrate(1);
+        assert!(!was.stems, "migrated once only");
     }
 
     #[test]
