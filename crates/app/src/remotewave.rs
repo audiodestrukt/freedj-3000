@@ -29,7 +29,13 @@ impl<T> Default for RemoteCache<T> {
 
 /// The detail waveform (150 entries a second) and the beat grid of a track.
 pub type RemoteWaves = RemoteCache<WaveData>;
-pub struct WaveData { pub bytes: Vec<u8>, pub beats: Vec<opendeck_dbserver::GridBeat> }
+pub struct WaveData {
+    pub bytes: Vec<u8>,
+    pub beats: Vec<opendeck_dbserver::GridBeat>,
+    /// The 3-band detail (low, mid, high per 1/150 s) when the player has it:
+    /// what the RGB and 3BAND waveform colours are drawn from.
+    pub bands: Vec<[u8; 3]>,
+}
 pub type RemoteInfos = RemoteCache<InfoData>;
 
 /// A track's metadata and cover.
@@ -38,7 +44,15 @@ pub struct InfoData { pub meta: TrackMeta, pub art: Option<Vec<u8>> }
 pub fn fetch_wave(c: &mut DbClient, slot: Slot, id: u32) -> anyhow::Result<WaveData> {
     let bytes = c.waveform_detail(slot, id)?;
     let beats = c.beat_grid(slot, id).map(|b| opendeck_dbserver::parse_beat_grid(&b)).unwrap_or_default();
-    Ok(WaveData { bytes, beats })
+    // CDJ-3000 3-band detail (.2EX PWV7), possibly with its section header.
+    let bands = c.anlz_tag(slot, id, b"PWV7", b"2EX").map(|b| {
+        let n = b.len();
+        let d: &[u8] = if n >= 24 && u32::from_be_bytes([b[12], b[13], b[14], b[15]]) == 3
+            && 24 + u32::from_be_bytes([b[16], b[17], b[18], b[19]]) as usize * 3 == n { &b[24..] } else { &b[n - n % 3..] };
+        d.chunks_exact(3).map(|e| [e[0], e[1], e[2]]).collect::<Vec<_>>()
+    }).unwrap_or_default();
+    log::info!("remote waveform {id}: {} bytes, {} beats, {} band entries", bytes.len(), beats.len(), bands.len());
+    Ok(WaveData { bytes, beats, bands })
 }
 
 pub fn fetch_info(c: &mut DbClient, slot: Slot, id: u32) -> anyhow::Result<InfoData> {

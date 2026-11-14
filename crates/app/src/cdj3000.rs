@@ -748,11 +748,22 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
         let bytes = &w.data.bytes;
         let n = bytes.len();
         let first = head * 150.0;
+        let mode = WAVE_MODE.load(std::sync::atomic::Ordering::Relaxed);
+        let bands = &w.data.bands;
+        let coloured = mode != 2 && !bands.is_empty();
         let mut x = r.min.x;
         while x < r.max.x {
             let (a, b) = (first + (x - cx) / per_entry, first + (x + 1.0 - cx) / per_entry);
             let (a, b) = ((a.floor().max(0.0)) as usize, (b.ceil().max(0.0)) as usize);
-            if a < n {
+            if coloured {
+                if a < bands.len() {
+                    let m = bands[a..b.max(a + 1).min(bands.len())].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])]);
+                    if let Some((col, frac)) = band_style(mode, m) {
+                        let hh = half * frac;
+                        p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0, col));
+                    }
+                }
+            } else if a < n {
                 let (h, wh) = bytes[a..b.max(a + 1).min(n)].iter().fold((0u8, 0u8), |m, &v| {
                     let (h, wh) = (v & 0x1f, v >> 5);
                     if h > m.0 { (h, wh) } else { m }
@@ -2195,6 +2206,26 @@ fn three_band_stack(m: [u8; 3], height: f32) -> [f32; 3] {
     let mid = lo + 0.5 * m[1] as f32;
     let hi = mid + 0.54 * m[2] as f32;
     [lo, mid, hi].map(|v| (height * v / FULL).min(height))
+}
+
+/// A waveform column of 3 band levels (low, mid, high) in the colour mode of
+/// the main waveform (0 RGB, 1 3-band): its colour and height as a fraction.
+fn band_style(mode: u8, m: [u8; 3]) -> Option<(Color32, f32)> {
+    let top = *m.iter().max().unwrap_or(&0) as f32;
+    if top <= 0.0 { return None; }
+    let col = if mode == 0 {
+        // RGB: bass red, mid green, high blue, scaled to full brightness.
+        let k = 255.0 / top;
+        Color32::from_rgb((m[0] as f32 * k) as u8, (m[1] as f32 * k) as u8, (m[2] as f32 * k) as u8)
+    } else {
+        // 3-band: the loudest band's colour (blue low, amber mid, white high).
+        match m.iter().position(|&v| v as f32 == top) {
+            Some(0) => Color32::from_rgb(58, 123, 240),
+            Some(1) => Color32::from_rgb(240, 160, 48),
+            _ => Color32::from_rgb(235, 235, 235),
+        }
+    };
+    Some((col, (top / 127.0).min(1.0)))
 }
 
 fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32, wave_on: bool) {
