@@ -3356,7 +3356,10 @@ impl DeckApp {
         let Some((pos, at)) = link.positions.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
         // Between packets (about 30 ms apart) the playhead runs on at the pitch.
         let run = if st.playing { at.elapsed().as_secs_f64() * pos.pitch as f64 } else { 0.0 };
-        snap.remote_wave = Some(snapshot::RemoteWaveView { data, bpm, playhead_s: pos.playhead_ms as f64 / 1000.0 + run, pitch: pos.pitch.max(0.1) });
+        snap.remote_wave = Some(snapshot::RemoteWaveView {
+            data, bpm, pitch: pos.pitch.max(0.1),
+            playhead_s: remote.smooth_playhead(p, pos.playhead_ms as f64 / 1000.0 + run, pos.pitch as f64, st.playing),
+        });
     }
 
     fn cols_visible(&self) -> f32 { Self::cols_for(self.settings.skin, self.zoom_level) }

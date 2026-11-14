@@ -107,7 +107,31 @@ impl<T: Send + Sync + 'static> RemoteCache<T> {
 
 /// The fetchers the screen's other-player views share.
 #[derive(Default, Clone)]
-pub struct Remote { pub waves: RemoteWaves, pub infos: RemoteInfos }
+pub struct Remote { pub waves: RemoteWaves, pub infos: RemoteInfos, play: Arc<Mutex<Option<Smooth>>> }
+
+struct Smooth { player: u8, est: f64, at: Instant }
+
+impl Remote {
+    /// The other player's playhead as it is drawn: a free-running estimate
+    /// that advances at its pitch every frame and is pulled gently to what
+    /// its position packets say.  The packets come in bursts over Wi-Fi, so
+    /// taking each one as it arrives would shake the waveform.
+    pub fn smooth_playhead(&self, player: u8, target: f64, pitch: f64, playing: bool) -> f64 {
+        let Ok(mut g) = self.play.lock() else { return target };
+        let now = Instant::now();
+        match g.as_mut() {
+            Some(s) if s.player == player => {
+                let dt = now.duration_since(s.at).as_secs_f64().min(0.25);
+                s.at = now;
+                if playing { s.est += dt * pitch; }
+                let err = target - s.est;
+                if err.abs() > 0.6 { s.est = target; } else { s.est += err * (1.0 - (-dt / 0.4).exp()); }
+                s.est
+            }
+            _ => { *g = Some(Smooth { player, est: target, at: now }); target }
+        }
+    }
+}
 
 /// The entries of an ANLZ tag section as the player sends it: a 4-byte
 /// prefix, the tag name, the header length, the section length, the entry

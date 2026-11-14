@@ -687,6 +687,13 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
         label(ui, b.center(), Align2::CENTER_CENTER, snap.master_player, 17.0, u, Color32::BLACK);
     }
     let r = lay.meter;
+    // This deck is the sync master: the slot says so (both views).
+    if snap.master {
+        let t = Rect::from_center_size(r.center(), Vec2::new(190.0 * u, 32.0 * u));
+        p.rect_filled(t, 2.0, BARS_ORANGE);
+        label(ui, t.center(), Align2::CENTER_CENTER, "MASTER PLAYER", 18.0, u, Color32::BLACK);
+        return;
+    }
     let resp = ui.interact(r, Id::new("cdj3k-meter"), egui::Sense::click());
     if resp.clicked() {
         let off = !meter_shown(ui.ctx());
