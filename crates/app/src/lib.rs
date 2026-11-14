@@ -1624,6 +1624,18 @@ impl DeckApp {
                             log::info!("tag list: removed {}", e.name);
                         }
                     }
+                    // Anywhere else (the playback screen, as on the unit):
+                    // tag, or untag, the track on the deck.
+                    ScreenMode::Playback | ScreenMode::Info | ScreenMode::Perform => match self.loaded.clone() {
+                        Some(load) => {
+                            let name = self.track_tags.title.clone()
+                                .unwrap_or_else(|| self.path.file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string());
+                            let entry = taglist::TagEntry { name: name.clone(), artist: self.track_tags.artist.clone(), load };
+                            let tagged = self.tag_list.toggle(entry);
+                            log::info!("tag list: {} {} (loaded track)", if tagged { "tagged" } else { "removed" }, name);
+                        }
+                        None => log::info!("tag list: no loaded track to tag"),
+                    },
                     _ => {}
                 }
             }
