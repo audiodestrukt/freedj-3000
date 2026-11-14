@@ -256,6 +256,12 @@ impl Nfs {
     /// short timeout; the server sees plain independent READs, which every
     /// NFS server (the CDJ's included) must handle.
     pub fn read_file(&mut self, fh: &Fh, size: u32) -> Result<Vec<u8>> {
+        self.read_file_with(fh, size, |_| true)
+    }
+
+    /// Like [`read_file`](Self::read_file), handing `on_bytes` the file's
+    /// bytes in order as the front of it completes; it returns false to stop.
+    pub fn read_file_with(&mut self, fh: &Fh, size: u32, mut on_bytes: impl FnMut(&[u8]) -> bool) -> Result<Vec<u8>> {
         const CHUNK: u32 = 8192;
         let mut out = vec![0u8; size as usize];
         if size == 0 { return Ok(out); }
@@ -266,6 +272,7 @@ impl Nfs {
         let mut next = 0usize;          // next block to request
         let mut done = 0usize;
         let mut got = vec![false; nblocks];
+        let mut contig = 0usize;        // blocks delivered in order so far
         let old_timeout = self.sock.read_timeout()?;
         self.sock.set_read_timeout(Some(Duration::from_millis(50)))?;
         let mut buf = vec![0u8; 65536];
@@ -314,6 +321,12 @@ impl Nfs {
                         let take = dlen.min(out.len() - at);
                         out[at..at + take].copy_from_slice(&r[start..start + take]);
                         if !got[block] { got[block] = true; done += 1; }
+                        if got[contig.min(nblocks - 1)] && contig < nblocks {
+                            let from = contig * CHUNK as usize;
+                            while contig < nblocks && got[contig] { contig += 1; }
+                            let to = (contig * CHUNK as usize).min(out.len());
+                            if to > from && !on_bytes(&out[from..to]) { bail!("read stopped"); }
+                        }
                     }
                     Err(_) => {
                         // Re-send anything older than the retransmit timeout.
@@ -337,7 +350,7 @@ impl Nfs {
     }
 
     /// Reads in flight at once for [`read_file`](Self::read_file).
-    pub const WINDOW: usize = 32;
+    pub const WINDOW: usize = 96;
 
     /// List a directory (one READDIR; large dirs may need cookie paging — TODO).
     pub fn readdir(&mut self, fh: &Fh) -> Result<Vec<DirEntry>> {

@@ -78,6 +78,11 @@ All notable changes to this project will be documented in this file.
   `--screen-only` still override it for one run.
 
 ### Changed
+- Loading from a linked player: the track starts decoding while it still
+  downloads, so the deck is playable after the first seconds instead of after
+  the whole file (a 65 MB AIFF took about 13 s over Wi-Fi before).  The NFS
+  read keeps 96 reads in flight instead of 32.  A format that needs the end
+  of the file first (some MP3s) still waits for the download.
 - Audio decoding moved to Symphonia 0.6.1.  Checked against 0.5 on 23 files
   (MP3 CBR / VBR / 44.1 kHz and two real tracks, AAC, ALAC, FLAC, WAV, AIFF
   at 16 / 24 / 32-bit and float, Vorbis, 5.1): every format decodes to the
