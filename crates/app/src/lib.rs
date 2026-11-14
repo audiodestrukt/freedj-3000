@@ -1832,9 +1832,12 @@ impl DeckApp {
                 TopScreen::Playlist => {
                     // PLAY LIST: the playlists of the source being browsed,
                     // else of the stick the last track came from.
-                    self.browser.open_playlists();
-                    self.screen_mode = ScreenMode::Browse;
-                    log::info!("screen → {:?} (playlists)", self.screen_mode);
+                    if self.browser.open_playlists() {
+                        self.screen_mode = ScreenMode::Browse;
+                        log::info!("screen → {:?} (playlists)", self.screen_mode);
+                    } else {
+                        self.notify("NO SOURCE LOADED");
+                    }
                 }
                 TopScreen::Info => {
                     // INFO: the loaded track's details, in the middle band.
@@ -3603,7 +3606,7 @@ impl DeckApp {
         }
         let mut touch = Vec::new();
         let _t_run = Instant::now();
-        cdj3000::set_source_badge(self.browser.source_badge());
+        cdj3000::set_source_badge(self.browser.source_badge(), self.browser.source_kind());
         let view = match self.screen_mode {
             ScreenMode::Playback => screen::ScreenView::Playback,
             ScreenMode::Browse   => screen::ScreenView::Browse(&self.browser),

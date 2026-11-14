@@ -1395,22 +1395,35 @@ fn draw_status_strip(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &m
 /// The linked stick last browsed (player, colour), for the source tile of the
 /// screens that are not about one stick (TAG LIST, UTILITY).
 static SOURCE_BADGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-pub fn set_source_badge(b: Option<(u8, u8)>) {
-    SOURCE_BADGE.store(b.map_or(0, |(p, c)| 1 << 16 | (p as u32) << 8 | c as u32), std::sync::atomic::Ordering::Relaxed);
+pub fn set_source_badge(b: Option<(u8, u8)>, kind: crate::browser::SourceTile) {
+    use crate::browser::SourceTile as K;
+    let k = match kind { K::None => 0u32, K::Folder => 1, K::Usb => 2, K::Link => 3 };
+    SOURCE_BADGE.store(k << 24 | b.map_or(0, |(p, c)| 1 << 16 | (p as u32) << 8 | c as u32), std::sync::atomic::Ordering::Relaxed);
 }
-/// Header tile for "no source chosen yet".
-const NO_SOURCE: (u8, u8) = (0, 0xff);
-fn cached_badge() -> Option<(u8, u8)> {
+fn cached_tile() -> Tile {
+    use crate::browser::SourceTile as K;
     let v = SOURCE_BADGE.load(std::sync::atomic::Ordering::Relaxed);
-    (v >> 16 != 0).then_some((((v >> 8) & 0xff) as u8, (v & 0xff) as u8))
+    let kind = match v >> 24 { 1 => K::Folder, 2 => K::Usb, 3 => K::Link, _ => K::None };
+    Tile { kind, badge: (v >> 16 & 0xff != 0).then_some((((v >> 8) & 0xff) as u8, (v & 0xff) as u8)) }
 }
+/// What the source tile shows.
+#[derive(Clone, Copy)]
+struct Tile { kind: crate::browser::SourceTile, badge: Option<(u8, u8)> }
 
 /// The source tile at the top left: tinted with the stick's colour label, its
 /// player number in the corner.
-fn draw_source_tile(ui: &Ui, snap: &DeckSnapshot, s: Rect, badge: Option<(u8, u8)>, u: f32) {
+fn draw_source_tile(ui: &Ui, snap: &DeckSnapshot, s: Rect, t: Tile, u: f32) {
+    use crate::browser::SourceTile as K;
+    let badge = t.badge;
     let p = ui.painter();
-    if badge == Some(NO_SOURCE) {
+    if t.kind == K::None {
         p.rect_filled(s, 0.0, Color32::from_rgb(40, 40, 40));
+        return;
+    }
+    if t.kind == K::Folder {
+        p.rect_filled(s, 0.0, SOURCE_TILE);
+        folder(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), u * 1.5, TEXT);
+        label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, "FOLDER", 17.0, u, TEXT);
         return;
     }
     p.rect_filled(s, 0.0, badge.and_then(|(_, c)| stick_color(c)).unwrap_or(SOURCE_TILE));
@@ -1420,15 +1433,15 @@ fn draw_source_tile(ui: &Ui, snap: &DeckSnapshot, s: Rect, badge: Option<(u8, u8
         outline(ui, bd, TEXT, u);
         label(ui, bd.center(), Align2::CENTER_CENTER, n, 15.0, u, TEXT);
     }
-    label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
+    label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, if t.kind == K::Link { "LINK" } else { "USB" }, 18.0, u, TEXT);
     label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
 }
 
-fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, folder_icon: bool, badge: Option<(u8, u8)>, u: f32, out: &mut Vec<Event>) {
+fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, folder_icon: bool, tile: Tile, u: f32, out: &mut Vec<Event>) {
     let p = ui.painter();
     p.rect_filled(lay.header, 0.0, HEADER);
     let s = lay.source;
-    draw_source_tile(ui, snap, s, badge, u);
+    draw_source_tile(ui, snap, s, tile, u);
     let back = Rect::from_min_max(Pos2::new(lay.screen.min.x + 121.0 * u, lay.screen.min.y + 21.0 * u),
                                   Pos2::new(lay.screen.min.x + 169.0 * u, lay.screen.min.y + 69.0 * u));
     if tap(ui, back, "cdj-list-back").0 { out.push(Event::Deck(ControlEvent::Back)); }
@@ -1787,7 +1800,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     }).collect();
     // The unit titles a category's name list BROWSE, a track list by its name.
     let title = if names.is_some() || b.on_rb_history() || b.idle() { "BROWSE".to_string() } else { b.title() };
-    draw_list_header(ui, snap, lay, &title, cats.is_none(), if b.idle() { Some(NO_SOURCE) } else { b.source_badge() }, u, out);
+    draw_list_header(ui, snap, lay, &title, cats.is_none(), Tile { kind: b.source_kind(), badge: b.source_badge() }, u, out);
     let bar = !b.playlist_only();
     let lx = if bar { 92.0 } else { 0.0 };
     match &cats {
@@ -2182,7 +2195,7 @@ fn draw_search(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     // Header: source tile, then the search field.
     p.rect_filled(lay.header, 0.0, HEADER);
     let st = lay.source;
-    draw_source_tile(ui, snap, st, b.source_badge(), u);
+    draw_source_tile(ui, snap, st, Tile { kind: b.source_kind(), badge: b.source_badge() }, u);
     let field = Rect::from_min_max(at(109.0, 20.0), at(874.0, 70.0));
     p.rect_filled(field, 0.0, Color32::BLACK);
     let m = at(137.0, 43.0);
@@ -2252,7 +2265,7 @@ fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: 
     let rows: Vec<Row> = tags.entries().iter().map(|e| Row {
         icon: RowIcon::Track, text: &e.name, value: e.artist.clone(), tagged: false, played: false, stems: false,
     }).collect();
-    draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, cached_badge(), u, out);
+    draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, cached_tile(), u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
     draw_list(ui, pane, "TRACK", &rows, tags.selected, "No tagged tracks. Tag one in BROWSE.", u, Some(out));
@@ -2267,7 +2280,7 @@ fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings,
         icon: RowIcon::None, text: name, tagged: false, played: false, stems: false,
         value: Some(match s { Setting::Stems => snap.stems.state.menu_value().unwrap_or_else(|| settings.value(*s)), _ => settings.value(*s) }),
     }).collect();
-    draw_list_header(ui, snap, lay, "UTILITY", false, cached_badge(), u, out);
+    draw_list_header(ui, snap, lay, "UTILITY", false, cached_tile(), u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
     draw_list(ui, pane, "SETTINGS", &rows, cursor, "", u, None);

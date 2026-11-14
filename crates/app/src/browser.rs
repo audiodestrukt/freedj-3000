@@ -87,6 +87,10 @@ pub enum Load {
     Db { ip: Ipv4Addr, id: u32, title: String, rekordbox: bool, #[serde(default)] sd: bool },
 }
 
+/// What the header tile shows as the source.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SourceTile { None, Folder, Usb, Link }
+
 /// One visible row.
 #[derive(Clone)]
 pub struct Entry {
@@ -1383,9 +1387,10 @@ impl Browser {
 
     /// PLAY LIST: from anywhere inside a rekordbox or linked source, its
     /// playlist tree; outside one, the stick the browser last used.
-    pub fn open_playlists(&mut self) {
-        self.idle = false;
+    pub fn open_playlists(&mut self) -> bool {
         let is_root = |l: &Loc| matches!(l, Loc::RbRoot | Loc::DbRoot);
+        let keep = (self.stack.clone(), self.names.clone(), self.selected, self.idle, self.entries.clone(), self.playlist_only);
+        self.idle = false;
         // Not inside a source: a linked player's session still open is the
         // one the last track came from.
         if !self.stack.iter().any(is_root) {
@@ -1394,8 +1399,13 @@ impl Browser {
                 self.names.resize(3, String::new());
             } else { self.go_root(); }
         }
+        let Some(r) = self.stack.iter().position(is_root) else {
+            // No stick with a library: nothing to show, as on a unit with
+            // nothing loaded.
+            (self.stack, self.names, self.selected, self.idle, self.entries, self.playlist_only) = keep;
+            return false;
+        };
         self.playlist_only = true;
-        let Some(r) = self.stack.iter().position(is_root) else { return };
         self.stack.truncate(r + 1);
         self.selected = 0;
         self.rebuild();
@@ -1405,6 +1415,17 @@ impl Browser {
             self.selected = i;
             self.enter();
         }
+        true
+    }
+
+    /// Which kind of source is being browsed, for the header tile.
+    pub fn source_kind(&self) -> SourceTile {
+        if self.idle { return SourceTile::None; }
+        if self.stack.iter().any(|l| matches!(l, Loc::Link | Loc::DbRoot)) || matches!(&self.rb_source, Some(RbSource::Link(_))) && self.stack.iter().any(|l| matches!(l, Loc::RbRoot)) {
+            return SourceTile::Link;
+        }
+        let on_stick = self.stack.iter().any(|l| matches!(l, Loc::Fs(p) if self.media.iter().any(|m| m.path == *p)));
+        if on_stick { SourceTile::Usb } else { SourceTile::Folder }
     }
 
     /// The LINK source key: jump to the list of linked players (from wherever
