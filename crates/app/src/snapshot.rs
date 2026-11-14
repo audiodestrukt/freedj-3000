@@ -209,12 +209,17 @@ impl DeckSnapshot<'_> {
 
     /// Fractional position within the current beat, 0.0–1.0, from our own grid.
     pub fn beat_phase(&self) -> Option<f32> {
+        self.beat_pos().map(|(_, f)| f)
+    }
+
+    /// The beat the playhead is in (from the grid's anchor) and how far
+    /// through it, from one reading, so the phase and the beat number never
+    /// disagree (see [`split_beat`]).
+    fn beat_pos(&self) -> Option<(i64, f32)> {
         let g = self.beat_grid?;
         let frames = self.position as f64 / self.channels as f64;
-        let anchor = g.anchor_sample as f64;
         let period = self.sample_rate as f64 * 60.0 / g.bpm;
-        let rel = (frames - anchor) / period;
-        Some(rel.rem_euclid(1.0) as f32)
+        Some(split_beat((frames - g.anchor_sample as f64) / period))
     }
 
     /// Beat number within the bar, 1–4, from our own grid.
@@ -230,9 +235,37 @@ impl DeckSnapshot<'_> {
 
     pub fn beat_in_bar(&self) -> Option<u8> {
         let g = self.beat_grid?;
-        let frames = self.position as f64 / self.channels as f64;
-        let period = self.sample_rate as f64 * 60.0 / g.bpm;
-        let beat = ((frames - g.anchor_sample as f64) / period).floor() as i64;
+        let (beat, _) = self.beat_pos()?;
         Some(((beat + g.downbeat_offset as i64).rem_euclid(4) + 1) as u8)
+    }
+}
+
+/// A position in beats → (whole beat, fraction 0..1).  The fraction is an
+/// f32 for drawing; just under a beat (…7.99999999) it would round up to
+/// 1.0 while the whole beat still read 7, and the phase meter drew that
+/// frame a beat off (its red bar mark jumped).  Such a value counts as the
+/// next beat at 0.
+pub fn split_beat(rel: f64) -> (i64, f32) {
+    let k = rel.floor();
+    let f = (rel - k) as f32;
+    if f >= 1.0 { (k as i64 + 1, 0.0) } else { (k as i64, f) }
+}
+
+#[cfg(test)]
+mod split_beat_tests {
+    use super::split_beat;
+
+    /// Just under a beat the f32 fraction rounds up to 1.0; the whole beat
+    /// must move on with it, or the phase meter draws that frame a beat off.
+    #[test]
+    fn a_fraction_that_rounds_to_one_is_the_next_beat() {
+        assert_eq!(split_beat(7.999_999_999), (8, 0.0));
+        assert_eq!(split_beat(7.5), (7, 0.5));
+        assert_eq!(split_beat(-0.25), (-1, 0.75));
+        for i in 0..200_000 {
+            let rel = 3.0 + i as f64 * 1e-5 - 1e-9;
+            let (k, f) = split_beat(rel);
+            assert!(f < 1.0 && (k as f64 + f as f64 - rel).abs() < 1e-6, "{rel}: {k} + {f}");
+        }
     }
 }

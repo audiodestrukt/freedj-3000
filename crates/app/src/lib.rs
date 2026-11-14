@@ -3186,7 +3186,8 @@ impl DeckApp {
         // Phase of the peer's row: a phase-locked free-run (see PeerPhase).
         let beat_ms = self.link.beat2_beat_ms.load(Ordering::Relaxed);
         let peer_playing = self.link.beat2_playing.load(Ordering::Relaxed);
-        let beat2_phase_beats = self.beat2_phase.advance(now_ms, beat_ms, beat2_bpm, peer_playing, frame_dt.as_secs_f64());
+        let (beat2_phase_beats, bib_drawn) = self.beat2_phase.advance(now_ms, beat_ms, beat2_bpm, beat2_bib_v, peer_playing, frame_dt.as_secs_f64());
+        let beat2_bib_v = bib_drawn;
         let flags = UiFlags {
             key_lock: self.key_lock, jog_vinyl: self.settings.jog_vinyl, remain_mode: self.remain_mode, auto_cue: self.auto_cue, slip: self.slip,
             sync: self.link.sync.load(Ordering::Relaxed), master: self.link.master.load(Ordering::Relaxed), zoom_grid_mode: self.zoom_grid_mode,

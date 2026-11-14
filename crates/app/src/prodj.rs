@@ -484,6 +484,10 @@ pub struct SenderState {
 pub struct PeerPhase {
     /// Free-running phase in beats; negative = not started.
     phase:     f64,
+    /// Beat-in-bar of free-run beat 0 (0–3), from the packets' beat numbers:
+    /// the bar count runs with the free-run instead of jumping when a packet
+    /// lands a few ms either side of the beat the row has drawn.
+    bar_offset: Option<i64>,
     /// Arrival time (ms) of the last packet folded in.
     folded_ms: u64,
     /// Correction still to be bled in, beats (signed).
@@ -502,17 +506,24 @@ impl PeerPhase {
     pub const SLEW: f64 = 0.25;
 
     pub const fn new() -> Self {
-        Self { phase: -1.0, folded_ms: 0, pending: 0.0 }
+        Self { phase: -1.0, bar_offset: None, folded_ms: 0, pending: 0.0 }
     }
 
     /// One frame: `dt_s` since the last call; `beat_ms` is when the latest
-    /// beat packet arrived (same clock as `now_ms`, 0 = none yet).  Returns
-    /// the phase to draw, 0..1.
-    pub fn advance(&mut self, now_ms: u64, beat_ms: u64, bpm: f32, peer_playing: bool, dt_s: f64) -> f32 {
+    /// beat packet arrived (same clock as `now_ms`, 0 = none yet) and `bib`
+    /// its beat within the bar (1–4, 0 = unknown).  Returns the phase to
+    /// draw, 0..1, and the beat in the bar it belongs to, both from the
+    /// free-run, so they turn over together.
+    pub fn advance(&mut self, now_ms: u64, beat_ms: u64, bpm: f32, bib: u8, peer_playing: bool, dt_s: f64) -> (f32, u8) {
         if bpm <= 0.0 || beat_ms == 0 {
             *self = Self::new();
-            return 0.0;
+            return (0.0, bib);
         }
+        let set_bar = |s: &mut Self, at_arrival: f64| {
+            if (1..=4).contains(&bib) {
+                s.bar_offset = Some((bib as i64 - 1 - at_arrival.round() as i64).rem_euclid(4));
+            }
+        };
         let period_s = 60.0 / bpm as f64;
         let age_s    = now_ms.saturating_sub(beat_ms) as f64 / 1000.0;
         let running  = peer_playing || age_s < 2.0 * period_s;
@@ -520,6 +531,7 @@ impl PeerPhase {
             self.phase = age_s / period_s;          // first packet: the beat was `age` ago
             self.folded_ms = beat_ms;
             self.pending = 0.0;
+            set_bar(self, 0.0);
         } else if running {
             let inc = dt_s / period_s;
             let adj = self.pending.clamp(-inc * Self::SLEW, inc * Self::SLEW);
@@ -533,8 +545,11 @@ impl PeerPhase {
             let err = at_arrival.rem_euclid(1.0);
             let err = if err > 0.5 { err - 1.0 } else { err };   // beats, ±0.5
             self.pending -= err * Self::PULL;
+            set_bar(self, at_arrival);
         }
-        self.phase.rem_euclid(1.0) as f32
+        let (k, f) = crate::snapshot::split_beat(self.phase);
+        let shown = match self.bar_offset { Some(o) => ((k + o).rem_euclid(4) + 1) as u8, None => bib };
+        (f, shown)
     }
 }
 
@@ -1907,7 +1922,7 @@ mod peer_phase_tests {
         while (t as u64) < to_ms {
             let now = t as u64;
             let beat_ms = arrivals.iter().copied().filter(|a| *a <= now).max().unwrap_or(0);
-            out.push((now, pp.advance(now, beat_ms, BPM, playing, DT)));
+            out.push((now, pp.advance(now, beat_ms, BPM, 0, playing, DT).0));
             t += DT * 1000.0;
         }
         out
@@ -1915,6 +1930,44 @@ mod peer_phase_tests {
 
     /// Phase advanced (mod 1) between two frames.
     fn step(a: f32, b: f32) -> f32 { (b - a).rem_euclid(1.0) }
+
+    /// The master row's red bar mark must never jump: beat packets land a
+    /// few ms either side of the beat the free-run has drawn, and their
+    /// beat-in-bar used to switch the bar count on arrival, a beat apart
+    /// from the drawn phase for a frame or two.  The drawn bar position
+    /// (beat in bar + phase) must advance smoothly through every beat.
+    #[test]
+    fn bar_count_turns_over_with_the_phase_not_the_packet() {
+        let mut pp = PeerPhase::new();
+        // Beats every 500 ms from 1 s, beat-in-bar 1,2,3,4,1…, each packet
+        // landing 0–24 ms late or early in a fixed pseudo-random pattern.
+        let jitter = |i: u64| ((i * 7919) % 25) as i64 - 12;
+        let beats: Vec<(u64, u8)> = (0..40u64).map(|i| ((1000 + i as i64 * 500 + jitter(i)) as u64, (i % 4 + 1) as u8)).collect();
+        let mut t = 1000.0;
+        let mut prev: Option<f64> = None;
+        while t < 20_000.0 {
+            let now = t as u64;
+            let (beat_ms, bib) = beats.iter().copied().filter(|(a, _)| *a <= now).last().unwrap_or((0, 0));
+            let (ph, shown) = pp.advance(now, beat_ms, BPM, bib, true, DT);
+            let bar = (shown as f64 - 1.0) + ph as f64;
+            if let Some(p) = prev {
+                let step = (bar - p).rem_euclid(4.0);
+                assert!(step < 0.1, "bar position jumped {p:.3} → {bar:.3} at {now} ms");
+            }
+            prev = Some(bar);
+            t += DT * 1000.0;
+        }
+        // And it is the right bar: at the beat due at 10 s (i = 18, beat 3).
+        let mut pp2 = PeerPhase::new();
+        let (mut t, mut shown) = (1000.0, 0);
+        while t < 10_250.0 {
+            let now = t as u64;
+            let (beat_ms, bib) = beats.iter().copied().filter(|(a, _)| *a <= now).last().unwrap_or((0, 0));
+            shown = pp2.advance(now, beat_ms, BPM, bib, true, DT).1;
+            t += DT * 1000.0;
+        }
+        assert_eq!(shown, 3, "follows the master's bar");
+    }
 
     #[test]
     fn steady_beats_run_at_tempo() {

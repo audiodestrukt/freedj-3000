@@ -86,6 +86,11 @@ All notable changes to this project will be documented in this file.
   at full scale and keep the MP3 encoder delay, as before; tags read as before.
 
 ### Fixed
+- Phase meter: the red bar mark no longer jumps a beat for a frame now and
+  then. On the master's row the beat-in-bar changed when each beat packet
+  arrived, a few ms either side of the beat the row had drawn; it now counts
+  along with the drawn phase. On our own row the phase could round up to a
+  whole beat a frame before the beat number did.
 - rekordbox sticks with cues: a track with any memory or hot cue point
   failed to read its analysis (the bundled parser took a cue point to be
   type 0; rekordbox writes 1), so its beat grid was lost as well as its cues.
