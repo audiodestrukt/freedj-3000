@@ -318,13 +318,11 @@ static MLComputeUnits freedj_units_wanted(void) {
     NSURL *docs = [[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     NSString *conf = [NSString stringWithContentsOfURL:[docs URLByAppendingPathComponent:@"opendeck-stems.conf"]
                                               encoding:NSUTF8StringEncoding error:nil].lowercaseString;
-    // The CPU by default: the run measured end to end on the iPad (3.5x real
-    // time, about 4.7 GB above the app's own use).  The first GPU attempt
-    // ran out of memory in its first chunk.  "gpu" or "all" in the file
-    // tries those.
+    // CPU + GPU by default: what the iPad Air splits with since 0.3.13 (with
+    // the increased memory limit).  "cpu" or "all" in the file tries those.
+    if ([conf containsString:@"cpu"] && ![conf containsString:@"gpu"]) return MLComputeUnitsCPUOnly;
     if ([conf containsString:@"all"]) return MLComputeUnitsAll;
-    if ([conf containsString:@"gpu"]) return MLComputeUnitsCPUAndGPU;
-    return MLComputeUnitsCPUOnly;
+    return MLComputeUnitsCPUAndGPU;
 }
 
 void freedj_sep_units(char *buf, size_t len) {

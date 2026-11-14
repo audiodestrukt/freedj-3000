@@ -361,10 +361,14 @@ pub mod model {
         #[cfg(target_os = "ios")] { super::coreml::release(); }
     }
 
-    /// Memory a split needs on top of what the app already uses, MB:
-    /// measured on an iPad (Core ML on the CPU) at 548 → 5219 MB, and on
-    /// Linux (ONNX Runtime) at about 4.9 GB peak.  With a margin.
-    pub const SPLIT_NEEDS_MB: u64 = 5_000;
+    /// Memory a split needs free before it starts, MB.  iPad Air 13", Core
+    /// ML on CPU + GPU, 0.3.12 (standard memory limit): the model loaded at
+    /// 893 MB, then the app was killed in the first chunk with 4226 MB
+    /// still left, so a split needs more than ~4.2 GB beyond the loaded
+    /// model (~0.2 GB).  With the increased limit (0.3.13) it splits.  A
+    /// guess from one failure, to be replaced with a measured peak.  (Linux,
+    /// ONNX Runtime on the CPU, is different: 548 → 5219 MB.)
+    pub const SPLIT_NEEDS_MB: u64 = 4_600;
 
     /// (process memory, memory left before the OS steps in), MB.
     pub fn memory_mb() -> (u64, u64) {

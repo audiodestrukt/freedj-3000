@@ -136,9 +136,11 @@ the first chunk and reads `opendeck-stems.conf` in the OpenDeck folder
   limit; one entry today, room for a lighter one for smaller devices. The
   download restarts from scratch if iOS suspends the app partway (a
   background `NSURLSession` would continue it; not done).
-- ~~Memory~~ measured on the iPad (CPU): 548 MB at start, 4693 MB with the
-  model loaded, 5219 MB peak; 3.5× real time. Since 2026-11-14 the model is
-  released after each split (it used to stay loaded, ~4 GB, for the
-  session), the CPU is the default, and a split needs `SPLIT_NEEDS_MB`
-  (5 GB) free or it is refused with "NEEDS MORE MEMORY" rather than killed.
-  GPU with the increased memory limit is untested.
+- Memory: since 2026-11-14 the model is released after each split (it used
+  to stay loaded for the session), and a split needs `SPLIT_NEEDS_MB`
+  (4.6 GB) free or is refused with "NEEDS MORE MEMORY" rather than killed.
+  That figure comes from the one iPad failure (0.3.12, standard limit:
+  killed in the first chunk with 4.2 GB left after the model loaded); the
+  peak of a successful iPad split (0.3.13+, CPU + GPU) is not recorded yet
+  and should replace it. (The 548 → 5219 MB run sometimes quoted is Linux,
+  ONNX Runtime on the CPU, not the iPad.)

@@ -51,7 +51,7 @@ pub struct ModelSpec {
 /// Best first.
 pub const CATALOG: &[ModelSpec] = &[
     // HTDemucs as Core ML, revision a914c07 of slaughters85j/htdemucs-coreml
-    // (MIT). 548 → 5219 MB on an iPad on the CPU.
+    // (MIT).  Memory: see separate::model::SPLIT_NEEDS_MB.
     ModelSpec {
         name: "HTDemucs (Core ML)",
         url: "https://huggingface.co/slaughters85j/htdemucs-coreml/resolve/a914c0702e346a969b1099991f93b3fceb1d38fd/htdemucs.mlpackage.zip",
@@ -59,7 +59,7 @@ pub const CATALOG: &[ModelSpec] = &[
         zip_sha256: "753276a6bfe2013cf3b03ab33fd038cb6138e0d933ce985724d7cf385df66a98",
         package: "htdemucs.mlpackage",
         installed_bytes: 425_000_000,
-        split_mb: 5_000,
+        split_mb: super::separate::model::SPLIT_NEEDS_MB,
     },
 ];
 
@@ -440,8 +440,10 @@ mod tests {
     #[test]
     fn the_model_is_picked_by_memory() {
         assert_eq!(pick(16_000).map(|m| m.package), Some("htdemucs.mlpackage"));
-        assert_eq!(pick(5_900).map(|m| m.package), Some("htdemucs.mlpackage"));
-        assert!(pick(5_000).is_none(), "a 5 GB limit cannot hold a 4.7 GB split beside the app");
+        assert_eq!(pick(5_500).map(|m| m.package), Some("htdemucs.mlpackage"));
+        // The iPad Air's standard limit (701 + 4418 MB), where 0.3.12 was
+        // killed partway: no model.
+        assert!(pick(701 + 4_418).is_none(), "the limit a split was killed under");
         assert!(CATALOG.iter().all(|m| m.zip_sha256.len() == 64 && m.url.contains("/resolve/") && m.zip_bytes > 0));
     }
 

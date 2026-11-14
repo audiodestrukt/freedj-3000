@@ -93,10 +93,9 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - Splitting stems on an iPad or iPhone no longer keeps the model (about 4 GB)
   in memory after the split, so the deck is not carrying it through the rest
-  of the set; the next split loads it again in a few seconds. The model runs
-  on the CPU by default, the path measured end to end on the iPad. A device
-  that cannot give a split the memory it needs shows "NEEDS MORE MEMORY"
-  instead of being closed by iOS partway, and downloads nothing.
+  of the set; the next split loads it again in a few seconds. A device that
+  cannot give a split the memory it needs shows "NEEDS MORE MEMORY" instead
+  of being closed by iOS partway, and downloads nothing.
 - Stems from an OverCue stick play almost at once. The bank is read page by
   page from the start of the track, each page checked as it arrives, and the
   deck plays the stems as far as they have got and the track itself beyond
