@@ -286,6 +286,8 @@ pub struct TrackMeta {
     pub title: Option<String>, pub artist: Option<String>, pub album: Option<String>,
     pub genre: Option<String>, pub key: Option<String>, pub year: Option<String>,
     pub comment: Option<String>,
+    /// "yyyy-mm-dd" the track was added to the library.
+    pub added: Option<String>,
     pub bpm: Option<f32>,
     /// The cover's id for [`Client::artwork`] (0 = none).
     pub artwork_id: u32,
@@ -304,6 +306,7 @@ impl TrackMeta {
                 0x0f if m.key.is_none()    => m.key    = text(r),
                 0x11 if m.year.is_none()   => m.year   = text(r),
                 0x23 if m.comment.is_none() => m.comment = text(r),
+                0x2e if m.added.is_none()  => m.added  = text(r),
                 0x0d if m.bpm.is_none()    => m.bpm    = Some(r.id as f32 / 100.0).filter(|b| *b > 0.0),
                 _ => {}
             }

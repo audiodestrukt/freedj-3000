@@ -2493,10 +2493,7 @@ impl DeckApp {
             let want = if rekordbox { "/" } else if sd { "/B/" } else { "/C/" };
             let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
             let exports = nfs.exports()?;
-            let export = exports.iter().find(|e| **e == utf16(want)).or_else(|| exports.first()).cloned()
-                .unwrap_or_else(|| utf16(want));
-            let root = nfs.mount(&export)?;
-            let (fh, size) = nfs.lookup_path(&root, &path)?;
+            let (fh, size) = nfs_resolve(&mut nfs, &exports, &utf16(want), &path)?;
             // The download runs on its own thread while the decoder reads the
             // front of the file as it arrives: the deck is playable after the
             // first seconds, not after the whole file.
@@ -2668,6 +2665,7 @@ impl DeckApp {
                     if self.loading.take().is_some() {
                         self.play_on_load = false;
                         log::warn!("load failed: {e:#}");
+                        self.notify("COULD NOT LOAD THE TRACK");
                     } else if !self.audio.complete.load(Ordering::Relaxed) {
                         // The start played; the rest would not decode (a
                         // damaged tail).  The track ends where decoding did.
@@ -3832,6 +3830,50 @@ struct Fetched { name: String, path: String, audio: AudioSrc, grid: FetchedGrid,
 /// `Anlz`: the `.DAT`, and the `.EXT` beside it when there is one (cue
 /// colours and comments).
 enum FetchedGrid { None, Anlz(Vec<u8>, Option<Vec<u8>>), Beats(Vec<opendeck_dbserver::GridBeat>) }
+
+/// Find a file a player's library names, over NFS.  The player's own export
+/// (`want`, "/C/" for its USB) goes first, then every other export it
+/// advertises; within one, a name that is not there is looked up again in the
+/// directory's listing, ignoring case.  Every miss is logged with what the
+/// directory holds, so a path the library names but the volume does not have
+/// shows what is actually there.
+fn nfs_resolve(nfs: &mut opendeck_nfs::Nfs, exports: &[Vec<u8>], want: &[u8], path: &str) -> Result<(opendeck_nfs::Fh, u32)> {
+    let show = |e: &[u8]| String::from_utf16_lossy(&e.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>());
+    log::info!("LINK nfs: exports {:?}, want {:?}", exports.iter().map(|e| show(e)).collect::<Vec<_>>(), show(want));
+    let mut order: Vec<Vec<u8>> = exports.iter().filter(|e| e.as_slice() == want).cloned().collect();
+    order.extend(exports.iter().filter(|e| e.as_slice() != want).cloned());
+    if order.is_empty() { order.push(want.to_vec()); }
+    let mut last = anyhow::anyhow!("no export to mount");
+    for export in order {
+        let name = show(&export);
+        let root = match nfs.mount(&export) {
+            Ok(r) => r,
+            Err(e) => { log::info!("LINK nfs: mount {name:?}: {e:#}"); last = e; continue; }
+        };
+        let (mut fh, mut size) = (root, 0u32);
+        let mut here = String::from("/");
+        let mut ok = true;
+        for comp in path.split('/').filter(|c| !c.is_empty()) {
+            let found = match nfs.lookup(&fh, comp) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    let entries = nfs.readdir(&fh).unwrap_or_default();
+                    let alt = entries.iter().find(|d| d.name.to_lowercase() == comp.to_lowercase());
+                    let sample: Vec<&str> = entries.iter().take(25).map(|d| d.name.as_str()).collect();
+                    log::info!("LINK nfs: {name:?}: {comp:?} not in {here:?} ({e:#}); {} entries, first {sample:?}; case-insensitive match {:?}",
+                               entries.len(), alt.map(|d| d.name.as_str()));
+                    match alt { Some(d) => nfs.lookup(&fh, &d.name).ok(), None => { last = e; None } }
+                }
+            };
+            match found {
+                Some((f, sz)) => { fh = f; size = sz; here = format!("{}{comp}/", here); }
+                None => { ok = false; break; }
+            }
+        }
+        if ok { log::info!("LINK nfs: {path:?} found on export {name:?}"); return Ok((fh, size)); }
+    }
+    Err(last)
+}
 
 /// The deck facts a loader thread needs; captured before the thread starts.
 #[derive(Clone)]
