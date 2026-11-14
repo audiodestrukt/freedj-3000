@@ -112,5 +112,6 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 ## Planned
 
 - Sampler deck: auto one-shots, quantized triggers, cue sequencing ([#24](https://github.com/audiodestrukt/freedj-3000/issues/24)).
+- OpenDeck as an engine with players and features as mods (the CDJ-3000 and XDJ-1000MK2 players among them), without mods ever reaching the audio path: proposal in [design/mods.md](design/mods.md).
 - The remaining CDJ-3000 screen work: [TODO-cdj-3000.md](TODO-cdj-3000.md).
 - Analysis improvements (phrases, mood, downbeats, key): [TODO-analysis.md](TODO-analysis.md).
