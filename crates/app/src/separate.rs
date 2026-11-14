@@ -47,6 +47,8 @@ pub struct Job {
     /// 0–1000 (tenths of a percent).
     pub progress: AtomicU32,
     pub cancel: AtomicBool,
+    /// Called after each chunk: (chunk index, chunks, seconds the model took).
+    pub on_chunk: Option<fn(usize, usize, f64)>,
 }
 
 impl Job {
@@ -135,7 +137,9 @@ pub fn separate(track: &[f32], deck_sr: u32, sep: &mut dyn Separator, job: &Job)
         }
         let tm = std::time::Instant::now();
         sep.run(&input, &mut output)?;
-        timing.model_s += tm.elapsed().as_secs_f64();
+        let dt = tm.elapsed().as_secs_f64();
+        timing.model_s += dt;
+        if let Some(f) = job.on_chunk { f(k, chunks, dt); }
 
         let need = off + n - base;
         if acc.len() < need * 6 { acc.resize(need * 6, 0.0); wsum.resize(need, 0.0); }

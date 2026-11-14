@@ -263,7 +263,9 @@ void *freedj_sep_open(char *err, size_t errlen) {
                 }
             }
             MLModelConfiguration *cfg = [MLModelConfiguration new];
-            cfg.computeUnits = MLComputeUnitsAll;
+            // GPU: the Neural Engine rejects this model's inverse transform
+            // (the converter's notes), and trying it costs compile time and memory.
+            cfg.computeUnits = MLComputeUnitsCPUAndGPU;
             MLModel *m = [MLModel modelWithContentsOfURL:compiled configuration:cfg error:&e];
             if (!m) { freedj_err(err, errlen, [NSString stringWithFormat:@"load: %@", e.localizedDescription]); return NULL; }
             return (__bridge_retained void *)m;

@@ -82,6 +82,15 @@ Quality is a listening call.
   8 GB Pi. Better as a "prepare this folder" job than on load. Not measured.
 - **Pi Zero, Android phones:** no.
 
+## First iPad run (0.3.11, iPad Air 13")
+
+The app quit during the first split of a local track. iOS kills an app that
+passes its memory limit without a crash report, so 0.3.12 writes each step
+(start, model ready, chunks) with the memory in use to the test file, line
+by line, runs the model on the GPU only (the Neural Engine attempt costs
+compile time and memory for nothing), and declares
+`com.apple.developer.kernel.increased-memory-limit`.
+
 ## Open
 
 - Run on the iPad: speed, memory, and whether iOS kills the app.

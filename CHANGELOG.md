@@ -13,7 +13,9 @@ All notable changes to this project will be documented in this file.
   `opendeck-stems-test.txt` there. On a Linux desktop, build with
   `--features separate-onnx` and point `OPENDECK_SEPARATE_MODEL` at
   `htdemucs.onnx`: a 3.5-minute track splits in about 50 s on a 28-thread
-  CPU. BROWSE hides model folders.
+  CPU. BROWSE hides model folders. The iPad build asks iOS for its higher
+  memory limit, runs the model on the GPU, and logs each step of a split
+  with the memory in use, so a split that runs out of memory shows where.
 - Stems: the CDJ-3000 STEMS panel now matches OverCue's on the unit: its own
   key spacing, the unit's checkered key faces (blue playing, grey muted),
   and a grey EQ key. In VOLUME mode the blue fills each key from the left

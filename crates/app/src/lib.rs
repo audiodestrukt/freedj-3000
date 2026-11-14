@@ -90,33 +90,52 @@ const HISTORY_MAX: usize = 100;
 /// No prepared stems: split the track on the device, if it has a
 /// separation model (iOS: HTDemucs in the OpenDeck folder; a desktop built
 /// with `separate-onnx`: `OPENDECK_SEPARATE_MODEL`; see `separate.rs`).
-/// Each split logs its timing and memory; on iOS also to
-/// `Documents/opendeck-stems-test.txt`, which only exists once a model was
-/// put there.
+/// Each split logs each step with the memory in use; on iOS also to
+/// `Documents/opendeck-stems-test.txt` (only once a model was put there),
+/// line by line, so a split iOS kills for memory still shows how far it got.
 fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: &separate::Job) -> Result<Option<stems::StemBank>> {
     use separate::model;
     if !model::present() { return Ok(None); }
-    let before = model::memory_mb();
-    let res = model::with(|m| separate::separate(track, sr, m, job));
-    let after = model::memory_mb();
     let secs = track.len() as f64 / 2.0 / sr as f64;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let mem = || { let (used, left) = model::memory_mb(); format!("mem {used} MB, {left} MB left") };
+    split_trace(&format!("{} {} | {name} | {secs:.0}s track | start | {}", utc_now(), model::device(), mem()));
+    let res = model::with(|m| {
+        split_trace(&format!("  model ready | {}", mem()));
+        separate::separate(track, sr, m, job)
+    });
     let line = match &res {
         Ok(((_, t), load_s)) => format!(
-            "{} {} | {name} | {secs:.0}s track | load {load_s:.1}s | {} chunks, model {:.1}s, total {:.1}s = {:.1}x real time | mem {} MB -> {} MB, {} MB left",
-            utc_now(), model::device(), t.chunks, t.model_s, t.total_s, secs / t.total_s.max(1e-9), before.0, after.0, after.1),
-        Err(e) => format!("{} {} | {name} | split failed: {e:#} | mem {} MB, {} MB left", utc_now(), model::device(), after.0, after.1),
+            "  done | load {load_s:.1}s | {} chunks, model {:.1}s, total {:.1}s = {:.1}x real time | {}",
+            t.chunks, t.model_s, t.total_s, secs / t.total_s.max(1e-9), mem()),
+        Err(e) => format!("  split failed: {e:#} | {}", mem()),
     };
+    split_trace(&line);
+    let ((data, _), _) = res?;
+    Ok(Some(stems::StemBank::from_split(track, data, sr)))
+}
+
+/// After each chunk of a split: its time and the memory in use (the first
+/// few, then every fifth).
+fn split_chunk_trace(k: usize, n: usize, dt: f64) {
+    if k < 3 || (k + 1) % 5 == 0 || k + 1 == n {
+        let (used, left) = separate::model::memory_mb();
+        split_trace(&format!("  chunk {}/{n} {dt:.2}s | mem {used} MB, {left} MB left", k + 1));
+    }
+}
+
+/// One line of the split log: the app log, and on iOS / Android the test
+/// file, opened and closed per line so it survives the app being killed.
+fn split_trace(line: &str) {
     log::info!("stems: {line}");
     #[cfg(any(target_os = "ios", target_os = "android"))]
     {
         use std::io::Write;
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(taglist::documents_dir().join("opendeck-stems-test.txt")) {
             let _ = writeln!(f, "{line}");
+            let _ = f.sync_all();
         }
     }
-    let ((data, _), _) = res?;
-    Ok(Some(stems::StemBank::from_split(track, data, sr)))
 }
 
 /// Wall-clock time as `YYYY-MM-DD HH:MM:SS` UTC, for log lines.
@@ -2478,7 +2497,7 @@ impl DeckApp {
         if !self.settings.stems || std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") || !self.path.is_file() { return; }
         let (tx, rx) = mpsc::channel();
         let (path, track, sr) = (self.path.clone(), Arc::clone(track), self.audio.sample_rate);
-        let job = Arc::new(separate::Job::default());
+        let job = Arc::new(separate::Job { on_chunk: Some(split_chunk_trace), ..Default::default() });
         let j = Arc::clone(&job);
         let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
             let got = match stems::load_local(&path, &track, sr, ch) {
