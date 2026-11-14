@@ -179,6 +179,9 @@ pub struct DeckSnapshot<'a> {
     /// INFO page: what Link is speaking from ("ip (iface) → broadcast") and
     /// the players heard.  Empty until the sender has started.
     pub link_addr:    String,
+    /// The device's IPv4 addresses for the MENU footer ("IP 192.168.1.23
+    /// (en0)"), the one Link uses first.  Filled while MENU is open.
+    pub ip_line:      String,
     pub link_peers:   String,
 
     /// Waveform columns (of `HOP_SIZE` frames) across the enlarged waveform:
@@ -230,7 +233,7 @@ impl<'a> DeckSnapshot<'a> {
             slip_shadow: None, playing: false, speed: 1.0, fader_speed: 1.0, key_lock: false, jog_vinyl: false,
             remain_mode: true, auto_cue: false, slip: false, sync: false, master: false, zoom_grid_mode: false,
             grid_edited: false, cue_set: false, sync_offset: 0.0, source_link: false, phase_ticks_view: false,
-            linked: false, master_player: 0, player: 1, link_addr: String::new(), link_peers: String::new(),
+            linked: false, master_player: 0, player: 1, link_addr: String::new(), ip_line: String::new(), link_peers: String::new(),
             cols_visible: 1.0, beat_grid: None, beat2_bpm: 0.0, beat2_phase_beats: 0.0, beat2_beat_in_bar: 0, key_shift: 0,
         }
     }

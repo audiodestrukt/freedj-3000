@@ -140,6 +140,21 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
     Ok(Some(bank))
 }
 
+/// "IP 192.168.1.23 (en0)  ·  10.0.0.5 (en1)": the device's IPv4
+/// addresses, the one Link sends from first, at most three, leaving out
+/// virtual ones (containers, VPNs, Apple's peer-to-peer links) unless Link
+/// is on one; "IP: no network" with none.
+fn format_ips(ifs: &[(String, std::net::Ipv4Addr)], link: Option<std::net::Ipv4Addr>) -> String {
+    const VIRTUAL: [&str; 12] = ["docker", "br-", "veth", "lxc", "virbr", "tailscale", "utun", "awdl", "llw", "bridge", "anpi", "vmnet"];
+    let mut v: Vec<&(String, std::net::Ipv4Addr)> = ifs.iter()
+        .filter(|(n, ip)| Some(*ip) == link || !VIRTUAL.iter().any(|p| n.starts_with(p)))
+        .collect();
+    v.sort_by_key(|(_, ip)| Some(*ip) != link);
+    v.truncate(3);
+    if v.is_empty() { return "IP: no network".into(); }
+    format!("IP {}", v.iter().map(|(n, ip)| format!("{ip} ({n})")).collect::<Vec<_>>().join("  ·  "))
+}
+
 /// A split's input is ready and its first chunk goes to the model.
 fn split_start_trace(n: usize) {
     let (used, left) = separate::model::memory_mb();
@@ -716,6 +731,8 @@ struct DeckApp {
     stems_no_memory: bool,
     /// A split has been started (or refused) for the loaded track.
     stems_split_tried: bool,
+    /// MENU footer addresses and when they were looked up.
+    ip_cache: (Option<Instant>, String),
     /// An on-device split in progress (progress, cancel), see `separate.rs`.
     stems_job:         Option<Arc<separate::Job>>,
     /// What the enlarged waveform shows now: the stem mix of (bank, gains,
@@ -909,6 +926,7 @@ fn make_snapshot<'a>(
         master_player: f.master_player,
         player:        f.player,
         link_addr:     String::new(),
+        ip_line:       String::new(),
         link_peers:    String::new(),
         cols_visible:  ZOOM_LEVELS[ZOOM_DEFAULT],
         beat_grid,
@@ -1085,6 +1103,7 @@ impl DeckApp {
             stems_await_model: false,
             stems_no_memory: false,
             stems_split_tried: false,
+            ip_cache: (None, String::new()),
             stems_job: None,
             stem_wave_key: None,
             loading: None,
@@ -2682,6 +2701,20 @@ impl DeckApp {
 
     /// Hand a finished stems job to the processor, if its track is still
     /// the one playing.
+    /// The MENU footer's addresses, looked up at most every 2 s (a network
+    /// change shows while MENU is open).
+    /// (Fields, not `&mut self`: the frame holds the renderer borrowed.)
+    fn ip_line(cache: &mut (Option<Instant>, String), link: &prodj::LinkState) -> String {
+        if cache.0.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
+            let ifs: Vec<(String, std::net::Ipv4Addr)> = if_addrs::get_if_addrs().unwrap_or_default().into_iter()
+                .filter_map(|i| match i.addr { if_addrs::IfAddr::V4(v) if !v.ip.is_loopback() => Some((i.name, v.ip)), _ => None })
+                .collect();
+            let link = link.own_addr.lock().ok().and_then(|a| a.split_whitespace().next().and_then(|ip| ip.parse().ok()));
+            *cache = (Some(Instant::now()), format_ips(&ifs, link));
+        }
+        cache.1.clone()
+    }
+
     /// The DJ is at the stems: the CDJ-3000 STEMS panel or the XDJ STEMS
     /// pad mode is open.  That is when a track without prepared stems is
     /// split, so nobody pays the download, heat or battery for stems they
@@ -3299,12 +3332,14 @@ impl DeckApp {
             slip_shadow,
         };
         let _t_snap = Instant::now();
+        let ip_line = if self.screen_mode == ScreenMode::Menu { Self::ip_line(&mut self.ip_cache, &self.link) } else { String::new() };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
         if self.screen_mode == ScreenMode::Info {
             snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
             snap.link_peers = self.link.peers_summary();
         }
+        snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = self.stems_view();
@@ -3534,12 +3569,14 @@ impl DeckApp {
             slip_shadow,
         };
         self.indicators.store(surface_bits(&flags, playing, self.transport.cued));
+        let ip_line = if self.screen_mode == ScreenMode::Menu { Self::ip_line(&mut self.ip_cache, &self.link) } else { String::new() };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
         if self.screen_mode == ScreenMode::Info {
             snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
             snap.link_peers = self.link.peers_summary();
         }
+        snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = stems_view;
@@ -4545,6 +4582,23 @@ mod memory_cue_tests {
         let r = [0.0, 0.0, 0.0, 0.5];
         assert_eq!(first_sound(&r, 2, -48.0), 2);
         assert_eq!(first_sound(&[0.0; 8], 2, -48.0), 0);
+    }
+}
+
+#[cfg(test)]
+mod ip_line_tests {
+    use super::format_ips;
+
+    #[test]
+    fn the_link_address_comes_first() {
+        let ifs = vec![("en1".to_string(), "10.0.0.5".parse().unwrap()), ("en0".to_string(), "192.168.1.23".parse().unwrap())];
+        assert_eq!(format_ips(&ifs, Some("192.168.1.23".parse().unwrap())), "IP 192.168.1.23 (en0)  ·  10.0.0.5 (en1)");
+        assert_eq!(format_ips(&ifs, None), "IP 10.0.0.5 (en1)  ·  192.168.1.23 (en0)");
+        assert_eq!(format_ips(&[], None), "IP: no network");
+        // Containers and VPNs stay out; at most three.
+        let busy: Vec<(String, std::net::Ipv4Addr)> = ["en0", "docker0", "tailscale0", "br-1a2b", "en1", "en2", "en3"].iter().enumerate()
+            .map(|(i, n)| (n.to_string(), std::net::Ipv4Addr::new(10, 0, 0, i as u8 + 1))).collect();
+        assert_eq!(format_ips(&busy, None), "IP 10.0.0.1 (en0)  ·  10.0.0.5 (en1)  ·  10.0.0.6 (en2)");
     }
 }
 

@@ -2107,6 +2107,8 @@ fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings,
     label(ui, Pos2::new(x, pane.max.y - 40.0 * u), Align2::LEFT_BOTTOM,
           format!("OpenDeck DJ  {}", crate::screen::APP_VERSION), 18.0, u, foot);
     label(ui, Pos2::new(x, pane.max.y - 14.0 * u), Align2::LEFT_BOTTOM, crate::screen::SUPPORT_LINE, 18.0, u, foot);
+    // This deck's address(es), for tools and other players on the network.
+    label(ui, Pos2::new(pane.max.x - 16.0 * u, pane.max.y - 14.0 * u), Align2::RIGHT_BOTTOM, &snap.ip_line, 18.0, u, TEXT);
     draw_status_strip(ui, snap, lay, u, out);
 }
 

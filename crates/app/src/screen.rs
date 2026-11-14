@@ -1097,7 +1097,7 @@ pub fn draw(
                 // INFO: the middle band shows the loaded track's details.
                 ScreenView::Info => draw_info_screen(ui, snap, lay, h),
                 // MENU / UTILITY: the settings list.
-                ScreenView::Menu(settings, cursor) => draw_menu(ui, settings, snap.stems.state, cursor, lay, h, out),
+                ScreenView::Menu(settings, cursor) => draw_menu(ui, settings, snap.stems.state, &snap.ip_line, cursor, lay, h, out),
                 ScreenView::Playback | ScreenView::History(..) => {
                     draw_title(ui, snap, lay, h);
                     draw_phase(ui, snap, lay, h, out);
@@ -1250,7 +1250,7 @@ pub const APP_VERSION: &str = match option_env!("OPENDECK_VERSION") {
 };
 pub const SUPPORT_LINE: &str = "support@audiodestrukt.com   ·   audiodestrukt.com/opendeck";
 
-fn draw_menu(ui: &Ui, settings: &Settings, stems: StemsState, cursor: usize, lay: &Layout, h: f32, out: &mut Vec<Event>) {
+fn draw_menu(ui: &Ui, settings: &Settings, stems: StemsState, ip_line: &str, cursor: usize, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     let p = ui.painter();
     let hdr = lay.title;
     p.rect_filled(hdr, 0.0, BAR);
@@ -1286,6 +1286,10 @@ fn draw_menu(ui: &Ui, settings: &Settings, stems: StemsState, cursor: usize, lay
     text(ui, Pos2::new(x, body.max.y - pad - h * 0.030), Align2::LEFT_BOTTOM,
          &format!("OpenDeck DJ  {APP_VERSION}"), h * 0.022, DIM);
     text(ui, Pos2::new(x, body.max.y - pad), Align2::LEFT_BOTTOM, SUPPORT_LINE, h * 0.022, DIM);
+    // This deck's address(es), for tools and other players on the network.
+    // The column is narrow here: the first two addresses (Link's first).
+    let two = ip_line.split("  ·  ").take(2).collect::<Vec<_>>().join("  ·  ");
+    text(ui, Pos2::new(body.max.x - pad - h * 0.02, body.max.y - pad - h * 0.030), Align2::RIGHT_BOTTOM, two, h * 0.022, TEXT);
 }
 
 /// INFO screen: the loaded track's details in the middle band — its own tags

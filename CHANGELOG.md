@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- MENU (UTILITY) shows the deck's IP address in its footer: the address Pro
+  DJ Link uses first, then the device's other networks (up to three on the
+  CDJ-3000 screen, two on the XDJ screen; containers, VPNs and Apple's
+  peer-to-peer links left out). It follows a network change while MENU is
+  open.
 - STEMS is on by default (MENU → STEMS turns it off; an older settings file
   with it off turns on once). Loading a track splits nothing: prepared stems
   on a stick play as the track loads, and a track without them is split on
