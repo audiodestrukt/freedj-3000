@@ -2006,11 +2006,18 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
         if tap(ui, pt, "cdj-trk-preview").0 { out.push(Event::Ui(UiEvent::BrowsePreview)); }
         let at_ = Rect::from_min_max(at(1050.0, 8.0), at(1165.0, 84.0));
         p.rect_filled(at_, 0.0, Color32::from_rgb(45, 45, 45));
-        label(ui, at_.center(), Align2::CENTER_CENTER, "A A A", 19.0, u, LABEL);
+        // A A A: three sizes, the current one bright and underlined.
+        for (n, sz) in [14.0f32, 20.0, 27.0].into_iter().enumerate() {
+            let pos = Pos2::new(at_.min.x + (22.0 + 36.0 * n as f32) * u, at_.center().y + 4.0 * u);
+            let cur = n as u8 == b.font_size();
+            let r = label(ui, pos, Align2::CENTER_CENTER, "A", sz, u, if cur { TEXT } else { LABEL });
+            if cur { ui.painter().line_segment([Pos2::new(r.min.x, r.max.y + 3.0 * u), Pos2::new(r.max.x, r.max.y + 3.0 * u)], Stroke::new(2.0 * u, TEXT)); }
+        }
+        if tap(ui, at_, "cdj-trk-font").0 { out.push(Event::Ui(UiEvent::BrowseFont)); }
         let it = Rect::from_min_max(at(1172.0, 8.0), at(1275.0, 84.0));
         let ion = b.info_on();
-        p.rect_filled(Rect::from_center_size(Pos2::new(it.min.x + 16.0 * u, it.center().y), Vec2::splat(26.0 * u)), 2.0, if ion { SEL_BLUE } else { Color32::from_rgb(70, 70, 70) });
-        label(ui, Pos2::new(it.min.x + 52.0 * u, it.center().y), Align2::CENTER_CENTER, "INFO", 19.0, u, if ion { SEL_BLUE } else { TEXT });
+        p.rect_filled(Rect::from_center_size(Pos2::new(it.min.x + 14.0 * u, it.center().y), Vec2::splat(24.0 * u)), 2.0, if ion { SEL_BLUE } else { Color32::from_rgb(70, 70, 70) });
+        label(ui, Pos2::new(it.min.x + 66.0 * u, it.center().y), Align2::CENTER_CENTER, "INFO", 19.0, u, if ion { SEL_BLUE } else { TEXT });
         if tap(ui, it, "cdj-trk-info").0 { out.push(Event::Ui(UiEvent::BrowseInfo)); }
     }
     // The second-row key: a box with ⌃⌄, lit while a detail row shows.
@@ -2030,6 +2037,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
     p.line_segment([Pos2::new(cx, cy - 10.0 * u), Pos2::new(cx + 6.0 * u, cy - 4.0 * u)], st);
     p.line_segment([Pos2::new(cx - 6.0 * u, cy + 4.0 * u), Pos2::new(cx, cy + 10.0 * u)], st);
     p.line_segment([Pos2::new(cx, cy + 10.0 * u), Pos2::new(cx + 6.0 * u, cy + 4.0 * u)], st);
+    let fsz = [22.0, 27.0, 32.0][b.font_size() as usize];
     let sel = b.selected;
     let first = sel.saturating_sub(vis / 2).min(rows.len().saturating_sub(vis));
     for k in 0..vis {
@@ -2061,11 +2069,11 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
         let tcol = if r.played { PLAYED } else { TEXT };
         let title_end = dx.map_or(1075.0, |d| d - 4.0);
         p.with_clip_rect(Rect::from_min_max(at(tr, y), at(title_end, y + ROW_H)))
-            .text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), tcol);
+            .text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(fsz * u), tcol);
         if let Some(d) = dx {
             p.line_segment([at(d, y), at(d, y + ROW_H)], Stroke::new(1.0 * u, Color32::from_rgb(70, 70, 70)));
             p.with_clip_rect(Rect::from_min_max(at(d + 2.0, y), at(1075.0, y + ROW_H)))
-                .text(Pos2::new(sc.min.x + (d + 10.0) * u, cy), Align2::LEFT_CENTER, b.detail_text(e), FontId::proportional(24.0 * u), LABEL);
+                .text(Pos2::new(sc.min.x + (d + 10.0) * u, cy), Align2::LEFT_CENTER, b.detail_text(e), FontId::proportional(fsz * 0.9 * u), LABEL);
         }
         if r.tagged { p.circle_filled(Pos2::new(sc.min.x + 1068.0 * u, cy), 5.0 * u, BARS_ORANGE); }
         rules(lit);
@@ -2075,11 +2083,12 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
             label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::BLACK);
             if tap(ui, load, &format!("cdj-trk-load-{i}")).0 { out.push(Event::Deck(ControlEvent::Load)); }
         } else {
-            if let Some(bpm) = e.bpm.filter(|b| *b > 0.0) {
-                label(ui, Pos2::new(sc.min.x + 1178.0 * u, cy), Align2::RIGHT_CENTER, format!("{bpm:.1}"), 27.0, u, TEXT);
+            let (mb, mk) = e.load().map(|l| b.db_bpm_key(l)).unwrap_or((None, None));
+            if let Some(bpm) = e.bpm.or(mb).filter(|b| *b > 0.0) {
+                label(ui, Pos2::new(sc.min.x + 1178.0 * u, cy), Align2::RIGHT_CENTER, format!("{bpm:.1}"), fsz, u, TEXT);
             }
-            if let Some(k) = &e.key {
-                label(ui, Pos2::new(sc.min.x + 1200.0 * u, cy), Align2::LEFT_CENTER, k, 27.0, u, TEXT);
+            if let Some(k) = e.key.clone().or(mk) {
+                label(ui, Pos2::new(sc.min.x + 1200.0 * u, cy), Align2::LEFT_CENTER, k, fsz, u, TEXT);
             }
         }
     }

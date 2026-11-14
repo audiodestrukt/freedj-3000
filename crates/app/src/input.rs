@@ -74,6 +74,8 @@ pub enum UiEvent {
     BrowseInfo,
     /// The track table's PREVIEW tab.
     BrowsePreview,
+    /// The table's text-size key.
+    BrowseFont,
     /// MENU: a row was tapped — select it and step its value.
     MenuTap(usize),
     /// GRID ADJUST touch keys (shown in place of the Bars readouts while the

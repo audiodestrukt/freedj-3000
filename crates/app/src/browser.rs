@@ -385,6 +385,7 @@ pub struct Browser {
     detail: u8,
     info: bool,
     previews: bool,
+    font: u8,
     /// Which local tracks have OverCue stems (the "S" mark in lists).
     stem_marks: std::cell::RefCell<crate::stems::StemMarks>,
 }
@@ -442,6 +443,7 @@ impl Browser {
             detail: 0,
             info: true,
             previews: true,
+            font: 1,
             stem_marks: Default::default(),
         };
         b.rebuild();
@@ -479,7 +481,7 @@ impl Browser {
         // table's previews and second rows fill in around it.
         let n = self.entries.len();
         let order = std::iter::once(self.selected)
-            .chain((1..=6usize).flat_map(|d| [self.selected + d, self.selected.wrapping_sub(d)]))
+            .chain((1..=10usize).flat_map(|d| [self.selected + d, self.selected.wrapping_sub(d)]))
             .filter(|&i| i < n);
         let todo = order.into_iter().find(|&i| {
             matches!(&self.entries[i].kind, EntryKind::Track(l @ Load::Db { .. }) if Self::meta_key(l).is_some_and(|k| !self.meta_cache.contains_key(&k)))
@@ -583,6 +585,16 @@ impl Browser {
     }
 
     pub fn refresh(&mut self) { self.playlist_only = false; self.rebuild(); }
+    /// BPM and key the player lists for a linked track, once fetched.
+    pub fn db_bpm_key(&self, l: &Load) -> (Option<f32>, Option<String>) {
+        match Self::meta_key(l).and_then(|k| self.meta_cache.get(&k)).and_then(|i| i.as_ref()) {
+            Some(i) => (i.meta.bpm, i.meta.key.clone()),
+            None => (None, None),
+        }
+    }
+    /// 0 small, 1 medium, 2 large: the table's text size ("A A A").
+    pub fn font_size(&self) -> u8 { self.font }
+    pub fn cycle_font(&mut self) { self.font = (self.font + 1) % 3; }
     pub fn previews_on(&self) -> bool { self.previews }
     pub fn toggle_previews(&mut self) { self.previews = !self.previews; }
     /// Length and stars the player lists for a linked track.
