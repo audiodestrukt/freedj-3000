@@ -55,6 +55,8 @@ pub enum Action {
     Quit,
     /// DECK VIEW: flip full deck ↔ screen only (the F key).
     DeckView,
+    /// KEY SHIFT to this many semitones.
+    KeyShift(i8),
 }
 
 /// Parse a script; entries are sorted by time. Errors name the bad entry.
@@ -92,6 +94,7 @@ pub fn parse(src: &str) -> Result<Vec<(f64, Action)>, String> {
             _ if act.starts_with("rotary=") => Action::Rotary(act[7..].trim().parse().map_err(|_| format!("{entry:?}: bad detents"))?),
             _ if act.starts_with("lamps=") => Action::Lamps(act[6..].trim().to_string()),
             _ if act.starts_with("shot=") => Action::Shot(act[5..].trim().to_string()),
+            _ if act.starts_with("keyshift=") => Action::KeyShift(act[9..].trim().parse().map_err(|_| format!("{entry:?}: bad semitones"))?),
             _ if act.starts_with("stems=") => {
                 let g: Vec<f32> = act[6..].split(',').map(|v| v.trim().parse::<f32>()).collect::<Result<_, _>>()
                     .map_err(|_| format!("{entry:?}: want stems=<drums>,<vocal>,<harmonics>"))?;

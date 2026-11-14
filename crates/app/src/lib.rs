@@ -2167,6 +2167,7 @@ impl DeckApp {
                 A::Shot(p) => self.script_shot = Some(p),
                 A::Stems(g) => { for (i, v) in g.iter().enumerate() { self.audio.stems.set_gain(i, *v); } log::info!("script: stems {g:?}"); }
                 A::DeckView => self.events.push(Event::Ui(UiEvent::DeckView)),
+                A::KeyShift(n) => self.apply(Event::Deck(ControlEvent::KeyShift { semitones: n })),
                 A::Quit => { log::info!("script: quit"); log::logger().flush(); std::process::exit(0); }
             }
         }

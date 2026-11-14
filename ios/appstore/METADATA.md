@@ -85,11 +85,15 @@ Upload in this order; the first two are what shows in search.
 
 | # | File | Shows |
 |---|---|---|
-| 1 | `01-playback.png` | Deck playing: waveform, jog, tempo fader, memory points |
-| 2 | `02-loop.png` | A 4-beat loop engaged with the phase meter running |
-| 3 | `03-perform.png` | PERFORM screen: hot cues A–D and beat-loop pads |
-| 4 | `04-browse.png` | BROWSE with a folder of tracks from the Files app |
-| 5 | `05-grid.png` | GRID ADJUST keys (RESET / SNAP / SHIFT) |
+| 1 | `01-playback.png` | The CDJ-3000 deck playing: waveforms, hot cues in their rekordbox colours on the screen and the pads, jog, tempo fader |
+| 2 | `02-stems.png` | STEMS: drums at full, vocal muted, harmonics at about half; the big waveform follows the mix |
+| 3 | `03-beatloop.png` | BEAT LOOP panel with a 4-beat loop running |
+| 4 | `04-keyshift.png` | KEY SHIFT +2: Fm up to Gm, the tempo unchanged |
+| 5 | `05-grid.png` | GRID ADJUST keys (SNAP GRID, SHIFT GRID, ½ beat, RESET) |
+
+Made by `ios/appstore/capture-cdj.sh` (our own track, real HTDemucs stems
+for it on a rekordbox test stick). The iPhone set is still `capture.sh`'s:
+phones show the XDJ-1000MK2 layout.
 
 They are the app's own renderer at the 13" panel's exact pixel size (same draw
 code the iPad runs), no alpha channel, sRGB.  App Store Connect reuses the 13"

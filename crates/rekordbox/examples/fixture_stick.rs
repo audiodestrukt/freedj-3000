@@ -3,7 +3,7 @@
 //! (`.DAT` + `.EXT`) carrying a beat grid and coloured, commented hot and
 //! memory cues.  Point OpenDeck at it with `OPENDECK_MEDIA_DIRS=<out>/..`.
 //!
-//! cargo run -p opendeck-rekordbox --example fixture_stick -- <out dir> <audio1> [audio2] [--bpm N]
+//! cargo run -p opendeck-rekordbox --example fixture_stick -- <out dir> <audio1> [audio2] [--bpm N] [--first-ms M]
 
 use opendeck_rekordbox::fixtures::{dat_and_ext, pqtz, FxCue};
 use std::path::{Path, PathBuf};
@@ -20,12 +20,18 @@ fn copy_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 
 fn main() -> anyhow::Result<()> {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
-    let bpm = match args.iter().position(|a| a == "--bpm") {
-        Some(i) => { let v = args[i + 1].parse()?; args.drain(i..i + 2); v }
-        None => 120.0,
+    let mut opt = |name: &str, default: f64| -> anyhow::Result<f64> {
+        Ok(match args.iter().position(|a| a == name) {
+            Some(i) => { let v = args[i + 1].parse()?; args.drain(i..i + 2); v }
+            None => default,
+        })
     };
+    let bpm = opt("--bpm", 120.0)?;
+    // Where the first beat is, so the grid sits on the music (the deck's own
+    // analysis: `cargo run -p opendeck-app --example analyze_file`).
+    let first_ms = opt("--first-ms", 0.0)?.round() as u32;
     let [out, audio @ ..] = args.as_slice() else {
-        anyhow::bail!("usage: fixture_stick <out dir> <audio1> [audio2] [--bpm N]");
+        anyhow::bail!("usage: fixture_stick <out dir> <audio1> [audio2] [--bpm N] [--first-ms M]");
     };
     let out = PathBuf::from(out);
     let demo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/rekordcrate/data/complete_export/demo_tracks");
@@ -48,7 +54,7 @@ fn main() -> anyhow::Result<()> {
         std::fs::create_dir_all(dst.parent().unwrap())?;
         std::fs::copy(src, &dst)?;
         let dat = t.analyze_on(&out).ok_or_else(|| anyhow::anyhow!("{} has no analysis path", t.title))?;
-        let (d, e) = dat_and_ext(pqtz(bpm, 0, 2000), &mem, &hot);
+        let (d, e) = dat_and_ext(pqtz(bpm, first_ms, 2000), &mem, &hot);
         std::fs::write(&dat, d)?;
         std::fs::write(dat.with_extension("EXT"), e)?;
         println!("{} ← {} ({} hot cues)", t.title, src, hot.len());
