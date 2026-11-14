@@ -302,6 +302,141 @@ impl LinkState {
     }
 }
 
+/// A position a hair before a beat line is on it.  Loop points are whole
+/// frames, so a loop's start can sit a fraction of a frame before the grid's
+/// beat; landing there read as the beat before the loop for an instant and
+/// sent it ("beat 1", then "beat 2" a millisecond later, on each wrap).
+pub fn on_beat_line(beat_f: f64) -> f64 {
+    let r = beat_f.round();
+    if (r - beat_f).abs() < 1e-3 { r } else { beat_f }
+}
+
+/// Within this many frames of a loop's end (≈2 ms) the playhead is at the
+/// loop's start: the end is rounded to a whole frame and can sit a hair past
+/// the grid's beat, which sent the beat after the loop just before each wrap.
+const LOOP_EDGE: f64 = 96.0;
+
+/// The sender's idea of the audible playhead, in frames: the decoder cursor
+/// less what is queued is only good to a block (±35 ms), so free-run at the
+/// true rate and pull gently toward that reference.  Loop-aware: the
+/// reference walks back modulo the loop (the cursor wraps before the tail is
+/// heard), and the estimate wraps at the loop's end however short the loop
+/// (it used to snap only on a jump over half a second, so ½- and 1-beat
+/// loops ran on through the song over Link).
+#[derive(Debug, Clone)]
+pub struct PlayheadEstimate {
+    /// Frames; negative = not running.
+    pub frames: f64,
+    ahead_avg: f64,
+}
+
+impl Default for PlayheadEstimate { fn default() -> Self { PlayheadEstimate { frames: -1.0, ahead_avg: 0.0 } } }
+
+impl PlayheadEstimate {
+    /// Move on `step` frames (the last stretch before a beat), going round
+    /// the loop at its end.  True when it went round.
+    pub fn advance(&mut self, step: f64, lp: Option<(u64, u64)>) -> bool {
+        self.frames += step;
+        match lp.filter(|(a, b)| b > a) {
+            Some((a, b)) if self.frames >= b as f64 - LOOP_EDGE => {
+                self.frames = a as f64 + (self.frames - b as f64).max(0.0) % (b - a) as f64;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// One tick: decoder cursor `pos` and `in_flight` (frames), the loop
+    /// `[start, end)` if one runs, `step` frames of play since the last tick.
+    /// True when the estimate went round the loop.
+    pub fn update(&mut self, pos: u64, in_flight: f64, lp: Option<(u64, u64)>, step: f64, sr: u32) -> bool {
+        self.ahead_avg += (in_flight - self.ahead_avg) * 0.005;
+        let lp = lp.filter(|(a, b)| b > a);
+        let mut reference = pos as f64 - self.ahead_avg;
+        if let Some((a, b)) = lp {
+            let (a, b) = (a as f64, b as f64);
+            if reference < a && pos as f64 >= a { reference = b - ((a - reference) % (b - a)); }
+        }
+        let reference = reference.max(0.0);
+        let mut wrapped = false;
+        if self.frames < 0.0 {
+            self.frames = reference;
+        } else {
+            self.frames += step;
+            if let Some((a, b)) = lp {
+                let (a, b) = (a as f64, b as f64);
+                if self.frames >= b - LOOP_EDGE && self.frames - step < b + (b - a) {
+                    self.frames = a + (self.frames - b).max(0.0) % (b - a);
+                    wrapped = true;
+                }
+            }
+            // The pull runs the short way round a loop.
+            let mut err = reference - self.frames;
+            if let Some((a, b)) = lp {
+                let len = (b - a) as f64;
+                if err > len / 2.0 { err -= len } else if err < -len / 2.0 { err += len }
+            }
+            if err.abs() > sr as f64 * 0.5 { self.frames = reference; } else { self.frames += err * 0.005; }
+            // Inside a loop the estimate stays inside it.
+            if let Some((a, b)) = lp {
+                let (a, b) = (a as f64, b as f64);
+                if self.frames < a && reference >= a { self.frames += b - a; }
+            }
+        }
+        wrapped
+    }
+}
+
+/// The sender's beat clock: the playhead estimate, the beat it is in, and
+/// which beats go out as beat packets.  The sender thread drives it once a
+/// millisecond; tests drive it the same way without the sockets or the
+/// spin-wait.
+#[derive(Debug, Clone, Default)]
+pub struct BeatClock {
+    pub est: PlayheadEstimate,
+    /// The beat the playhead is in (grid index) and how far into it.
+    pub beat_now: Option<(i64, f64)>,
+    last_beat: Option<i64>,
+    wrapped: bool,
+}
+
+impl BeatClock {
+    /// One tick while playing: decoder cursor and in-flight (frames), the
+    /// loop if one runs, `step` frames of play since the last tick at
+    /// `rate` frames a second.  Returns the seconds to the next beat line
+    /// (the caller spins to it when it is under 1.5 ms, then passes the
+    /// frames it moved to [`finish`](Self::finish)).
+    pub fn tick(&mut self, grid: &BeatGrid, sr: u32, pos: u64, in_flight: f64, lp: Option<(u64, u64)>, step: f64, rate: f64) -> f64 {
+        self.wrapped = self.est.update(pos, in_flight, lp, step, sr);
+        let at = self.est.frames.max(0.0) as u64;
+        let period = grid.samples_per_beat_at(at, sr);
+        let beat_f = grid.beat_at_sample(at, sr);
+        ((beat_f.floor() + 1.0) - beat_f) * period / rate.max(1.0)
+    }
+
+    /// After the tick (and the spin, which moved `landed` frames): the beat
+    /// to send now, if one is due.  One per beat line crossed; a loop going
+    /// round (however short) or a seek sends the beat it lands on.
+    pub fn finish(&mut self, grid: &BeatGrid, sr: u32, landed: Option<f64>, lp: Option<(u64, u64)>) -> Option<i64> {
+        // Landing on a loop's end is landing on its start.
+        if let Some(f) = landed { self.wrapped |= self.est.advance(f, lp); }
+        let beat_f = on_beat_line(grid.beat_at_sample(self.est.frames.max(0.0) as u64, sr));
+        let beat = beat_f.floor() as i64;
+        self.beat_now = Some((beat, beat_f - beat_f.floor()));
+        let seek = self.wrapped || self.last_beat.map_or(false, |b| beat < b - 2 || beat > b + 8);
+        let due = self.last_beat.map_or(true, |b| beat > b) || seek;
+        self.wrapped = false;
+        if due { self.last_beat = Some(beat); Some(beat) } else { None }
+    }
+
+    /// Stopped: no estimate, no beat.
+    pub fn stop(&mut self) {
+        self.est.frames = -1.0;
+        self.beat_now = None;
+        self.last_beat = None;
+    }
+}
+
 /// Deck state the sender reads; all atomics, nothing locked.
 pub struct SenderState {
     /// When false, only announce packets go out — no beat, status, or master
@@ -515,10 +650,19 @@ fn broadcast_for(ip: Ipv4Addr, mask: Ipv4Addr, reported: Option<Ipv4Addr>) -> Op
     }
 }
 
+/// Link on the loopback (`OPENDECK_LINK_IFACE=lo`): from 127.0.0.1, with
+/// broadcasts to 127.255.255.255, which Linux delivers to every socket on
+/// the port, so other programs on this machine hear them (a second
+/// OpenDeck, Deckbench's decks on 127.0.0.N).  Sending them to 127.0.0.1
+/// reached only one socket bound to the port.
+fn loopback_link() -> (Ipv4Addr, Ipv4Addr, [u8; 6], String) {
+    (Ipv4Addr::LOCALHOST, Ipv4Addr::new(127, 255, 255, 255), [0x02, 0xfd, 0, 0, 0, 1], "lo".into())
+}
+
 fn link_interface(peers: &[Ipv4Addr]) -> (Ipv4Addr, Ipv4Addr, [u8; 6], String) {
     let pin = pinned_iface();
     if let Some((_, ip, _)) = pin {
-        if ip.is_loopback() { return (Ipv4Addr::LOCALHOST, Ipv4Addr::LOCALHOST, [0x02, 0xfd, 0, 0, 0, 1], "lo".into()); }
+        if ip.is_loopback() { return loopback_link(); }
     }
     let mut best: Option<(u8, Ipv4Addr, Ipv4Addr, [u8; 6], String)> = None;
     if let Ok(ifs) = if_addrs::get_if_addrs() {
@@ -1189,7 +1333,6 @@ impl ProDjSender {
                 // every 1.5 s).  Wait before concluding nobody is master.
                 let mut want_since: Option<Instant> = None;
                 let mut counter: u32  = 0;
-                let mut last_beat: Option<i64> = None;
                 let mut last_sent = Instant::now();
                 // Audible-position estimate.  The decoder cursor advances a
                 // 512-frame block at a time and `in_flight` swings ±35 ms
@@ -1199,7 +1342,7 @@ impl ProDjSender {
                 // low-passed reference; τ ≈ 200 ms on both at the 1 ms tick.
                 // Measured against an XDJ-1000MK2 at the same receiver:
                 // sd 1.23 ms vs its 1.33 ms.  See PERFORMANCE.md.
-                let mut ahead_avg: f64 = 0.0;
+                let mut clock = BeatClock::default();
                 let mut est_frames: f64 = -1.0;
                 let mut last_tick = Instant::now();
                 // Sync follow: phase nudge in progress (speed offset, until).
@@ -1231,41 +1374,32 @@ impl ProDjSender {
                     let rate    = st.sample_rate as f64 * fader;
 
                     // ── Audible position estimate ────────────────────────────
-                    let mut beat_now: Option<(i64, f64)> = None;   // (index, fractional)
+                    let mut beat_due: Option<i64> = None;
                     if playing {
                         if let Some(grid) = cur_grid {
-                            let pos   = st.position.load(Ordering::Relaxed);
-                            let ahead = st.in_flight.load(Ordering::Relaxed) as f64;
-                            ahead_avg += (ahead - ahead_avg) * 0.005;
-                            let reference = (pos as f64 - ahead_avg).max(0.0) / st.channels as f64;
-                            if est_frames < 0.0 || (reference - est_frames).abs() > st.sample_rate as f64 * 0.5 {
-                                est_frames = reference;
-                            } else {
-                                est_frames += dt * rate;
-                                est_frames += (reference - est_frames) * 0.005;
-                            }
-                            let period = grid.samples_per_beat_at(est_frames.max(0.0) as u64, st.sample_rate);
-                            let beat_f = grid.beat_at_sample(est_frames.max(0.0) as u64, st.sample_rate);
+                            let ch = st.channels.max(1) as u64;
+                            let lp = st.loop_active.load(Ordering::Relaxed).then(|| (
+                                st.loop_start.load(Ordering::Relaxed) / ch, st.loop_end.load(Ordering::Relaxed) / ch));
+                            let to_next = clock.tick(grid, st.sample_rate, st.position.load(Ordering::Relaxed) / ch,
+                                                     st.in_flight.load(Ordering::Relaxed) as f64 / ch as f64, lp, dt * rate, rate);
                             // Sleep-to-deadline for the last stretch before a beat.
-                            let to_next = ((beat_f.floor() + 1.0) - beat_f) * period / rate;
-                            if to_next > 0.0 && to_next < 0.0015 {
+                            let landed = if to_next > 0.0 && to_next < 0.0015 {
                                 let target = now + Duration::from_secs_f64(to_next);
                                 while Instant::now() < target { std::hint::spin_loop(); }
-                                est_frames += to_next * rate;
-                            }
-                            let beat_f = grid.beat_at_sample(est_frames.max(0.0) as u64, st.sample_rate);
-                            beat_now = Some((beat_f.floor() as i64, beat_f - beat_f.floor()));
+                                Some(to_next * rate)
+                            } else { None };
+                            beat_due = clock.finish(grid, st.sample_rate, landed, lp);
+                            est_frames = clock.est.frames;
                         }
                     } else {
-                        last_beat = None;
+                        clock.stop();
                         est_frames = -1.0;
                     }
 
                     // ── Beat packet ──────────────────────────────────────────
                     let send_full = st.send_full.load(Ordering::Relaxed);
-                    if send_full { if let (Some(grid), Some((beat, _))) = (cur_grid, beat_now) {
-                        let seek = last_beat.map_or(false, |b| beat < b - 2 || beat > b + 8);
-                        if last_beat.map_or(true, |b| beat > b) || seek {
+                    if send_full { if let (Some(grid), Some(beat)) = (cur_grid, beat_due) {
+                        {
                             let bib  = ((beat + grid.downbeat_offset as i64).rem_euclid(4) + 1) as u8;
                             let snap = EngineSnapshot {
                                 position: 0, ghost_position: 0, speed: fader as f32,
@@ -1294,7 +1428,6 @@ impl ProDjSender {
                             }
                             log::debug!("ProDJ tx: beat {beat} ({bib}/4) @ {:.2} BPM  +{:.2}ms", snap.bpm, sent_at.duration_since(last_sent).as_secs_f64() * 1000.0);
                             last_sent = sent_at;
-                            last_beat = Some(beat);
                         }
                     } }
 
@@ -1496,7 +1629,7 @@ impl ProDjSender {
                             let seq = link.master_beat_seq.load(Ordering::Relaxed);
                             if seq != seen_master_beat {
                                 seen_master_beat = seq;
-                                if let Some((_, frac)) = beat_now {
+                                if let Some((_, frac)) = clock.beat_now {
                                     let held = f32::from_bits(link.sync_offset.load(Ordering::Relaxed)) as f64;
                                     // One line per master beat: the end-to-end SHIFT GRID
                                     // test (tools/test_shift_grid.py) reads these.
@@ -1530,7 +1663,7 @@ impl ProDjSender {
                     let flags_changed = flags != last_flags;
                     last_flags = flags;
                     if send_full && (flags_changed || now.duration_since(last_status) >= Duration::from_millis(200)) {
-                        let (beat_num, bib) = match (cur_grid, beat_now) {
+                        let (beat_num, bib) = match (cur_grid, clock.beat_now) {
                             (Some(grid), Some((beat, _))) => {
                                 let first = grid.beat_at_sample(0, st.sample_rate).floor() as i64;
                                 (Some((beat - first).max(0) as u32), Some(((beat + grid.downbeat_offset as i64).rem_euclid(4) + 1) as u8))
@@ -2055,5 +2188,182 @@ mod position_rx_tests {
         assert_eq!(at(100, false), Some(25_000.0));
         assert_eq!(at(1500, true), None, "stale");
         assert_eq!(link.playhead_ms(2, true, t0), None, "our own is not kept");
+    }
+}
+
+#[cfg(test)]
+mod playhead_estimate_tests {
+    use super::PlayheadEstimate;
+
+    const SR: u32 = 48_000;
+
+    /// A deck looping `[a, b)` (frames) at normal speed: the decoder cursor
+    /// runs `ahead` frames in front of what is heard, in 512-frame blocks,
+    /// and wraps at `b`.  Returns every estimate (1 ms ticks) and the wraps.
+    fn run_loop(a: u64, b: u64, ahead: u64, secs: f64) -> (Vec<f64>, usize) {
+        let mut est = PlayheadEstimate::default();
+        let step = SR as f64 / 1000.0;
+        let (mut heard, mut out, mut wraps) = (a as f64, Vec::new(), 0);
+        for _ in 0..(secs * 1000.0) as usize {
+            heard += step;
+            if heard >= b as f64 { heard -= (b - a) as f64; }
+            // The cursor: heard + ahead, wrapped into the loop, on a block.
+            let mut cur = heard + ahead as f64;
+            while cur >= b as f64 { cur -= (b - a) as f64; }
+            let cur = ((cur as u64) / 512) * 512;
+            if est.update(cur.max(a), ahead as f64, Some((a, b)), step, SR) { wraps += 1; }
+            out.push(est.frames);
+        }
+        (out, wraps)
+    }
+
+    #[test]
+    fn a_short_loop_keeps_the_link_position_inside_it() {
+        // A half-beat loop at 128 BPM (0.23 s), well under the old 0.5 s snap.
+        let (a, b) = (480_000, 480_000 + 11_250);
+        let (est, wraps) = run_loop(a, b, 4_000, 3.0);
+        assert!(wraps >= 12, "went round the loop: {wraps} wraps in 3 s");
+        for (i, f) in est.iter().enumerate().skip(50) {
+            assert!(*f >= a as f64 - 1.0 && *f < b as f64 + 50.0, "tick {i}: {f} outside {a}..{b}");
+        }
+    }
+
+    #[test]
+    fn a_long_loop_wraps_without_dipping_before_its_start() {
+        // A 4-beat loop at 120 BPM (2 s), with ~90 ms queued: when the cursor
+        // wraps, the old reference read back before the loop start.
+        let (a, b) = (960_000, 960_000 + 96_000);
+        let (est, wraps) = run_loop(a, b, 4_300, 7.0);
+        assert!(wraps >= 3, "{wraps} wraps");
+        assert!(est.iter().skip(50).all(|f| *f >= a as f64 - 1.0), "never before the loop start");
+    }
+
+    /// The step to a beat that is also the loop's end lands on the loop's
+    /// start: the beat sent is the loop's first, not the one after the loop
+    /// (a stray "beat 3" then "beat 2" in the same instant, seen on Deckbench).
+    #[test]
+    fn stepping_onto_the_loop_end_lands_on_its_start() {
+        let mut est = PlayheadEstimate { frames: 10_000.0 - 30.0, ..Default::default() };
+        assert!(est.advance(30.0, Some((7_000, 10_000))));
+        assert_eq!(est.frames, 7_000.0);
+        assert!(!est.advance(30.0, Some((7_000, 10_000))));
+        assert!(!est.advance(5_000.0, None));
+        // A loop end a few frames past the grid's beat: the step to that
+        // beat is the loop going round, not the next beat.
+        let mut est = PlayheadEstimate { frames: 10_000.0 - 30.0, ..Default::default() };
+        assert!(est.advance(30.0, Some((7_000, 10_003))));
+        assert_eq!(est.frames, 7_000.0);
+    }
+
+    #[test]
+    fn a_hair_before_a_beat_is_on_it() {
+        use super::on_beat_line;
+        assert_eq!(on_beat_line(17.9996).floor(), 18.0, "a loop start a frame before beat 18 is beat 18");
+        assert_eq!(on_beat_line(18.0004).floor(), 18.0);
+        assert_eq!(on_beat_line(17.98).floor(), 17.0, "a real position before the beat stays before it");
+    }
+
+    #[test]
+    fn without_a_loop_it_follows_the_track() {
+        let mut est = PlayheadEstimate::default();
+        let step = SR as f64 / 1000.0;
+        for i in 1..=2000u64 {
+            let heard = 100_000 + i * 48;
+            est.update(heard + 4_000, 4_000.0, None, step, SR);
+        }
+        assert!((est.frames - (100_000.0 + 2000.0 * 48.0)).abs() < 600.0, "{}", est.frames);
+    }
+}
+
+#[cfg(test)]
+mod loopback_tests {
+    #[test]
+    fn loopback_link_broadcasts_to_the_whole_loopback() {
+        let (ip, bc, _, name) = super::loopback_link();
+        assert_eq!((ip.to_string(), bc.to_string(), name.as_str()), ("127.0.0.1".into(), "127.255.255.255".into(), "lo"));
+    }
+}
+
+/// The beats OpenDeck sends over Link while it plays and loops, from a
+/// simulated deck at 1 ms ticks: the cursor runs ~85 ms ahead in 512-frame
+/// blocks, loop points are whole frames (as quantize makes them) and the
+/// grid is 127 BPM, so beat lines fall between frames.  Each glitch here was
+/// first seen on Deckbench (tools/deckbench/loop_beats.py).
+#[cfg(test)]
+mod beat_clock_tests {
+    use super::*;
+
+    const SR: u32 = 48_000;
+    const AHEAD: f64 = 4_096.0;
+
+    fn grid() -> BeatGrid { BeatGrid::new_constant(1_234, 127.0) }
+    /// Grid beat `n`'s position, in frames (not a whole number).
+    fn line(n: i64) -> f64 { 1_234.0 + n as f64 * SR as f64 * 60.0 / 127.0 }
+
+    /// Play from `from` for `secs`; loop `[a, b)` from `loop_at` on, if
+    /// given.  Every beat sent: (ms, grid beat).
+    fn play(from: f64, secs: f64, lp: Option<(u64, u64)>, loop_at: f64) -> Vec<(usize, i64)> {
+        let g = grid();
+        let mut clock = BeatClock::default();
+        let step = SR as f64 / 1000.0;
+        let mut heard = from;
+        let mut sent = Vec::new();
+        for ms in 0..(secs * 1000.0) as usize {
+            let lp_now = lp.filter(|_| ms as f64 / 1000.0 >= loop_at);
+            heard += step;
+            let mut cur = heard + AHEAD;
+            if let Some((a, b)) = lp_now {
+                let (a, b) = (a as f64, b as f64);
+                if heard >= b { heard -= b - a; }
+                while cur >= b { cur -= b - a; }
+            }
+            let cur = (cur as u64 / 512) * 512;
+            let to_next = clock.tick(&g, SR, cur, AHEAD, lp_now, step, SR as f64);
+            let landed = (to_next > 0.0 && to_next < 0.0015).then(|| to_next * SR as f64);
+            if let Some(b) = clock.finish(&g, SR, landed, lp_now) { sent.push((ms, b)); }
+        }
+        sent
+    }
+
+    #[test]
+    fn playing_sends_each_beat_once_in_order() {
+        let sent = play(line(10) + 1_000.0, 5.0, None, 0.0);
+        let beats: Vec<i64> = sent.iter().map(|s| s.1).skip(1).collect();
+        assert!(beats.windows(2).all(|w| w[1] == w[0] + 1), "{beats:?}");
+        assert!((9..=11).contains(&beats.len()), "{} beats in 5 s at 127 BPM", beats.len());
+    }
+
+    #[test]
+    fn a_one_beat_loop_sends_its_beat_once_each_time_round() {
+        // Beat 17 looped, its points rounded down to whole frames.
+        let (a, b) = (line(17) as u64, line(18) as u64);
+        let sent = play(line(15), 9.0, Some((a, b)), 1.5);
+        let in_loop: Vec<_> = sent.iter().filter(|s| s.0 > 2_000).collect();
+        assert!(in_loop.iter().all(|s| s.1 == 17), "only beat 17 while looping it (no stray 16 or 18): {in_loop:?}");
+        assert!(in_loop.windows(2).all(|w| w[1].0 - w[0].0 > 300), "one beat each time round, never two together: {in_loop:?}");
+        assert!((13..=15).contains(&in_loop.len()), "{} wraps in ~7 s of a 0.47 s loop", in_loop.len());
+    }
+
+    #[test]
+    fn a_half_beat_loop_keeps_sending_its_beat() {
+        // Half a beat inside beat 20: under the old 0.5 s snap, so the
+        // estimate used to run on through the song.
+        let a = line(20) as u64;
+        let b = (line(20) + (line(21) - line(20)) / 2.0) as u64;
+        let sent = play(line(18), 6.0, Some((a, b)), 1.0);
+        let in_loop: Vec<_> = sent.iter().filter(|s| s.0 > 1_600).collect();
+        assert!(in_loop.iter().all(|s| s.1 == 20), "{in_loop:?}");
+        assert!(in_loop.len() >= 15, "a beat each time round: {}", in_loop.len());
+    }
+
+    #[test]
+    fn a_four_beat_loop_counts_its_four_beats_round_and_round() {
+        let (a, b) = (line(40) as u64, line(44) as u64);
+        let sent = play(line(38), 10.0, Some((a, b)), 1.0);
+        let in_loop: Vec<i64> = sent.iter().filter(|s| s.0 > 1_400).map(|s| s.1).collect();
+        assert!(in_loop.iter().all(|b| (40..44).contains(b)), "{in_loop:?}");
+        for w in in_loop.windows(2) {
+            assert!(w[1] == w[0] + 1 || (w[0] == 43 && w[1] == 40), "40 41 42 43 40 …: {in_loop:?}");
+        }
     }
 }

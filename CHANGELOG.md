@@ -80,6 +80,15 @@ All notable changes to this project will be documented in this file.
   was loaded). The track rows now have the 16 fields a CDJ-3000 sends for
   its own tracks, with the key and the tempo. The player also stops asking
   for every listed track's details one by one.
+- Loops over Pro DJ Link: while the deck loops, the players, mixers and
+  lighting tools following OpenDeck now see it loop. Short loops (½ or 1
+  beat) used to run on through the song over Link, 1–2 beat loops sent no
+  beats at all, and every wrap could send a stray beat from before or after
+  the loop. Now each time round sends the loop's beat once. Details in
+  docs/design/link-loop-timing.md.
+- With `OPENDECK_LINK_IFACE=lo`, Link broadcasts go to 127.255.255.255, so
+  other programs on the machine hear them (Deckbench, a second OpenDeck).
+  `tools/deckbench/loop_beats.py` checks loops over Link on Deckbench.
 - SLIP works with hot cues and scratching: hold a hot cue (or hold the
   platter in VINYL mode) with SLIP on and the track carries on underneath;
   letting go returns to where it would have been. Before, SLIP only
