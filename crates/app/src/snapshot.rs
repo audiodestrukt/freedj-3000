@@ -27,6 +27,8 @@ pub enum StemsState {
     /// On, but this device has too little memory to split a track (no
     /// model is downloaded for it either).
     NoMemory,
+    /// On; the model download failed (no network…) and will be retried.
+    Waiting,
     /// On and playable.
     Ready,
 }
@@ -34,6 +36,31 @@ pub enum StemsState {
 impl StemsState {
     /// The stem controls work: ready, or split far enough to start.
     pub fn playable(self) -> bool { matches!(self, StemsState::Ready | StemsState::Splitting(_)) }
+
+    /// While the stem model is being fetched (first use only), the line the
+    /// STEMS panel shows across its keys, so it is plain that a one-time
+    /// download is under way and how far it has got.
+    pub fn fetch_note(self) -> Option<String> {
+        let total = (crate::modelfetch::MODEL.zip_bytes / 1_000_000) as u32;   // MB, as the listing says
+        match self {
+            StemsState::Downloading(p) => Some(format!("DOWNLOADING STEM MODEL  {} / {total} MB  ·  FIRST USE ONLY", total * p as u32 / 100)),
+            StemsState::Preparing => Some("PREPARING STEM MODEL  ·  FIRST USE ONLY".into()),
+            StemsState::Waiting => Some("STEM MODEL DOWNLOAD: WAITING FOR NETWORK".into()),
+            StemsState::NoMemory => Some("THIS DEVICE HAS NOT GOT THE MEMORY TO SPLIT STEMS".into()),
+            _ => None,
+        }
+    }
+
+    /// The MENU's STEMS row while the model is fetched ("ON" otherwise).
+    pub fn menu_value(self) -> Option<String> {
+        match self {
+            StemsState::Downloading(p) => Some(format!("ON · DOWNLOADING MODEL {p}%")),
+            StemsState::Preparing => Some("ON · PREPARING MODEL".into()),
+            StemsState::Waiting => Some("ON · WAITING FOR NETWORK".into()),
+            StemsState::NoMemory => Some("ON · NEEDS MORE MEMORY".into()),
+            _ => None,
+        }
+    }
 }
 
 /// The stem controls' view: state plus drums / vocal / harmonics levels.
@@ -173,6 +200,20 @@ impl DeckSnapshot<'_> {
             Some((r, g, b)) => egui::Color32::from_rgb(r, g, b),
             None => default,
         }
+    }
+}
+
+#[cfg(test)]
+mod stems_state_tests {
+    use super::StemsState as S;
+
+    /// The first-use download is spelt out: size, progress, one time only.
+    #[test]
+    fn the_model_fetch_says_what_it_is() {
+        assert_eq!(S::Downloading(43).fetch_note().as_deref(), Some("DOWNLOADING STEM MODEL  123 / 287 MB  ·  FIRST USE ONLY"));
+        assert_eq!(S::Downloading(43).menu_value().as_deref(), Some("ON · DOWNLOADING MODEL 43%"));
+        assert!(S::Waiting.fetch_note().unwrap().contains("WAITING FOR NETWORK"));
+        assert!(S::Ready.fetch_note().is_none() && S::Ready.menu_value().is_none());
     }
 }
 

@@ -2486,6 +2486,7 @@ impl DeckApp {
             else if self.stems_await_model {
                 match modelfetch::state() {
                     modelfetch::Fetch::Unsupported => S::NoMemory,
+                    modelfetch::Fetch::Failed(_) => S::Waiting,
                     modelfetch::Fetch::Unpacking | modelfetch::Fetch::Ready => S::Preparing,
                     f => f.percent().map_or(S::None, S::Downloading),
                 }

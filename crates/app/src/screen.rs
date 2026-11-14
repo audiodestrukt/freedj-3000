@@ -1097,7 +1097,7 @@ pub fn draw(
                 // INFO: the middle band shows the loaded track's details.
                 ScreenView::Info => draw_info_screen(ui, snap, lay, h),
                 // MENU / UTILITY: the settings list.
-                ScreenView::Menu(settings, cursor) => draw_menu(ui, settings, cursor, lay, h, out),
+                ScreenView::Menu(settings, cursor) => draw_menu(ui, settings, snap.stems.state, cursor, lay, h, out),
                 ScreenView::Playback | ScreenView::History(..) => {
                     draw_title(ui, snap, lay, h);
                     draw_phase(ui, snap, lay, h, out);
@@ -1250,7 +1250,7 @@ pub const APP_VERSION: &str = match option_env!("OPENDECK_VERSION") {
 };
 pub const SUPPORT_LINE: &str = "support@audiodestrukt.com   ·   audiodestrukt.com/opendeck";
 
-fn draw_menu(ui: &Ui, settings: &Settings, cursor: usize, lay: &Layout, h: f32, out: &mut Vec<Event>) {
+fn draw_menu(ui: &Ui, settings: &Settings, stems: StemsState, cursor: usize, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     let p = ui.painter();
     let hdr = lay.title;
     p.rect_filled(hdr, 0.0, BAR);
@@ -1274,7 +1274,8 @@ fn draw_menu(ui: &Ui, settings: &Settings, cursor: usize, lay: &Layout, h: f32, 
         let ink = if sel { BG } else { TEXT };
         text(ui, Pos2::new(row.min.x + h * 0.02, row.center().y), Align2::LEFT_CENTER, *label, h * 0.028, ink);
         text(ui, Pos2::new(row.max.x - h * 0.02, row.center().y), Align2::RIGHT_CENTER,
-             settings.value(*setting), h * 0.028, if sel { BG } else { BLUE });
+             match setting { crate::settings::Setting::Stems => stems.menu_value().unwrap_or_else(|| settings.value(*setting)), _ => settings.value(*setting) },
+             h * 0.028, if sel { BG } else { BLUE });
         if clicked { out.push(Event::Ui(UiEvent::MenuTap(i))); }
     }
 

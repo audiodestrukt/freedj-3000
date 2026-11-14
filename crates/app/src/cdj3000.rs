@@ -17,7 +17,7 @@
 use crate::browser::Browser;
 use crate::input::{ControlEvent, Event, Screen as TopScreen, UiEvent};
 use crate::screen::ScreenView;
-use crate::settings::MENU;
+use crate::settings::{Setting, MENU};
 use crate::taglist::TagList;
 use crate::screen::{bars_to_next, cover, needle_touch, stem_touch, tap, wave_touch, STEM_NAMES};
 use crate::settings::Settings;
@@ -446,6 +446,13 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
         let changed = ready && snap.stems.changed() && open != Panel::Stems;
         let bar = Rect::from_center_size(Pos2::new(k.center().x, k.max.y - 3.0 * u), Vec2::new(if changed { 90.0 } else { 56.0 } * u, 3.0 * u));
         p.rect_filled(bar, 0.0, if changed { KEY_LIT } else { KEY_EDGE });
+        // The model downloading (first use): the bar fills as it goes, so it
+        // shows with the panel closed too.
+        if let StemsState::Downloading(pc) = snap.stems.state {
+            let wide = Rect::from_center_size(bar.center(), Vec2::new(90.0 * u, 3.0 * u));
+            p.rect_filled(wide, 0.0, KEY_EDGE);
+            p.rect_filled(Rect::from_min_size(wide.min, Vec2::new(wide.width() * pc as f32 / 100.0, wide.height())), 0.0, KEY_LIT);
+        }
         label(ui, Pos2::new(k.center().x, k.min.y + 45.0 * u), Align2::CENTER_CENTER, "STEMS", 21.0, u, if ready { TEXT } else { DIM });
     }
 }
@@ -968,6 +975,7 @@ fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Lay
             checker(ui, r, fill, CHECK_LIT, u);
         }
         label(ui, r.center(), Align2::CENTER_CENTER, *name, 22.0, u, text_c);
+        if snap.stems.state.fetch_note().is_some() { continue; }   // the band below says it once
         let sub = match snap.stems.state {
             StemsState::Loading => "LOADING".to_string(),
             StemsState::Splitting(p) => format!("SPLITTING {p}%"),
@@ -978,6 +986,18 @@ fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Lay
             _ => String::new(),
         };
         if !sub.is_empty() { label(ui, Pos2::new(r.center().x, r.center().y + 24.0 * u), Align2::CENTER_CENTER, &sub, 15.0, u, DIM); }
+    }
+
+    // First use: one band across the stem keys says the model is being
+    // fetched, how far, and that it is a one-time thing.
+    if let Some(note) = snap.stems.state.fetch_note() {
+        let band = Rect::from_min_max(Pos2::new(k.stems[0].min.x, k.stems[0].max.y - 30.0 * u), k.stems[2].max);
+        ui.painter().rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 200));
+        if let StemsState::Downloading(pc) = snap.stems.state {
+            let fill = Rect::from_min_size(Pos2::new(band.min.x, band.max.y - 4.0 * u), Vec2::new(band.width() * pc as f32 / 100.0, 4.0 * u));
+            ui.painter().rect_filled(fill, 0.0, KEY_LIT);
+        }
+        label(ui, Pos2::new(band.center().x, band.center().y - 2.0 * u), Align2::CENTER_CENTER, note, 17.0, u, TEXT);
     }
 
     // EQ: grey; Stems EQ comes from a mixer we do not support.
@@ -2068,7 +2088,8 @@ fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: 
 fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings, cursor: usize, u: f32, out: &mut Vec<Event>) {
     let sc = lay.screen;
     let rows: Vec<Row> = MENU.iter().map(|(s, name)| Row {
-        icon: RowIcon::None, text: name, value: Some(settings.value(*s)), tagged: false, played: false, stems: false,
+        icon: RowIcon::None, text: name, tagged: false, played: false, stems: false,
+        value: Some(match s { Setting::Stems => snap.stems.state.menu_value().unwrap_or_else(|| settings.value(*s)), _ => settings.value(*s) }),
     }).collect();
     draw_list_header(ui, snap, lay, "UTILITY", false, u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
