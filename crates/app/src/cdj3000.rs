@@ -419,11 +419,7 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
     p.rect_filled(lay.header, 0.0, HEADER);
 
     // Source tile: where the loaded track came from.
-    let s = lay.source;
-    p.rect_filled(s, 0.0, SOURCE_TILE);
-    let src = if snap.source_link { "LINK" } else { "USB" };
-    label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, src, 18.0, u, TEXT);
-    label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
+    draw_source_tile(ui, snap, lay.source, loaded_tile(), u);
 
     draw_art(ui, ctx, snap.tags, "deck", lay.art);
 
@@ -1395,14 +1391,23 @@ fn draw_status_strip(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &m
 /// The linked stick last browsed (player, colour), for the source tile of the
 /// screens that are not about one stick (TAG LIST, UTILITY).
 static SOURCE_BADGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-pub fn set_source_badge(b: Option<(u8, u8)>, kind: crate::browser::SourceTile) {
+static LOADED_TILE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+fn pack(b: Option<(u8, u8)>, kind: crate::browser::SourceTile) -> u32 {
     use crate::browser::SourceTile as K;
     let k = match kind { K::None => 0u32, K::Folder => 1, K::Usb => 2, K::Link => 3 };
-    SOURCE_BADGE.store(k << 24 | b.map_or(0, |(p, c)| 1 << 16 | (p as u32) << 8 | c as u32), std::sync::atomic::Ordering::Relaxed);
+    k << 24 | b.map_or(0, |(p, c)| 1 << 16 | (p as u32) << 8 | c as u32)
 }
-fn cached_tile() -> Tile {
+pub fn set_source_badge(b: Option<(u8, u8)>, kind: crate::browser::SourceTile) {
+    SOURCE_BADGE.store(pack(b, kind), std::sync::atomic::Ordering::Relaxed);
+}
+/// The loaded track's source, for the playback screen's tile.
+pub fn set_loaded_tile(b: Option<(u8, u8)>, kind: crate::browser::SourceTile) {
+    LOADED_TILE.store(pack(b, kind), std::sync::atomic::Ordering::Relaxed);
+}
+fn cached_tile() -> Tile { unpack(SOURCE_BADGE.load(std::sync::atomic::Ordering::Relaxed)) }
+fn loaded_tile() -> Tile { unpack(LOADED_TILE.load(std::sync::atomic::Ordering::Relaxed)) }
+fn unpack(v: u32) -> Tile {
     use crate::browser::SourceTile as K;
-    let v = SOURCE_BADGE.load(std::sync::atomic::Ordering::Relaxed);
     let kind = match v >> 24 { 1 => K::Folder, 2 => K::Usb, 3 => K::Link, _ => K::None };
     Tile { kind, badge: (v >> 16 & 0xff != 0).then_some((((v >> 8) & 0xff) as u8, (v & 0xff) as u8)) }
 }

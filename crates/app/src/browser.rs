@@ -617,6 +617,22 @@ impl Browser {
         Some((player, color))
     }
     pub fn idle(&self) -> bool { self.idle }
+    /// The source a loaded track came from, for the playback screen's tile:
+    /// its kind, and for a linked stick its player number and colour label.
+    pub fn load_tile(&self, l: &Load) -> (SourceTile, Option<(u8, u8)>) {
+        let linked = |ip: Ipv4Addr, slot: u8| {
+            let player = self.link.peer_player(ip);
+            let color = player.and_then(|p| self.link.media(p).into_iter().find(|m| m.slot == slot)).map_or(0, |m| m.color);
+            (SourceTile::Link, player.map(|p| (p, color)))
+        };
+        match l {
+            Load::Local { path, .. } => {
+                if self.media.iter().any(|m| path.starts_with(&m.path)) { (SourceTile::Usb, None) } else { (SourceTile::Folder, None) }
+            }
+            Load::Link { ip, .. } => linked(*ip, 3),
+            Load::Db { ip, sd, .. } => linked(*ip, if *sd { 2 } else { 3 }),
+        }
+    }
     pub fn previews_on(&self) -> bool { self.previews }
     pub fn toggle_previews(&mut self) { self.previews = !self.previews; }
     /// Length and stars the player lists for a linked track.
