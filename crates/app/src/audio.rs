@@ -315,6 +315,16 @@ impl AudioHandle {
         Self::open_inner(None, TrackTags::default())
     }
 
+    /// A deck for tests: the real processor thread, with a stand-in device
+    /// (48 kHz stereo) that pulls the output at real time, 10 ms at a time,
+    /// through the same [`OutputFill`] as the device callback.
+    #[cfg(test)]
+    pub fn open_test(samples: Vec<f32>, sr: u32) -> Result<Self> {
+        let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), None)?;
+        h.set_playing(false);
+        Ok(h)
+    }
+
     fn open_inner(initial: Option<(Vec<f32>, u32, usize)>, tags: TrackTags) -> Result<Self> {
         // ── 2. Open cpal device ────────────────────────────────────────────────
         let host   = cpal::default_host();
@@ -324,9 +334,16 @@ impl AudioHandle {
         let supported = device
             .default_output_config()
             .context("failed to get default output config")?;
+        Self::start(initial, tags, Some((device, supported)))
+    }
 
-        let device_sr = supported.sample_rate().0;
-        let device_ch = supported.channels() as usize;
+    /// Everything after the device is chosen; `None` = the tests' stand-in.
+    fn start(initial: Option<(Vec<f32>, u32, usize)>, tags: TrackTags,
+             output: Option<(cpal::Device, cpal::SupportedStreamConfig)>) -> Result<Self> {
+        let (device_sr, device_ch) = match &output {
+            Some((_, c)) => (c.sample_rate().0, c.channels() as usize),
+            None => (48_000, 2),
+        };
 
         // ── 1. Initial track, or an empty deck.  Empty takes the device rate, in stereo
         //       and starts paused; the processor idles until a track loads. ─────
@@ -349,7 +366,7 @@ impl AudioHandle {
 
         let stream_config = cpal::StreamConfig {
             channels:    device_ch as u16,
-            sample_rate: supported.sample_rate(),
+            sample_rate: cpal::SampleRate(device_sr),
             buffer_size: cpal::BufferSize::Default,
         };
 
@@ -442,6 +459,35 @@ impl AudioHandle {
             drain_flag: Arc::clone(&drain_flag), failed: Arc::clone(&failed),
             scrub_live: Arc::clone(&scrub.live),
         };
+        let stream = match output {
+            None => {
+                // The tests' device: 10 ms of output every 10 ms.
+                let sd = Arc::clone(&shutdown);
+                let mut fill = OutputFill::new(&parts);
+                let t = thread::Builder::new().name("audio-test-out".into()).spawn(move || {
+                    let mut buf = vec![0f32; device_sr as usize / 100 * device_ch];
+                    let t0 = std::time::Instant::now();
+                    let mut n = 0u32;
+                    while !sd.load(Ordering::Relaxed) {
+                        fill.fill(&mut buf);
+                        n += 1;
+                        let due = t0 + Duration::from_millis(10) * n;
+                        if let Some(w) = due.checked_duration_since(std::time::Instant::now()) { thread::sleep(w); }
+                    }
+                }).context("failed to spawn audio-test-out thread")?;
+                StreamOwner::Thread(Some(t))
+            }
+            Some((device, _)) => Self::open_device(device, parts, &shutdown)?,
+        };
+
+        log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
+        Self::assemble(samples, position, playing, proc_thread, speed, key_lock, loop_start, loop_end, loop_active,
+                       source_consumed, in_flight, seek_request, scrub, stems, stats, complete, file_sr, file_ch, tags,
+                       stream, shutdown, processor)
+    }
+
+    /// The device stream: owned by a supervisor thread on Linux, inline elsewhere.
+    fn open_device(device: cpal::Device, parts: StreamParts, shutdown: &Arc<AtomicBool>) -> Result<StreamOwner> {
         #[cfg(target_os = "linux")]
         let stream = {
             let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
@@ -476,10 +522,17 @@ impl AudioHandle {
             StreamOwner::Thread(Some(supervisor))
         };
         #[cfg(not(target_os = "linux"))]
-        let stream = StreamOwner::Inline(build_stream(&device, &parts)?);
+        let stream = { let _ = shutdown; StreamOwner::Inline(build_stream(&device, &parts)?) };
+        Ok(stream)
+    }
 
-        log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
-
+    #[allow(clippy::too_many_arguments)]
+    fn assemble(samples: Arc<ArcSwap<Vec<f32>>>, position: Arc<AtomicU64>, playing: Arc<AtomicBool>, proc_thread: thread::Thread,
+                speed: Arc<AtomicU32>, key_lock: Arc<AtomicBool>, loop_start: Arc<AtomicU64>, loop_end: Arc<AtomicU64>,
+                loop_active: Arc<AtomicBool>, source_consumed: Arc<AtomicU64>, in_flight: Arc<AtomicU64>,
+                seek_request: Arc<AtomicU64>, scrub: ScrubShared, stems: Arc<StemControl>, stats: Arc<AudioStats>,
+                complete: Arc<AtomicBool>, file_sr: u32, file_ch: usize, tags: TrackTags, stream: StreamOwner,
+                shutdown: Arc<AtomicBool>, processor: thread::JoinHandle<()>) -> Result<Self> {
         Ok(Self {
             samples,
             position,
@@ -535,23 +588,102 @@ enum StreamOwner {
     Inline(cpal::Stream),
 }
 
+/// The output callback's work, shared by the device stream and the tests'
+/// stand-in device: pull the ring into `out`, fading out on stop and
+/// flushing on a seek.  Real-time safe: no allocation, no blocking.
+struct OutputFill {
+    consumer:   Arc<Mutex<rtrb::Consumer<f32>>>,
+    playing:    Arc<AtomicBool>,
+    scrub_live: Arc<AtomicBool>,
+    drain_flag: Arc<AtomicBool>,
+    stats:      Arc<AudioStats>,
+    device_ch:  usize,
+    fade_step:  f32,
+    gain:       f32,
+}
+
+impl OutputFill {
+    fn new(p: &StreamParts) -> OutputFill {
+        // Stop fade: cutting to silence mid-waveform is a step, and a step is
+        // the click heard on every CUE release / pause.  On stop the callback
+        // keeps playing what the ring already holds while a gain ramps to
+        // zero over STOP_FADE_S (below anything audible as a fade), THEN goes
+        // silent and honours any pending flush.  Start is untouched — no
+        // fade-in — so cue latency stays exactly as it is.
+        const STOP_FADE_S: f32 = 0.003;
+        OutputFill {
+            consumer: Arc::clone(&p.consumer), playing: Arc::clone(&p.playing), scrub_live: Arc::clone(&p.scrub_live),
+            drain_flag: Arc::clone(&p.drain_flag), stats: Arc::clone(&p.stats), device_ch: p.device_ch,
+            fade_step: 1.0 / (p.device_sr as f32 * STOP_FADE_S).max(1.0),   // per frame
+            gain: 1.0,
+        }
+    }
+
+    fn fill(&mut self, out: &mut [f32]) {
+        // Only ever contended for the instant a replacement stream
+        // takes over; silence is the right answer then.
+        let Ok(mut consumer) = self.consumer.try_lock() else { out.fill(0.0); return; };
+        if !self.playing.load(Ordering::Relaxed) && !self.scrub_live.load(Ordering::Relaxed) {
+            if self.gain > 0.0 {
+                // Fading out: ring audio × a falling gain, frame by
+                // frame.  A flush requested meanwhile waits until
+                // the fade is done (the ring holds ~90 ms, plenty).
+                for frame in out.chunks_mut(self.device_ch) {
+                    let g = self.gain * self.gain;   // squared ramp: lands with zero slope
+                    for sample in frame.iter_mut() {
+                        *sample = consumer.pop().unwrap_or(0.0) * g;
+                    }
+                    self.gain = (self.gain - self.fade_step).max(0.0);
+                    if self.gain == 0.0 { break; }
+                }
+                if self.gain > 0.0 { return; }
+                // Fell to zero inside this buffer: the rest is
+                // silence and the flush can proceed.
+            }
+            if self.drain_flag.swap(false, Ordering::AcqRel) {
+                while consumer.pop().is_ok() {}
+            }
+            out.fill(0.0);
+            return;
+        }
+        self.gain = 1.0;   // playing: no fade-in, and a restart mid-fade snaps up
+
+        // On seek, flush stale buffered audio.  This same buffer will
+        // then fill with silence until the producer re-primes from the
+        // new position — expected, so attribute it to seek priming,
+        // not to starvation.
+        let draining = self.drain_flag.swap(false, Ordering::AcqRel);
+        if draining {
+            while consumer.pop().is_ok() {}
+        }
+
+        // Fill from the ring; count any sample we had to invent as
+        // silence.  No allocation, and the atomics are touched only
+        // when silence actually happens, so the clean path stays a
+        // bare pop().
+        let mut underran = 0u64;
+        for sample in out.iter_mut() {
+            match consumer.pop() {
+                Ok(s)  => *sample = s,
+                Err(_) => { *sample = 0.0; underran += 1; }
+            }
+        }
+        if underran > 0 {
+            if draining {
+                // Expected re-prime gap right after a seek/cue flush.
+                self.stats.seek_priming_samples.fetch_add(underran, Ordering::Relaxed);
+            } else {
+                // Genuine starvation — the core failed to keep up.
+                self.stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
+                self.stats.underrun_events.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
 fn build_stream(device: &cpal::Device, p: &StreamParts) -> Result<cpal::Stream> {
-    let cpal_playing = Arc::clone(&p.playing);
-    let cpal_stats   = Arc::clone(&p.stats);
-    let consumer     = Arc::clone(&p.consumer);
-    let drain_flag   = Arc::clone(&p.drain_flag);
-    let failed       = Arc::clone(&p.failed);
-    let scrub_live   = Arc::clone(&p.scrub_live);
-    let device_ch    = p.device_ch;
-    // Stop fade: cutting to silence mid-waveform is a step, and a step is
-    // the click heard on every CUE release / pause.  On stop the callback
-    // keeps playing what the ring already holds while a gain ramps to
-    // zero over STOP_FADE_S (below anything audible as a fade), THEN goes
-    // silent and honours any pending flush.  Start is untouched — no
-    // fade-in — so cue latency stays exactly as it is.
-    const STOP_FADE_S: f32 = 0.003;
-    let fade_step = 1.0 / (p.device_sr as f32 * STOP_FADE_S).max(1.0);   // per frame
-    let mut gain: f32 = 1.0;
+    let failed = Arc::clone(&p.failed);
+    let mut fill = OutputFill::new(p);
     let mut rt_asked = false;
     let stream = device
         .build_output_stream::<f32, _, _>(
@@ -560,64 +692,7 @@ fn build_stream(device: &cpal::Device, p: &StreamParts) -> Result<cpal::Stream> 
                 // The device thread is cpal's; ask for RT priority from inside
                 // it, once (a syscall, no allocation).
                 if !rt_asked { rt_asked = true; try_realtime("cpal output", 30); }
-                // Only ever contended for the instant a replacement stream
-                // takes over; silence is the right answer then.
-                let Ok(mut consumer) = consumer.try_lock() else { out.fill(0.0); return; };
-                if !cpal_playing.load(Ordering::Relaxed) && !scrub_live.load(Ordering::Relaxed) {
-                    if gain > 0.0 {
-                        // Fading out: ring audio × a falling gain, frame by
-                        // frame.  A flush requested meanwhile waits until
-                        // the fade is done (the ring holds ~90 ms, plenty).
-                        for frame in out.chunks_mut(device_ch) {
-                            let g = gain * gain;   // squared ramp: lands with zero slope
-                            for sample in frame.iter_mut() {
-                                *sample = consumer.pop().unwrap_or(0.0) * g;
-                            }
-                            gain = (gain - fade_step).max(0.0);
-                            if gain == 0.0 { break; }
-                        }
-                        if gain > 0.0 { return; }
-                        // Fell to zero inside this buffer: the rest is
-                        // silence and the flush can proceed.
-                    }
-                    if drain_flag.swap(false, Ordering::AcqRel) {
-                        while consumer.pop().is_ok() {}
-                    }
-                    out.fill(0.0);
-                    return;
-                }
-                gain = 1.0;   // playing: no fade-in, and a restart mid-fade snaps up
-
-                // On seek, flush stale buffered audio.  This same buffer will
-                // then fill with silence until the producer re-primes from the
-                // new position — expected, so attribute it to seek priming,
-                // not to starvation.
-                let draining = drain_flag.swap(false, Ordering::AcqRel);
-                if draining {
-                    while consumer.pop().is_ok() {}
-                }
-
-                // Fill from the ring; count any sample we had to invent as
-                // silence.  No allocation, and the atomics are touched only
-                // when silence actually happens, so the clean path stays a
-                // bare pop().
-                let mut underran = 0u64;
-                for sample in out.iter_mut() {
-                    match consumer.pop() {
-                        Ok(s)  => *sample = s,
-                        Err(_) => { *sample = 0.0; underran += 1; }
-                    }
-                }
-                if underran > 0 {
-                    if draining {
-                        // Expected re-prime gap right after a seek/cue flush.
-                        cpal_stats.seek_priming_samples.fetch_add(underran, Ordering::Relaxed);
-                    } else {
-                        // Genuine starvation — the core failed to keep up.
-                        cpal_stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
-                        cpal_stats.underrun_events.fetch_add(1, Ordering::Relaxed);
-                    }
-                }
+                fill.fill(out);
             },
             move |err| {
                 // Once per failure: cpal repeats the error on every poll of a

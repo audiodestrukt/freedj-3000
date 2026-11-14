@@ -2919,6 +2919,21 @@ impl DeckApp {
         });
     }
 
+    /// The audible position: the decoder's cursor less what is still queued
+    /// in the ring.  Inside an active loop the cursor has already wrapped
+    /// while the loop's tail is still in flight, so walk back MODULO the loop
+    /// (otherwise the estimate lands before loop_start and the playhead
+    /// lurches).
+    fn heard_pos(&self, raw_pos: u64, in_flight: u64) -> f64 {
+        let loop_active = self.audio.loop_active.load(Ordering::Relaxed);
+        let (ls, le) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
+        let h = raw_pos as i64 - in_flight as i64;
+        if loop_active && le > ls && h < ls as i64 {
+            let len = (le - ls) as i64;
+            (ls as i64 + ((h - ls as i64) % len + len) % len) as f64
+        } else { h.max(0) as f64 }
+    }
+
     fn render_frame(&mut self) {
         // While occluded (iOS background) don't touch the GPU: the surface is
         // invalid and any acquire/present risks the background scene-update
@@ -3017,13 +3032,7 @@ impl DeckApp {
         // before loop_start and the playhead lurches.
         let loop_active = self.audio.loop_active.load(Ordering::Relaxed);
         let (ls, le) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
-        let heard = {
-            let h = raw_pos as i64 - in_flight as i64;
-            if loop_active && le > ls && h < ls as i64 {
-                let len = (le - ls) as i64;
-                (ls as i64 + ((h - ls as i64) % len + len) % len) as f64
-            } else { h.max(0) as f64 }
-        };
+        let heard = self.heard_pos(raw_pos, in_flight);
         // The audible wrap (end → start) is an EXPECTED backward jump: snap the
         // playhead to it instead of riding it out as a transient.
         let wrapped = loop_active && le > ls && (self.smoothed_pos - heard) > (le - ls) as f64 * 0.5;
@@ -4594,5 +4603,179 @@ mod slip_hold_tests {
         let at = h.shadow(t0 + Duration::from_secs(2)) / 96_000.0;
         assert!((at - 12.2).abs() < 1e-9, "{at}");
         assert_eq!(h.shadow(t0), h.pos);
+    }
+}
+
+/// A whole deck with no window and no sound card, for tests of what the
+/// user sees: send it the events a key or pad sends, let it play in real
+/// time, read the deck state back.  The audio is the real processor and
+/// stretcher; a stand-in device pulls the output at real time.
+#[cfg(test)]
+pub(crate) mod deck_harness {
+    use super::*;
+
+    pub const SR: u32 = 48_000;
+
+    /// A deck holding `secs` of a 120 BPM click track (a beat every 0.5 s),
+    /// paused at the start, with QUANTIZE off unless a test turns it on.
+    pub fn deck(secs: f64) -> DeckApp {
+        static DATA: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        let dir = DATA.get_or_init(|| {
+            let d = tempfile::tempdir().unwrap();
+            std::env::set_var("XDG_DATA_HOME", d.path());   // settings / tags never touch the real ones
+            d
+        });
+        let frames = (secs * SR as f64) as usize;
+        let samples: Vec<f32> = (0..frames).flat_map(|n| {
+            let v = if n % (SR as usize / 2) < 200 { 0.5 } else { 0.01 };
+            [v, v]
+        }).collect();
+        let audio = AudioHandle::open_test(samples, SR).unwrap();
+        let grid = BeatGrid::new_constant(0, 120.0);
+        let (_tx, rx) = mpsc::channel();
+        let mut settings = settings::Settings { quantize: false, ..Default::default() };
+        settings.stems = false;
+        let mut d = DeckApp::new(
+            dir.path().join("none.wav"), Some(dir.path().to_path_buf()),
+            WaveformCache { columns: Vec::new(), sample_rate: SR, hop_size: 512 },
+            audio, Some(grid.clone()),
+            Arc::new(AtomicU32::new(1f32.to_bits())), Arc::new(AtomicU32::new(0)), Arc::new(AtomicU64::new(0)),
+            Arc::new(AtomicU32::new(0)), Arc::new(AtomicU32::new(0)),
+            prodj::LinkState::new(4), Arc::new(arc_swap::ArcSwap::from_pointee(Some(grid))),
+            Arc::new(AtomicBool::new(false)), rx, Arc::new(surface::Indicators::default()), settings,
+        );
+        d.tick();
+        d
+    }
+
+    impl DeckApp {
+        /// What a frame does to the playhead, without drawing: follow the
+        /// audible position.
+        pub fn tick(&mut self) {
+            let raw = self.audio.position.load(Ordering::Relaxed);
+            let fl = self.audio.in_flight.load(Ordering::Relaxed);
+            self.smoothed_pos = self.heard_pos(raw, fl);
+        }
+
+        /// Let the deck run for `secs`, ticking as frames would.
+        pub fn run(&mut self, secs: f64) {
+            let end = Instant::now() + Duration::from_secs_f64(secs);
+            while Instant::now() < end {
+                std::thread::sleep(Duration::from_millis(10));
+                self.tick();
+            }
+        }
+
+        /// Send one control event, as a key, pad or controller would.
+        pub fn send(&mut self, e: ControlEvent) { self.apply(Event::Deck(e)); self.tick(); }
+
+        /// The audible position in seconds.
+        pub fn at(&self) -> f64 { self.smoothed_pos / (SR as f64 * 2.0) }
+        /// Seconds → interleaved samples.
+        pub fn samples(secs: f64) -> u64 { (secs * SR as f64) as u64 * 2 }
+    }
+}
+
+/// The deck's controls end to end, through the harness: each test is what a
+/// DJ does and what they hear.
+#[cfg(test)]
+mod deck_tests {
+    use super::deck_harness::*;
+    use super::*;
+    use opendeck_protocol::ControlEvent as C;
+
+    fn near(got: f64, want: f64, what: &str) {
+        assert!((got - want).abs() < 0.15, "{what}: at {got:.2}s, want {want:.2}s");
+    }
+
+    #[test]
+    fn slip_returns_after_a_held_hot_cue_and_not_without_slip() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(1.0);
+        d.send(C::HotCueSet { slot: 0 });
+        let cue = d.at();
+        d.run(1.0);
+        // SLIP on: hold A for a second, let go: back where the track would be.
+        d.send(C::SlipToggle);
+        let before = d.at();
+        d.send(C::HotCueTrigger { slot: 0, held: true });
+        near(d.at(), cue, "the pad jumps to its cue");
+        d.run(1.0);
+        d.send(C::HotCueRelease { slot: 0 });
+        near(d.at(), before + 1.0, "SLIP: release returns to the shadow");
+        // SLIP off: the hot cue latches, the release changes nothing.
+        d.send(C::SlipToggle);
+        d.send(C::HotCueTrigger { slot: 0, held: true });
+        d.run(0.5);
+        d.send(C::HotCueRelease { slot: 0 });
+        near(d.at(), cue + 0.5, "no SLIP: plays on from the cue");
+    }
+
+    #[test]
+    fn slip_returns_after_a_loop() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(1.0);
+        d.send(C::SlipToggle);
+        d.send(C::LoopIn);
+        let start = d.at();
+        d.run(0.5);
+        d.send(C::LoopOut);
+        let out = d.at();
+        d.run(1.5);
+        assert!(d.at() >= start - 0.05 && d.at() <= out + 0.05, "looping between {start:.2} and {out:.2}, at {:.2}", d.at());
+        d.send(C::Reloop);   // exit
+        near(d.at(), out + 1.5, "SLIP: the loop's exit returns to the shadow");
+    }
+
+    #[test]
+    fn slip_returns_after_a_vinyl_scratch() {
+        let mut d = deck(30.0);
+        d.settings.jog_vinyl = true;
+        d.send(C::Play);
+        d.run(1.0);
+        d.send(C::SlipToggle);
+        let before = d.at();
+        d.send(C::JogTouch { touched: true });
+        d.run(1.0);
+        d.send(C::JogTouch { touched: false });
+        near(d.at(), before + 1.0, "SLIP: the platter's release returns to the shadow");
+        assert!(d.audio.playing.load(Ordering::Relaxed), "and plays on");
+    }
+
+    #[test]
+    fn a_manual_loop_plays_between_in_and_out() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(1.0);
+        d.send(C::LoopIn);
+        let start = d.at();
+        d.run(0.6);
+        d.send(C::LoopOut);
+        let out = d.at();
+        assert!(d.audio.loop_active.load(Ordering::Relaxed), "OUT closes the loop");
+        let mut seen_wrap = false;
+        for _ in 0..30 {
+            d.run(0.05);
+            assert!(d.at() >= start - 0.05 && d.at() <= out + 0.05, "inside the loop: {:.2} not in {start:.2}..{out:.2}", d.at());
+            if d.at() < start + 0.2 { seen_wrap = true; }
+        }
+        assert!(seen_wrap, "the loop went round");
+    }
+
+    #[test]
+    fn tempo_range_keeps_the_fader_still() {
+        let mut d = deck(5.0);
+        d.send(C::TempoFader { position: 0.25 });   // half way down
+        let fader = |d: &DeckApp| input::speed_to_fader(f32::from_bits(d.fader_speed.load(Ordering::Relaxed)), d.settings.tempo_range);
+        let before = fader(&d);
+        for _ in 0..4 {
+            d.apply(Event::Ui(UiEvent::CycleSetting(settings::Setting::TempoRange)));
+            assert!((fader(&d) - before).abs() < 1e-4, "fader moved on range {}", d.settings.tempo_range);
+            let pct = (f32::from_bits(d.fader_speed.load(Ordering::Relaxed)) - 1.0) * 100.0;
+            let want = if d.settings.tempo_range >= 0.99 { 50.0 } else { d.settings.tempo_range * 50.0 };
+            assert!((pct - want).abs() < 0.01, "tempo follows the range: {pct}% on {}", d.settings.tempo_range);
+        }
     }
 }
