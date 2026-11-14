@@ -13,10 +13,11 @@ use std::time::{Duration, Instant};
 type Key = (u8, u8, u32);
 
 struct State<T> {
-    have: Option<(Key, Arc<T>)>,
+    /// What has arrived, per track (a few: tabs switch back and forth).
+    have: HashMap<Key, Arc<T>>,
     busy: bool,
     /// A failed track is not asked for again for a while.
-    tried: HashMap<Key, Instant>,
+    failed: HashMap<Key, Instant>,
 }
 
 /// One fetched thing per track of another player.
@@ -24,7 +25,7 @@ pub struct RemoteCache<T>(Arc<Mutex<State<T>>>);
 
 impl<T> Clone for RemoteCache<T> { fn clone(&self) -> Self { Self(self.0.clone()) } }
 impl<T> Default for RemoteCache<T> {
-    fn default() -> Self { Self(Arc::new(Mutex::new(State { have: None, busy: false, tried: HashMap::new() }))) }
+    fn default() -> Self { Self(Arc::new(Mutex::new(State { have: HashMap::new(), busy: false, failed: HashMap::new() }))) }
 }
 
 /// The detail waveform (150 entries a second) and the beat grid of a track.
@@ -35,6 +36,8 @@ pub struct WaveData {
     /// The 3-band detail (low, mid, high per 1/150 s) when the player has it:
     /// what the RGB and 3BAND waveform colours are drawn from.
     pub bands: Vec<[u8; 3]>,
+    /// The colour detail (`.EXT` PWV5): red, green, blue (0-7) and height (0-31).
+    pub rgb: Vec<[u8; 4]>,
 }
 pub type RemoteInfos = RemoteCache<InfoData>;
 
@@ -44,15 +47,19 @@ pub struct InfoData { pub meta: TrackMeta, pub art: Option<Vec<u8>> }
 pub fn fetch_wave(c: &mut DbClient, slot: Slot, id: u32) -> anyhow::Result<WaveData> {
     let bytes = c.waveform_detail(slot, id)?;
     let beats = c.beat_grid(slot, id).map(|b| opendeck_dbserver::parse_beat_grid(&b)).unwrap_or_default();
-    // CDJ-3000 3-band detail (.2EX PWV7), possibly with its section header.
-    let bands = c.anlz_tag(slot, id, b"PWV7", b"2EX").map(|b| {
-        let n = b.len();
-        let d: &[u8] = if n >= 24 && u32::from_be_bytes([b[12], b[13], b[14], b[15]]) == 3
-            && 24 + u32::from_be_bytes([b[16], b[17], b[18], b[19]]) as usize * 3 == n { &b[24..] } else { &b[n - n % 3..] };
-        d.chunks_exact(3).map(|e| [e[0], e[1], e[2]]).collect::<Vec<_>>()
-    }).unwrap_or_default();
-    log::info!("remote waveform {id}: {} bytes, {} beats, {} band entries", bytes.len(), beats.len(), bands.len());
-    Ok(WaveData { bytes, beats, bands })
+    // CDJ-3000 3-band detail (.2EX PWV7, 3 bytes per entry) and the colour
+    // detail (.EXT PWV5, 2 bytes per entry).
+    let bands = c.anlz_tag(slot, id, b"PWV7", b"2EX").ok()
+        .and_then(|b| anlz_entries(&b, 3).map(|d| d.chunks_exact(3).map(|e| [e[0], e[1], e[2]]).collect::<Vec<_>>()))
+        .unwrap_or_default();
+    let rgb = c.anlz_tag(slot, id, b"PWV5", b"EXT").ok()
+        .and_then(|b| anlz_entries(&b, 2).map(|d| d.chunks_exact(2).map(|e| {
+            let v = u16::from_be_bytes([e[0], e[1]]);
+            [(v >> 13 & 7) as u8, (v >> 10 & 7) as u8, (v >> 7 & 7) as u8, (v >> 2 & 31) as u8]
+        }).collect::<Vec<_>>()))
+        .unwrap_or_default();
+    log::info!("remote waveform {id}: {} bytes, {} beats, {} band entries, {} colour entries", bytes.len(), beats.len(), bands.len(), rgb.len());
+    Ok(WaveData { bytes, beats, bands, rgb })
 }
 
 pub fn fetch_info(c: &mut DbClient, slot: Slot, id: u32) -> anyhow::Result<InfoData> {
@@ -69,10 +76,9 @@ impl<T: Send + Sync + 'static> RemoteCache<T> {
         if t.id == 0 { return None; }
         let key = (t.player, t.slot, t.id);
         let mut s = self.0.lock().ok()?;
-        if let Some((k, d)) = &s.have { if *k == key { return Some(d.clone()); } }
-        if s.busy || s.tried.get(&key).is_some_and(|at| at.elapsed() < Duration::from_secs(30)) { return None; }
+        if let Some(d) = s.have.get(&key) { return Some(d.clone()); }
+        if s.busy || s.failed.get(&key).is_some_and(|at| at.elapsed() < Duration::from_secs(30)) { return None; }
         s.busy = true;
-        s.tried.insert(key, Instant::now());
         drop(s);
         let me = self.clone();
         let spawned = std::thread::Builder::new().name("remote-fetch".into()).spawn(move || {
@@ -85,8 +91,12 @@ impl<T: Send + Sync + 'static> RemoteCache<T> {
             if let Ok(mut s) = me.0.lock() {
                 s.busy = false;
                 match r {
-                    Ok(v) => { log::info!("remote fetch {key:?}: done"); s.have = Some((key, Arc::new(v))); }
-                    Err(e) => log::info!("remote fetch {key:?}: {e:#}"),
+                    Ok(v) => {
+                        log::info!("remote fetch {key:?}: done");
+                        if s.have.len() >= 12 { s.have.clear(); }
+                        s.have.insert(key, Arc::new(v));
+                    }
+                    Err(e) => { log::info!("remote fetch {key:?}: {e:#}"); s.failed.insert(key, Instant::now()); }
                 }
             }
         });
@@ -98,3 +108,15 @@ impl<T: Send + Sync + 'static> RemoteCache<T> {
 /// The fetchers the screen's other-player views share.
 #[derive(Default, Clone)]
 pub struct Remote { pub waves: RemoteWaves, pub infos: RemoteInfos }
+
+/// The entries of an ANLZ tag section as the player sends it: a 4-byte
+/// prefix, the tag name, the header length, the section length, the entry
+/// size and the entry count, then the entries.
+fn anlz_entries(b: &[u8], entry: usize) -> Option<&[u8]> {
+    if b.len() < 28 { return None; }
+    let be = |i: usize| u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as usize;
+    let (head, size, count) = (be(8), be(16), be(20));
+    if size != entry { return None; }
+    let data = b.get(4 + head..)?;
+    Some(&data[..data.len().min(count * entry)])
+}

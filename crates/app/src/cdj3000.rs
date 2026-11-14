@@ -750,12 +750,23 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
         let first = head * 150.0;
         let mode = WAVE_MODE.load(std::sync::atomic::Ordering::Relaxed);
         let bands = &w.data.bands;
-        let coloured = mode != 2 && !bands.is_empty();
+        let rgb = &w.data.rgb;
+        let coloured = (mode == 0 && !rgb.is_empty()) || (mode == 1 && !bands.is_empty());
+        let draw_rgb = mode == 0 && !rgb.is_empty();
         let mut x = r.min.x;
         while x < r.max.x {
             let (a, b) = (first + (x - cx) / per_entry, first + (x + 1.0 - cx) / per_entry);
             let (a, b) = ((a.floor().max(0.0)) as usize, (b.ceil().max(0.0)) as usize);
-            if coloured {
+            if draw_rgb {
+                if a < rgb.len() {
+                    let m = rgb[a..b.max(a + 1).min(rgb.len())].iter().fold([0u8; 4], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2]), m[3].max(v[3])]);
+                    if m[3] > 0 {
+                        let col = Color32::from_rgb(m[0] * 36, m[1] * 36, m[2] * 36);
+                        let hh = half * m[3] as f32 / 31.0;
+                        p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0, col));
+                    }
+                }
+            } else if coloured {
                 if a < bands.len() {
                     let m = bands[a..b.max(a + 1).min(bands.len())].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])]);
                     if let Some((col, frac)) = band_style(mode, m) {
