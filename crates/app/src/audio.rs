@@ -28,7 +28,7 @@ use opendeck_types::{Decoder, PipelineStage};
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -130,6 +130,9 @@ pub struct AudioHandle {
     /// (time-stretch); false = varispeed, pitch tracks speed like vinyl.  Read
     /// by the processor each block.
     pub key_lock:    Arc<AtomicBool>,
+    /// KEY SHIFT: semitones up (+) or down (−) on top of whatever the speed
+    /// and key lock do to the pitch; the tempo is untouched.
+    pub key_shift:   Arc<AtomicI32>,
     /// Loop: [loop_start, loop_end) in interleaved samples, honoured by the
     /// processor while `loop_active`.  The wrap happens INSIDE a source block
     /// (tail of the loop then its head, one continuous read) so the stretcher
@@ -375,6 +378,7 @@ impl AudioHandle {
         let playing    = Arc::new(AtomicBool::new(playing_init));
         let speed      = Arc::new(AtomicU32::new(1.0f32.to_bits()));
         let key_lock   = Arc::new(AtomicBool::new(true));  // Master Tempo on by default
+        let key_shift  = Arc::new(AtomicI32::new(0));
         let loop_start  = Arc::new(AtomicU64::new(0));
         let loop_end    = Arc::new(AtomicU64::new(0));
         let loop_active = Arc::new(AtomicBool::new(false));
@@ -399,6 +403,7 @@ impl AudioHandle {
         let proc_playing    = Arc::clone(&playing);
         let proc_speed      = Arc::clone(&speed);
         let proc_key_lock   = Arc::clone(&key_lock);
+        let proc_key_shift  = Arc::clone(&key_shift);
         let proc_loop = LoopShared {
             start:  Arc::clone(&loop_start),
             end:    Arc::clone(&loop_end),
@@ -424,6 +429,7 @@ impl AudioHandle {
                     proc_playing,
                     proc_speed,
                     proc_key_lock,
+                    proc_key_shift,
                     proc_loop,
                     proc_drain_flag,
                     proc_in_flight,
@@ -481,7 +487,7 @@ impl AudioHandle {
         };
 
         log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
-        Self::assemble(samples, position, playing, proc_thread, speed, key_lock, loop_start, loop_end, loop_active,
+        Self::assemble(samples, position, playing, proc_thread, speed, key_lock, key_shift, loop_start, loop_end, loop_active,
                        source_consumed, in_flight, seek_request, scrub, stems, stats, complete, file_sr, file_ch, tags,
                        stream, shutdown, processor)
     }
@@ -528,7 +534,7 @@ impl AudioHandle {
 
     #[allow(clippy::too_many_arguments)]
     fn assemble(samples: Arc<ArcSwap<Vec<f32>>>, position: Arc<AtomicU64>, playing: Arc<AtomicBool>, proc_thread: thread::Thread,
-                speed: Arc<AtomicU32>, key_lock: Arc<AtomicBool>, loop_start: Arc<AtomicU64>, loop_end: Arc<AtomicU64>,
+                speed: Arc<AtomicU32>, key_lock: Arc<AtomicBool>, key_shift: Arc<AtomicI32>, loop_start: Arc<AtomicU64>, loop_end: Arc<AtomicU64>,
                 loop_active: Arc<AtomicBool>, source_consumed: Arc<AtomicU64>, in_flight: Arc<AtomicU64>,
                 seek_request: Arc<AtomicU64>, scrub: ScrubShared, stems: Arc<StemControl>, stats: Arc<AudioStats>,
                 complete: Arc<AtomicBool>, file_sr: u32, file_ch: usize, tags: TrackTags, stream: StreamOwner,
@@ -540,6 +546,7 @@ impl AudioHandle {
             proc_thread,
             speed,
             key_lock,
+            key_shift,
             loop_start,
             loop_end,
             loop_active,
@@ -1020,6 +1027,7 @@ fn processor_loop(
     playing:    Arc<AtomicBool>,
     speed:      Arc<AtomicU32>,
     key_lock:   Arc<AtomicBool>,
+    key_shift:  Arc<AtomicI32>,
     lp:         LoopShared,
     drain_flag: Arc<AtomicBool>,
     in_flight:  Arc<AtomicU64>,
@@ -1275,7 +1283,9 @@ fn processor_loop(
         // speed change of the source.
         let spd = f32::from_bits(speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
         stretcher.set_speed(spd);
-        let semitones = if key_lock.load(Ordering::Relaxed) { 0.0 } else { 12.0 * spd.log2() };
+        // KEY SHIFT adds its semitones on top, in either mode.
+        let shift = key_shift.load(Ordering::Relaxed) as f32;
+        let semitones = shift + if key_lock.load(Ordering::Relaxed) { 0.0 } else { 12.0 * spd.log2() };
         stretcher.set_pitch_semitones(semitones);
 
         // ── Timestretch ───────────────────────────────────────────────────────

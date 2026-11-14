@@ -800,6 +800,50 @@ mod perf {
         }
     }
 
+    /// KEY SHIFT: a 440 Hz tone moved by n semitones comes out at 440·2^(n/12)
+    /// at the tempo the fader sets (the length still follows the speed), in
+    /// all three engines, with key lock on as the deck plays it.
+    #[test]
+    fn key_shift_moves_pitch_by_semitones() {
+        const HZ: f64 = 440.0;
+        let tone: Vec<f32> = (0..SR as usize * 4)
+            .flat_map(|i| { let v = 0.5 * (2.0 * std::f64::consts::PI * HZ * i as f64 / SR as f64).sin() as f32; [v, v] })
+            .collect();
+        let mut engines: Vec<(&str, fn() -> Box<dyn PipelineStage>)> = vec![
+            ("rubberband", || Box::new(TimestretechStage::new(SR, CH as u8))),
+            ("wsola", || Box::new(WsolaStage::new(SR, CH as u8))),
+        ];
+        #[cfg(feature = "bungee")]
+        engines.push(("bungee", || Box::new(BungeeStage::new(SR, CH as u8))));
+        for (name, make) in engines {
+            for speed in [1.0f32, 1.08] {
+                for shift in [-2i32, 1, 3] {
+                    let mut st = make();
+                    let mut out = Vec::new();
+                    for chunk in tone.chunks(BLOCK * CH) {
+                        st.set_speed(speed);
+                        st.set_pitch_semitones(shift as f32);
+                        st.process(chunk, &mut out);
+                    }
+                    let left: Vec<f32> = out.chunks(CH).map(|f| f[0]).collect();
+                    let body = &left[SR as usize / 2..left.len() - SR as usize / 4];
+                    let xs: Vec<f64> = body.windows(2).enumerate()
+                        .filter(|(_, w)| w[0] < 0.0 && w[1] >= 0.0)
+                        .map(|(i, w)| i as f64 + (w[0] / (w[0] - w[1])) as f64)
+                        .collect();
+                    let hz = (xs.len() - 1) as f64 / ((xs[xs.len() - 1] - xs[0]) / SR as f64);
+                    let cents = 1200.0 * (hz / HZ).log2() - 100.0 * shift as f64;
+                    let want_frames = (tone.len() / CH) as f64 / speed as f64;
+                    let frames = out.len() as f64 / CH as f64;
+                    println!("{name:<10} {:+4.0} %  shift {shift:+}  {hz:7.2} Hz  {cents:+6.2} cents off  {frames:.0}/{want_frames:.0} frames",
+                             (speed - 1.0) * 100.0);
+                    assert!(cents.abs() < 3.0, "{name} @{speed} shift {shift:+}: {hz:.2} Hz, {cents:+.2} cents off");
+                    assert!((frames - want_frames).abs() < 0.05 * want_frames, "{name} @{speed} shift {shift:+}: tempo changed ({frames} frames, want ~{want_frames})");
+                }
+            }
+        }
+    }
+
     fn frame_accounting_and_signal(stage: &mut dyn PipelineStage, speed: f32) {
         {
             stage.set_speed(speed);

@@ -139,6 +139,8 @@ pub struct DeckSnapshot<'a> {
     pub beat2_phase_beats: f32,
     /// External deck's beat within its bar, 1–4 (0 = unknown).
     pub beat2_beat_in_bar: u8,
+    /// KEY SHIFT in semitones (0 = the track's own key).
+    pub key_shift: i8,
 
     /// INFO page: what Link is speaking from ("ip (iface) → broadcast") and
     /// the players heard.  Empty until the sender has started.
@@ -151,6 +153,13 @@ pub struct DeckSnapshot<'a> {
 }
 
 impl DeckSnapshot<'_> {
+    /// The key to show: the track's key moved by KEY SHIFT (as the unit's
+    /// KEY readout does), in the notation the track's key came in.
+    pub fn shown_key(&self) -> Option<String> {
+        let k = self.tags.key.as_deref()?;
+        Some(opendeck_analysis::key::Key::shift_name(k, self.key_shift as i32).unwrap_or_else(|| k.to_string()))
+    }
+
     /// Hot cue `i`'s colour: rekordbox's, else `default` (the skin's green).
     pub fn hot_color(&self, i: usize, default: egui::Color32) -> egui::Color32 {
         match self.hot_rgb.get(i).copied().flatten() {
@@ -174,7 +183,7 @@ impl<'a> DeckSnapshot<'a> {
             remain_mode: true, auto_cue: false, slip: false, sync: false, master: false, zoom_grid_mode: false,
             grid_edited: false, cue_set: false, sync_offset: 0.0, source_link: false, phase_ticks_view: false,
             linked: false, master_player: 0, player: 1, link_addr: String::new(), link_peers: String::new(),
-            cols_visible: 1.0, beat_grid: None, beat2_bpm: 0.0, beat2_phase_beats: 0.0, beat2_beat_in_bar: 0,
+            cols_visible: 1.0, beat_grid: None, beat2_bpm: 0.0, beat2_phase_beats: 0.0, beat2_beat_in_bar: 0, key_shift: 0,
         }
     }
 }

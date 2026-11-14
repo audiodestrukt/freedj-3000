@@ -60,7 +60,7 @@ exceptions:
 
 | Item | Who | Size |
 |---|---|---|
-| KEY SHIFT panel (drawn, inert): needs a key-shift engine | all | M |
+| ~~KEY SHIFT panel~~ done: −/+ a semitone, RESET, shifted KEY readouts | all | ✓ |
 | ~~Key detection + KEY readout~~ done (0.3.10); green when compatible still open | all | S |
 | KEY SYNC | all | M |
 | ~~Hot-cue colours from rekordbox (PCO2 in the `.EXT`)~~ done: read, drawn, served. Comments are read and served, not yet shown on our screen | all | S |

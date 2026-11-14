@@ -897,6 +897,7 @@ fn make_snapshot<'a>(
         beat2_bpm,
         beat2_phase_beats,
         beat2_beat_in_bar,
+        key_shift:     audio.key_shift.load(Ordering::Relaxed) as i8,
     }
 }
 
@@ -1381,6 +1382,13 @@ impl DeckApp {
                 self.fader_speed.store(s.to_bits(), Ordering::Relaxed);
                 self.audio.speed_store(s);
                 log::info!("tempo {:+.2}%", (s - 1.0) * 100.0);
+            }
+            Event::Deck(ControlEvent::KeyShift { semitones }) => {
+                // KEY SHIFT: the key moves, the tempo does not (CDJ-3000:
+                // ±1 semitone per tap, RESET).  A new track starts unshifted.
+                let s = semitones.clamp(-KEY_SHIFT_MAX, KEY_SHIFT_MAX);
+                self.audio.key_shift.store(s as i32, Ordering::Relaxed);
+                log::info!("key shift {s:+}");
             }
             Event::Deck(ControlEvent::KeyLockToggle) => {
                 // Master Tempo: on = key lock (time-stretch, pitch held); off =
@@ -2687,6 +2695,7 @@ impl DeckApp {
         self.path           = p.path;
         self.memory_cues    = p.memory_cues;
         self.hot_cues       = p.hot_cues;
+        self.audio.key_shift.store(0, Ordering::Relaxed);
         self.cue_looks      = p.looks;
         self.perform_delete = false;
         if p.total > 0 { self.audio.load_streaming(Arc::clone(&p.samples), p.total, deck_sr, p.ch as u8)?; }
@@ -3517,6 +3526,9 @@ fn set_idle_timer_disabled(disabled: bool) {
 /// What a rekordbox ANLZ contributes to a load: the beat grid, the load cue
 /// (its first memory point), every memory point, and hot cues A–H — all as
 /// interleaved samples.
+/// KEY SHIFT reaches an octave either way.
+pub(crate) const KEY_SHIFT_MAX: i8 = 12;
+
 struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8], looks: CueLooks }
 
 /// A cue's colour and comment from rekordbox (see [`opendeck_rekordbox::RbCue`]).
@@ -4791,6 +4803,30 @@ mod deck_tests {
     use super::deck_harness::*;
     use super::*;
     use opendeck_protocol::ControlEvent as C;
+
+    /// KEY SHIFT sets the audio's semitones (an octave at most), leaves the
+    /// tempo alone, and a new track starts in its own key.
+    #[test]
+    fn key_shift_moves_the_key_not_the_tempo_and_resets_on_load() {
+        let mut d = deck(2.0);
+        let speed = d.audio.speed.load(Ordering::Relaxed);
+        d.send(C::KeyShift { semitones: 2 });
+        assert_eq!(d.audio.key_shift.load(Ordering::Relaxed), 2);
+        assert_eq!(d.audio.speed.load(Ordering::Relaxed), speed, "tempo untouched");
+        d.send(C::KeyShift { semitones: -40 });
+        assert_eq!(d.audio.key_shift.load(Ordering::Relaxed), -12, "an octave down at most");
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("t.wav");
+        super::stream_load_tests::wav(&wav, SR, 6.0, 0.0);
+        let prep = Prep { deck_sr: SR, deck_ch: 2, auto_cue: false, auto_cue_level_db: -48.0,
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+        let (tx, rx) = mpsc::channel();
+        DeckApp::prepare_local(prep, wav, None, &tx).unwrap();
+        drop(tx);
+        let Some(LoadMsg::Ready(p)) = rx.into_iter().next() else { panic!("loaded") };
+        d.apply_prepared(p).unwrap();
+        assert_eq!(d.audio.key_shift.load(Ordering::Relaxed), 0, "a new track is in its own key");
+    }
 
     fn near(got: f64, want: f64, what: &str) {
         assert!((got - want).abs() < 0.15, "{what}: at {got:.2}s, want {want:.2}s");

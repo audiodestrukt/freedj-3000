@@ -65,7 +65,7 @@ list, by area, with what has been tested where, is
 In short:
 
 - **Deck:** PLAY / CUE, hot cues A–H (in rekordbox's colours), memory cues, loops, BEAT JUMP, SLIP,
-  QUANTIZE, jog (VINYL / CDJ), tempo ±6 to WIDE, and MASTER TEMPO key lock
+  QUANTIZE, jog (VINYL / CDJ), tempo ±6 to WIDE, KEY SHIFT, and MASTER TEMPO key lock
   (Rubber Band R3, Bungee or WSOLA).
 - **Tracks:**
   - MP3, AAC, ALAC, FLAC, WAV, AIFF and OGG at any sample rate.
@@ -346,7 +346,7 @@ On the iPad, iPhone and Android the screen is the panel; on the desktop the
 mouse stands in for a finger. Press or drag on the overview to needle-search; drag the
 enlarged waveform to jog; scroll over it to zoom; the on-screen keys and
 panels (BROWSE, BEAT LOOP, hot-cue pads, the SEARCH keyboard…) respond to a
-tap; the few still inert, like KEY SHIFT, are in the TODO list. Every input — keys and touch alike — is an `Event` on one bus applied in
+tap; the few still inert, like TRACK FILTER, are in the TODO list. Every input — keys and touch alike — is an `Event` on one bus applied in
 `DeckApp::apply`; see `docs/INPUT_PLAN.md`.
 
 ### Controllers
@@ -604,7 +604,7 @@ most useful near-term work:
   section rekordbox writes.
 - **CDJ-3000 parity.** The open items in
   [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md): sorting, TRACK FILTER and
-  KEY SHIFT.
+  KEY SYNC.
 - **An XDJ loading from OpenDeck.** The servers are in; the acceptance test on
   a real XDJ is not (see `docs/reference/prodj-link-media.md`).
 - **Hardware.** The panel board is generated and routed

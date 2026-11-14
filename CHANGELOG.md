@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- KEY SHIFT on the CDJ-3000 screen. The KEY SHIFT key opens its panel: − and
+  + move the key a semitone each (up to an octave either way), labelled with
+  the key they lead to; the middle shows the key and its offset, and RESET
+  puts the track back in its own key. The tempo does not move. The KEY
+  readouts show the shifted key, in the notation the track's key came in.
+  Each new track starts in its own key. Works in all three key-lock engines,
+  with MASTER TEMPO on or off.
 - Hot cue colours from rekordbox. A stick track's hot cues show in the
   colours set in rekordbox, on the pads, the waveform flags and the overview
   of both screens. Cues with no colour stay green. A CDJ-3000 that loads the

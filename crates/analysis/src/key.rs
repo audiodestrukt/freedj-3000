@@ -68,6 +68,18 @@ const MINOR_NAMES: [&str; 12] = ["Cm", "Dbm", "Dm", "Ebm", "Em", "Fm", "F#m", "G
 impl Key {
     pub fn new(tonic: u8, minor: bool) -> Key { Key { tonic: tonic % 12, minor } }
 
+    /// This key moved `semitones` up (+) or down (−): KEY SHIFT.
+    pub fn transposed(self, semitones: i32) -> Key {
+        Key::new((self.tonic as i32 + semitones).rem_euclid(12) as u8, self.minor)
+    }
+
+    /// `name` (rekordbox's "Fm" or Camelot "4A") moved `semitones`, written
+    /// the way it came; None if it doesn't parse.
+    pub fn shift_name(name: &str, semitones: i32) -> Option<String> {
+        let k = Key::parse(name)?.transposed(semitones);
+        Some(if name.trim().starts_with(|c: char| c.is_ascii_digit()) { k.camelot_name() } else { k.name().to_string() })
+    }
+
     /// The name rekordbox gives this key ("Am", "F#", "Ebm", …).
     pub fn name(self) -> &'static str {
         if self.minor { MINOR_NAMES[self.tonic as usize] } else { MAJOR_NAMES[self.tonic as usize] }

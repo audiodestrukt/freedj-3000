@@ -30,7 +30,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Files-app music folder with a bundled demo track | ✅ | iOS (Android: Music folder) |
 | Stems prepared with OverCue Desktop: mute / solo / level per stem (MENU → STEMS, off by default); the enlarged waveform follows the stem mix; BROWSE marks stem tracks "S" | ✅ | All |
 | Stems split on the device with HTDemucs when a track has none prepared; the stems play as the split goes ("SPLITTING n%"), the rest of the track as normal; model supplied by the user | 🧪 Linux desktop (`separate-onnx`) measured; runs on iPad Air 13" (0.3.13) | iOS, D (Linux) |
-| Sorting, TRACK FILTER, KEY SHIFT (CDJ-3000 screen) | 📋 | — |
+| Sorting, TRACK FILTER, KEY SYNC (CDJ-3000 screen) | 📋 | — |
 | From rekordbox sticks: hot cue colours, memory cue colours and comments, read from the `.EXT` (USB and LINK) and passed on to CDJs | ✅ byte-built tests; a CDJ-3000 (emulator) draws the colours | All |
 | From rekordbox sticks: rekordbox's phrases, its colour waveforms on load (today OpenDeck shows its own analysis), hot loops as loops, cue comments on screen; cues set on OpenDeck saved across launches | 📋 | — |
 | OneLibrary sticks (rekordbox's new encrypted USB library, read by the CDJ-3000X); today OpenDeck reads the Device Library (`export.pdb`) that rekordbox 7.2.11+ writes alongside it | 📋 | — |
@@ -62,6 +62,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Scrub audio: a paused jog (or a VINYL scratch) plays the audio under the playhead | ✅ | All |
 | Drag the big waveform to seek | ✅ | All |
 | Tempo fader ±6 / ±10 / ±16 / WIDE; MASTER TEMPO key lock | ✅ | All |
+| KEY SHIFT (CDJ-3000 screen): ±1 semitone per tap up to an octave, RESET; the tempo stays put; the KEY readouts show the shifted key; a new track starts unshifted. Within 0.2 cents in all three key-lock engines, MASTER TEMPO on or off | ✅ | All (CDJ-3000 screen) |
 | Key-lock engines: Rubber Band R3 (default), Bungee, WSOLA (low-power boards); a tone holds its pitch within 0.2 cents from −16 % to +16 % in all three | ✅ | All (WSOLA for Pi Zero) |
 | Vinyl brake, key lock off (varispeed), real-time sample-rate conversion | 📋 | — |
 
