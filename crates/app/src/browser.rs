@@ -1795,7 +1795,7 @@ mod tests {
         link.peer_names.lock().unwrap().extend([(3u8, "CDJ-3000".to_string()), (17u8, "rekordbox".to_string())]);
         link.peer_media.lock().unwrap().insert((3, 3), (opendeck_link::prodj::MediaInfo {
             player: 3, slot: 3, name: "OPENDECK".into(), tracks: 12, playlists: 1,
-            date: "2026-09-17".into(), total: 32 << 30, free: 16 << 30,
+            date: "2026-09-17".into(), total: 32 << 30, free: 16 << 30, color: 0,
         }, std::time::Instant::now()));
         let b = Browser::new(home.path(), link);
         let rows = b.sources();

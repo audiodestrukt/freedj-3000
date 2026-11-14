@@ -395,6 +395,21 @@ fn scroll_text(ui: &Ui, field: Rect, x: f32, cy: f32, text: &str, font: FontId, 
     ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
 }
 
+/// A stick's colour label as the unit tints its source tile (None: no label).
+fn stick_color(code: u8) -> Option<Color32> {
+    Some(match code {
+        1 => Color32::from_rgb(200, 60, 150),   // pink
+        2 => Color32::from_rgb(190, 40, 40),    // red
+        3 => Color32::from_rgb(210, 110, 20),   // orange
+        4 => Color32::from_rgb(190, 160, 20),   // yellow
+        5 => Color32::from_rgb(40, 150, 60),    // green
+        6 => Color32::from_rgb(30, 150, 170),   // aqua
+        7 => Color32::from_rgb(40, 90, 200),    // blue
+        8 => Color32::from_rgb(130, 60, 190),   // purple
+        _ => return None,
+    })
+}
+
 fn outline(ui: &Ui, r: Rect, c: Color32, u: f32) {
     ui.painter().rect_stroke(r, 0.0, Stroke::new((1.5 * u).max(1.0), c));
 }
@@ -1548,7 +1563,7 @@ fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: 
         }
         // Icon tile (inset by the selection border when highlighted).
         let tile = Rect::from_min_max(at(0.0, y), at(90.0, bottom));
-        p.rect_filled(if sel { tile.shrink(2.0 * u) } else { tile }, 0.0, SOURCE_TILE);
+        p.rect_filled(if sel { tile.shrink(2.0 * u) } else { tile }, 0.0, r.info.as_ref().and_then(|i| stick_color(i.color)).unwrap_or(SOURCE_TILE));
         let c = Pos2::new(tile.center().x, tile.min.y + 33.0 * u);
         let kind = match r.kind { SourceKind::Local => "FOLDER", SourceKind::Usb => "USB", SourceKind::Link if r.rekordbox => "PC", SourceKind::Link => "LINK" };
         match r.kind {
