@@ -81,6 +81,8 @@ pub struct DeckSnapshot<'a> {
     pub file:         &'a str,
     /// Hot cues A–H (interleaved sample index), for the PERFORM pads + markers.
     pub hot_cues:     [Option<u64>; 8],
+    /// Each hot cue's rekordbox colour (None: the CDJ default green).
+    pub hot_rgb:      [Option<(u8, u8, u8)>; 8],
     /// PERFORM screen state.
     pub perform_mode:   crate::input::PerformMode,
     pub perform_bank:   u8,
@@ -148,13 +150,24 @@ pub struct DeckSnapshot<'a> {
     pub cols_visible: f32,
 }
 
+impl DeckSnapshot<'_> {
+    /// Hot cue `i`'s colour: rekordbox's, else `default` (the skin's green).
+    pub fn hot_color(&self, i: usize, default: egui::Color32) -> egui::Color32 {
+        match self.hot_rgb.get(i).copied().flatten() {
+            Some((r, g, b)) => egui::Color32::from_rgb(r, g, b),
+            None => default,
+        }
+    }
+}
+
 #[cfg(test)]
 impl<'a> DeckSnapshot<'a> {
+
     /// A stopped, empty deck for unit tests; set the fields a test needs.
     pub fn test(tags: &'a opendeck_decode::TrackTags) -> Self {
         DeckSnapshot {
             title: "", loading: None, notice: None, stems: StemsView::default(), tags, file: "", position: 0, sample_rate: 44_100, channels: 2,
-            total_samples: 0, cue_point: 0, memory_cues: &[], hot_cues: [None; 8],
+            total_samples: 0, cue_point: 0, memory_cues: &[], hot_cues: [None; 8], hot_rgb: [None; 8],
             perform_mode: crate::input::PerformMode::HotCue, perform_bank: 0, perform_delete: false,
             loop_active: false, loop_start: 0, loop_end: 0, loop_beats: 0.0, tempo_range: 10.0, quantize: false,
             slip_shadow: None, playing: false, speed: 1.0, fader_speed: 1.0, key_lock: false, jog_vinyl: false,

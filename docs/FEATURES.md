@@ -31,7 +31,8 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Stems prepared with OverCue Desktop: mute / solo / level per stem (MENU → STEMS, off by default); the enlarged waveform follows the stem mix; BROWSE marks stem tracks "S" | ✅ | All |
 | Stems split on the device with HTDemucs when a track has none prepared; the stems play as the split goes ("SPLITTING n%"), the rest of the track as normal; model supplied by the user | 🧪 Linux desktop (`separate-onnx`) measured; runs on iPad Air 13" (0.3.13) | iOS, D (Linux) |
 | Sorting, TRACK FILTER, KEY SHIFT (CDJ-3000 screen) | 📋 | — |
-| From rekordbox sticks: hot cue colours and comments, rekordbox's phrases, its colour waveforms on load (today OpenDeck shows its own analysis); cues set on OpenDeck saved across launches and passed on to CDJs | 📋 | — |
+| From rekordbox sticks: hot cue colours, memory cue colours and comments, read from the `.EXT` (USB and LINK) and passed on to CDJs | ✅ byte-built tests; a CDJ-3000 (emulator) draws the colours | All |
+| From rekordbox sticks: rekordbox's phrases, its colour waveforms on load (today OpenDeck shows its own analysis), hot loops as loops, cue comments on screen; cues set on OpenDeck saved across launches | 📋 | — |
 | OneLibrary sticks (rekordbox's new encrypted USB library, read by the CDJ-3000X); today OpenDeck reads the Device Library (`export.pdb`) that rekordbox 7.2.11+ writes alongside it | 📋 | — |
 
 ## Analysis
@@ -53,7 +54,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Feature | Status | Where |
 |---|---|---|
 | PLAY / CUE with hold-to-preview and back-cue, AUTO CUE (with level setting) | ✅ | All |
-| Hot cues (A–D on the XDJ screen, A–H on the CDJ-3000 faceplate), memory cues | ✅ | All |
+| Hot cues (A–D on the XDJ screen, A–H on the CDJ-3000 faceplate), memory cues; rekordbox's hot cue colours on pads and waveforms | ✅ | All |
 | Loops: manual IN / OUT, beat loops 1/2–16, BEAT JUMP | ✅ | All |
 | QUANTIZE for cues and loops | ✅ | All |
 | SLIP mode: loops, held hot cues, VINYL scratches (the track runs on underneath and returns) | ✅ | All |

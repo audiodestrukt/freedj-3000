@@ -535,7 +535,7 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
             let x = x_of(*pos);
             if !on(x) { continue; }
             let b = Rect::from_min_size(Pos2::new(x, top), Vec2::new(17.0 * u, 16.0 * u));
-            p.rect_filled(b, 0.0, CUE_GREEN);
+            p.rect_filled(b, 0.0, snap.hot_color(i, CUE_GREEN));
             label(ui, b.center(), Align2::CENTER_CENTER, (b'A' + i as u8) as char, 13.0, u, Color32::BLACK);
         }
         let x = x_of(snap.cue_point);
@@ -2138,7 +2138,7 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
         let Some(pos) = c else { continue };
         let x = ov.min.x + *pos as f32 / total * ov.width();
         let flag = Rect::from_min_size(Pos2::new(x, lay.flags.min.y), Vec2::new(13.0 * u, lay.flags.height()));
-        p.rect_filled(flag, 0.0, CUE_GREEN);
+        p.rect_filled(flag, 0.0, snap.hot_color(i, CUE_GREEN));
         label(ui, flag.center(), Align2::CENTER_CENTER, (b'A' + i as u8) as char, 12.0, u, Color32::BLACK);
     }
     // Memory points: red ▼ over the overview.

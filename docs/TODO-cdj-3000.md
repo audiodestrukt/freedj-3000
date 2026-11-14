@@ -63,7 +63,7 @@ exceptions:
 | KEY SHIFT panel (drawn, inert): needs a key-shift engine | all | M |
 | ~~Key detection + KEY readout~~ done (0.3.10); green when compatible still open | all | S |
 | KEY SYNC | all | M |
-| Hot-cue colours from rekordbox (PCO2 in the `.EXT`), comments; read from sticks and served to CDJs (OpenDeck's own cues already reach a CDJ-3000, uncoloured) | all | M |
+| ~~Hot-cue colours from rekordbox (PCO2 in the `.EXT`)~~ done: read, drawn, served. Comments are read and served, not yet shown on our screen | all | S |
 | Gate Cue, Smart Cue | all | S |
 | Beat-jump value settable (CALL/DELETE + BEAT JUMP); quantize beat value | all | S |
 | Slip reverse, reverse | all | M |

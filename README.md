@@ -64,7 +64,7 @@ list, by area, with what has been tested where, is
 
 In short:
 
-- **Deck:** PLAY / CUE, hot cues A–H, memory cues, loops, BEAT JUMP, SLIP,
+- **Deck:** PLAY / CUE, hot cues A–H (in rekordbox's colours), memory cues, loops, BEAT JUMP, SLIP,
   QUANTIZE, jog (VINYL / CDJ), tempo ±6 to WIDE, and MASTER TEMPO key lock
   (Rubber Band R3, Bungee or WSOLA).
 - **Tracks:**
@@ -102,8 +102,9 @@ In short:
   [docs/testing/cdj-3000-interop.md](docs/testing/cdj-3000-interop.md).
 
 **Next:**
-- rekordbox's hot cue colours and comments, phrases and colour waveforms,
-  read from sticks and passed through to CDJs.
+- rekordbox's phrases and colour waveforms, read from sticks and passed
+  through to CDJs (hot cue colours already are).
+- A set of test sticks covering everything rekordbox writes.
 - Cues set on OpenDeck saved across launches.
 - The remaining CDJ-3000 screen work:
   [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md).
@@ -598,8 +599,9 @@ most useful near-term work:
 
 - **A physical CDJ-3000 on the network.** Run the
   [interop kit](docs/testing/cdj-3000-interop.md) and report back.
-- **rekordbox data, both ways.** Hot cue colours and comments, phrases and
-  colour waveforms from sticks, passed through to CDJs.
+- **rekordbox data, both ways.** Phrases and colour waveforms from sticks,
+  passed through to CDJs, and test sticks that exercise every analysis
+  section rekordbox writes.
 - **CDJ-3000 parity.** The open items in
   [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md): sorting, TRACK FILTER and
   KEY SHIFT.

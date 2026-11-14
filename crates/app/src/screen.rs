@@ -1752,7 +1752,7 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
                 let set    = snap.hot_cues[slot as usize];
                 let face = match set {
                     Some(_) if snap.perform_delete => tint(RED, 210),
-                    Some(_)                        => pad_green,
+                    Some(_)                        => snap.hot_color(slot as usize, pad_green),
                     None if down                   => KEY_HI,
                     None                           => KEY,
                 };
@@ -2221,8 +2221,8 @@ fn draw_bottom(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Vec
             let x = ov.min.x + 3.0 + (*pos as f32 / total) * (ov.width() - 6.0);
             p.add(egui::Shape::convex_polygon(
                 vec![Pos2::new(x - 4.0, ty - 4.0), Pos2::new(x + 4.0, ty - 4.0), Pos2::new(x, ty + 3.0)],
-                pad_green, Stroke::NONE));
-            text(ui, Pos2::new(x, ty - h * 0.014), Align2::CENTER_CENTER, (b'A' + i as u8) as char, h * 0.014, pad_green);
+                snap.hot_color(i, pad_green), Stroke::NONE));
+            text(ui, Pos2::new(x, ty - h * 0.014), Align2::CENTER_CENTER, (b'A' + i as u8) as char, h * 0.014, snap.hot_color(i, pad_green));
         }
     }
 

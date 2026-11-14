@@ -256,10 +256,15 @@ fn serve_grid(link: &prodj::LinkState, path: &std::path::Path, grid: Option<&Bea
 
 /// The cues a peer reads for the loaded track: its hot cues A–H and memory
 /// cues, from interleaved sample positions (`ch` channels at `sr`).
-fn served_cues(hot: &[Option<u64>; 8], memory: &[u64], sr: u32, ch: u32) -> Vec<opendeck_dbserver::server::Cue> {
+fn served_cues(hot: &[Option<u64>; 8], memory: &[u64], looks: &CueLooks, sr: u32, ch: u32) -> Vec<opendeck_dbserver::server::Cue> {
+    use opendeck_dbserver::server::Cue;
     let ms = |pos: u64| (pos as f64 / ch.max(1) as f64 / sr.max(1) as f64 * 1000.0).round() as u32;
-    let mut v: Vec<_> = memory.iter().map(|&p| opendeck_dbserver::server::Cue { hot: 0, ms: ms(p), ..Default::default() }).collect();
-    v.extend(hot.iter().enumerate().filter_map(|(i, c)| c.map(|p| opendeck_dbserver::server::Cue { hot: i as u8 + 1, ms: ms(p), ..Default::default() })));
+    let dress = |c: Cue, l: Option<&CueLook>| match l {
+        Some(l) => Cue { color_code: l.code, rgb: l.rgb, comment: l.comment.clone(), ..c },
+        None => c,
+    };
+    let mut v: Vec<_> = memory.iter().map(|&p| dress(Cue { hot: 0, ms: ms(p), ..Default::default() }, looks.memory_at(p))).collect();
+    v.extend(hot.iter().enumerate().filter_map(|(i, c)| c.map(|p| dress(Cue { hot: i as u8 + 1, ms: ms(p), ..Default::default() }, looks.hot.get(i)))));
     v
 }
 
@@ -403,7 +408,7 @@ mod track_ref_tests {
         let mut hot = [None; 8];
         hot[0] = Some(2 * 1500);
         hot[2] = Some(2 * 250);
-        let cues = super::served_cues(&hot, &[2 * 40], 1000, 2);
+        let cues = super::served_cues(&hot, &[2 * 40], &super::CueLooks::default(), 1000, 2);
         let c = |hot: u8, ms: u32| opendeck_dbserver::server::Cue { hot, ms, ..Default::default() };
         assert_eq!(cues, vec![c(0, 40), c(1, 1500), c(3, 250)]);
         super::update_served(&link, &outside, |t| t.cues = cues.clone());
@@ -417,7 +422,7 @@ mod stream_load_tests {
     use super::*;
 
     /// A 16-bit stereo WAV: `lead` seconds of silence, then a 440 Hz tone.
-    fn wav(path: &std::path::Path, sr: u32, secs: f64, lead: f64) {
+    pub(super) fn wav(path: &std::path::Path, sr: u32, secs: f64, lead: f64) {
         let n = (sr as f64 * secs) as u32;
         let mut d = Vec::new();
         for i in 0..n {
@@ -719,6 +724,10 @@ struct DeckApp {
     /// Hot cues A–H (interleaved sample index, or empty): rekordbox's from the
     /// ANLZ on load, plus any set from the PERFORM pads.  In-session for now.
     hot_cues:          [Option<u64>; 8],
+    /// What rekordbox says about each cue beyond its position: colour and
+    /// comment (hot cues A–H by slot; memory points by position).  A cue set
+    /// on the deck has none.
+    cue_looks:         CueLooks,
     /// PERFORM screen state: pad mode, which bank the four pads show (0 = A–D,
     /// 1 = E–H), and whether DELETE –CALL is armed (next pad tap deletes).
     perform_mode:      PerformMode,
@@ -805,6 +814,7 @@ struct UiFlags {
     player: u8,
     cue_point: u64,
     hot_cues: [Option<u64>; 8],
+    hot_rgb: [Option<(u8, u8, u8)>; 8],
     perform_mode: PerformMode, perform_bank: u8, perform_delete: bool,
     loop_active: bool, loop_start: u64, loop_end: u64, loop_beats: f32,
     tempo_range: f32, quantize: bool,
@@ -852,6 +862,7 @@ fn make_snapshot<'a>(
         cue_point:     f.cue_point,
         memory_cues,
         hot_cues:      f.hot_cues,
+        hot_rgb:       f.hot_rgb,
         perform_mode:  f.perform_mode,
         perform_bank:  f.perform_bank,
         perform_delete: f.perform_delete,
@@ -1064,6 +1075,7 @@ impl DeckApp {
             memory_cues,
             track_tags,
             hot_cues,
+            cue_looks:         CueLooks::default(),
             perform_mode:      PerformMode::HotCue,
             perform_bank:      0,
             perform_delete:    false,
@@ -1311,6 +1323,7 @@ impl DeckApp {
                     let ch  = self.audio.channels as u64;
                     let pos = self.quantized(self.smoothed_pos);
                     self.hot_cues[s] = Some(pos);
+                    self.cue_looks.hot[s] = CueLook::default();
                     let sr_ch = self.audio.sample_rate as f64 * ch as f64;
                     log::info!("hot cue {}: set at {:.2}s", (b'A' + slot) as char, pos as f64 / sr_ch);
                     self.serve_deck_cues();
@@ -1334,6 +1347,7 @@ impl DeckApp {
             Event::Deck(ControlEvent::HotCueDelete { slot }) => {
                 if let Some(c) = self.hot_cues.get_mut(slot as usize) {
                     *c = None;
+                    self.cue_looks.hot[slot as usize] = CueLook::default();
                     log::info!("hot cue {}: deleted", (b'A' + slot) as char);
                     self.serve_deck_cues();
                 }
@@ -1828,7 +1842,7 @@ impl DeckApp {
 
     /// Serve the loaded track's hot and memory cues (see [`served_cues`]).
     fn serve_deck_cues(&self) {
-        let cues = served_cues(&self.hot_cues, &self.memory_cues, self.audio.sample_rate, self.audio.channels as u32);
+        let cues = served_cues(&self.hot_cues, &self.memory_cues, &self.cue_looks, self.audio.sample_rate, self.audio.channels as u32);
         update_served(&self.link, &self.path, |t| t.cues = cues);
     }
 
@@ -2001,9 +2015,12 @@ impl DeckApp {
     }
 
     /// Same as `grid_from_anlz` but from ANLZ bytes read over the network.
-    fn grid_from_anlz_bytes(bytes: &[u8], deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
-        let a = opendeck_rekordbox::read_anlz_from(&mut std::io::Cursor::new(bytes.to_vec()))
+    fn grid_from_anlz_bytes(bytes: &[u8], ext: Option<&[u8]>, deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
+        let mut a = opendeck_rekordbox::read_anlz_from(&mut std::io::Cursor::new(bytes.to_vec()))
             .map_err(|e| log::warn!("ANLZ (link): {e:#}")).ok()?;
+        if let Some(ext) = ext {
+            if let Err(e) = opendeck_rekordbox::merge_ext(&mut a, &mut std::io::Cursor::new(ext.to_vec())) { log::warn!("ANLZ .EXT (link): {e:#}"); }
+        }
         Self::anlz_to_grid(a, deck_sr, ch)
     }
 
@@ -2018,13 +2035,19 @@ impl DeckApp {
         let to_samples = |ms: u32| (ms as u64 * deck_sr as u64) / 1000 * ch as u64;
         let memory_cues: Vec<u64> = a.memory_cues.iter().map(|c| to_samples(c.time_ms)).collect();
         let cue = memory_cues.first().copied().unwrap_or(0);
+        // rekordbox numbers hot cues from 1 (A); the deck's slots from 0.
         let mut hot_cues = [None; 8];
+        let mut looks = CueLooks::default();
         for c in &a.hot_cues {
-            if let Some(n) = c.hot_cue {
-                if (n as usize) < 8 { hot_cues[n as usize] = Some(to_samples(c.time_ms)); }
+            if let Some(n @ 1..=8) = c.hot_cue {
+                let s = n as usize - 1;
+                hot_cues[s] = Some(to_samples(c.time_ms));
+                looks.hot[s] = CueLook::of(c);
             }
         }
-        Some(AnlzLoad { grid, cue, memory_cues, hot_cues })
+        looks.memory = a.memory_cues.iter().map(|c| (to_samples(c.time_ms), CueLook::of(c)))
+            .filter(|(_, l)| *l != CueLook::default()).collect();
+        Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks })
     }
 
     /// Dispatch a browser selection: a local file, or a track on a linked player.
@@ -2312,7 +2335,11 @@ impl DeckApp {
             let audio = nfs.read_file(&fh, size)?;
             let grid = if analyze_rel.is_empty() { FetchedGrid::None } else {
                 match nfs.lookup_path(&root, &analyze_rel).and_then(|(afh, asz)| nfs.read_file(&afh, asz)) {
-                    Ok(bytes) => FetchedGrid::Anlz(bytes),
+                    Ok(bytes) => {
+                        let ext_rel = std::path::Path::new(&analyze_rel).with_extension("EXT").to_string_lossy().into_owned();
+                        let ext = nfs.lookup_path(&root, &ext_rel).and_then(|(efh, esz)| nfs.read_file(&efh, esz)).ok();
+                        FetchedGrid::Anlz(bytes, ext)
+                    }
                     Err(e) => { log::warn!("link ANLZ {analyze_rel}: {e:#}"); FetchedGrid::None }
                 }
             };
@@ -2660,6 +2687,7 @@ impl DeckApp {
         self.path           = p.path;
         self.memory_cues    = p.memory_cues;
         self.hot_cues       = p.hot_cues;
+        self.cue_looks      = p.looks;
         self.perform_delete = false;
         if p.total > 0 { self.audio.load_streaming(Arc::clone(&p.samples), p.total, deck_sr, p.ch as u8)?; }
         else { self.audio.load_samples(Arc::clone(&p.samples), deck_sr, p.ch as u8)?; }
@@ -3180,7 +3208,7 @@ impl DeckApp {
             },
             player: self.link.player(),
             cue_point: self.transport.cue_point,
-            hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
+            hot_cues: self.hot_cues, hot_rgb: self.cue_looks.hot_rgb(), perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
             loop_active: self.audio.loop_active.load(Ordering::Relaxed),
             loop_start: self.audio.loop_start.load(Ordering::Relaxed),
             loop_end: self.audio.loop_end.load(Ordering::Relaxed),
@@ -3415,7 +3443,7 @@ impl DeckApp {
             },
             player: self.link.player(),
             cue_point: self.transport.cue_point,
-            hot_cues: self.hot_cues, perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
+            hot_cues: self.hot_cues, hot_rgb: self.cue_looks.hot_rgb(), perform_mode: self.perform_mode, perform_bank: self.perform_bank, perform_delete: self.perform_delete,
             loop_active: self.audio.loop_active.load(Ordering::Relaxed),
             loop_start: self.audio.loop_start.load(Ordering::Relaxed),
             loop_end: self.audio.loop_end.load(Ordering::Relaxed),
@@ -3488,11 +3516,41 @@ fn set_idle_timer_disabled(disabled: bool) {
 /// What a rekordbox ANLZ contributes to a load: the beat grid, the load cue
 /// (its first memory point), every memory point, and hot cues A–H — all as
 /// interleaved samples.
-struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8] }
+struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8], looks: CueLooks }
+
+/// A cue's colour and comment from rekordbox (see [`opendeck_rekordbox::RbCue`]).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CueLook {
+    /// rekordbox's colour code: a hot cue's palette index, a memory cue's 1–8.
+    code: u8,
+    /// A hot cue's colour; None = the CDJ default (green).
+    rgb: Option<(u8, u8, u8)>,
+    comment: String,
+}
+
+impl CueLook {
+    fn of(c: &opendeck_rekordbox::RbCue) -> CueLook {
+        CueLook { code: c.color_code, rgb: c.rgb, comment: c.comment.clone() }
+    }
+}
+
+/// The loaded track's cue looks: hot cues by slot, memory points by position.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct CueLooks {
+    hot: [CueLook; 8],
+    memory: Vec<(u64, CueLook)>,
+}
+
+impl CueLooks {
+    fn hot_rgb(&self) -> [Option<(u8, u8, u8)>; 8] { std::array::from_fn(|i| self.hot[i].rgb) }
+    fn memory_at(&self, pos: u64) -> Option<&CueLook> { self.memory.iter().find(|(p, _)| *p == pos).map(|(_, l)| l) }
+}
 
 /// A track fetched over the network by a background thread, ready to decode.
 struct Fetched { name: String, path: String, audio: Vec<u8>, grid: FetchedGrid, t0: Instant }
-enum FetchedGrid { None, Anlz(Vec<u8>), Beats(Vec<opendeck_dbserver::GridBeat>) }
+/// `Anlz`: the `.DAT`, and the `.EXT` beside it when there is one (cue
+/// colours and comments).
+enum FetchedGrid { None, Anlz(Vec<u8>, Option<Vec<u8>>), Beats(Vec<opendeck_dbserver::GridBeat>) }
 
 /// The deck facts a loader thread needs; captured before the thread starts.
 #[derive(Clone)]
@@ -3526,7 +3584,7 @@ impl Prep {
 struct Prepared {
     name: String, path: std::path::PathBuf, tags: opendeck_decode::TrackTags,
     samples: Arc<Vec<f32>>, ch: usize, waveform: WaveformCache,
-    beat_grid: Option<BeatGrid>, cue_pt: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8],
+    beat_grid: Option<BeatGrid>, cue_pt: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8], looks: CueLooks,
     grid_src: &'static str, t0: Instant,
     /// Still decoding: the expected length in samples (the rest arrives as
     /// [`Grow`]s).  0 = `samples` is the whole track.
@@ -3567,7 +3625,7 @@ impl Prep {
         let ch = self.deck_ch;
         let grid_cue = match f.grid {
             FetchedGrid::None => None,
-            FetchedGrid::Anlz(bytes) => DeckApp::grid_from_anlz_bytes(&bytes, self.deck_sr, ch),
+            FetchedGrid::Anlz(bytes, ext) => DeckApp::grid_from_anlz_bytes(&bytes, ext.as_deref(), self.deck_sr, ch),
             FetchedGrid::Beats(beats) if !beats.is_empty() => {
                 let a = opendeck_rekordbox::RbAnalysis {
                     beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
@@ -3606,9 +3664,9 @@ impl Prep {
         let total_hint = dec.total_frames().map(|f| (f as f64 * deck_sr as f64 / header_sr.max(1) as f64).round() as u64 * ch as u64).unwrap_or(0);
         let per_sec = (deck_sr as usize * ch) as f64;
 
-        let (beat_grid, rb_cue, memory_cues, hot_cues, grid_src) = match grid_cue {
-            Some(AnlzLoad { grid, cue, memory_cues, hot_cues }) => (Some(grid), cue, memory_cues, hot_cues, "rekordbox"),
-            None => (None, 0, Vec::new(), [None; 8], "freedj"),
+        let (beat_grid, rb_cue, memory_cues, hot_cues, looks, grid_src) = match grid_cue {
+            Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks }) => (Some(grid), cue, memory_cues, hot_cues, looks, "rekordbox"),
+            None => (None, 0, Vec::new(), [None; 8], CueLooks::default(), "freedj"),
         };
         let grid_src = match (&local, grid_src) { (Some(Some(_)), "rekordbox") => "cache", (_, g) => g };
         // AUTO CUE only when rekordbox gave no cue: then the first sound.
@@ -3669,7 +3727,7 @@ impl Prep {
                 let p = Prepared {
                     name: name.clone(), path: path.clone(), tags: tags.clone(),
                     samples: Arc::new(out.clone()), ch, waveform: if eof { wb.snapshot() } else { partial(&wb) },
-                    beat_grid: beat_grid.clone(), cue_pt, memory_cues: memory_cues.clone(), hot_cues,
+                    beat_grid: beat_grid.clone(), cue_pt, memory_cues: memory_cues.clone(), hot_cues, looks: looks.clone(),
                     grid_src, t0, total,
                 };
                 log::info!("load: playable in {} ms ({:.1}s decoded)", t0.elapsed().as_millis(), out.len() as f64 / per_sec);
@@ -4408,6 +4466,52 @@ mod memory_cue_tests {
 #[cfg(test)]
 mod anlz_grid_tests {
     use super::*;
+
+    /// A rekordbox stick track loads with its hot cues in the right pads (A
+    /// is rekordbox's hot cue 1), in rekordbox's colours, and a player that
+    /// asks us for the cue list gets the colours and comments too.  Setting
+    /// a pad again on the deck makes it a plain (uncoloured) cue.
+    #[test]
+    fn stick_cues_load_in_their_pads_with_colours() {
+        use opendeck_rekordbox::fixtures::{dat_and_ext, pqtz, FxCue};
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("t.wav");
+        super::stream_load_tests::wav(&wav, 48_000, 40.0, 0.0);
+        let red = (0xe6, 0x28, 0x28);
+        let (dat, ext) = dat_and_ext(pqtz(120.0, 0, 80),
+            &[FxCue { ms: 1_000, code: 2, comment: "intro", ..Default::default() }],
+            &[FxCue { hot: 1, ms: 4_000, code: 0x2a, rgb: red, comment: "drop", ..Default::default() },
+              FxCue { hot: 2, ms: 8_000, ..Default::default() },
+              FxCue { hot: 8, ms: 30_000, code: 0x09, rgb: (0, 0xe0, 0xff), ..Default::default() }]);
+        std::fs::write(dir.path().join("ANLZ0000.DAT"), dat).unwrap();
+        std::fs::write(dir.path().join("ANLZ0000.EXT"), ext).unwrap();
+
+        let prep = Prep { deck_sr: deck_harness::SR, deck_ch: 2, auto_cue: true, auto_cue_level_db: -48.0,
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+        let (tx, rx) = mpsc::channel();
+        DeckApp::prepare_local(prep, wav, Some(dir.path().join("ANLZ0000.DAT")), &tx).unwrap();
+        drop(tx);
+        let Some(LoadMsg::Ready(p)) = rx.into_iter().next() else { panic!("loaded") };
+        let mut d = deck_harness::deck(2.0);
+        d.apply_prepared(p).unwrap();
+
+        let at = |secs: f64| Some(deck_harness::deck_samples(secs));
+        assert_eq!(d.hot_cues, [at(4.0), at(8.0), None, None, None, None, None, at(30.0)], "A, B and H in their own pads");
+        assert_eq!(d.cue_looks.hot_rgb(), [Some(red), None, None, None, None, None, None, Some((0, 0xe0, 0xff))]);
+        assert_eq!(d.memory_cues, vec![deck_harness::deck_samples(1.0)]);
+
+        let served = served_cues(&d.hot_cues, &d.memory_cues, &d.cue_looks, d.audio.sample_rate, 2);
+        let a = served.iter().find(|c| c.hot == 1).unwrap();
+        assert_eq!((a.ms, a.rgb, a.color_code, a.comment.as_str()), (4_000, Some(red), 0x2a, "drop"));
+        let m = served.iter().find(|c| c.hot == 0).unwrap();
+        assert_eq!((m.ms, m.color_code, m.comment.as_str()), (1_000, 2, "intro"));
+        assert!(served.iter().find(|c| c.hot == 2).unwrap().rgb.is_none(), "B has no colour: the default green");
+
+        d.send(ControlEvent::HotCueDelete { slot: 0 });
+        d.send(ControlEvent::HotCueSet { slot: 0 });
+        assert!(d.hot_cues[0].is_some());
+        assert_eq!(d.cue_looks.hot_rgb()[0], None, "a pad set on the deck is a plain cue");
+    }
     // Gated: OPENDECK_TEST_RB=/run/media/dan/CDJ1
     #[test]
     fn grid_from_anlz_matches_rekordbox() {
@@ -4674,6 +4778,9 @@ pub(crate) mod deck_harness {
         /// Seconds → interleaved samples.
         pub fn samples(secs: f64) -> u64 { (secs * SR as f64) as u64 * 2 }
     }
+
+    /// Seconds → interleaved samples at the harness rate.
+    pub fn deck_samples(secs: f64) -> u64 { DeckApp::samples(secs) }
 }
 
 /// The deck's controls end to end, through the harness: each test is what a

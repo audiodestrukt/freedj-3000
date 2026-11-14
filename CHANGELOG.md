@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Hot cue colours from rekordbox. A stick track's hot cues show in the
+  colours set in rekordbox, on the pads, the waveform flags and the overview
+  of both screens. Cues with no colour stay green. A CDJ-3000 that loads the
+  track from OpenDeck gets the same colours (with its HOT CUE COLOR setting
+  on), along with memory cue colours and every cue's comment. The colours come
+  from the stick's `.EXT` analysis file, read for USB sticks and for tracks
+  loaded from another player over LINK. Setting a pad again on the deck makes
+  it a plain green cue.
+- `fixture_stick` example (opendeck-rekordbox): builds a test rekordbox stick
+  from the demo export with your audio and coloured, commented cues; point
+  OpenDeck at it with `OPENDECK_MEDIA_DIRS`.
 - Stems: play with the stems while a track is still being split on the
   device. The stem keys work as soon as the first stretch is split
   (they still read "SPLITTING n%"), on the part split so far; past it the
@@ -75,6 +86,12 @@ All notable changes to this project will be documented in this file.
   at full scale and keep the MP3 encoder delay, as before; tags read as before.
 
 ### Fixed
+- rekordbox sticks with cues: a track with any memory or hot cue point
+  failed to read its analysis (the bundled parser took a cue point to be
+  type 0; rekordbox writes 1), so its beat grid was lost as well as its cues.
+  A cue without a comment, and extended cue entries of other lengths, failed
+  the same way. No test stick had cues, so this never showed.
+- rekordbox hot cues landed one pad late: A on B, B on C, and H was dropped.
 - A CDJ-3000 browsing OpenDeck's music now shows each track's key in its
   track list (the KEY column was empty, though the key showed once the track
   was loaded). The track rows now have the 16 fields a CDJ-3000 sends for

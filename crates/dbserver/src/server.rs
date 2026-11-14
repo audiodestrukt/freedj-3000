@@ -437,13 +437,17 @@ pub fn no_data(txid: u32, req: u16) -> Message {
 
 /// A hot cue (`hot` 1–8 = A–H) or memory cue (`hot` 0), in milliseconds;
 /// with `loop_end_ms` it is a loop.  `rgb` is the hot cue's colour (None:
-/// green, a loop orange, as a CDJ-3000 colours its own).
+/// green, a loop orange, as a CDJ-3000 colours its own).  `color_code` is
+/// rekordbox's colour number: a hot cue's palette index, a memory cue's
+/// colour 1–8 (0 = none).  `comment` is the DJ's comment.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Cue {
     pub hot:         u8,
     pub ms:          u32,
     pub loop_end_ms: Option<u32>,
     pub rgb:         Option<(u8, u8, u8)>,
+    pub color_code:  u8,
+    pub comment:     String,
 }
 
 /// Milliseconds to the half-frames (1/150 s) of the plain cue list.
@@ -493,21 +497,30 @@ fn ext_cue_list(txid: u32, cues: &[Cue]) -> Option<Message> {
     mem.sort_by_key(|c| c.ms);
     let mut blob = Vec::new();
     for c in hot.iter().chain(mem.iter()) {
-        let size = if c.hot != 0 { 0x54 } else { 0x4c };
-        let mut e = vec![0u8; size];
-        e[0..4].copy_from_slice(&(size as u32).to_le_bytes());
+        // The fixed head (0x4a bytes), then the comment, then the tail: a
+        // hot cue's colour code and RGB sit after the comment (Beat Link reads
+        // them at 0x4e + the comment's length).
+        let mut e = vec![0u8; 0x4a];
         e[4..6].copy_from_slice(&(c.hot as u16).to_le_bytes());
         e[6] = if c.loop_end_ms.is_some() { 2 } else { 1 };
         e[0x0a..0x0c].copy_from_slice(&1000u16.to_le_bytes());
         e[0x0c..0x10].copy_from_slice(&c.ms.to_le_bytes());
         e[0x10..0x14].copy_from_slice(&c.loop_end_ms.unwrap_or(u32::MAX).to_le_bytes());
         e[0x20..0x34].fill(0xff);
+        if c.hot == 0 && c.color_code != 0 { e[0x22] = c.color_code; }
         e[0x34] = if c.hot != 0 { 0x1a } else { 0x12 };
+        let mut comment: Vec<u8> = c.comment.encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+        if !comment.is_empty() { comment.extend([0, 0]); }
+        e[0x48..0x4a].copy_from_slice(&(comment.len() as u16).to_le_bytes());
+        e.extend(&comment);
         if c.hot != 0 {
-            e[0x4a] = 4;
             let (r, g, b) = c.rgb.unwrap_or(if c.loop_end_ms.is_some() { (0xff, 0x8c, 0) } else { (0, 0xff, 0) });
-            e[0x4f..0x52].copy_from_slice(&[r, g, b]);
+            e.extend([4, 0, 0, 0, c.color_code, r, g, b, 0, 0]);
+        } else {
+            e.extend([0, 0]);
         }
+        let size = e.len() as u32;
+        e[0..4].copy_from_slice(&size.to_le_bytes());
         blob.extend(e);
     }
     let n = (hot.len() + mem.len()) as u32;
@@ -964,5 +977,41 @@ mod tests {
         assert_eq!(&got[0x4f..0x52], &[0, 0xff, 0]);
         assert_eq!(&got[0xa8 + 0x4f..0xa8 + 0x52], &[0xff, 0x8c, 0]);
         assert!(ext_cue_list(3, &[]).is_none(), "no cues: 'no data', as a CDJ answers");
+    }
+
+    /// rekordbox's colours and comments go where Beat Link (and a CDJ) read
+    /// them: a memory cue's colour at 0x22; the comment's length at 0x48, the
+    /// comment (UTF-16LE + 0x0000) at 0x4a, and a hot cue's colour code and
+    /// RGB after it, at 0x4e + the comment's length.
+    #[test]
+    fn extended_cue_list_carries_colours_and_comments() {
+        let cues = vec![
+            Cue { hot: 1, ms: 10_000, rgb: Some((0xe6, 0x28, 0x28)), color_code: 0x2a, comment: "drop".into(), ..Default::default() },
+            Cue { hot: 2, ms: 30_000, ..Default::default() },
+            Cue { hot: 0, ms: 1_500, color_code: 2, comment: "intro".into(), ..Default::default() },
+        ];
+        let m = ext_cue_list(1, &cues).unwrap();
+        let Field::Blob(b) = m.args[3].clone() else { panic!() };
+        // Walk it as Beat Link's parseNxs2Entries does.
+        let mut seen = Vec::new();
+        let mut off = 0;
+        for _ in 0..m.args[4].as_u32() {
+            let e = &b[off..];
+            let size = u32::from_le_bytes(e[0..4].try_into().unwrap()) as usize;
+            let n = u16::from_le_bytes([e[0x48], e[0x49]]) as usize;
+            let comment = if n > 0 {
+                let u: Vec<u16> = e[0x4a..0x4a + n - 2].chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+                String::from_utf16(&u).unwrap()
+            } else { String::new() };
+            let colour = if e[4] == 0 { (e[0x22], None) } else { (e[0x4e + n], Some((e[0x4f + n], e[0x50 + n], e[0x51 + n]))) };
+            seen.push((e[4], u32::from_le_bytes(e[12..16].try_into().unwrap()), comment, colour, size));
+            off += size;
+        }
+        assert_eq!(off, b.len(), "entry sizes add up");
+        assert_eq!(seen, vec![
+            (1, 10_000, "drop".to_string(), (0x2a, Some((0xe6, 0x28, 0x28))), 0x54 + 10),
+            (2, 30_000, String::new(),      (0, Some((0, 0xff, 0))), 0x54),
+            (0, 1_500,  "intro".to_string(), (2, None), 0x4c + 12),
+        ]);
     }
 }

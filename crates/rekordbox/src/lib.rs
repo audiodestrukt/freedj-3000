@@ -7,6 +7,10 @@
 //! the thin adapter. Cue-point / beat-grid import from the `ANLZ` files is a
 //! later step.
 
+/// Byte-built analysis files for tests (here and in the app).
+#[doc(hidden)]
+pub mod fixtures;
+
 use anyhow::{anyhow, Context, Result};
 use binrw::BinRead;
 use rekordcrate::pdb::string::DeviceSQLString;
@@ -252,13 +256,21 @@ pub struct RbBeat {
 }
 
 /// A memory or hot cue (or loop) from the analysis.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RbCue {
     pub time_ms: u32,
     pub is_loop: bool,
     pub loop_ms: u32,
     /// `Some(n)` if this is hot cue n, `None` for a memory cue.
     pub hot_cue: Option<u32>,
+    /// rekordbox's colour code: for a hot cue its palette index (1–0x3e),
+    /// for a memory cue its colour (1 pink … 8 purple); 0 = none.  Only in
+    /// the `.EXT` file's extended cue list.
+    pub color_code: u8,
+    /// A hot cue's colour as rekordbox stores it for the players' pads.
+    pub rgb: Option<(u8, u8, u8)>,
+    /// The DJ's comment ("" when none).
+    pub comment: String,
 }
 
 /// Parsed analysis for one track.
@@ -275,10 +287,34 @@ pub struct RbAnalysis {
 
 /// Read a rekordbox `ANLZ####.DAT` analysis file: beat grid, cue points and
 /// the small blue preview (the detailed waveforms are ignored: freedj renders
-/// its own). Missing sections are fine.
+/// its own). Missing sections are fine.  The `.EXT` beside it, when there is
+/// one, adds the cues' colours and comments ([`merge_ext`]).
 pub fn read_anlz(path: &Path) -> Result<RbAnalysis> {
     let mut f = File::open(path).with_context(|| format!("open {}", path.display()))?;
-    read_anlz_from(&mut f)
+    let mut a = read_anlz_from(&mut f)?;
+    let ext = path.with_extension("EXT");
+    if let Ok(mut e) = File::open(&ext) {
+        if let Err(err) = merge_ext(&mut a, &mut e) { log::warn!("{}: {err:#}", ext.display()); }
+    }
+    Ok(a)
+}
+
+/// Take the cues from a `.EXT` file's extended cue lists (PCO2) when it has
+/// any: the same points as the `.DAT`'s, plus colours and comments.
+pub fn merge_ext<R: Read + Seek>(a: &mut RbAnalysis, reader: &mut R) -> Result<()> {
+    let ext = read_anlz_from(reader)?;
+    if !ext.hot_cues.is_empty() || !ext.memory_cues.is_empty() {
+        a.hot_cues = ext.hot_cues;
+        a.memory_cues = ext.memory_cues;
+    }
+    Ok(())
+}
+
+/// rekordbox's memory cue colour number (0 none, 1 pink … 8 purple).
+fn color_index(c: &rekordcrate::util::ColorIndex) -> u8 {
+    use rekordcrate::util::ColorIndex as C;
+    match c { C::None => 0, C::Pink => 1, C::Red => 2, C::Orange => 3, C::Yellow => 4,
+              C::Green => 5, C::Aqua => 6, C::Blue => 7, C::Purple => 8 }
 }
 
 /// Parse ANLZ from any reader (e.g. bytes read over NFS).
@@ -307,6 +343,22 @@ pub fn read_anlz_from<R: Read + Seek>(reader: &mut R) -> Result<RbAnalysis> {
                         is_loop: c.cue_type == CueType::Loop,
                         loop_ms: c.loop_time,
                         hot_cue: hot.then_some(c.hot_cue),
+                        ..Default::default()
+                    });
+                }
+            }
+            Content::ExtendedCueList(cl) => {
+                let hot = cl.list_type == CueListType::HotCues;
+                let dst = if hot { &mut out.hot_cues } else { &mut out.memory_cues };
+                for c in &cl.cues {
+                    dst.push(RbCue {
+                        time_ms:    c.time,
+                        is_loop:    c.cue_type == CueType::Loop,
+                        loop_ms:    c.loop_time,
+                        hot_cue:    hot.then_some(c.hot_cue),
+                        color_code: if hot { c.hot_cue_color_index() } else { color_index(&c.color) },
+                        rgb:        if hot { c.hot_cue_color_rgb() } else { None },
+                        comment:    c.comment(),
                     });
                 }
             }
@@ -359,4 +411,42 @@ mod tests {
         assert!((gap as i32 - 480).abs() <= 2, "≈480ms spacing, got {gap}");
         println!("OK: {} beats, first @ {}ms {} BPM", a.beats.len(), first.time_ms, first.bpm);
     }
+
+    use crate::fixtures::{anlz_file, pcob, pco2, FxCue};
+
+    #[test]
+    fn cue_points_parse_with_rekordbox_type_1() {
+        // A memory point at 1.5 s, hot cue A at 10 s and hot loop C 20–24 s.
+        let dat = anlz_file(&[pcob(false, &[FxCue { ms: 1500, ..Default::default() }]),
+                              pcob(true, &[FxCue { hot: 1, ms: 10_000, ..Default::default() },
+                                           FxCue { hot: 3, ms: 20_000, loop_end_ms: Some(24_000), ..Default::default() }])]);
+        let a = read_anlz_from(&mut std::io::Cursor::new(dat)).expect("a cue point (type 1) parses");
+        assert_eq!(a.memory_cues.len(), 1);
+        assert_eq!(a.memory_cues[0].time_ms, 1500);
+        assert_eq!(a.hot_cues.iter().map(|c| (c.hot_cue, c.time_ms, c.is_loop)).collect::<Vec<_>>(),
+                   vec![(Some(1), 10_000, false), (Some(3), 20_000, true)]);
+    }
+
+    #[test]
+    fn ext_cues_bring_colours_and_comments() {
+        let dir = std::env::temp_dir().join(format!("od-rb-ext-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let dat = dir.join("ANLZ0000.DAT");
+        let mem = [FxCue { ms: 1500, code: 2, comment: "intro", ..Default::default() }];
+        let hot = [FxCue { hot: 1, ms: 10_000, code: 0x2a, rgb: (0xe6, 0x28, 0x28), comment: "drop", ..Default::default() },
+                   FxCue { hot: 2, ms: 30_000, ..Default::default() }];
+        std::fs::write(&dat, anlz_file(&[pcob(false, &mem), pcob(true, &hot)])).unwrap();
+        // Without the .EXT: the points, no colours.
+        let plain = read_anlz(&dat).unwrap();
+        assert!(plain.hot_cues.iter().all(|c| c.rgb.is_none() && c.color_code == 0));
+        std::fs::write(dir.join("ANLZ0000.EXT"), anlz_file(&[pco2(false, &mem), pco2(true, &hot)])).unwrap();
+        let a = read_anlz(&dat).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(a.memory_cues, vec![RbCue { time_ms: 1500, loop_ms: u32::MAX, color_code: 2, comment: "intro".into(), ..Default::default() }]);
+        assert_eq!(a.hot_cues[0], RbCue { time_ms: 10_000, loop_ms: u32::MAX, hot_cue: Some(1), color_code: 0x2a,
+                                          rgb: Some((0xe6, 0x28, 0x28)), comment: "drop".into(), ..Default::default() });
+        assert_eq!((a.hot_cues[1].hot_cue, a.hot_cues[1].rgb, a.hot_cues[1].comment.as_str()), (Some(2), None, ""),
+                   "a hot cue with no colour and no comment parses");
+    }
+
 }

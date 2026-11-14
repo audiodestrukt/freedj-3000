@@ -672,11 +672,12 @@ fn draw_pads(ui: &Ui, snap: &DeckSnapshot, pads: &[Rect; 8], call_delete: Option
         // The letter top-left and the lamp bar along the bottom, as on the unit.
         let bar = Rect::from_min_max(Pos2::new(r.min.x + r.width() * 0.08, r.max.y - r.height() * 0.2),
                                      Pos2::new(r.max.x - r.width() * 0.08, r.max.y - r.height() * 0.12));
-        p.rect_filled(bar, 1.0, if set.is_some() { PAD_SET } else { PAD_EMPTY });
+        let lit = snap.hot_color(i, PAD_SET);
+        p.rect_filled(bar, 1.0, if set.is_some() { lit } else { PAD_EMPTY });
         if set.is_some() && down { p.rect_filled(r.shrink(1.5), round, Color32::from_rgba_unmultiplied(0, 200, 60, 70)); }
         let letter = ((b'A' + slot) as char).to_string();
         p.text(Pos2::new(r.min.x + r.width() * 0.1, r.min.y + r.height() * 0.1), Align2::LEFT_TOP, letter,
-               FontId::proportional(t * 0.9), if set.is_some() { PAD_SET } else { LEGEND });
+               FontId::proportional(t * 0.9), if set.is_some() { lit } else { LEGEND });
         if pressed {
             out.push(Event::Deck(match (set, deleting) {
                 (Some(_), true) => ControlEvent::HotCueDelete { slot },

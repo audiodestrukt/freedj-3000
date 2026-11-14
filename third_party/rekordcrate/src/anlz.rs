@@ -153,7 +153,7 @@ pub enum CueListType {
 #[brw(repr = u8)]
 pub enum CueType {
     /// Cue is a single point.
-    Point = 0,
+    Point = 1,
     /// Cue is a loop.
     Loop = 2,
 }
@@ -264,97 +264,43 @@ pub struct ExtendedCue {
     pub loop_numerator: u16,
     /// Represents the loop size denominator (if this is a quantized loop).
     pub loop_denominator: u16,
-    /// Length of the comment string in bytes.
+    /// Length of the comment in bytes (UTF-16BE with a trailing `0x0000`;
+    /// 0 when there is no comment).
     #[br(temp)]
-    #[bw(calc = (comment.len() as u32 + 1) * 2)]
+    #[bw(calc = comment_raw.len() as u32)]
     len_comment: u32,
-    /// An UTF-16BE encoded string, followed by a trailing  `0x0000`.
-    #[br(assert((comment.len() as u32 + 1) * 2 == len_comment))]
-    pub comment: NullWideString,
-    /// Rekordbox hotcue color index.
-    ///
-    /// | Value  | Color                       |
-    /// | ------ | --------------------------- |
-    /// | `0x00` | None (Green on older CDJs). |
-    /// | `0x01` | `#305aff`                   |
-    /// | `0x02` | `#5073ff`                   |
-    /// | `0x03` | `#508cff`                   |
-    /// | `0x04` | `#50a0ff`                   |
-    /// | `0x05` | `#50b4ff`                   |
-    /// | `0x06` | `#50b0f2`                   |
-    /// | `0x07` | `#50aee8`                   |
-    /// | `0x08` | `#45acdb`                   |
-    /// | `0x09` | `#00e0ff`                   |
-    /// | `0x0a` | `#19daf0`                   |
-    /// | `0x0b` | `#32d2e6`                   |
-    /// | `0x0c` | `#21b4b9`                   |
-    /// | `0x0d` | `#20aaa0`                   |
-    /// | `0x0e` | `#1fa392`                   |
-    /// | `0x0f` | `#19a08c`                   |
-    /// | `0x10` | `#14a584`                   |
-    /// | `0x11` | `#14aa7d`                   |
-    /// | `0x12` | `#10b176`                   |
-    /// | `0x13` | `#30d26e`                   |
-    /// | `0x14` | `#37de5a`                   |
-    /// | `0x15` | `#3ceb50`                   |
-    /// | `0x16` | `#28e214`                   |
-    /// | `0x17` | `#7dc13d`                   |
-    /// | `0x18` | `#8cc832`                   |
-    /// | `0x19` | `#9bd723`                   |
-    /// | `0x1a` | `#a5e116`                   |
-    /// | `0x1b` | `#a5dc0a`                   |
-    /// | `0x1c` | `#aad208`                   |
-    /// | `0x1d` | `#b4c805`                   |
-    /// | `0x1e` | `#b4be04`                   |
-    /// | `0x1f` | `#bab404`                   |
-    /// | `0x20` | `#c3af04`                   |
-    /// | `0x21` | `#e1aa00`                   |
-    /// | `0x22` | `#ffa000`                   |
-    /// | `0x23` | `#ff9600`                   |
-    /// | `0x24` | `#ff8c00`                   |
-    /// | `0x25` | `#ff7500`                   |
-    /// | `0x26` | `#e0641b`                   |
-    /// | `0x27` | `#e0461e`                   |
-    /// | `0x28` | `#e0301e`                   |
-    /// | `0x29` | `#e02823`                   |
-    /// | `0x2a` | `#e62828`                   |
-    /// | `0x2b` | `#ff376f`                   |
-    /// | `0x2c` | `#ff2d6f`                   |
-    /// | `0x2d` | `#ff127b`                   |
-    /// | `0x2e` | `#f51e8c`                   |
-    /// | `0x2f` | `#eb2da0`                   |
-    /// | `0x30` | `#e637b4`                   |
-    /// | `0x31` | `#de44cf`                   |
-    /// | `0x32` | `#de448d`                   |
-    /// | `0x33` | `#e630b4`                   |
-    /// | `0x34` | `#e619dc`                   |
-    /// | `0x35` | `#e600ff`                   |
-    /// | `0x36` | `#dc00ff`                   |
-    /// | `0x37` | `#cc00ff`                   |
-    /// | `0x38` | `#b432ff`                   |
-    /// | `0x39` | `#b93cff`                   |
-    /// | `0x3a` | `#c542ff`                   |
-    /// | `0x3b` | `#aa5aff`                   |
-    /// | `0x3c` | `#aa72ff`                   |
-    /// | `0x3d` | `#8272ff`                   |
-    /// | `0x3e` | `#6473ff`                   |
-    pub hot_cue_color_index: u8,
-    /// Rekordbot hot cue color RGB value.
-    ///
-    /// This color is similar but not identical to the color that Rekordbox displays, and possibly
-    /// used to illuminate the RGB LEDs in a player that has loaded the cue. If not color is
-    /// associated with this hot cue, the value is `(0, 0, 0)`.
-    pub hot_cue_color_rgb: (u8, u8, u8),
-    /// Unknown field.
-    unknown6: u32,
-    /// Unknown field.
-    unknown7: u32,
-    /// Unknown field.
-    unknown8: u32,
-    /// Unknown field.
-    unknown9: u32,
-    /// Unknown field.
-    unknown10: u32,
+    /// The comment, raw (see [`ExtendedCue::comment`]).
+    #[br(count = len_comment)]
+    comment_raw: Vec<u8>,
+    /// Everything after the comment: the hot cue colour index, its RGB and
+    /// unknown fields, as long as this entry is (older exports write less).
+    /// OpenDeck patch: upstream fixed the same parse failures (no comment,
+    /// short entries); see [`ExtendedCue::hot_cue_color_index`].
+    #[br(count = header.total_size.saturating_sub(0x2c + len_comment) as usize)]
+    pub trailing: Vec<u8>,
+}
+
+impl ExtendedCue {
+    /// The DJ's comment, "" when there is none.
+    pub fn comment(&self) -> String {
+        let units: Vec<u16> = self.comment_raw.chunks_exact(2).map(|c| u16::from_be_bytes([c[0], c[1]])).collect();
+        String::from_utf16_lossy(&units).trim_end_matches('\0').to_string()
+    }
+
+    /// rekordbox's hot cue colour index (0 = none; 1–0x3e, see the palette
+    /// in rekordbox).
+    pub fn hot_cue_color_index(&self) -> u8 {
+        self.trailing.first().copied().unwrap_or(0)
+    }
+
+    /// The hot cue's colour as RGB, as rekordbox stores it for the player's
+    /// pads; None when the entry has no colour (0, 0, 0) or is too short.
+    pub fn hot_cue_color_rgb(&self) -> Option<(u8, u8, u8)> {
+        match self.trailing.get(1..4) {
+            Some(&[0, 0, 0]) | None => None,
+            Some(c) => Some((c[0], c[1], c[2])),
+        }
+    }
 }
 
 impl Default for WaveformPreviewColumn {
