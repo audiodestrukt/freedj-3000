@@ -439,7 +439,7 @@ impl Browser {
             last_root: None,
             playlist_only: false,
             detail: 0,
-            info: false,
+            info: true,
             stem_marks: Default::default(),
         };
         b.rebuild();
