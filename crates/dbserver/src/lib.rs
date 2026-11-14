@@ -285,6 +285,7 @@ impl MenuItem {
 pub struct TrackMeta {
     pub title: Option<String>, pub artist: Option<String>, pub album: Option<String>,
     pub genre: Option<String>, pub key: Option<String>, pub year: Option<String>,
+    pub comment: Option<String>,
     pub bpm: Option<f32>,
     /// The cover's id for [`Client::artwork`] (0 = none).
     pub artwork_id: u32,
@@ -302,6 +303,7 @@ impl TrackMeta {
                 0x06 if m.genre.is_none()  => m.genre  = text(r),
                 0x0f if m.key.is_none()    => m.key    = text(r),
                 0x11 if m.year.is_none()   => m.year   = text(r),
+                0x23 if m.comment.is_none() => m.comment = text(r),
                 0x0d if m.bpm.is_none()    => m.bpm    = Some(r.id as f32 / 100.0).filter(|b| *b > 0.0),
                 _ => {}
             }
@@ -580,7 +582,8 @@ mod tests {
     fn track_meta_from_rows() {
         let row = |t, id, l: &str| MenuItem { parent_id: 0, id, label: l.into(), label2: String::new(), item_type: t, flags: 0, artwork_id: 0, position: 0, key: String::new(), bpm_x100: 0 };
         let m = TrackMeta::from_rows(&[row(0x04, 9, "Daddy"), row(0x07, 3, "Ali Storm"), row(0x02, 0, "B Album"),
-                                       row(0x0d, 12850, ""), row(0x0f, 0, "Am"), row(0x0b, 200, "")]);
+                                       row(0x0d, 12850, ""), row(0x0f, 0, "Am"), row(0x0b, 200, ""), row(0x23, 0, "warm")]);
+        assert_eq!(m.comment.as_deref(), Some("warm"));
         assert_eq!((m.title.as_deref(), m.artist.as_deref(), m.album.as_deref(), m.key.as_deref()),
                    (Some("Daddy"), Some("Ali Storm"), Some("B Album"), Some("Am")));
         assert_eq!(m.bpm, Some(128.5));

@@ -488,7 +488,7 @@ impl Browser {
         let m = &i.meta;
         Some(opendeck_decode::TrackTags {
             title: m.title.clone(), artist: m.artist.clone(), album: m.album.clone(), genre: m.genre.clone(),
-            key: m.key.clone(), year: m.year.clone(), bpm: m.bpm,
+            key: m.key.clone(), year: m.year.clone(), bpm: m.bpm, comment: m.comment.clone(),
             artwork: i.art.as_ref().map(|b| (if b.starts_with(&[0x89, b'P']) { "image/png" } else { "image/jpeg" }.to_string(), b.clone())),
             ..Default::default()
         })

@@ -3915,6 +3915,7 @@ impl Prep {
             if t.genre.is_none()  { t.genre  = m.genre; }
             if t.key.is_none()    { t.key    = m.key; }
             if t.year.is_none()   { t.year   = m.year; }
+            if t.comment.is_none() { t.comment = m.comment; }
             if t.bpm.is_none()    { t.bpm    = m.bpm; }
         }
         let ch = self.deck_ch;
