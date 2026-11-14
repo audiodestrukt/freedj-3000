@@ -285,9 +285,9 @@ impl Key {
         let loaded = snap.total_samples > 0;
         match self {
             Key::Source => level(matches!(view, ScreenView::Source(..))),
-            Key::Browse => level(matches!(view, ScreenView::Browse(b) if !b.in_search())),
+            Key::Browse => level(matches!(view, ScreenView::Browse(b) if !b.in_search() && !b.playlist_only())),
             Key::TagList => level(matches!(view, ScreenView::TagList)),
-            Key::Playlist => Lamp::Dim,
+            Key::Playlist => level(matches!(view, ScreenView::Browse(b) if b.playlist_only() && !b.in_search())),
             Key::Search => level(matches!(view, ScreenView::Browse(b) if b.in_search())),
             Key::Menu => level(matches!(view, ScreenView::Menu(..))),
             Key::TagTrack => bit(sel_tagged),
