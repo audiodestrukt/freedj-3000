@@ -595,6 +595,19 @@ impl Browser {
     /// 0 small, 1 medium, 2 large: the table's text size ("A A A").
     pub fn font_size(&self) -> u8 { self.font }
     pub fn cycle_font(&mut self) { self.font = (self.font + 1) % 3; }
+    /// The linked stick being browsed: its player number and colour label,
+    /// for the header tile.  None outside a linked source.
+    pub fn source_badge(&self) -> Option<(u8, u8)> {
+        let in_link = self.stack.iter().any(|l| matches!(l, Loc::DbRoot | Loc::RbRoot | Loc::DbFolder(_) | Loc::DbCat(..) | Loc::DbAllTracks | Loc::DbTree(_)));
+        let (ip, slot) = match (&self.db, &self.rb_source) {
+            (Some((ip, _, slot)), _) if in_link && self.stack.iter().any(|l| matches!(l, Loc::DbRoot)) => (*ip, *slot as u8),
+            (_, Some(RbSource::Link(ip))) if in_link => (*ip, 3),
+            _ => return None,
+        };
+        let player = self.link.peer_player(ip)?;
+        let color = self.link.media(player).into_iter().find(|m| m.slot == slot).map_or(0, |m| m.color);
+        Some((player, color))
+    }
     pub fn previews_on(&self) -> bool { self.previews }
     pub fn toggle_previews(&mut self) { self.previews = !self.previews; }
     /// Length and stars the player lists for a linked track.

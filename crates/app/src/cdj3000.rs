@@ -1392,11 +1392,17 @@ fn draw_status_strip(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &m
 }
 
 /// The header of a list screen: source tile, ← BACK, the title with its icon.
-fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, folder_icon: bool, u: f32, out: &mut Vec<Event>) {
+fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, folder_icon: bool, badge: Option<(u8, u8)>, u: f32, out: &mut Vec<Event>) {
     let p = ui.painter();
     p.rect_filled(lay.header, 0.0, HEADER);
     let s = lay.source;
-    p.rect_filled(s, 0.0, SOURCE_TILE);
+    p.rect_filled(s, 0.0, badge.and_then(|(_, c)| stick_color(c)).unwrap_or(SOURCE_TILE));
+    if let Some((n, _)) = badge {
+        let bd = Rect::from_min_size(Pos2::new(s.min.x + 2.0 * u, s.min.y + 2.0 * u), Vec2::splat(22.0 * u));
+        p.rect_filled(bd, 0.0, Color32::BLACK);
+        outline(ui, bd, TEXT, u);
+        label(ui, bd.center(), Align2::CENTER_CENTER, n, 15.0, u, TEXT);
+    }
     label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
     label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
     let back = Rect::from_min_max(Pos2::new(lay.screen.min.x + 121.0 * u, lay.screen.min.y + 21.0 * u),
@@ -1757,7 +1763,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     }).collect();
     // The unit titles a category's name list BROWSE, a track list by its name.
     let title = if names.is_some() || b.on_rb_history() { "BROWSE".to_string() } else { b.title() };
-    draw_list_header(ui, snap, lay, &title, cats.is_none(), u, out);
+    draw_list_header(ui, snap, lay, &title, cats.is_none(), b.source_badge(), u, out);
     let bar = !b.playlist_only();
     let lx = if bar { 92.0 } else { 0.0 };
     match &cats {
@@ -2223,7 +2229,7 @@ fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: 
     let rows: Vec<Row> = tags.entries().iter().map(|e| Row {
         icon: RowIcon::Track, text: &e.name, value: e.artist.clone(), tagged: false, played: false, stems: false,
     }).collect();
-    draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, u, out);
+    draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, None, u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
     draw_list(ui, pane, "TRACK", &rows, tags.selected, "No tagged tracks. Tag one in BROWSE.", u, Some(out));
@@ -2238,7 +2244,7 @@ fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings,
         icon: RowIcon::None, text: name, tagged: false, played: false, stems: false,
         value: Some(match s { Setting::Stems => snap.stems.state.menu_value().unwrap_or_else(|| settings.value(*s)), _ => settings.value(*s) }),
     }).collect();
-    draw_list_header(ui, snap, lay, "UTILITY", false, u, out);
+    draw_list_header(ui, snap, lay, "UTILITY", false, None, u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
     draw_list(ui, pane, "SETTINGS", &rows, cursor, "", u, None);
