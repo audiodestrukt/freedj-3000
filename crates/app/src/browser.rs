@@ -385,6 +385,9 @@ pub struct Browser {
     detail: u8,
     info: bool,
     previews: bool,
+    /// Nothing chosen yet since launch: BROWSE lists nothing until a source
+    /// (SOURCE, USB, PLAY LIST) is picked, as a unit with nothing loaded.
+    idle: bool,
     font: u8,
     /// Which local tracks have OverCue stems (the "S" mark in lists).
     stem_marks: std::cell::RefCell<crate::stems::StemMarks>,
@@ -443,6 +446,7 @@ impl Browser {
             detail: 0,
             info: true,
             previews: true,
+            idle: !cfg!(test),
             font: 1,
             stem_marks: Default::default(),
         };
@@ -608,6 +612,7 @@ impl Browser {
         let color = self.link.media(player).into_iter().find(|m| m.slot == slot).map_or(0, |m| m.color);
         Some((player, color))
     }
+    pub fn idle(&self) -> bool { self.idle }
     pub fn previews_on(&self) -> bool { self.previews }
     pub fn toggle_previews(&mut self) { self.previews = !self.previews; }
     /// Length and stars the player lists for a linked track.
@@ -674,7 +679,7 @@ impl Browser {
 
     fn rebuild(&mut self) {
         self.names.resize(self.stack.len(), String::new());
-        let entries = match self.stack.last().cloned() {
+        let entries = match self.stack.last().cloned().filter(|_| !self.idle) {
             Some(Loc::Fs(dir))        => self.fs_entries(&dir),
             Some(Loc::Link)           => self.link_entries(),
             Some(Loc::RbRoot)         => self.rb_root_entries(),
@@ -1325,6 +1330,7 @@ impl Browser {
     /// CDJ's SOURCE screen does). Returns false when there is no such row or
     /// a LINK source would not connect.
     pub fn open_source(&mut self, i: usize) -> bool {
+        self.idle = false;
         self.playlist_only = false;
         let rows = self.sources();
         let Some(row) = rows.get(i) else { return false };
@@ -1378,6 +1384,7 @@ impl Browser {
     /// PLAY LIST: from anywhere inside a rekordbox or linked source, its
     /// playlist tree; outside one, the stick the browser last used.
     pub fn open_playlists(&mut self) {
+        self.idle = false;
         let is_root = |l: &Loc| matches!(l, Loc::RbRoot | Loc::DbRoot);
         // Not inside a source: a linked player's session still open is the
         // one the last track came from.
@@ -1403,6 +1410,7 @@ impl Browser {
     /// The LINK source key: jump to the list of linked players (from wherever
     /// the browser is).
     pub fn go_link(&mut self) {
+        self.idle = false;
         self.playlist_only = false;
         self.remember();
         self.stack.truncate(1);
@@ -1426,6 +1434,7 @@ impl Browser {
     /// is mounted (on its rekordbox categories when it has an export), else
     /// the local root folder.
     pub fn go_root(&mut self) {
+        self.idle = false;
         self.playlist_only = false;
         // Back to the source browsed last, where it was left, while it is
         // still there: a stick mounted since does not take the key over.

@@ -1398,6 +1398,8 @@ static SOURCE_BADGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32
 pub fn set_source_badge(b: Option<(u8, u8)>) {
     SOURCE_BADGE.store(b.map_or(0, |(p, c)| 1 << 16 | (p as u32) << 8 | c as u32), std::sync::atomic::Ordering::Relaxed);
 }
+/// Header tile for "no source chosen yet".
+const NO_SOURCE: (u8, u8) = (0, 0xff);
 fn cached_badge() -> Option<(u8, u8)> {
     let v = SOURCE_BADGE.load(std::sync::atomic::Ordering::Relaxed);
     (v >> 16 != 0).then_some((((v >> 8) & 0xff) as u8, (v & 0xff) as u8))
@@ -1407,6 +1409,10 @@ fn cached_badge() -> Option<(u8, u8)> {
 /// player number in the corner.
 fn draw_source_tile(ui: &Ui, snap: &DeckSnapshot, s: Rect, badge: Option<(u8, u8)>, u: f32) {
     let p = ui.painter();
+    if badge == Some(NO_SOURCE) {
+        p.rect_filled(s, 0.0, Color32::from_rgb(40, 40, 40));
+        return;
+    }
     p.rect_filled(s, 0.0, badge.and_then(|(_, c)| stick_color(c)).unwrap_or(SOURCE_TILE));
     if let Some((n, _)) = badge {
         let bd = Rect::from_min_size(Pos2::new(s.min.x + 2.0 * u, s.min.y + 2.0 * u), Vec2::splat(22.0 * u));
@@ -1780,13 +1786,14 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         stems: stems_on && e.load().is_some_and(|l| b.has_stems(l)),
     }).collect();
     // The unit titles a category's name list BROWSE, a track list by its name.
-    let title = if names.is_some() || b.on_rb_history() { "BROWSE".to_string() } else { b.title() };
-    draw_list_header(ui, snap, lay, &title, cats.is_none(), b.source_badge(), u, out);
+    let title = if names.is_some() || b.on_rb_history() || b.idle() { "BROWSE".to_string() } else { b.title() };
+    draw_list_header(ui, snap, lay, &title, cats.is_none(), if b.idle() { Some(NO_SOURCE) } else { b.source_badge() }, u, out);
     let bar = !b.playlist_only();
     let lx = if bar { 92.0 } else { 0.0 };
     match &cats {
         Some((names, open)) if bar => draw_rb_categories(ui, lay, names, *open, u, out),
         Some(_) => {}
+        None if b.idle() => {}
         None => draw_categories(ui, lay, &["FOLDER"], u),
     }
     // A rekordbox track list is one full-width table (PREVIEW, TRACK, BPM, KEY).
