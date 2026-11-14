@@ -374,6 +374,27 @@ fn label(ui: &Ui, pos: Pos2, a: Align2, s: impl ToString, px: f32, u: f32, c: Co
     ui.painter().text(pos, a, s, FontId::proportional(px * u), c)
 }
 
+/// Text in a field, left-aligned at `x` and vertically centred on `cy`. When it
+/// is too long for the field and `active` is set it runs through it like an
+/// LED sign: a pause at the start, a slow scroll to the end, a pause there,
+/// and round again.
+fn scroll_text(ui: &Ui, field: Rect, x: f32, cy: f32, text: &str, font: FontId, color: Color32, active: bool, u: f32) {
+    const PAUSE: f32 = 2.5;
+    let p = ui.painter().with_clip_rect(field);
+    let width = p.layout_no_wrap(text.to_string(), font.clone(), color).size().x;
+    let over = width - (field.max.x - x);
+    if !active || over <= 1.0 {
+        p.text(Pos2::new(x, cy), Align2::LEFT_CENTER, text, font, color);
+        return;
+    }
+    let speed = 70.0 * u;
+    let run = over / speed;
+    let t = (ui.input(|i| i.time) as f32) % (PAUSE + run + PAUSE);
+    let off = if t < PAUSE { 0.0 } else if t < PAUSE + run { (t - PAUSE) * speed } else { over };
+    p.text(Pos2::new(x - off, cy), Align2::LEFT_CENTER, text, font, color);
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+}
+
 fn outline(ui: &Ui, r: Rect, c: Color32, u: f32) {
     ui.painter().rect_stroke(r, 0.0, Stroke::new((1.5 * u).max(1.0), c));
 }
@@ -397,7 +418,7 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
     if stems_on { title_area.max.x = lay.stems_key.min.x - 8.0 * u; }
     let clip = ui.painter().with_clip_rect(title_area);
     let t = lay.title;
-    clip.text(Pos2::new(t.min.x, t.center().y), Align2::LEFT_CENTER, format!("♪ {}", snap.title), FontId::proportional(33.0 * u), TEXT);
+    scroll_text(ui, title_area, t.min.x, t.center().y, &format!("♪ {}", snap.title), FontId::proportional(33.0 * u), TEXT, true, u);
     let row = lay.track_row;
     let y = row.center().y;
     if snap.total_samples > 0 {
@@ -1460,8 +1481,8 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
         let right = if let Some(v) = &row.value {
             label(ui, Pos2::new(rr.max.x - 14.0 * u, cy), Align2::RIGHT_CENTER, v, 24.0, u, TEXT).min.x - 12.0 * u
         } else { rr.max.x - 10.0 * u };
-        p.with_clip_rect(Rect::from_min_max(Pos2::new(rr.min.x, rr.min.y), Pos2::new(right, rr.max.y)))
-            .text(Pos2::new(rr.min.x + tx * u, cy), Align2::LEFT_CENTER, row.text, FontId::proportional(27.0 * u), if row.played { PLAYED } else { TEXT });
+        scroll_text(ui, Rect::from_min_max(Pos2::new(rr.min.x, rr.min.y), Pos2::new(right, rr.max.y)), rr.min.x + tx * u, cy,
+                    row.text, FontId::proportional(27.0 * u), if row.played { PLAYED } else { TEXT }, sel, u);
         if row.tagged {
             p.circle_filled(Pos2::new(right - 6.0 * u, cy), 5.0 * u, BARS_ORANGE);
         }
@@ -1803,7 +1824,6 @@ fn draw_browse_info(ui: &Ui, b: &Browser, e: &crate::browser::Entry, sc: Rect, r
     let bpm = tags.bpm.or(e.bpm).map(|b| format!("{b:.1}")).unwrap_or_default();
     let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
     let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0, Color32::from_rgb(70, 70, 70)));
-    let small = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 150.0), at(1062.0, 480.0)));
     let time = dur.map(|d| format!("{:02}:{:02}", d / 60, d % 60)).unwrap_or_default();
     let rows: [(&str, String); 7] = [
         ("person", artist),
@@ -1831,14 +1851,14 @@ fn draw_browse_info(ui: &Ui, b: &Browser, e: &crate::browser::Entry, sc: Rect, r
                 else { ui.painter().circle_stroke(c, 8.0 * u, Stroke::new(1.5 * u, TEXT)); }
             }
         } else {
-            small.text(at(780.0, y), Align2::LEFT_CENTER, v, FontId::proportional(24.0 * u), TEXT);
+            scroll_text(ui, Rect::from_min_max(at(742.0, y - 22.0), at(1062.0, y + 22.0)), at(780.0, y).x, at(780.0, y).y, v, FontId::proportional(24.0 * u), TEXT, true, u);
         }
         rule(y + 23.0, 1062.0);
     }
     draw_art(ui, ui.ctx(), &tags, "browse", Rect::from_min_max(at(1075.0, 160.0), at(1262.0, 347.0)));
     icon(ui, Icon::Bubble, at(758.0, 513.0), u);
-    ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 490.0), at(1270.0, 536.0)))
-        .text(at(780.0, 513.0), Align2::LEFT_CENTER, tags.comment.clone().unwrap_or_default(), FontId::proportional(20.0 * u), TEXT);
+    scroll_text(ui, Rect::from_min_max(at(742.0, 490.0), at(1270.0, 536.0)), at(780.0, 513.0).x, at(780.0, 513.0).y,
+                &tags.comment.clone().unwrap_or_default(), FontId::proportional(20.0 * u), TEXT, true, u);
     rule(537.0, 1270.0);
     let load = Rect::from_min_max(at(935.0, 552.0), at(1085.0, 602.0));
     if tap(ui, load, "cdj-browse-load").0 { out.push(Event::Deck(ControlEvent::Load)); }
@@ -2071,12 +2091,12 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
         track_icon(ui, Pos2::new(sc.min.x + (tr + 23.0) * u, cy), r.stems, u);
         let tcol = if r.played { PLAYED } else { TEXT };
         let title_end = dx.map_or(1075.0, |d| d - 4.0);
-        p.with_clip_rect(Rect::from_min_max(at(tr, y), at(title_end, y + ROW_H)))
-            .text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(fsz * u), tcol);
+        scroll_text(ui, Rect::from_min_max(at(tr, y), at(title_end, y + ROW_H)), sc.min.x + (tr + 46.0) * u, cy,
+                    r.text, FontId::proportional(fsz * u), tcol, lit, u);
         if let Some(d) = dx {
             p.line_segment([at(d, y), at(d, y + ROW_H)], Stroke::new(1.0 * u, Color32::from_rgb(70, 70, 70)));
-            p.with_clip_rect(Rect::from_min_max(at(d + 2.0, y), at(1075.0, y + ROW_H)))
-                .text(Pos2::new(sc.min.x + (d + 10.0) * u, cy), Align2::LEFT_CENTER, b.detail_text(e), FontId::proportional(fsz * 0.9 * u), LABEL);
+            scroll_text(ui, Rect::from_min_max(at(d + 2.0, y), at(1075.0, y + ROW_H)), sc.min.x + (d + 10.0) * u, cy,
+                        &b.detail_text(e), FontId::proportional(fsz * 0.9 * u), LABEL, lit, u);
         }
         if r.tagged { p.circle_filled(Pos2::new(sc.min.x + 1068.0 * u, cy), 5.0 * u, BARS_ORANGE); }
         rules(lit);
