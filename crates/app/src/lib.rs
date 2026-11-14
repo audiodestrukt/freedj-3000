@@ -4931,6 +4931,42 @@ mod deck_tests {
     use super::*;
     use opendeck_protocol::ControlEvent as C;
 
+    /// Load time, end to end: LOAD the bundled 8:47 MP3 through the real
+    /// loader thread into a 48 kHz deck (so it is resampled, as on most
+    /// devices).  It must be playable — PLAY moves the playhead — within
+    /// `BUDGET_MS`, long before the whole track is in.  Measured on a desktop
+    /// debug build: playable in ~20–35 ms, whole track in ~1 s.  The budget
+    /// leaves room for slow CI machines; a regression to decoding the whole
+    /// track first (seconds) still fails it.  Times print with --nocapture.
+    #[test]
+    fn a_long_mp3_is_playable_within_the_load_budget() {
+        const BUDGET_MS: u128 = 500;
+        let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../amplificate.mp3");
+        let mut d = deck(2.0);
+        let t0 = Instant::now();
+        d.load_track(&mp3, None).unwrap();
+        let mut playable = None;
+        while d.fetch_rx.is_some() && t0.elapsed() < Duration::from_secs(60) {
+            d.poll_fetch();
+            if playable.is_none() && d.loading.is_none() && d.path == mp3 { playable = Some(t0.elapsed()); }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let whole = t0.elapsed();
+        let playable = playable.expect("the track became playable");
+        eprintln!("load: playable in {} ms, whole track in {} ms", playable.as_millis(), whole.as_millis());
+        assert!(d.audio.complete.load(Ordering::Relaxed), "the whole track streamed in");
+        let secs = d.audio.len() as f64 / (SR as f64 * 2.0);
+        assert!((secs - 527.3).abs() < 1.0, "8:47 at the deck rate: {secs:.1}s");
+        assert!(playable.as_millis() < BUDGET_MS, "playable in {} ms (budget {BUDGET_MS} ms)", playable.as_millis());
+        assert!(playable * 4 < whole, "playable ({} ms) well before the whole track ({} ms)", playable.as_millis(), whole.as_millis());
+
+        // And it plays from the cue.
+        let cue = d.at();
+        d.send(C::PlayPause);
+        d.run(0.3);
+        assert!(d.at() > cue + 0.1, "PLAY moves the playhead: {cue:.2}s → {:.2}s", d.at());
+    }
+
     /// Loading a track never splits it: the split waits until the DJ opens
     /// the stems (here the XDJ's STEMS pad mode), then starts once.
     #[test]
