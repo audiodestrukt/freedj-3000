@@ -59,6 +59,15 @@ default = []
 # waveform rasteriser, for boards wgpu cannot drive (VideoCore IV, KMSDRM).
 # Selected at run time with OPENDECK_RENDERER=sdl.
 renderer-sdl = ["dep:sdl2"]
+# Split tracks into stems on load with HTDemucs through the system's ONNX
+# Runtime (loaded at run time), when OPENDECK_SEPARATE_MODEL names the model.
+separate-onnx = ["dep:ort"]
+
+[dependencies.ort]
+version = "=2.0.0-rc.15"
+default-features = false
+features = ["std", "load-dynamic", "api-23"]
+optional = true
 
 [dev-dependencies]
 tempfile = "3"

@@ -966,11 +966,12 @@ fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Lay
         }
         label(ui, r.center(), Align2::CENTER_CENTER, *name, 22.0, u, text_c);
         let sub = match snap.stems.state {
-            StemsState::Loading => "LOADING",
-            StemsState::None => "NO STEMS",
-            _ => "",
+            StemsState::Loading => "LOADING".to_string(),
+            StemsState::Splitting(p) => format!("SPLITTING {p}%"),
+            StemsState::None => "NO STEMS".to_string(),
+            _ => String::new(),
         };
-        if !sub.is_empty() { label(ui, Pos2::new(r.center().x, r.center().y + 24.0 * u), Align2::CENTER_CENTER, sub, 15.0, u, DIM); }
+        if !sub.is_empty() { label(ui, Pos2::new(r.center().x, r.center().y + 24.0 * u), Align2::CENTER_CENTER, &sub, 15.0, u, DIM); }
     }
 
     // EQ: grey; Stems EQ comes from a mixer we do not support.

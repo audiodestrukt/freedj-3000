@@ -17,6 +17,8 @@ pub enum StemsState {
     None,
     /// On; the stems are being read and aligned.  Controls are greyed.
     Loading,
+    /// On; the device is splitting the track itself (percent done).
+    Splitting(u8),
     /// On and playable.
     Ready,
 }

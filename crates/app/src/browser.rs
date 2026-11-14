@@ -25,7 +25,7 @@ const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif",
 
 /// Folders no one browses for music: `_CodeSignature` and its kin inside the
 /// iOS app bundle (the browse root there), `__MACOSX` resource forks, and the
-/// bundle's localisation / framework folders.
+/// bundle's localisation / framework folders, and Core ML model packages.
 fn is_housekeeping_dir(name: &str) -> bool {
     // A stick's system and library folders: a player's FOLDER view never
     // lists them (the rekordbox export, OverCue's stems, Windows / Android
@@ -34,6 +34,8 @@ fn is_housekeeping_dir(name: &str) -> bool {
     SYSTEM.iter().any(|s| name.eq_ignore_ascii_case(s))
         || name.starts_with('_')
         || name.ends_with(".lproj")
+        // A stem separation model put in the music folder (separate.rs).
+        || name.ends_with(".mlpackage") || name.ends_with(".mlmodelc")
         || (cfg!(target_os = "ios") && matches!(name, "Frameworks" | "PlugIns" | "SC_Info"))
 }
 
@@ -1358,6 +1360,7 @@ mod tests {
         let crate_dir = home.path().join("Crate");
         std::fs::create_dir_all(crate_dir.join("inner")).unwrap();
         std::fs::create_dir_all(crate_dir.join("_CodeSignature")).unwrap();
+        std::fs::create_dir_all(crate_dir.join("htdemucs.mlpackage")).unwrap();
         for f in ["b.mp3", "A.wav", "notes.txt", ".hidden.mp3"] {
             std::fs::write(crate_dir.join(f), b"").unwrap();
         }

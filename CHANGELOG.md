@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Stems, experimental: a track with no prepared stems can be split on the
+  device with the HTDemucs model (MIT). With MENU → STEMS on, the stem keys
+  read "SPLITTING n%" after a load, and the stems play once the split
+  finishes. On iPad, put `htdemucs.mlpackage` (Core ML, iOS 18+) in the
+  OpenDeck folder; each split writes its timing and memory to
+  `opendeck-stems-test.txt` there. On a Linux desktop, build with
+  `--features separate-onnx` and point `OPENDECK_SEPARATE_MODEL` at
+  `htdemucs.onnx`: a 3.5-minute track splits in about 50 s on a 28-thread
+  CPU. BROWSE hides model folders.
 - Stems: the CDJ-3000 STEMS panel now matches OverCue's on the unit: its own
   key spacing, the unit's checkered key faces (blue playing, grey muted),
   and a grey EQ key. In VOLUME mode the blue fills each key from the left

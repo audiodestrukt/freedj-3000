@@ -29,6 +29,7 @@ mod fbdev;
 mod waveform_cpu;
 mod settings;
 mod stems;
+mod separate;
 mod snapshot;
 mod taglist;
 #[cfg(target_os = "android")]
@@ -86,6 +87,55 @@ const HISTORY_MAX: usize = 100;
 /// goes to the top of `history`, and the new one leaves it.
 /// Add a served track to this session's HISTORY (one session per run, id 1),
 /// not twice in a row.
+/// No prepared stems: split the track on the device, if it has a
+/// separation model (iOS: HTDemucs in the OpenDeck folder; a desktop built
+/// with `separate-onnx`: `OPENDECK_SEPARATE_MODEL`; see `separate.rs`).
+/// Each split logs its timing and memory; on iOS also to
+/// `Documents/opendeck-stems-test.txt`, which only exists once a model was
+/// put there.
+fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: &separate::Job) -> Result<Option<stems::StemBank>> {
+    use separate::model;
+    if !model::present() { return Ok(None); }
+    let before = model::memory_mb();
+    let res = model::with(|m| separate::separate(track, sr, m, job));
+    let after = model::memory_mb();
+    let secs = track.len() as f64 / 2.0 / sr as f64;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let line = match &res {
+        Ok(((_, t), load_s)) => format!(
+            "{} {} | {name} | {secs:.0}s track | load {load_s:.1}s | {} chunks, model {:.1}s, total {:.1}s = {:.1}x real time | mem {} MB -> {} MB, {} MB left",
+            utc_now(), model::device(), t.chunks, t.model_s, t.total_s, secs / t.total_s.max(1e-9), before.0, after.0, after.1),
+        Err(e) => format!("{} {} | {name} | split failed: {e:#} | mem {} MB, {} MB left", utc_now(), model::device(), after.0, after.1),
+    };
+    log::info!("stems: {line}");
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(taglist::documents_dir().join("opendeck-stems-test.txt")) {
+            let _ = writeln!(f, "{line}");
+        }
+    }
+    let ((data, _), _) = res?;
+    Ok(Some(stems::StemBank::from_split(track, data, sr)))
+}
+
+/// Wall-clock time as `YYYY-MM-DD HH:MM:SS` UTC, for log lines.
+fn utc_now() -> String {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let (days, rem) = (t / 86_400, t % 86_400);
+    // Civil date from days since 1970 (Howard Hinnant's algorithm).
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    format!("{y:04}-{m:02}-{d:02} {:02}:{:02}:{:02}", rem / 3600, rem % 3600 / 60, rem % 60)
+}
+
 fn note_history(link: &prodj::LinkState, id: u32) {
     let Some(lib) = link.library.lock().ok().and_then(|l| l.clone()) else { return };
     let Ok(mut lib) = lib.write() else { return };
@@ -604,6 +654,8 @@ struct DeckApp {
     fetch_rx:          Option<mpsc::Receiver<LoadMsg>>,
     /// The stems job for the loaded track (see `stems.rs`).
     stems_rx:          Option<mpsc::Receiver<Result<Option<stems::StemBank>>>>,
+    /// An on-device split in progress (progress, cancel), see `separate.rs`.
+    stems_job:         Option<Arc<separate::Job>>,
     /// What the enlarged waveform shows now: the stem mix of (bank, gains,
     /// column count), or None for the track's own.
     stem_wave_key:     Option<(usize, [u32; 3], usize)>,
@@ -958,6 +1010,7 @@ impl DeckApp {
             indicators,
             fetch_rx: None,
             stems_rx: None,
+            stems_job: None,
             stem_wave_key: None,
             loading: None,
             load_gen: Arc::new(AtomicU64::new(0)),
@@ -2279,7 +2332,7 @@ impl DeckApp {
                 let track = self.audio.current();
                 if !track.is_empty() { self.start_stems(&track, self.audio.channels as usize); }
             } else {
-                self.stems_rx = None;
+                self.stop_stems();
                 self.audio.stems.reset();
                 if self.perform_mode == input::PerformMode::Stems { self.perform_mode = input::PerformMode::HotCue; }
             }
@@ -2291,6 +2344,7 @@ impl DeckApp {
         use snapshot::StemsState as S;
         let state = if !self.settings.stems { S::Off }
             else if self.audio.stems.ready_for(&self.audio.current()) { S::Ready }
+            else if let Some(j) = self.stems_job.as_ref().filter(|j| j.progress.load(std::sync::atomic::Ordering::Relaxed) > 0) { S::Splitting(j.percent()) }
             else if self.stems_rx.is_some() { S::Loading }
             else { S::None };
         snapshot::StemsView { state, gains: self.audio.stems.gains() }
@@ -2420,14 +2474,27 @@ impl DeckApp {
     /// thread.  Local files only for now; LINK loads come in phase 4.
     /// `OPENDECK_STEMS=0` turns stems off.
     fn start_stems(&mut self, track: &Arc<Vec<f32>>, ch: usize) {
-        self.stems_rx = None;
+        self.stop_stems();
         if !self.settings.stems || std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") || !self.path.is_file() { return; }
         let (tx, rx) = mpsc::channel();
         let (path, track, sr) = (self.path.clone(), Arc::clone(track), self.audio.sample_rate);
+        let job = Arc::new(separate::Job::default());
+        let j = Arc::clone(&job);
         let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
-            let _ = tx.send(stems::load_local(&path, &track, sr, ch));
+            let got = match stems::load_local(&path, &track, sr, ch) {
+                Ok(None) if ch == 2 => split_on_device(&path, &track, sr, &j),
+                r => r,
+            };
+            let _ = tx.send(got);
         });
-        if spawned.is_ok() { self.stems_rx = Some(rx); }
+        if spawned.is_ok() { self.stems_rx = Some(rx); self.stems_job = Some(job); }
+    }
+
+    /// Drop the stems job for the old track; a split in progress stops at
+    /// its next chunk.
+    fn stop_stems(&mut self) {
+        self.stems_rx = None;
+        if let Some(j) = self.stems_job.take() { j.cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
     }
 
     /// The enlarged waveform follows the STEMS panel: the stems playing at
@@ -2458,6 +2525,7 @@ impl DeckApp {
             Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("stems thread died")),
         };
         self.stems_rx = None;
+        self.stems_job = None;
         match got {
             Ok(Some(bank)) if bank.is_for(&self.audio.current()) => {
                 self.audio.stems.set_bank(Some(Arc::new(bank)));
@@ -2517,7 +2585,7 @@ impl DeckApp {
         // starts there — with AUTO CUE that's the first sound, not the leader.
         if p.cue_pt > 0 { self.seek_to(p.cue_pt); }
         // Stems and the served analysis wait for the whole track (apply_grow).
-        self.stems_rx = None;
+        self.stop_stems();
         self.publish_track();
         log::info!(
             "loaded {} in {:.2}s ({} BPM, {} grid, cue {:.2}s){}",

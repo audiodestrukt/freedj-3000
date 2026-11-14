@@ -203,6 +203,15 @@ pub fn build(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32>>
     Ok(StemBank { track: Arc::downgrade(track), data, offset_frames: offset, waves })
 }
 
+impl StemBank {
+    /// A bank from stems split on the device: already at the deck rate and
+    /// aligned to `track`.
+    pub fn from_split(track: &Arc<Vec<f32>>, data: [Vec<i16>; 3], deck_sr: u32) -> StemBank {
+        let waves = stem_waves(&data, deck_sr);
+        StemBank { track: Arc::downgrade(track), data, offset_frames: 0, waves }
+    }
+}
+
 /// Each stem's waveform columns, built as the track's own are (one thread
 /// per stem).
 pub fn stem_waves(data: &[Vec<i16>; 3], sr: u32) -> [Vec<WaveformColumn>; 3] {
