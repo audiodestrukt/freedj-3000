@@ -13,10 +13,12 @@ key lock, transport, loops, cues, analysis, library and Pro DJ Link. What
 differs is the screen, the controls, and a handful of behaviour rules.
 
 So turn it around. **OpenDeck is an engine. A player is a mod on top of it.**
-The CDJ-3000 screen and feature set is one mod; the XDJ-1000MK2 is another;
-the sampler deck ([sampler-deck.md](sampler-deck.md)) would be a third. A DJ,
-or a modder, can change a player or write a new one without touching, or
-being able to break, the engine.
+- The CDJ-3000 screen and feature set is one player mod.
+- The XDJ-1000MK2 is another.
+- The sampler deck ([sampler-deck.md](sampler-deck.md)) would be a third.
+
+A DJ, or a modder, can change a player or write a new one without touching,
+or being able to break, the engine.
 
 ## Why now: the community is already modding CDJs
 
@@ -31,9 +33,9 @@ It works, and people want it. But that kind of mod:
 
 OpenDeck can offer what those modders are reaching for: a deck whose
 "firmware" is open, with a stable, documented engine API. The player itself
-is replaceable, and a mod can't take the audio down. And OpenDeck already
-runs as firmware on CDJ-3000 hardware in the emulator
-([../hardware/cdj-3000-install.md](../hardware/cdj-3000-install.md)). So the
+is replaceable, and a mod can't take the audio down. OpenDeck already boots as
+firmware on CDJ-3000 hardware in the emulator
+([../hardware/cdj-3000-install.md](../hardware/cdj-3000-install.md)), so the
 same engine and mods could run on a CDJ-3000 itself.
 
 ## The constraint: absolute performance
@@ -43,204 +45,249 @@ playhead that never judders, CUE landing on the beat, and a Pi Zero W playing
 cleanly on one core. Mods are only worth having if the engine stays exactly
 that fast. That gives one rule, which everything below follows:
 
-**The engine's hot paths do not know mods exist.**
+> **The engine's hot paths do not know mods exist.** The audio path never
+> calls mod code, never waits on a mod, and never takes a lock a mod can
+> hold. The UI frame never waits on mod code; it publishes state mods can
+> read and drains a bounded queue of their requests, as it drains controller
+> input.
 
-- **The audio path** (decode → key lock → ring → device callback) never calls
-  mod code, never waits on a mod, and never takes a lock a mod can hold.
-- **The UI frame** never waits on mod code. Mods get the state the frame
-  already builds, and send requests into a bounded queue that the frame drains
-  the way it drains controller input.
+## 1. The ecosystem
 
-With no mods, the cost is an empty-queue check per frame. With mods, the
-engine's extra work is a copy of a few hundred bytes of state per frame plus
-applying events at controller rates. Everything a mod itself costs runs below
-the priority of `audio-proc`, which runs SCHED_FIFO where permitted (see
-[rt-audio-isolation.md](rt-audio-isolation.md)).
+Where everything sits: the engine in the middle, players and features on
+top, the devices it runs on below, and the Pro DJ Link network beside it.
 
-**A player mod is first-party Rust by default.** The CDJ-3000 and XDJ
-personalities ship compiled in (option A below), so they are exactly as fast
-as today. They just go through the engine API instead of reaching into
-`DeckApp`. The isolation options only matter for third-party code.
+```mermaid
+flowchart TB
+    subgraph MODS["Mods"]
+        direction LR
+        subgraph PLAYERS["Player mods: one active per deck"]
+            direction LR
+            CDJ["CDJ-3000 player<br/>1280×720 screen, faceplate,<br/>8 hot cues, KEY SHIFT,<br/>BEAT LOOP / JUMP panels"]
+            XDJ["XDJ-1000MK2 player<br/>1024×600 screen, PERFORM pads,<br/>phone two-page layout"]
+            SMP["Sampler deck<br/>(planned, issue 24)"]
+            COM["Community players<br/>(WASM)"]
+        end
+        subgraph FEATURES["Feature mods: any number"]
+            direction LR
+            F1["Lighting / visuals bridge"]
+            F2["Cue sequencer,<br/>auto-loops"]
+            F3["Set logger,<br/>second screen"]
+            F4["Sample voices<br/>(own audio bus)"]
+        end
+    end
 
-## Three layers
+    API{{"Engine API<br/>commands in · state out · analysis · drawing layers · voice buses"}}
 
+    subgraph ENGINE["OpenDeck engine (Rust, owns the audio)"]
+        direction LR
+        E1["Decks<br/>decode, stream-load,<br/>key lock, key shift"]
+        E2["Transport primitives<br/>CUE / PLAY rules runner,<br/>loops, SLIP, quantize"]
+        E3["Analysis<br/>grid, key, phrases,<br/>waveforms"]
+        E4["Library<br/>folders, rekordbox sticks,<br/>stems"]
+        E5["Pro DJ Link<br/>sync, master, status,<br/>dbserver + NFS media"]
+        E6["Output<br/>ring, device, renderers"]
+    end
+
+    subgraph HOSTS["Runs on"]
+        direction LR
+        H1["Desktop<br/>Linux, Mac, Windows"]
+        H2["Raspberry Pi 5,<br/>Pi Zero W"]
+        H3["iPad, iPhone,<br/>Android"]
+        H4["CDJ-3000 hardware<br/>(OpenDeck as firmware)"]
+        H5["ADK-1000 panel<br/>(planned)"]
+    end
+
+    subgraph NET["Pro DJ Link network"]
+        direction LR
+        N1["CDJ-3000s, XDJs"]
+        N2["rekordbox"]
+        N3["Lighting controllers,<br/>timecode tools"]
+    end
+
+    PLAYERS --> API
+    FEATURES --> API
+    API --> ENGINE
+    ENGINE --> HOSTS
+    E5 <--> NET
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ Feature mods     add to a player: a panel, a control mapping,│
-│                  a lighting / visuals / logging tool, a voice │
-├──────────────────────────────────────────────────────────────┤
-│ Player mods      CDJ-3000 · XDJ-1000MK2 · sampler · your own  │
-│                  screen, controls, behaviour rules (specs)    │
-├══════════════════════════════════════════════════════════════┤
-│ Engine           decks · transport primitives · key lock /    │
-│  (Rust, owns     key shift · loops · cues · SLIP · analysis · │
-│   the audio)     library · media server · Pro DJ Link · output│
-└──────────────────────────────────────────────────────────────┘
-          the engine API (the double line) is the only way in
+
+What each layer owns:
+
+| Layer | Owns | Written in | Can break the audio? |
+|---|---|---|---|
+| Engine | Everything with timing or audio in it: decode, key lock, transport primitives, loops, SLIP, quantize, the beat clock, analysis, library, Link, the output | Rust, in this repo | — (it *is* the audio) |
+| Player mod | What makes a CDJ-3000 a CDJ-3000: screen, control map, behaviour rules (specs), its MENU / UTILITY settings | Rust compiled in (ours) or WASM (community) | No |
+| Feature mod | One addition on top of a player: a panel, a mapping, a bridge, a tool, a voice | Any language over the socket, or WASM | No |
+
+## 2. The CDJ-3000 and XDJ-1000MK2 as player variants
+
+Both players share one engine and one deck. Switching player mid-set
+(MENU → SCREEN today) loses nothing, because the track, playhead, grid,
+cues and loop all live in the engine, not in the player.
+
+```mermaid
+flowchart LR
+    subgraph CDJP["CDJ-3000 player mod"]
+        direction TB
+        C1["Screen<br/>playback, BROWSE, SOURCE,<br/>INFO, UTILITY, panels"]
+        C2["Control map<br/>faceplate keys, touch screen,<br/>CDJ-3000 sub-CPU panel,<br/>HID over LINK"]
+        C3["Rules<br/>specs/cdj-3000 (to write)"]
+        C4["Settings<br/>cdj-3000 UTILITY"]
+    end
+    subgraph XDJP["XDJ-1000MK2 player mod"]
+        direction TB
+        X1["Screen<br/>playback, BROWSE, INFO,<br/>PERFORM pads, MENU"]
+        X2["Control map<br/>XDJ faceplate, phone CONTROLS page,<br/>DJ2Go, ADK-1000 panel"]
+        X3["Rules<br/>specs/xdj-1000mk2"]
+        X4["Settings<br/>xdj UTILITY"]
+    end
+
+    API{{"Engine API"}}
+
+    subgraph ENG["Engine: one deck"]
+        direction TB
+        D1["Track, playhead, grid,<br/>cues, loop, tempo, key"]
+        D2["Rules runner<br/>runs the active player's spec"]
+        D3["Audio path"]
+    end
+
+    C1 -- "draws from state" --- API
+    C2 -- "sends commands" --> API
+    C3 -- "selects rule set" --> API
+    X1 -- "draws from state" --- API
+    X2 -- "sends commands" --> API
+    X3 -- "selects rule set" --> API
+    API --> D2 --> D1 --> D3
 ```
 
-### The engine
+What actually differs between the two, and so what a player mod has to
+supply:
 
-Everything with timing or audio in it stays here, in Rust, owned by the
-engine:
+| | CDJ-3000 player | XDJ-1000MK2 player |
+|---|---|---|
+| Screen | 1280×720, panels under the waveform | 1024×600, PERFORM pads on screen |
+| Hot cues | A–H on the faceplate | A–D per bank, E–H on bank 2 |
+| Extra controls | KEY SHIFT, BEAT LOOP / BEAT JUMP panels, SOURCE, SEARCH keyboard | phone two-page layout |
+| Hardware it drives | CDJ-3000 panel (sub-CPU SPI), CDJ-3000 over HID-LINK, iPad faceplate | XDJ faceplate, DJ2Go, ADK-1000 panel |
+| Behaviour rules | to write as `specs/cdj-3000/` | `specs/xdj-1000mk2/` (exists) |
+| Default on | desktop, Pi, iPad, Android tablet | phones |
 
-- the audio path and the ring;
-- transport *primitives*: play, stop with its 3 ms fade, seek, cue
-  preview, loop wrap inside a block;
-- SLIP's shadow playhead;
-- key lock and key shift;
-- quantize;
-- the beat clock;
-- analysis, the library and Link.
+Everything else (decoding, key lock, cues, loops, SLIP, analysis, browsing
+rekordbox sticks, Pro DJ Link, serving music to other players) is the
+engine, shared by both and by any future player.
 
-A player never re-implements these. It chooses between them and configures
-them.
+## 3. Threads: who waits on whom
 
-### Player mods
+The performance rule as a picture. The solid arrows on the left are the
+existing hot paths. Every arrow that touches a mod is a non-blocking queue:
+a full queue drops, it never waits.
 
-What makes a CDJ-3000 a CDJ-3000 rather than an XDJ:
+```mermaid
+flowchart LR
+    subgraph RT["Real-time (SCHED_FIFO where allowed)"]
+        CB["Device callback<br/>pops the ring"]
+        PROC["audio-proc<br/>decode → key lock → ring"]
+    end
+    subgraph UI["UI thread, display-paced"]
+        FRAME["Frame<br/>drain inputs → apply → snapshot → draw"]
+    end
+    subgraph LOW["Lower priority"]
+        HOST["Mod host<br/>socket listener / WASM runtime"]
+        VOICE["Voice mods<br/>render ahead"]
+    end
+    subgraph OUT["Separate processes"]
+        M1["Socket mods<br/>any language"]
+    end
 
-- **Screen:** layout, panels, waveform style, colours.
-- **Control map:** physical and touch controls → engine events. The CDJ-3000
-  has eight hot cues, the XDJ four per bank; the CDJ-3000 has KEY SHIFT; and
-  so on.
-- **Behaviour rules:** when CUE previews versus sets, what AUTO CUE does,
-  what SNAP lights after. These are already moving into data: the transport
-  rules crate checks behaviour against `specs/xdj-1000mk2/`. A player would
-  ship its own specs, and the engine runs whichever rule set the player
-  selects. Rules are decisions at button-press time, not per sample, so this
-  costs nothing on the hot path.
-- **Settings:** its MENU / UTILITY, saved under the player's name.
+    PROC -- "lock-free ring" --> CB
+    FRAME -- "atomics: speed, seek,<br/>key shift, loop" --> PROC
+    FRAME -. "latest state<br/>(overwritten, never queued)" .-> HOST
+    HOST -. "bounded command queue<br/>(full = dropped + counted)" .-> FRAME
+    HOST <-. "socket" .-> M1
+    VOICE -. "own ring: mixed if ready,<br/>silence if not" .-> CB
+```
 
-Today all of this is mixed into the app crate (`cdj3000.rs`, `cdjface.rs`,
-`screen.rs`, branches in `lib.rs`). Moving each skin behind the engine API is
-the refactor, and it's the same work as the player-crate plan's phases.
+The cost to the engine:
 
-### Feature mods
+| Situation | Extra work in the engine |
+|---|---|
+| No mods (the default) | one empty-queue check per frame |
+| Mods watching | one copy of the snapshot (a few hundred bytes) per frame into a single slot |
+| Mods sending commands | applying events at controller rates, through the same `apply` a key press uses |
+| A voice mod playing | one add per sample per voice bus in the callback, or nothing if its ring is empty |
 
-Smaller additions on top of a player:
+A first-party player compiled in (option A below) costs exactly what the
+screens cost today: it is the same code, behind an API instead of inside
+`DeckApp`.
 
-- a panel;
-- a remapped controller;
-- a lighting or visuals bridge;
-- set logging, a practice tool, a cue sequencer;
-- later, a sound voice.
+## 4. A mod's request, step by step
 
-## The engine API
+A lighting-desk feature mod asks the deck to set a 4-beat loop on the next
+downbeat. Nothing in the audio path waits for any of it.
 
-Two seams that already exist, made formal:
+```mermaid
+sequenceDiagram
+    participant M as Mod (own process)
+    participant H as Mod host thread
+    participant F as UI frame
+    participant E as Engine (apply, rules)
+    participant A as audio-proc
+    M->>H: {"cmd": "beat_loop", "beats": 4}
+    H->>H: check permission "cues and loops", rate limit
+    H->>F: push onto bounded queue (drop if full)
+    Note over F: next frame (≤16 ms)
+    F->>E: drain queue, apply BeatLoop{4} like a pad press
+    E->>E: quantize to the downbeat, rules decide
+    E->>A: loop bounds via atomics
+    A->>A: wraps inside a block, no click
+    F-->>H: next snapshot shows loop_active
+    H-->>M: state stream: loop on, 4 beats
+```
 
-- **Commands in.** Every key, pad, controller and touch is already an `Event`
-  (`ControlEvent` / `UiEvent`) applied in `DeckApp::apply`. That becomes the
-  command set, versioned, with permissions.
-- **State out.** Each frame builds a `DeckSnapshot`: playhead, grid, cues,
-  loop, tempo, key, master. That becomes the state stream. Track analysis
-  (grid, waveforms, phrases, cues) and library queries are on-demand reads.
-  Pro DJ Link already publishes much of this to the network.
-
-A third seam is new and only for players:
-
-- **Drawing.** A player describes its screen as layers the engine renders:
-  the waveform, overview, grid and cue markers stay engine-drawn GPU passes,
-  because they're performance-critical. The player draws text, keys and
-  panels around them through egui, as today. Third-party players get a
-  declarative version of the same thing (option C).
-
-## Where mod code runs
+## 5. Where mod code runs
 
 The API is the same for every mod; how its code is hosted depends on whose
 code it is.
 
-### A. Compiled-in Rust (first-party players and features)
-
-Built into the binary behind cargo features, calling the engine API directly.
-
-- **Performance:** identical to today.
-- **Safety:** code review only; it runs in-process.
-- **For:** the CDJ-3000 and XDJ players, the sampler, anything we ship.
-
-### B. Out of process, over a local socket (tools and controllers)
-
-The mod is its own program, in any language. It connects on a local or LAN
-socket, gets the state stream, and sends commands.
-
-- **Performance:** the engine gains one listener thread. A slow mod gets the
-  latest state and drops the rest; the engine never waits. The OS keeps its
-  CPU off the audio core.
-- **Safety:** the strongest available. A crash or loop stays in its own
-  process.
-- **Platforms:** desktop and Pi, and LAN-only for an iPad (iOS can't run
-  other programs).
-- **For:** lighting and visuals, set logging, remote control from a phone or
-  laptop, automated testing. Deckbench already drives OpenDeck this way, and
-  Link is a read-only version of it.
-
-### C. In-process WebAssembly (third-party players and features)
-
-The mod is a `.wasm` module run on a dedicated thread by an embedded runtime,
-with a CPU budget (fuel or epochs) and a memory cap.
-
-- **Performance:** near-native on desktop (wasmtime). Interpreted on iOS
-  (wasmi; iOS forbids JIT), around 10× slower, which is fine for UI and
-  rules, not for audio DSP. The runtime adds megabytes to the binary. On a
-  one-core Pi Zero W the mod thread shares the audio's only core.
-- **Safety:** good. A trap or a timeout disables the mod; the engine keeps
-  playing.
-- **Platforms:** all, including the iPad.
-- **For:** community players and features that should work on every device
-  without a rebuild. This is the closest thing to "drop a mod on the stick".
-
-### Not supported: native libraries
-
-Loading a `.so` / `.dylib` into the process, the way CDJ mods inject into
-Pioneer's player, would be fast but would let a mod do anything the engine
-can: block the audio, corrupt memory, crash the deck. It's ruled out for
-third-party code. A modder who wants native speed can contribute a Rust player
-or feature to the repo (A).
-
-### Comparison
-
-| | A. Compiled-in Rust | B. Out of process | C. WASM | Native libs |
+| | A. Compiled-in Rust | B. Out of process (socket) | C. WebAssembly | Native libraries |
 |---|---|---|---|---|
-| Engine cost, no mods | 0 | ~0 | ~0 (+ binary size) | 0 |
-| A mod crashes | deck dies | mod dies | mod disabled | deck dies |
-| A mod loops forever | deck hangs | its own core busy | stopped by budget | deck hangs |
-| On the iPad itself | yes | no (LAN only) | yes (interpreted) | no |
-| Who writes them | us, contributors | anyone, any language | anyone | — |
+| For | our players (CDJ-3000, XDJ, sampler) and contributed ones | tools: lighting, visuals, logging, remote control, tests | community players and features on every device | — |
+| Engine cost, no mods | 0 | ~0 | ~0 (+ a few MB of binary) | 0 |
+| Speed of the mod | native | native, plus a local round trip (tens of µs) | near-native on desktop; interpreted (~10× slower) on iOS | native |
+| A mod crashes | deck dies (code review is the guard) | mod dies | mod disabled | deck dies |
+| A mod loops forever | deck hangs | its own core busy | stopped by its CPU budget | deck hangs |
+| On the iPad itself | yes | no (LAN only; iOS can't run other programs) | yes | no |
 | Can be a whole player | yes | no | yes | — |
+| Verdict | yes | yes, first | yes, after the API settles | **no**: this is how CDJ mods work, and it's what lets them stop a show |
 
-## Mods that make sound
-
-The hard part, and separate from the rest. Stems are the community's own
-example.
+## 6. Mods that make sound
 
 - **Voices** (samplers, one-shots, extra stems): the mod renders ahead into
-  its own ring at lower priority. The output mixes that ring in if samples
-  are there and plays nothing if not. A late or dead mod is silence on its bus;
-  the deck plays on.
+  its own ring at lower priority. The callback adds that ring if samples are
+  there and nothing if not. A late or dead mod is silence on its bus; the deck
+  plays on.
 - **Processing the deck's own audio** (effects, stem separation): the mod
-  must hear the audio before it plays, which puts it in the chain the rule
-  keeps it out of. The safe form runs it in parallel and falls back to the
-  dry signal on any late block. That's twice the work for that chain, and the
-  effect audibly drops out on a late block. Stems in OpenDeck today are
-  engine features (the OverCue reader, on-device HTDemucs), not mods, for
-  exactly this reason.
+  would have to sit inside the chain, which the rule keeps it out of. The safe
+  form runs it in parallel and falls back to dry on any late block. That
+  doubles the work, and the effect audibly drops out when a block is late.
+  Stems in OpenDeck today (the OverCue reader, on-device HTDemucs) are engine
+  features for exactly this reason.
 
 **Proposal:** voices as mods; processing stays in the engine until a concrete
 mod needs it.
 
-## Show safety
+## 7. Show safety
 
 - **Watchdog:** each mod has a CPU and memory budget and an event-rate limit,
-  well above any controller's. Over budget means it's disabled for the
-  session, with its name shown on screen.
-- **Performance lock:** no installing, updating or re-permissioning mods
-  while a track plays.
+  well above any controller's. Over budget means disabled for the session,
+  with its name on screen.
+- **Performance lock:** no installing, updating or re-permissioning mods while
+  a track plays.
 - **Safe mode:** a start-up option, and a key held at boot, that starts the
-  built-in player with every mod off.
-- **Fallback player:** if a third-party player mod fails, the deck drops to
-  the built-in CDJ-3000 player with the same track, position and cues. The
-  engine still holds all of that, so nothing is lost but the look.
+  built-in CDJ-3000 player with every mod off.
+- **Fallback player:** if a community player mod fails, the deck drops to the
+  built-in CDJ-3000 player with the same track, position and cues. The engine
+  holds all of that, so only the look changes.
 - **Permissions, declared per mod:**
   - read-only (state, analysis, Link);
   - cues and loops;
@@ -250,48 +297,109 @@ mod needs it.
   - own panel;
   - own audio bus.
 
-## How to prove it: hostile-mod tests
+  A read-only mod cannot change what the deck plays.
+
+## 8. Proving it: hostile-mod tests
 
 Each guarantee becomes a test: play a track on the headless deck harness
-(`deck_harness`, the real audio processor) while a deliberately broken mod
-runs:
+(`deck_harness`, the real audio processor, no window or sound card) while a
+deliberately broken mod runs:
 
-- a mod that spins forever;
-- one that allocates until it's killed;
-- one that crashes on its first state update;
-- one that floods 10,000 events a second;
-- one that connects and never reads;
-- a voice that stops filling its ring mid-bar;
-- a player mod that traps while drawing.
+| Hostile mod | Must hold |
+|---|---|
+| spins forever | zero underruns; disabled within its budget |
+| allocates until killed | zero underruns; the deck's memory unaffected |
+| crashes on its first state update | zero underruns; the others keep running |
+| floods 10,000 commands a second | zero underruns; PLAY / CUE still answer; excess dropped and counted |
+| connects and never reads | zero underruns; its state slot is overwritten, nothing queues |
+| a voice that stops mid-bar | zero underruns; its bus goes silent, the deck plays on |
+| a player that traps while drawing | the built-in player takes over, same playhead |
 
-A test passes only with **zero underrun events**, the playhead where it
-should be, and PLAY / CUE still answering. They run in CI. On the Pi Zero W the
-same suite runs by hand.
+Zero underruns is checked with the existing counters
+(`AudioStats::underrun_events`). The suite runs in CI. On the Pi Zero W it is
+run by hand, since a mod there shares the audio's only core.
 
-## A path, if we go ahead
+## 9. From today's code to the target
 
-1. **Engine API inside the app.** Do player-crate phases 0–2. Then move the
-   XDJ and CDJ-3000 players behind the API as compiled-in mods (A). No
-   behaviour change; measured with `make perf`, the underrun counters and
-   [`../BENCHMARKS.md`](../BENCHMARKS.md) before and after.
-2. **State stream out (B, read-only).** Lighting, visuals, logging, remote
-   display. Zero risk to the deck.
-3. **Commands in, with permissions, the watchdog and the hostile-mod
-   tests.**
-4. **WASM players and features (C).** Community mods on every device.
-5. **Voices as mods.** Last, and only for a real mod that needs it.
+Today the two players are files inside the app crate, reaching straight into
+`DeckApp`:
 
-Steps 1–3 are worth doing even if no third-party mod ever ships: step 1 is
-the player-crate plan, and steps 2–3 are the remote-control and test API.
+```mermaid
+flowchart LR
+    subgraph NOW["Today: crates/app"]
+        direction TB
+        L["lib.rs: DeckApp (4,900 lines)<br/>deck state, apply, loader, Link glue,<br/>window, render_frame"]
+        S1["cdj3000.rs + cdjface.rs<br/>CDJ-3000 screen + faceplate"]
+        S2["screen.rs<br/>XDJ-1000MK2 screen"]
+        AU["audio.rs<br/>AudioHandle, audio-proc, callback"]
+        PJ["prodj.rs<br/>Link, PeerPhase, sender"]
+        IN["input.rs + snapshot.rs<br/>Event, DeckSnapshot"]
+        SF["surface/<br/>MIDI, I2C, sub-CPU, HID-LINK"]
+    end
+    subgraph TARGET["Target"]
+        direction TB
+        T1["crates/player: the deck engine<br/>(player-crate phase 0)"]
+        T2["crates/output: rings, routing, voice buses<br/>(phase 1)"]
+        T3["crates/sync: clock, master, PeerPhase<br/>(phase 2)"]
+        T4["crates/engine-api: commands, state,<br/>analysis, drawing layers, permissions"]
+        T5["players/cdj3000, players/xdj1000mk2<br/>compiled-in player mods"]
+        T6["crates/modhost: socket server, WASM runtime,<br/>watchdog"]
+        T7["crates/app: window, platform glue,<br/>picks a player"]
+    end
+    L --> T1
+    AU --> T1
+    AU --> T2
+    PJ --> T3
+    IN --> T4
+    S1 --> T5
+    S2 --> T5
+    SF --> T5
+    L --> T7
+```
+
+## 10. Milestones
+
+```mermaid
+flowchart LR
+    M1["1. State out<br/>read-only socket API,<br/>example mod, hostile tests"]
+    M2["2. Commands in<br/>permissions, rate limit,<br/>watchdog, performance lock"]
+    M3["3. Players as mods<br/>player-crate phases 0–2,<br/>CDJ-3000 + XDJ behind the API"]
+    M4["4. WASM mods<br/>community players and<br/>features, incl. iPad"]
+    M5["5. Voices<br/>own audio buses"]
+    M1 --> M2 --> M3 --> M4 --> M5
+```
+
+1. **State out (days).** OpenDeck publishes its live state at frame rate on a
+   local socket: playhead, beat and bar, BPM, key and key shift, cues, loop,
+   master, sync. Track analysis comes on request. Off by default, local-only
+   unless turned on. Ships with an example mod and the first hostile tests.
+   Zero risk: mods can only watch. It needs no refactor, because the snapshot
+   already exists every frame, and it fixes the API's state format for
+   everything after.
+2. **Commands in (days).** Mods send the events a controller sends, with
+   permissions, a rate limit, the watchdog and the performance lock. Enough
+   for control mods.
+3. **Players as mods (weeks).** Player-crate phases 0–2, then the CDJ-3000
+   and XDJ players move behind the API as compiled-in mods, with their rules
+   as specs. No behaviour change, gated by `make perf`, the underrun
+   counters, the CUE timing check and idle CPU before and after. This is a
+   large mechanical refactor of the app crate; it needs a quiet window in the
+   files other work touches.
+4. **WASM mods.** Community players and features on every device, including
+   the iPad. A mod is a file the DJ copies onto a stick.
+5. **Voices.** Own audio buses, for a real mod that needs one.
+
+Milestones 1–3 are worth doing even if no third-party mod ever ships: 1–2
+are a remote-control and test API, and 3 is the player-crate plan.
 
 ## Open questions
 
 - Is the first non-built-in player a community one, or ours (the sampler)?
-- How much of the screen should a third-party player control? Engine-drawn
-  waveforms with a mod-drawn frame is fast; fully mod-drawn screens would
-  need a GPU budget per frame.
-- Wire format for B: something schema'd (FlatBuffers, Cap'n Proto) or
-  JSON lines for approachability? Either is small at 60 Hz.
-- Distribution: files the DJ copies onto a stick (like CDJ mods today), a
-  catalogue, or both? And signing?
+- How much of the screen should a community player control? Engine-drawn
+  waveforms with a mod-drawn frame is fast; fully mod-drawn screens need a
+  GPU budget per frame.
+- Wire format for the socket: something schema'd (FlatBuffers, Cap'n Proto)
+  or JSON lines for approachability? Either is small at 60 Hz.
+- Distribution: files on a stick (as CDJ mods are passed around today), a
+  catalogue, or both? Signed?
 - When OpenDeck runs on a CDJ-3000 itself, do mods install the same way?

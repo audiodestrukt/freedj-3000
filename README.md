@@ -108,6 +108,9 @@ In short:
 - Cues set on OpenDeck saved across launches.
 - The remaining CDJ-3000 screen work:
   [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md).
+- Mods: OpenDeck as an engine, with the CDJ-3000 and XDJ-1000MK2 players
+  (and community ones) as mods that can never reach the audio path.
+  Proposal: [docs/design/mods.md](docs/design/mods.md).
 - A hardware control surface and a sampler deck.
 
 ---
