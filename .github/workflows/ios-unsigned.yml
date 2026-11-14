@@ -1,0 +1,58 @@
+name: iOS unsigned IPA
+
+# For forks and anyone without the maintainer's Apple signing keys: builds the
+# iOS app with code signing off and packages an UNSIGNED .ipa as a run
+# artifact.  Re-sign it with your own Apple ID when you install it
+# (Sideloadly, AltStore or SideStore; a free Apple ID lasts 7 days).
+#
+# Run it from the Actions tab: iOS unsigned IPA → Run workflow.  The .ipa is
+# under the run's Artifacts.  It carries no entitlements (no increased memory
+# limit, so on-device stem splitting may run out of memory).
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4.2.2
+
+      - name: Select latest Xcode (iOS 26 SDK)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+
+      - name: Add iOS Rust target
+        run: rustup target add aarch64-apple-ios
+
+      - name: Build (no signing)
+        run: |
+          xcodebuild -project ios/freedj.xcodeproj \
+            -scheme freedj -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            FREEDJ_ENTITLEMENTS= \
+            MARKETING_VERSION=0.3.11 CURRENT_PROJECT_VERSION=$(date -u +%s) \
+            build
+
+      - name: Package .ipa
+        run: |
+          APP=build/Build/Products/Release-iphoneos/freedj.app
+          test -d "$APP"
+          mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          (cd out && zip -qr OpenDeck-DJ-unsigned.ipa Payload)
+          ls -la out
+
+      - name: Upload .ipa artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenDeck-DJ-unsigned-ipa
+          path: out/OpenDeck-DJ-unsigned.ipa
+          if-no-files-found: error
