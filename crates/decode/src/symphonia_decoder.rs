@@ -247,6 +247,8 @@ impl SymphoniaDecoder {
 
     /// The track's own metadata, as read at open.
     pub fn tags(&self) -> &TrackTags { &self.tags }
+    /// For a source that knows more than the file does (a player's library).
+    pub fn tags_mut(&mut self) -> &mut TrackTags { &mut self.tags }
 
     /// Sample rate of the decoded packets so far (None before the first).
     pub fn decoded_rate(&self) -> Option<u32> { self.decoded_rate }

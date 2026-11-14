@@ -46,7 +46,7 @@ fn is_audio(path: &Path) -> bool {
 }
 
 /// A linked track's file path (if the server has one) and its beat-grid blob.
-pub type DbTrackFile = (Option<String>, anyhow::Result<Vec<u8>>);
+pub type DbTrackFile = (Option<String>, anyhow::Result<Vec<u8>>, Option<opendeck_dbserver::TrackMeta>);
 
 /// Which category a dbserver root-menu row is: by its label when it is one
 /// we know (a source may number the item types its own way), else by type.
@@ -57,6 +57,17 @@ fn db_category(i: &opendeck_dbserver::MenuItem) -> &'static str {
         "ARTIST" => "root-artist",
         "ALBUM" => "root-album",
         "FILENAME" | "FILE NAME" => "root-filename",
+        "GENRE" => "root-genre",
+        "BPM" => "root-bpm",
+        "RATING" => "root-rating",
+        "YEAR" => "root-year",
+        "LABEL" => "root-label",
+        "COLOR" => "root-color",
+        "TIME" | "DURATION" => "root-time",
+        "HISTORY" => "root-history",
+        "KEY" => "root-key",
+        "ORIGINAL ARTIST" => "root-orig-artist",
+        "REMIXER" => "root-remixer",
         _ => i.type_name(),
     }
 }
@@ -150,6 +161,85 @@ enum Loc {
     DbAlbums,
     DbAlbum(u32),
     DbFilenames,
+    /// The other categories a player lists (GENRE, BPM, KEY, …): the ids
+    /// picked so far.  Fewer than `Cat::depth` of them is a list of names to
+    /// pick from; all of them is the tracks.
+    DbCat(Cat, Vec<u32>),
+}
+
+/// A dbserver category beyond the ones with their own `Loc`: the menu that
+/// lists it, and the requests that open one of its entries (Beat Link's /
+/// dysentery's tables).  The argument after the sort order is the picked
+/// entry's id; -1 means "all" where a request takes two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Cat { Genre, Bpm, Rating, Year, Label, Color, Time, History, Key, OrigArtist, Remixer }
+
+impl Cat {
+    fn of_root(kind: &str) -> Option<Cat> {
+        Some(match kind {
+            "root-genre" => Cat::Genre, "root-bpm" => Cat::Bpm, "root-rating" => Cat::Rating,
+            "root-year" => Cat::Year, "root-label" => Cat::Label, "root-color" => Cat::Color,
+            "root-time" => Cat::Time, "root-history" => Cat::History, "root-key" => Cat::Key,
+            "root-orig-artist" => Cat::OrigArtist, "root-remixer" => Cat::Remixer,
+            _ => return None,
+        })
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Cat::Genre => "GENRE", Cat::Bpm => "BPM", Cat::Rating => "RATING", Cat::Year => "YEAR",
+            Cat::Label => "LABEL", Cat::Color => "COLOR", Cat::Time => "TIME", Cat::History => "HISTORY",
+            Cat::Key => "KEY", Cat::OrigArtist => "ORIGINAL ARTIST", Cat::Remixer => "REMIXER",
+        }
+    }
+    /// How many entries are picked before the tracks: GENRE → artist → tracks.
+    fn depth(self) -> usize {
+        match self {
+            Cat::Bpm | Cat::Rating | Cat::Color | Cat::Time | Cat::History => 1,
+            Cat::Genre | Cat::Year | Cat::Label | Cat::Key | Cat::OrigArtist | Cat::Remixer => 2,
+        }
+    }
+    /// The request that lists the names at this level (`picked` ids so far).
+    fn names_request(self, picked: &[u32]) -> (u16, Vec<u32>) {
+        use opendeck_dbserver::kind as k;
+        match (self, picked) {
+            (Cat::Genre, [])      => (k::GENRE_MENU, vec![]),
+            (Cat::Genre, [g])     => (0x1101, vec![*g]),
+            (Cat::Bpm, _)         => (k::BPM_MENU, vec![]),
+            (Cat::Rating, _)      => (k::RATING_MENU, vec![]),
+            (Cat::Year, [])       => (k::YEAR_MENU, vec![]),
+            (Cat::Year, [d])      => (0x1108, vec![*d]),
+            (Cat::Label, [])      => (k::LABEL_MENU, vec![]),
+            (Cat::Label, [l])     => (0x110a, vec![*l]),
+            (Cat::Color, _)       => (k::COLOR_MENU, vec![]),
+            (Cat::Time, _)        => (k::TIME_MENU, vec![]),
+            (Cat::History, _)     => (k::HISTORY_MENU, vec![]),
+            (Cat::Key, [])        => (k::KEY_MENU, vec![]),
+            (Cat::Key, [key])     => (0x1114, vec![*key]),
+            (Cat::OrigArtist, []) => (k::ORIG_ARTIST_MENU, vec![]),
+            (Cat::OrigArtist, [a]) => (0x1402, vec![*a]),
+            (Cat::Remixer, [])    => (k::REMIXER_MENU, vec![]),
+            (Cat::Remixer, [a])   => (0x1702, vec![*a]),
+            _                     => (k::ALL_TRACKS, vec![]),
+        }
+    }
+    /// The request that lists the tracks once every entry is picked.
+    fn tracks_request(self, p: &[u32]) -> (u16, Vec<u32>) {
+        const ALL: u32 = 0xffff_ffff;
+        let at = |i: usize| p.get(i).copied().unwrap_or(0);
+        match self {
+            Cat::Genre      => (0x1301, vec![at(0), at(1), ALL]),
+            Cat::Bpm        => (0x1206, vec![at(0), 0]),
+            Cat::Rating     => (0x1107, vec![at(0)]),
+            Cat::Year       => (0x1208, vec![at(0), at(1)]),
+            Cat::Label      => (0x130a, vec![at(0), at(1), ALL]),
+            Cat::Color      => (0x110d, vec![at(0)]),
+            Cat::Time       => (0x1110, vec![at(0)]),
+            Cat::History    => (0x1112, vec![at(0)]),
+            Cat::Key        => (0x1214, vec![at(0), at(1)]),
+            Cat::OrigArtist => (0x1502, vec![at(0), at(1)]),
+            Cat::Remixer    => (0x1802, vec![at(0), at(1)]),
+        }
+    }
 }
 
 /// A track field the rekordbox categories group by.
@@ -380,6 +470,8 @@ impl Browser {
             Some(Loc::DbArtists) => "ARTIST".to_string(),
             Some(Loc::DbAlbums) => "ALBUM".to_string(),
             Some(Loc::DbFilenames) => "FILENAME".to_string(),
+            Some(Loc::DbCat(c, ids)) if ids.is_empty() => c.label().to_string(),
+            Some(Loc::DbCat(..)) => self.db_title.clone(),
             Some(Loc::DbFolder(_)) | Some(Loc::DbPlaylist(_)) | Some(Loc::DbArtist(_)) | Some(Loc::DbAlbum(_)) => self.db_title.clone(),
             None => "/".to_string(),
         }
@@ -441,6 +533,7 @@ impl Browser {
             Some(Loc::DbAlbums)       => self.db_name_entries(|c, s| c.albums(s), Loc::DbAlbum),
             Some(Loc::DbAlbum(id))    => self.db_track_entries(|c, s| c.tracks_for_album(s, id)),
             Some(Loc::DbFilenames)    => self.db_track_entries(|c, s| c.filenames(s)),
+            Some(Loc::DbCat(c, ids))  => self.db_cat_entries(c, ids),
             None                      => Vec::new(),
         };
         self.entries = entries;
@@ -556,6 +649,7 @@ impl Browser {
             Some(Ok(_)) => { log::info!("LINK: empty category menu; showing playlists"); return self.db_folder_entries(0); }
             Some(Err(e)) => { log::info!("LINK: no category menu ({e:#}); showing playlists"); return self.db_folder_entries(0); }
         };
+        for i in &items { log::info!("LINK category: {:?} item_type 0x{:x} id {} → {}", i.label, i.item_type, i.id, db_category(i)); }
         items.into_iter().map(|i| {
             let kind = match db_category(&i) {
                 "root-track"    => EntryKind::Descend(Loc::DbAllTracks),
@@ -563,10 +657,35 @@ impl Browser {
                 "root-artist"   => EntryKind::Descend(Loc::DbArtists),
                 "root-album"    => EntryKind::Descend(Loc::DbAlbums),
                 "root-filename" => EntryKind::Descend(Loc::DbFilenames),
-                _ => EntryKind::Unsupported,
+                other => match Cat::of_root(other) {
+                    Some(c) => EntryKind::Descend(Loc::DbCat(c, Vec::new())),
+                    None    => EntryKind::Unsupported,
+                },
             };
             Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None, kind }
         }).collect()
+    }
+
+    /// One of the `Cat` categories: the names to pick from at this level, or
+    /// the tracks once every entry is picked.
+    fn db_cat_entries(&mut self, cat: Cat, picked: Vec<u32>) -> Vec<Entry> {
+        if picked.len() >= cat.depth() {
+            let (kind, ids) = cat.tracks_request(&picked);
+            return self.db_track_entries(|c, s| c.browse(kind, s, &ids));
+        }
+        let (kind, ids) = cat.names_request(&picked);
+        let Some(r) = self.db_call(|c, s| c.browse(kind, s, &ids)) else { return Vec::new() };
+        match r {
+            Ok(items) => items.into_iter().map(|i| {
+                let mut next = picked.clone();
+                next.push(i.id);
+                // Rows are named by their label; a row with only a second
+                // label (a count, a key) shows that instead of nothing.
+                let name = if i.label.is_empty() { i.label2.clone() } else { i.label.clone() };
+                Entry { name, is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(Loc::DbCat(cat, next)) }
+            }).collect(),
+            Err(e) => { log::warn!("LINK {}: 0x{kind:04x} {ids:x?}: {e:#}", cat.label()); Vec::new() }
+        }
     }
 
     /// A list of names (artists, albums) that each open as a track list.
@@ -606,7 +725,13 @@ impl Browser {
         let Some((ip, _, slot)) = self.db.as_ref() else { return Vec::new() };
         let (ip, slot) = (*ip, *slot);
         match r {
-            Ok(items) => items.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
+            Ok(items) => {
+                // A row we don't take for a track is dropped; say what it was,
+                // so a player that types its rows differently shows in the log.
+                let dropped: Vec<_> = items.iter().filter(|i| i.type_name() != "track").map(|i| i.item_type).collect();
+                log::info!("LINK tracks: {} rows, {} dropped (types {:x?})", items.len(), dropped.len(), &dropped[..dropped.len().min(8)]);
+                items
+            }.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
                 name: i.label.clone(), is_dir: false,
                 artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None, art: None,
                 kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }),
@@ -645,7 +770,8 @@ impl Browser {
             Err(e) => return Some(Err(e)),
         };
         let grid = self.db_call(|c, s| c.beat_grid(s, id)).unwrap_or_else(|| Err(anyhow::anyhow!("session closed")));
-        Some(Ok((path, grid)))
+        let meta = self.db_call(|c, s| c.track_meta(s, id)).and_then(|r| r.ok());
+        Some(Ok((path, grid, meta)))
     }
 
     /// Open a dbserver session to a peer (a player's USB slot, or rekordbox's
@@ -884,7 +1010,7 @@ impl Browser {
             EntryKind::Unsupported => { log::info!("BROWSE: {:?} is not browsable here yet", sel_name); Enter::Nothing }
             EntryKind::Grant => { media::request_access(); Enter::Nothing }
             EntryKind::Descend(loc) => {
-                if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_)) { self.db_title = sel_name.clone(); }
+                if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_) | Loc::DbCat(..)) { self.db_title = sel_name.clone(); }
                 let from_usb_row = sel_name.starts_with("USB: ");
                 self.stack.push(loc);
                 self.names.resize(self.stack.len() - 1, String::new());

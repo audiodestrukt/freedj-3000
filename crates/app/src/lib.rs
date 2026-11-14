@@ -2436,7 +2436,7 @@ impl DeckApp {
                 }
             };
             log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
-            prep.complete(Fetched { name, path: rel_path, audio: AudioSrc::Bytes(audio), grid, t0 }, tx)
+            prep.complete(Fetched { name, path: rel_path, audio: AudioSrc::Bytes(audio), grid, t0, meta: None }, tx)
         })
     }
 
@@ -2458,11 +2458,11 @@ impl DeckApp {
         let ports = self.link_ports;
         self.start_fetch(title.clone(), move |tx| {
             let t0 = Instant::now();
-            let (path, grid) = match known {
+            let (path, grid, meta) = match known {
                 Some(r) => r?,
                 None => {
                     let mut db = Client::discover_at(ip, ports.query, device)?;
-                    (db.file_path(slot, id)?, db.beat_grid(slot, id))
+                    (db.file_path(slot, id)?, db.beat_grid(slot, id), db.track_meta(slot, id).ok())
                 }
             };
             let path = path.ok_or_else(|| anyhow::anyhow!("LINK {ip}: no file path for track {id}"))?;
@@ -2496,7 +2496,7 @@ impl DeckApp {
                 }
             })?;
             let name = if title.is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { title };
-            prep.complete(Fetched { name, path, audio: AudioSrc::Stream(reader), grid: FetchedGrid::Beats(beats), t0 }, tx)
+            prep.complete(Fetched { name, path, audio: AudioSrc::Stream(reader), grid: FetchedGrid::Beats(beats), t0, meta }, tx)
         })
     }
 
@@ -3808,7 +3808,10 @@ impl CueLooks {
 /// The fetched audio: all of it, or a file still downloading that the decoder
 /// reads as it arrives.
 enum AudioSrc { Bytes(Vec<u8>), Stream(opendeck_decode::growing::Growing) }
-struct Fetched { name: String, path: String, audio: AudioSrc, grid: FetchedGrid, t0: Instant }
+struct Fetched { name: String, path: String, audio: AudioSrc, grid: FetchedGrid, t0: Instant,
+    /// The serving library's title, artist, … (a player's database knows them
+    /// when the file's own tags are missing or unread).
+    meta: Option<opendeck_dbserver::TrackMeta> }
 /// `Anlz`: the `.DAT`, and the `.EXT` beside it when there is one (cue
 /// colours and comments).
 enum FetchedGrid { None, Anlz(Vec<u8>, Option<Vec<u8>>), Beats(Vec<opendeck_dbserver::GridBeat>) }
@@ -3882,10 +3885,21 @@ impl Prep {
     /// Decode fetched bytes and stream them in (loader thread).
     fn complete(self, f: Fetched, tx: &LoadTx) -> Result<()> {
         let ext = f.path.rsplit('.').next();
-        let dec = match f.audio {
+        let mut dec = match f.audio {
             AudioSrc::Bytes(b) => opendeck_decode::SymphoniaDecoder::open_bytes(b, ext),
             AudioSrc::Stream(r) => opendeck_decode::SymphoniaDecoder::open_growing(r, ext),
         }.context("failed to open the fetched audio")?;
+        // The file's own tags win; the library fills what they lack.
+        if let Some(m) = f.meta {
+            let t = dec.tags_mut();
+            if t.title.is_none()  { t.title  = m.title; }
+            if t.artist.is_none() { t.artist = m.artist; }
+            if t.album.is_none()  { t.album  = m.album; }
+            if t.genre.is_none()  { t.genre  = m.genre; }
+            if t.key.is_none()    { t.key    = m.key; }
+            if t.year.is_none()   { t.year   = m.year; }
+            if t.bpm.is_none()    { t.bpm    = m.bpm; }
+        }
         let ch = self.deck_ch;
         let grid_cue = match f.grid {
             FetchedGrid::None => None,
