@@ -1,9 +1,11 @@
-Cues for other players, a three-colour waveform, and wider file support.
+STEMS: split any track into drums, vocals and the rest, right on your iPad. Turn on MENU > STEMS and the app fetches its separation model by itself the first time (about 290 MB, once). Stems play while the track is still being split, and the model no longer stays in memory after a split. Stems prepared on a USB stick with OverCue now play within a fraction of a second of loading.
 
-WAVEFORM COLOR: MENU → WAVEFORM COLOR picks BLUE, RGB or 3BAND, and remembers your choice. 3BAND is the new default: lows blue, mids amber, highs white.
+KEY SHIFT: move the track up or down a semitone at a time without touching the tempo, with RESET to go back. The KEY readouts show the new key.
 
-STEMS: on tracks with prepared stems (MENU → STEMS on), the enlarged waveform now shows only the parts you are playing: mute the drums and the kicks leave the picture, and FULL MIX brings the whole track back. In the second player layout the STEMS keys show each part's level, and BROWSE marks tracks that have stems with a small "S".
+HOT CUE COLOURS: hot cues from a rekordbox stick show in the colours you gave them in rekordbox, on the pads and the waveforms, and other players that load the track from OpenDeck see them too.
 
-PRO DJ LINK: players that load a track from OpenDeck now get its hot cues and memory cues. Lighting, video and timecode tools can follow OpenDeck's play position and active loop, and tools that look up track titles directly now find them. A pitched OpenDeck now reports the right tempo, so decks synced to it and lighting get the correct BPM.
+WAVEFORM COLOR: BLUE, RGB or 3BAND in MENU, with 3BAND by default.
 
-FIXES: touch keys respond reliably, including with another finger on the jog or the tempo fader. SLIP now works with held hot cues and scratching. LOOP IN and LOOP OUT set the loop where you press. TEMPO RANGE no longer moves the tempo fader. The fader stays where it is and the tempo follows the new range, so +3% on ±6 becomes +8% on ±16. 32-bit FLAC files load and play. AIFF files show their key, BPM and artwork, and no longer end in a short burst of noise. OGG files with tags open. Files at 88.2 kHz and above get a beat grid that lands on the beat (they are analysed again once). In the second player layout, the 16 and 32 marks under the waveform stay still.
+PRO DJ LINK: CDJ-3000s and lighting or timecode tools get the deck's exact play position many times a second, its loops, its hot and memory cues, and each track's key in their browse lists.
+
+FIXES: rekordbox tracks with cue points kept their beat grid and cues (they could lose both), and hot cues land on the right pads. SLIP works with hot cues and scratching. Loop keys act the moment they are pressed. TEMPO RANGE no longer moves the tempo. The phase meter no longer jumps a beat. Touch keys no longer miss quick taps. 32-bit FLAC plays, and AIFF titles are clean.
