@@ -3351,12 +3351,12 @@ impl DeckApp {
         let p = other as u8;
         let Some(st) = link.peer_status.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
         let Some(ip) = link.peers.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
-        let Some(bytes) = remote.waves.get(ip, link.player(), st.track, remotewave::fetch_wave) else { return };
+        let Some(data) = remote.waves.get(ip, link.player(), st.track, remotewave::fetch_wave) else { return };
         let Some(bpm) = st.bpm.filter(|b| *b > 0.0) else { return };
         let Some((pos, at)) = link.positions.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
         // Between packets (about 30 ms apart) the playhead runs on at the pitch.
         let run = if st.playing { at.elapsed().as_secs_f64() * pos.pitch as f64 } else { 0.0 };
-        snap.remote_wave = Some(snapshot::RemoteWaveView { bytes, bpm, playhead_s: pos.playhead_ms as f64 / 1000.0 + run, pitch: pos.pitch.max(0.1) });
+        snap.remote_wave = Some(snapshot::RemoteWaveView { data, bpm, playhead_s: pos.playhead_ms as f64 / 1000.0 + run, pitch: pos.pitch.max(0.1) });
     }
 
     fn cols_visible(&self) -> f32 { Self::cols_for(self.settings.skin, self.zoom_level) }

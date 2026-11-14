@@ -721,43 +721,31 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
 }
 
 /// The meter slot's WAVEFORM view (photographed off a CDJ-3000): the other
-/// player's waveform, thin, above the main waveform, running past a white
-/// line at its playhead, over this deck's beat grid (ticks along both edges,
-/// red on the first beat of a bar).  The scale is this deck's tempo, so when
-/// the other track is at the same tempo and in phase its beats fall on the
-/// grid, and when it is not they drift off it.
+/// player's waveform, thin, above the main waveform, with its own beat grid
+/// (ticks along both edges, red on the first beat of a bar) moving with it
+/// past a white line at its playhead.  The scale is this deck's tempo, so
+/// when the other track is at the same tempo and in phase its beats line up
+/// with this deck's grid on the main waveform, and when it is not they drift.
 fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, u: f32) {
     let p = ui.painter().with_clip_rect(r);
     let (cx, beat_px) = (r.center().x, 73.0 * u);
-    // This deck's grid: beat i is at (i - phase) beats from the centre line.
-    let ours = snap.beat_grid.map(|g| (g.bpm as f32 * snap.fader_speed, snap.beat_phase().unwrap_or(0.0), snap.beat_in_bar().unwrap_or(1) as i32));
-    if let Some((_, ph, bib)) = ours {
-        for i in -7..=7i32 {
-            let x = cx + (i as f32 - ph) * beat_px;
-            if x < r.min.x || x > r.max.x { continue; }
-            let bar = (i + bib - 1).rem_euclid(4) == 0;
-            let col = if bar { RED } else { TEXT };
-            let len = if bar { 12.0 } else { 8.0 } * u;
-            p.line_segment([Pos2::new(x, r.min.y + 2.0 * u), Pos2::new(x, r.min.y + 2.0 * u + len)], Stroke::new(2.0 * u, col));
-            p.line_segment([Pos2::new(x, r.max.y - 2.0 * u), Pos2::new(x, r.max.y - 2.0 * u - len)], Stroke::new(2.0 * u, col));
-            p.line_segment([Pos2::new(x, r.min.y + 14.0 * u), Pos2::new(x, r.max.y - 14.0 * u)],
-                           Stroke::new(1.0, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
-        }
-    }
     if let Some(w) = &snap.remote_wave {
         let (mid, half) = (r.center().y, 24.0 * u);
         // Points per 1/150 s of the other track: its media seconds pass at
         // its pitch, and a beat of this deck is `beat_px` wide.
-        let our_bpm = ours.map_or(w.bpm * w.pitch, |(b, _, _)| b);
+        let our_bpm = snap.beat_grid.map_or(w.bpm * w.pitch, |g| g.bpm as f32 * snap.fader_speed);
         let per_entry = beat_px * our_bpm / 60.0 / w.pitch / 150.0;
-        let first = w.playhead_s as f32 * 150.0;
-        let n = w.bytes.len();
+        let per_sec = per_entry * 150.0;
+        let head = w.playhead_s as f32;
+        let bytes = &w.data.bytes;
+        let n = bytes.len();
+        let first = head * 150.0;
         let mut x = r.min.x;
         while x < r.max.x {
             let (a, b) = (first + (x - cx) / per_entry, first + (x + 1.0 - cx) / per_entry);
             let (a, b) = ((a.floor().max(0.0)) as usize, (b.ceil().max(0.0)) as usize);
             if a < n {
-                let (h, wh) = w.bytes[a..b.max(a + 1).min(n)].iter().fold((0u8, 0u8), |m, &v| {
+                let (h, wh) = bytes[a..b.max(a + 1).min(n)].iter().fold((0u8, 0u8), |m, &v| {
                     let (h, wh) = (v & 0x1f, v >> 5);
                     if h > m.0 { (h, wh) } else { m }
                 });
@@ -769,6 +757,37 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, u: f32) {
                 }
             }
             x += 1.0;
+        }
+        // Its beat grid, drawn where its beats are in the track.
+        let span = (r.width() / per_sec) * 0.6;
+        for b in w.data.beats.iter().filter(|b| ((b.time_ms as f32 / 1000.0) - head).abs() < span) {
+            let x = cx + (b.time_ms as f32 / 1000.0 - head) * per_sec;
+            if x < r.min.x || x > r.max.x { continue; }
+            let bar = b.beat_in_bar == 1;
+            let col = if bar { RED } else { TEXT };
+            let len = if bar { 12.0 } else { 8.0 } * u;
+            p.line_segment([Pos2::new(x, r.min.y + 2.0 * u), Pos2::new(x, r.min.y + 2.0 * u + len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.max.y - 2.0 * u), Pos2::new(x, r.max.y - 2.0 * u - len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.min.y + 14.0 * u), Pos2::new(x, r.max.y - 14.0 * u)],
+                           Stroke::new(1.0, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
+        }
+    }
+    else if snap.beat2_bpm > 0.0 && !snap.master {
+        // No waveform (the other player's data has not come, or this deck
+        // has no track yet): its grid from its live beats, as the phase
+        // meter has it, spaced on this deck's tempo when there is one.
+        let spacing = snap.beat_grid.map_or(beat_px, |g| beat_px * (g.bpm as f32 * snap.fader_speed) / snap.beat2_bpm);
+        let bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
+        for i in -9..=9i32 {
+            let x = cx + (i as f32 - snap.beat2_phase_beats) * spacing;
+            if x < r.min.x || x > r.max.x { continue; }
+            let bar = (i + bib - 1).rem_euclid(4) == 0;
+            let col = if bar { RED } else { TEXT };
+            let len = if bar { 12.0 } else { 8.0 } * u;
+            p.line_segment([Pos2::new(x, r.min.y + 2.0 * u), Pos2::new(x, r.min.y + 2.0 * u + len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.max.y - 2.0 * u), Pos2::new(x, r.max.y - 2.0 * u - len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.min.y + 14.0 * u), Pos2::new(x, r.max.y - 14.0 * u)],
+                           Stroke::new(1.0, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
         }
     }
     p.line_segment([Pos2::new(cx, r.min.y + 2.0 * u), Pos2::new(cx, r.max.y - 2.0 * u)], Stroke::new(2.5 * u, TEXT));

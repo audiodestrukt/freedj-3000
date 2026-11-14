@@ -263,7 +263,7 @@ pub struct RemoteInfoView {
 #[derive(Clone)]
 pub struct RemoteWaveView {
     /// 150 entries a second: height in the low 5 bits, whiteness above.
-    pub bytes: std::sync::Arc<Vec<u8>>,
+    pub data: std::sync::Arc<crate::remotewave::WaveData>,
     /// The track's tempo, unpitched, and where its playhead is.
     pub bpm: f32,
     pub playhead_s: f64,

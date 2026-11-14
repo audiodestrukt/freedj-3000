@@ -27,14 +27,19 @@ impl<T> Default for RemoteCache<T> {
     fn default() -> Self { Self(Arc::new(Mutex::new(State { have: None, busy: false, tried: HashMap::new() }))) }
 }
 
-/// The detail waveform: 150 entries a second.
-pub type RemoteWaves = RemoteCache<Vec<u8>>;
+/// The detail waveform (150 entries a second) and the beat grid of a track.
+pub type RemoteWaves = RemoteCache<WaveData>;
+pub struct WaveData { pub bytes: Vec<u8>, pub beats: Vec<opendeck_dbserver::GridBeat> }
 pub type RemoteInfos = RemoteCache<InfoData>;
 
 /// A track's metadata and cover.
 pub struct InfoData { pub meta: TrackMeta, pub art: Option<Vec<u8>> }
 
-pub fn fetch_wave(c: &mut DbClient, slot: Slot, id: u32) -> anyhow::Result<Vec<u8>> { c.waveform_detail(slot, id) }
+pub fn fetch_wave(c: &mut DbClient, slot: Slot, id: u32) -> anyhow::Result<WaveData> {
+    let bytes = c.waveform_detail(slot, id)?;
+    let beats = c.beat_grid(slot, id).map(|b| opendeck_dbserver::parse_beat_grid(&b)).unwrap_or_default();
+    Ok(WaveData { bytes, beats })
+}
 
 pub fn fetch_info(c: &mut DbClient, slot: Slot, id: u32) -> anyhow::Result<InfoData> {
     let meta = TrackMeta::from_rows(&c.metadata(slot, id)?);
