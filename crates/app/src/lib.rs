@@ -1803,6 +1803,7 @@ impl DeckApp {
                 }
             }
             Event::Ui(UiEvent::BrowseDetail) => self.browser.cycle_detail(),
+            Event::Ui(UiEvent::BrowsePreview) => self.browser.toggle_previews(),
             Event::Ui(UiEvent::BrowseInfo) => if self.screen_mode == ScreenMode::Browse { self.browser.toggle_info() },
             Event::Ui(UiEvent::BrowseCategory(i)) => {
                 self.browser.open_rb_category(i);

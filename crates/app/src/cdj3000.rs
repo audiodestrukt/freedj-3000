@@ -1785,48 +1785,57 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
 /// The INFO pane for a highlighted track (right side of BROWSE): details,
 /// cover, comment and LOAD.
 fn draw_browse_info(ui: &Ui, b: &Browser, e: &crate::browser::Entry, sc: Rect, right: Rect, u: f32, out: &mut Vec<Event>) {
-    // A track: its details (tags for a local file; what the source
-    // listed otherwise), the cover, and LOAD, on the pane's grey.
+    // As the unit lays it out: artist, album, time, BPM, key, date added,
+    // stars, comment; the cover top right; LOAD below.
     ui.painter().rect_filled(right, 0.0, Color32::from_rgb(50, 50, 50));
     let hb = Rect::from_min_size(right.min, Vec2::new(right.width(), 60.0 * u));
     ui.painter().rect_filled(hb, 0.0, PANE_HEAD);
     label(ui, Pos2::new(hb.min.x + 11.0 * u, hb.center().y), Align2::LEFT_CENTER, "INFO", 21.0, u, LABEL);
-    let tags = match e.load() {
+    let load_ref = e.load();
+    let tags = match load_ref {
         Some(crate::browser::Load::Local { path, .. }) => browse_tags(ui.ctx(), path),
         // A linked player's track: what its library knows.
         Some(l @ crate::browser::Load::Db { .. }) => b.db_tags(l),
         _ => None,
     }.unwrap_or_default();
-    let title = tags.title.clone().unwrap_or_else(|| e.name.clone());
+    let (dur, stars) = load_ref.and_then(|l| b.db_extra(l)).unwrap_or((None, 0));
     let artist = tags.artist.clone().or_else(|| e.artist.clone()).unwrap_or_default();
     let bpm = tags.bpm.or(e.bpm).map(|b| format!("{b:.1}")).unwrap_or_default();
     let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
     let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0, Color32::from_rgb(70, 70, 70)));
-    let clip = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 152.0), at(1270.0, 248.0)));
-    label(ui, at(758.0, 176.0), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
-    clip.text(at(780.0, 176.0), Align2::LEFT_CENTER, &title, FontId::proportional(26.0 * u), TEXT);
-    rule(200.0, 1270.0);
-    icon(ui, Icon::Person, at(758.0, 224.0), u);
-    clip.text(at(780.0, 224.0), Align2::LEFT_CENTER, &artist, FontId::proportional(26.0 * u), TEXT);
-    rule(248.0, 1270.0);
-    let small = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 248.0), at(1062.0, 440.0)));
-    let rows: [(&str, String); 4] = [
+    let small = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 150.0), at(1062.0, 480.0)));
+    let time = dur.map(|d| format!("{:02}:{:02}", d / 60, d % 60)).unwrap_or_default();
+    let rows: [(&str, String); 7] = [
+        ("person", artist),
         ("disc", tags.album.clone().unwrap_or_default()),
+        ("clock", time),
         ("BPM", bpm),
         ("b#", tags.key.clone().unwrap_or_default()),
         ("cal", tags.year.clone().unwrap_or_default()),
+        ("stars", String::new()),
     ];
     for (i, (k, v)) in rows.iter().enumerate() {
-        let y = 272.0 + 48.0 * i as f32;
+        let y = 176.0 + 46.0 * i as f32;
         match *k {
+            "person" => icon(ui, Icon::Person, at(758.0, y), u),
             "disc" => icon(ui, Icon::Disc, at(758.0, y), u),
+            "clock" => icon(ui, Icon::Clock, at(758.0, y), u),
             "cal" => icon(ui, Icon::Calendar, at(758.0, y), u),
+            "stars" => {}
             t => boxed(ui, t, at(758.0, y), u),
         }
-        small.text(at(780.0, y), Align2::LEFT_CENTER, v, FontId::proportional(22.0 * u), TEXT);
-        rule(y + 24.0, 1062.0);
+        if *k == "stars" {
+            for n in 0..5 {
+                let c = at(790.0 + 30.0 * n as f32, y);
+                if (n as u8) < stars { ui.painter().circle_filled(c, 8.0 * u, TEXT); }
+                else { ui.painter().circle_stroke(c, 8.0 * u, Stroke::new(1.5 * u, TEXT)); }
+            }
+        } else {
+            small.text(at(780.0, y), Align2::LEFT_CENTER, v, FontId::proportional(24.0 * u), TEXT);
+        }
+        rule(y + 23.0, 1062.0);
     }
-    draw_art(ui, ui.ctx(), &tags, "browse", Rect::from_min_max(at(1073.0, 252.0), at(1260.0, 439.0)));
+    draw_art(ui, ui.ctx(), &tags, "browse", Rect::from_min_max(at(1075.0, 160.0), at(1262.0, 347.0)));
     icon(ui, Icon::Bubble, at(758.0, 513.0), u);
     ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 490.0), at(1270.0, 536.0)))
         .text(at(780.0, 513.0), Align2::LEFT_CENTER, tags.comment.clone().unwrap_or_default(), FontId::proportional(20.0 * u), TEXT);
@@ -1900,14 +1909,14 @@ fn file_art(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::Texture
 static WAVE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 pub fn set_wave_mode(m: u8) { WAVE_MODE.store(m, std::sync::atomic::Ordering::Relaxed); }
 
-fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32) {
+fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32, wave_on: bool) {
     let p = ui.painter();
     // The whole PREVIEW cell but the cover: the wave runs edge to edge.
     let wave = Rect::from_min_max(Pos2::new(x0 + 1.0 * u, y0 + 2.0 * u), Pos2::new(x0 + 191.0 * u, y0 + 46.0 * u));
-    p.rect_filled(wave, 0.0, Color32::BLACK);
+    if wave_on { p.rect_filled(wave, 0.0, Color32::BLACK); }
     let anlz = match e.load() { Some(crate::browser::Load::Local { analyze: Some(a), .. }) => Some(a.clone()), _ => None };
     let mode = WAVE_MODE.load(std::sync::atomic::Ordering::Relaxed);
-    let bands = if mode == 2 { None } else { e.load().and_then(|l| b.db_bands(l)) };
+    let bands = if mode == 2 || !wave_on { None } else { e.load().and_then(|l| b.db_bands(l)) };
     let cols = (wave.width() / u).floor().max(1.0) as usize;   // one stroke per unit pixel
     let step = wave.width() / cols as f32;
     if let Some(w) = bands {
@@ -1933,7 +1942,7 @@ fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0
             let x = wave.min.x + (c as f32 + 0.5) * step;
             p.line_segment([Pos2::new(x, wave.max.y), Pos2::new(x, wave.max.y - h)], Stroke::new(step.max(1.0), col));
         }
-    } else if let Some(w) = anlz.as_deref().and_then(|a| rb_wave(ui.ctx(), a)).or_else(|| e.load().and_then(|l| b.db_wave(l))) {
+    } else if let Some(w) = anlz.as_deref().filter(|_| wave_on).and_then(|a| rb_wave(ui.ctx(), a)).or_else(|| e.load().filter(|_| wave_on).and_then(|l| b.db_wave(l))) {
         let n = w.len().max(1);
         for c in 0..cols {
             // The loudest source column under each pixel column.
@@ -1948,7 +1957,7 @@ fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0
             p.line_segment([Pos2::new(x, top), Pos2::new(x, wave.max.y)], Stroke::new(step.max(1.0), col));
         }
     }
-    let art = Rect::from_min_size(Pos2::new(x0 + 192.0 * u, y0 + 0.5 * u), Vec2::splat(47.0 * u));
+    let art = Rect::from_min_size(Pos2::new(x0 + if wave_on { 192.0 } else { 0.0 } * u, y0 + 0.5 * u), Vec2::splat(47.0 * u));
     if let Some(tags) = e.load().and_then(|l| b.db_tags(l)).filter(|t| t.artwork.is_some()) {
         draw_art(ui, ui.ctx(), &tags, &format!("row-{}", e.name), art);
     } else {
@@ -1964,7 +1973,8 @@ fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0
 /// LOAD in the BPM/KEY cells. Tap selects, a second tap (or LOAD) loads.
 fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32, bottom: f32, count_digits: usize, u: f32, out: &mut Vec<Event>) {
     // Columns from the left edge: PREVIEW 239, then TRACK from +240.
-    let (pv, tr) = (left + 239.0, left + 240.0);
+    let pw = if b.previews_on() { 239.0 } else { 48.0 };
+    let (pv, tr) = (left + pw, left + pw + 1.0);
     let vis = (((bottom - 152.0) / ROW_H).floor() as usize).max(1);
     let sc = lay.screen;
     let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
@@ -1981,18 +1991,28 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
         ui.painter().add(Shape::convex_polygon(vec![Pos2::new(x, y + h), Pos2::new(x + 2.0 * h, y + h), Pos2::new(x + h, y - h)], c, Stroke::NONE));
         x + 2.0 * h
     };
-    label(ui, at(left + 11.0, 122.0), Align2::LEFT_CENTER, "PREVIEW", 21.0, u, LABEL);
+    if b.previews_on() { label(ui, at(left + 11.0, 122.0), Align2::LEFT_CENTER, "PREVIEW", 21.0, u, LABEL); }
     let th = label(ui, at(tr + 11.0, 122.0), Align2::LEFT_CENTER, "TRACK", 21.0, u, ZOOM_BLUE);
     let tx = up(th, ZOOM_BLUE);
     label(ui, Pos2::new(tx + 22.0 * u, th.center().y), Align2::LEFT_CENTER, format!("[{:0w$}]", rows.len(), w = count_digits), 21.0, u, LABEL);
     up(label(ui, at(1090.0, 122.0), Align2::LEFT_CENTER, "BPM", 21.0, u, LABEL), LABEL);
     up(label(ui, at(1200.0, 122.0), Align2::LEFT_CENTER, "KEY", 21.0, u, LABEL), LABEL);
-    // INFO key, in the PREVIEW cell (the pane never covers it).
-    let ib = Rect::from_min_max(at(left + 150.0, 98.0), at(left + 230.0, 146.0));
-    p.rect_filled(ib, 0.0, if b.info_on() { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });
-    outline(ui, ib, Color32::BLACK, u);
-    label(ui, ib.center(), Align2::CENTER_CENTER, "INFO", 15.0, u, TEXT);
-    if tap(ui, ib, "cdj-trk-info").0 { out.push(Event::Ui(UiEvent::BrowseInfo)); }
+    // The tab strip above the table: PREVIEW, text size (inert), INFO.
+    {
+        let pt = Rect::from_min_max(at(890.0, 8.0), at(1045.0, 84.0));
+        let on = b.previews_on();
+        p.rect_filled(pt, 0.0, if on { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });
+        label(ui, pt.center(), Align2::CENTER_CENTER, "PREVIEW", 19.0, u, TEXT);
+        if tap(ui, pt, "cdj-trk-preview").0 { out.push(Event::Ui(UiEvent::BrowsePreview)); }
+        let at_ = Rect::from_min_max(at(1050.0, 8.0), at(1165.0, 84.0));
+        p.rect_filled(at_, 0.0, Color32::from_rgb(45, 45, 45));
+        label(ui, at_.center(), Align2::CENTER_CENTER, "A A A", 19.0, u, LABEL);
+        let it = Rect::from_min_max(at(1172.0, 8.0), at(1275.0, 84.0));
+        let ion = b.info_on();
+        p.rect_filled(Rect::from_center_size(Pos2::new(it.min.x + 16.0 * u, it.center().y), Vec2::splat(26.0 * u)), 2.0, if ion { SEL_BLUE } else { Color32::from_rgb(70, 70, 70) });
+        label(ui, Pos2::new(it.min.x + 52.0 * u, it.center().y), Align2::CENTER_CENTER, "INFO", 19.0, u, if ion { SEL_BLUE } else { TEXT });
+        if tap(ui, it, "cdj-trk-info").0 { out.push(Event::Ui(UiEvent::BrowseInfo)); }
+    }
     // The second-row key: a box with ⌃⌄, lit while a detail row shows.
     let sb = Rect::from_min_max(at(1011.0, 98.0), at(1069.0, 146.0));
     p.rect_filled(sb, 0.0, if b.detail_name().is_some() { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });
@@ -2030,7 +2050,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
         let lit = i == sel;
         let stripe = if k % 2 == 0 { Color32::from_rgb(40, 40, 40) } else { BG };
         p.rect_filled(Rect::from_min_max(at(left, y), at(pv, y + ROW_H)), 0.0, stripe);
-        draw_row_preview(ui, b, e, sc.min.x + left * u, sc.min.y + y * u, u);
+        draw_row_preview(ui, b, e, sc.min.x + left * u, sc.min.y + y * u, u, b.previews_on());
         p.rect_filled(Rect::from_min_max(at(tr, y), at(1280.0, y + ROW_H)), 0.0, if lit { SEL_BLUE } else { stripe });
         let cy = sc.min.y + (y + ROW_H / 2.0) * u;
         let title = Rect::from_min_max(at(tr, y), at(1079.0, y + ROW_H));

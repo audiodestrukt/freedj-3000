@@ -289,6 +289,8 @@ pub struct TrackMeta {
     /// "yyyy-mm-dd" the track was added to the library.
     pub added: Option<String>,
     pub bpm: Option<f32>,
+    /// Length in seconds, and the 0–5 star rating.
+    pub duration: Option<u32>, pub rating: u8,
     /// The cover's id for [`Client::artwork`] (0 = none).
     pub artwork_id: u32,
 }
@@ -307,6 +309,8 @@ impl TrackMeta {
                 0x11 if m.year.is_none()   => m.year   = text(r),
                 0x23 if m.comment.is_none() => m.comment = text(r),
                 0x2e if m.added.is_none()  => m.added  = text(r),
+                0x0b if m.duration.is_none() => m.duration = Some(r.id).filter(|d| *d > 0),
+                0x0a => m.rating = (r.id as u8).min(5),
                 0x0d if m.bpm.is_none()    => m.bpm    = Some(r.id as f32 / 100.0).filter(|b| *b > 0.0),
                 _ => {}
             }
