@@ -3603,6 +3603,7 @@ impl DeckApp {
         }
         let mut touch = Vec::new();
         let _t_run = Instant::now();
+        cdj3000::set_source_badge(self.browser.source_badge());
         let view = match self.screen_mode {
             ScreenMode::Playback => screen::ScreenView::Playback,
             ScreenMode::Browse   => screen::ScreenView::Browse(&self.browser),

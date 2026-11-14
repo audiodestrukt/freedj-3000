@@ -1392,10 +1392,21 @@ fn draw_status_strip(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &m
 }
 
 /// The header of a list screen: source tile, ← BACK, the title with its icon.
-fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, folder_icon: bool, badge: Option<(u8, u8)>, u: f32, out: &mut Vec<Event>) {
+/// The linked stick last browsed (player, colour), for the source tile of the
+/// screens that are not about one stick (TAG LIST, UTILITY).
+static SOURCE_BADGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub fn set_source_badge(b: Option<(u8, u8)>) {
+    SOURCE_BADGE.store(b.map_or(0, |(p, c)| 1 << 16 | (p as u32) << 8 | c as u32), std::sync::atomic::Ordering::Relaxed);
+}
+fn cached_badge() -> Option<(u8, u8)> {
+    let v = SOURCE_BADGE.load(std::sync::atomic::Ordering::Relaxed);
+    (v >> 16 != 0).then_some((((v >> 8) & 0xff) as u8, (v & 0xff) as u8))
+}
+
+/// The source tile at the top left: tinted with the stick's colour label, its
+/// player number in the corner.
+fn draw_source_tile(ui: &Ui, snap: &DeckSnapshot, s: Rect, badge: Option<(u8, u8)>, u: f32) {
     let p = ui.painter();
-    p.rect_filled(lay.header, 0.0, HEADER);
-    let s = lay.source;
     p.rect_filled(s, 0.0, badge.and_then(|(_, c)| stick_color(c)).unwrap_or(SOURCE_TILE));
     if let Some((n, _)) = badge {
         let bd = Rect::from_min_size(Pos2::new(s.min.x + 2.0 * u, s.min.y + 2.0 * u), Vec2::splat(22.0 * u));
@@ -1405,6 +1416,13 @@ fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, fol
     }
     label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
     label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
+}
+
+fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, folder_icon: bool, badge: Option<(u8, u8)>, u: f32, out: &mut Vec<Event>) {
+    let p = ui.painter();
+    p.rect_filled(lay.header, 0.0, HEADER);
+    let s = lay.source;
+    draw_source_tile(ui, snap, s, badge, u);
     let back = Rect::from_min_max(Pos2::new(lay.screen.min.x + 121.0 * u, lay.screen.min.y + 21.0 * u),
                                   Pos2::new(lay.screen.min.x + 169.0 * u, lay.screen.min.y + 69.0 * u));
     if tap(ui, back, "cdj-list-back").0 { out.push(Event::Deck(ControlEvent::Back)); }
@@ -2157,9 +2175,7 @@ fn draw_search(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     // Header: source tile, then the search field.
     p.rect_filled(lay.header, 0.0, HEADER);
     let st = lay.source;
-    p.rect_filled(st, 0.0, SOURCE_TILE);
-    label(ui, Pos2::new(st.center().x, st.min.y + 66.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
-    label(ui, Pos2::new(st.center().x, st.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
+    draw_source_tile(ui, snap, st, b.source_badge(), u);
     let field = Rect::from_min_max(at(109.0, 20.0), at(874.0, 70.0));
     p.rect_filled(field, 0.0, Color32::BLACK);
     let m = at(137.0, 43.0);
@@ -2229,7 +2245,7 @@ fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: 
     let rows: Vec<Row> = tags.entries().iter().map(|e| Row {
         icon: RowIcon::Track, text: &e.name, value: e.artist.clone(), tagged: false, played: false, stems: false,
     }).collect();
-    draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, None, u, out);
+    draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, cached_badge(), u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
     draw_list(ui, pane, "TRACK", &rows, tags.selected, "No tagged tracks. Tag one in BROWSE.", u, Some(out));
@@ -2244,7 +2260,7 @@ fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings,
         icon: RowIcon::None, text: name, tagged: false, played: false, stems: false,
         value: Some(match s { Setting::Stems => snap.stems.state.menu_value().unwrap_or_else(|| settings.value(*s)), _ => settings.value(*s) }),
     }).collect();
-    draw_list_header(ui, snap, lay, "UTILITY", false, None, u, out);
+    draw_list_header(ui, snap, lay, "UTILITY", false, cached_badge(), u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
     draw_list(ui, pane, "SETTINGS", &rows, cursor, "", u, None);
