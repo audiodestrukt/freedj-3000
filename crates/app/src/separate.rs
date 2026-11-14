@@ -485,7 +485,7 @@ mod real {
         // On a stick with OverCue stems for this file: how close are ours?
         // SDR with OverCue's stem as the reference (higher is closer).
         let track = std::sync::Arc::new(track);
-        if let Ok(Some(oc)) = crate::stems::load_local(std::path::Path::new(&inp), &track, sr, 2) {
+        if let Ok(Some(oc)) = crate::stems::load_local(std::path::Path::new(&inp), &track, sr, 2, None) {
             for (i, name) in ["drums", "vocal", "harmonics"].iter().enumerate() {
                 let (mut num, mut den) = (0f64, 0f64);
                 for (a, b) in oc.stem(i).iter().zip(&stems[i]) {

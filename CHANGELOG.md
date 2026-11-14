@@ -85,6 +85,12 @@ All notable changes to this project will be documented in this file.
   `--screen-only` still override it for one run.
 
 ### Changed
+- Stems from an OverCue stick play almost at once. The bank is read page by
+  page from the start of the track, each page checked as it arrives, and the
+  deck plays the stems as far as they have got and the track itself beyond
+  that. On a real stick: stems playing 0.15 s after a load, where the whole
+  bank used to be read first (1.5–2 s on a desktop, longer on an iPad). A
+  bank that fails a check partway is dropped and the track plays on.
 - Audio decoding moved to Symphonia 0.6.1.  Checked against 0.5 on 23 files
   (MP3 CBR / VBR / 44.1 kHz and two real tracks, AAC, ALAC, FLAC, WAV, AIFF
   at 16 / 24 / 32-bit and float, Vorbis, 5.1): every format decodes to the

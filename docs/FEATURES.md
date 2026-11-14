@@ -28,7 +28,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | rekordbox USB sticks: export.pdb categories (ARTIST, ALBUM, TRACK, KEY, PLAYLIST, HISTORY, FOLDER), beat grids, memory and hot cues, preview waveforms, covers | ✅ | All |
 | USB drives plugged into the device (iOS: "USB: ADD DRIVE…" picker, remembered; Android: "All files access") | ✅ | iOS, And, D, Pi |
 | Files-app music folder with a bundled demo track | ✅ | iOS (Android: Music folder) |
-| Stems prepared with OverCue Desktop: mute / solo / level per stem (MENU → STEMS, off by default); the enlarged waveform follows the stem mix; BROWSE marks stem tracks "S" | ✅ | All |
+| Stems prepared with OverCue Desktop: mute / solo / level per stem (MENU → STEMS, off by default); the enlarged waveform follows the stem mix; BROWSE marks stem tracks "S". Read page by page: stems play about 0.15 s after a load, before the whole bank is in | ✅ | All |
 | Stems split on the device with HTDemucs when a track has none prepared; the stems play as the split goes ("SPLITTING n%"), the rest of the track as normal; model supplied by the user | 🧪 Linux desktop (`separate-onnx`) measured; runs on iPad Air 13" (0.3.13) | iOS, D (Linux) |
 | Sorting, TRACK FILTER, KEY SYNC (CDJ-3000 screen) | 📋 | — |
 | From rekordbox sticks: hot cue colours, memory cue colours and comments, read from the `.EXT` (USB and LINK) and passed on to CDJs | ✅ byte-built tests; a CDJ-3000 (emulator) draws the colours | All |

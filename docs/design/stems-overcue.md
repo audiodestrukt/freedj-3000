@@ -137,8 +137,21 @@ an exact 2:1 decimation (a half-band FIR, cheap, works on any range). 96 →
 
 ### Load in pages, starting at the playhead
 
-Decode and resample page by page, from the cue point outward, into a
-preallocated stem buffer. A per-page "ready" bitmap is published atomically.
+**Built 2026-11-14, from the start of the track rather than the cue**
+(`stems::build_paged`). The page tables are checked first; the offset is
+measured on the few full-mix pages around 25 / 50 / 75 %; then an empty bank
+is published and filled from the start in 4-second steps, each page checked
+against its hash as it is read, with a whole-role hash check at the end
+(FORMAT.md: "a real-time reader can verify the table up front and pages as
+it fetches them"). The deck plays stems up to the fill point and the track
+after it, the same mechanism as an on-device split. On Dan's stick (release
+build, desktop): stems playing 0.15 s after a load, the whole bank in
+1.5–2.1 s. Starting from the cue, not the top, is still open; it matters
+only for a load cued deep into a long track.
+
+The original plan: decode and resample page by page, from the cue point
+outward, into a preallocated stem buffer. A per-page "ready" bitmap is
+published atomically.
 
 - The processor uses the stem mix only where every page in the block is
   ready. Anywhere else it plays the original.

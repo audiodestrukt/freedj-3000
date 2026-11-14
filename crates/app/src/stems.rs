@@ -239,8 +239,10 @@ impl StemMarks {
 }
 
 /// Build the bank for a local file just loaded as `track` (interleaved,
-/// `deck_sr`, stereo).  `Ok(None)`: the file has no prepared stems.
-pub fn load_local(file: &Path, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize) -> Result<Option<StemBank>> {
+/// `deck_sr`, stereo).  `Ok(None)`: the file has no prepared stems.  With a
+/// `job`, the bank is published there as soon as it starts filling, so the
+/// deck plays the stems read so far (see [`build`]).
+pub fn load_local(file: &Path, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize, job: Option<&crate::separate::Job>) -> Result<Option<Arc<StemBank>>> {
     let Some((root, rel)) = find_stick(file) else { return Ok(None) };
     let mut media = oc::DirMedia::new(&root);
     let Some(index) = oc::Index::read(&mut media)? else { return Ok(None) };
@@ -249,12 +251,30 @@ pub fn load_local(file: &Path, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize) -
         let got = sha256_file(file)?;
         ensure!(got == want, "{rel}: the stems were prepared from a different version of this file; prepare them again");
     }
-    build(&mut media, &entry, track, deck_sr, ch).with_context(|| rel.clone()).map(Some)
+    build(&mut media, &entry, track, deck_sr, ch, job).with_context(|| rel.clone()).map(Some)
 }
 
+/// Seconds of stems each step of a paged load reads, converts and appends.
+const PAGED_STEP_SECS: usize = 4;
+/// Source frames read either side of a step, so the rate converter has the
+/// audio around it and a step's edges match a whole-role conversion.
+const PAGED_MARGIN: usize = 8192;
+
 /// Read, convert, align and shift a bank onto `track`.
-pub fn build(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize) -> Result<StemBank> {
+///
+/// Paged (`.pgz` banks, the spec's real-time reading): the page tables are
+/// checked first, the offset is measured on the few full-mix pages it
+/// needs, then an empty bank is published (on `job`) and filled from the
+/// start a few seconds at a time, each page checked against its hash as it
+/// is read.  The deck plays the stems up to where the bank has got and the
+/// track itself after that, so stems are there within a second of a load
+/// instead of after the whole bank.  Once every page has gone by, each
+/// role's whole-PCM hash is checked too; a mismatch drops the bank.
+pub fn build(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize, job: Option<&crate::separate::Job>) -> Result<Arc<StemBank>> {
     ensure!(ch == 2, "stems need a stereo deck (deck has {ch} channels)");
+    if entry.layout != oc::index::Layout::Wav {
+        return build_paged(media, entry, track, deck_sr, job);
+    }
     let t0 = std::time::Instant::now();
     let full = role_at(media, entry, Role::FullMix, deck_sr)?;
     let offset = align(track, &full, deck_sr)?;
@@ -267,6 +287,156 @@ pub fn build(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32>>
     bank.finish(deck_sr);
     log::info!("stems: bank {} ready, offset {offset} frames ({:.2} ms), {:.1}s",
                entry.bundle, offset as f64 * 1e3 / deck_sr as f64, t0.elapsed().as_secs_f32());
+    Ok(Arc::new(bank))
+}
+
+/// One role read page by page: pages kept while a step still needs them,
+/// and the whole-role hash taken as the pages first go by, in order.
+struct PagedRole {
+    reader: oc::RoleReader,
+    cache: std::collections::BTreeMap<usize, Vec<i16>>,
+    hasher: sha2::Sha256,
+    hashed: usize,
+}
+
+impl PagedRole {
+    fn open(media: &mut dyn oc::Media, entry: &oc::Entry, role: Role) -> Result<PagedRole> {
+        use sha2::Digest;
+        Ok(PagedRole { reader: oc::RoleReader::open(media, entry, role)?, cache: Default::default(), hasher: sha2::Sha256::new(), hashed: 0 })
+    }
+
+    fn frames(&self) -> usize { self.reader.frames() }
+
+    /// Page `i`, read and checked once.
+    fn page(&mut self, media: &mut dyn oc::Media, i: usize) -> Result<&Vec<i16>> {
+        use sha2::Digest;
+        if !self.cache.contains_key(&i) {
+            let p = self.reader.page(media, i)?;
+            if i == self.hashed {
+                for v in &p { self.hasher.update(v.to_le_bytes()); }
+                self.hashed += 1;
+            }
+            self.cache.insert(i, p);
+        }
+        Ok(&self.cache[&i])
+    }
+
+    /// Source frames `[a, b)` (clamped to the role) as interleaved i16.
+    fn source(&mut self, media: &mut dyn oc::Media, a: usize, b: usize) -> Result<Vec<i16>> {
+        let pf = self.reader.page_frames(0).max(1);
+        let b = b.min(self.frames());
+        let mut out = Vec::with_capacity(b.saturating_sub(a) * 2);
+        if a >= b { return Ok(out); }
+        for i in a / pf..=(b - 1) / pf {
+            let start = i * pf;
+            let p = self.page(media, i)?;
+            let lo = a.max(start) - start;
+            let hi = (b.min(start + p.len() / 2)) - start;
+            out.extend_from_slice(&p[lo * 2..hi * 2]);
+        }
+        Ok(out)
+    }
+
+    /// Forget pages before source frame `a`.
+    fn drop_before(&mut self, a: usize) {
+        let pf = self.reader.page_frames(0).max(1);
+        let keep = self.cache.split_off(&(a / pf));
+        self.cache = keep;
+    }
+
+    /// Read any pages not yet hashed and check the whole-role hash.
+    fn finish(mut self, media: &mut dyn oc::Media) -> Result<()> {
+        use sha2::Digest;
+        while self.hashed < self.reader.pages.len() {
+            let i = self.hashed;
+            self.cache.remove(&i);
+            self.page(media, i)?;
+            self.cache.remove(&i);
+        }
+        let got: [u8; 32] = self.hasher.finalize().into();
+        ensure!(got == self.reader.full_sha256(), "{}: full PCM checksum mismatch", self.reader.path);
+        Ok(())
+    }
+}
+
+/// Deck-rate frames `[a, b)` (may run past either end: silence there) of a
+/// role stored at `from` Hz, converted to `to` Hz exactly as converting the
+/// whole role would: the source span is widened by [`PAGED_MARGIN`] and
+/// started on a frame that maps to a whole deck frame.
+fn deck_span(role: &mut PagedRole, media: &mut dyn oc::Media, from: u32, to: u32, a: isize, b: isize) -> Result<Vec<i16>> {
+    let mut out = vec![0i16; (b - a).max(0) as usize * 2];
+    let total_out = match (from, to) {
+        (x, y) if x == y => role.frames(),
+        (96_000, 48_000) => role.frames().div_ceil(2),
+        _ => (role.frames() as f64 * to as f64 / from as f64).round() as usize,
+    };
+    let (lo, hi) = (a.max(0) as usize, (b.max(0) as usize).min(total_out));
+    if lo >= hi { return Ok(out); }
+    let g = gcd(from as u64, to as u64);
+    let (q, r) = ((from as u64 / g) as usize, (to as u64 / g) as usize);   // q source frames = r deck frames
+    let s0 = ((lo * from as usize / to as usize).saturating_sub(PAGED_MARGIN)) / q * q;
+    let s1 = (hi * from as usize).div_ceil(to as usize) + PAGED_MARGIN;
+    let src = role.source(media, s0, s1)?;
+    let conv: Vec<i16> = match (from, to) {
+        (x, y) if x == y => src,
+        (96_000, 48_000) => oc::decimate::decimate2(&src),
+        _ => {
+            let f: Vec<f32> = src.iter().map(|s| *s as f32 / 32768.0).collect();
+            crate::audio::resample_interleaved(&f, 2, from, to)?
+                .iter().map(|v| (v * 32768.0).round().clamp(-32768.0, 32767.0) as i16).collect()
+        }
+    };
+    let d0 = s0 / q * r;   // the deck frame conv[0] lands on
+    for f in lo..hi {
+        let k = f - d0;
+        if k * 2 + 1 < conv.len() {
+            let o = (f as isize - a) as usize * 2;
+            out[o..o + 2].copy_from_slice(&conv[k * 2..k * 2 + 2]);
+        }
+    }
+    Ok(out)
+}
+
+fn gcd(a: u64, b: u64) -> u64 { if b == 0 { a } else { gcd(b, a % b) } }
+
+fn build_paged(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32>>, deck_sr: u32, job: Option<&crate::separate::Job>) -> Result<Arc<StemBank>> {
+    let t0 = std::time::Instant::now();
+    let from = entry.sample_rate;
+    // Every table first: a bad bank is refused before anything plays.
+    let mut full = PagedRole::open(media, entry, Role::FullMix)?;
+    let mut roles = ROLES.map(|r| PagedRole::open(media, entry, r)).into_iter().collect::<Result<Vec<_>>>()?;
+    let full_frames = match (from, deck_sr) {
+        (x, y) if x == y => full.frames(),
+        (96_000, 48_000) => full.frames().div_ceil(2),
+        _ => (full.frames() as f64 * deck_sr as f64 / from as f64).round() as usize,
+    };
+    let offset = align_by(track, full_frames, |a, b| deck_span(&mut full, media, from, deck_sr, a as isize, b as isize), deck_sr)?;
+    drop(full);
+    let mut bank = StemBank::filling(track);
+    bank.offset_frames = offset;
+    let bank = Arc::new(bank);
+    if let Some(j) = job { let _ = j.bank.set(Arc::clone(&bank)); }
+    let frames = track.len() / 2;
+    let step = deck_sr as usize * PAGED_STEP_SECS;
+    let mut first = None;
+    for o0 in (0..frames).step_by(step) {
+        if job.is_some_and(|j| j.cancel.load(Ordering::Relaxed)) { bail!("cancelled"); }
+        let o1 = (o0 + step).min(frames);
+        let (a, b) = (o0 as isize + offset, o1 as isize + offset);
+        let mut got: [Vec<i16>; 3] = Default::default();
+        for (s, role) in roles.iter_mut().enumerate() {
+            got[s] = deck_span(role, media, from, deck_sr, a, b)?;
+            role.drop_before((a.max(0) as usize * from as usize / deck_sr as usize).saturating_sub(2 * PAGED_MARGIN));
+        }
+        bank.append([&got[0], &got[1], &got[2]]);
+        if let Some(j) = job { j.progress.store((o1 as u64 * 1000 / frames.max(1) as u64) as u32, Ordering::Relaxed); }
+        first.get_or_insert(t0.elapsed());
+    }
+    for role in roles { role.finish(media)?; }
+    bank.finish(deck_sr);
+    log::info!("stems: bank {} ready, offset {offset} frames ({:.2} ms); first {}s playable in {:.2}s, whole bank {:.1}s",
+               entry.bundle, offset as f64 * 1e3 / deck_sr as f64, PAGED_STEP_SECS,
+               first.unwrap_or_default().as_secs_f32(), t0.elapsed().as_secs_f32());
     Ok(bank)
 }
 
@@ -335,11 +505,16 @@ fn shift(stem: &[i16], offset: isize, len: usize) -> Vec<i16> {
 /// `full[n + d] ≈ deck[n]`.  Measured at three points in the track; they
 /// must agree and correlate strongly, else the bank is refused.
 pub fn align(deck: &[f32], full: &[i16], sr: u32) -> Result<isize> {
+    align_by(deck, full.len() / 2, |a, b| Ok(full[a * 2..(b * 2).min(full.len())].to_vec()), sr)
+}
+
+/// [`align`] reading the full mix through `full_at(a, b)` (deck-rate frames
+/// `[a, b)`, interleaved), so a paged load reads only the pages it needs.
+pub fn align_by(deck: &[f32], full_frames: usize, mut full_at: impl FnMut(usize, usize) -> Result<Vec<i16>>, sr: u32) -> Result<isize> {
     let mono_d: Vec<f32> = deck.chunks_exact(2).map(|f| f[0] + f[1]).collect();
-    let mono_f: Vec<f32> = full.chunks_exact(2).map(|f| (f[0] as f32 + f[1] as f32) / 32768.0).collect();
     let win = sr as usize;          // 1 s windows
     let max_lag = sr as usize / 4;  // ±250 ms
-    let n = mono_d.len().min(mono_f.len());
+    let n = mono_d.len().min(full_frames);
     ensure!(n > win + 2 * max_lag + 64, "track too short to align stems");
     let mut found = Vec::new();
     for frac in [0.25, 0.5, 0.75] {
@@ -351,9 +526,12 @@ pub fn align(deck: &[f32], full: &[i16], sr: u32) -> Result<isize> {
         let dec = |s: &[f32]| -> Vec<f32> { s.chunks(D).map(|c| c.iter().sum::<f32>() / D as f32).collect() };
         let a8 = dec(a);
         let lag8 = (max_lag / D) as isize;
-        let b8 = dec(&mono_f[start - max_lag..start + win + max_lag]);
+        let mono_f: Vec<f32> = full_at(start - max_lag, start + win + max_lag)?
+            .chunks_exact(2).map(|f| (f[0] as f32 + f[1] as f32) / 32768.0).collect();
+        ensure!(mono_f.len() == win + 2 * max_lag, "full mix shorter than its index says");
+        let b8 = dec(&mono_f);
         let coarse = (-lag8..=lag8).max_by(|x, y| ncc(&a8, &b8, x + lag8).total_cmp(&ncc(&a8, &b8, y + lag8))).unwrap() * D as isize;
-        let b = &mono_f[start - max_lag..start + win + max_lag];
+        let b = &mono_f[..];
         let (best, score) = (coarse - 12..=coarse + 12)
             .filter(|l| l.unsigned_abs() <= max_lag)
             .map(|l| (l, ncc(a, b, l + max_lag as isize)))
@@ -550,7 +728,7 @@ mod tests {
         let mut deck = vec![0f32; late * 2];
         deck.extend(full48.iter().map(|v| *v as f32 / 32768.0));
         let track = Arc::new(deck);
-        let bank = load_local(&file, &track, 48_000, 2).unwrap().unwrap();
+        let bank = load_local(&file, &track, 48_000, 2, None).unwrap().unwrap();
         assert_eq!(bank.offset_frames, -(late as isize));
         assert!(bank.is_for(&track));
         assert_eq!(bank.len(), track.len());
@@ -574,9 +752,102 @@ mod tests {
         assert!(marks.has_stems(&file), "cached answer");
         // A changed original (re-exported) is refused.
         std::fs::write(&file, b"another version").unwrap();
-        assert!(load_local(&file, &track, 48_000, 2).is_err());
+        assert!(load_local(&file, &track, 48_000, 2, None).is_err());
         // A file not on a prepared stick has no stems.
-        assert!(load_local(elsewhere.path(), &track, 48_000, 2).unwrap().is_none());
+        assert!(load_local(elsewhere.path(), &track, 48_000, 2, None).unwrap().is_none());
+    }
+
+    /// A stick bank read page by page is the bank a whole read gives: at
+    /// 48 kHz (exact 2:1 from 96 kHz), at 44.1 kHz (the general converter)
+    /// and from a 44.1 kHz stick; published on the job before it is done;
+    /// and a damaged page still refuses it.
+    #[test]
+    fn a_paged_load_is_the_whole_load_and_plays_while_it_fills() {
+        for (codec, src, deck_sr, exact) in [(SynthCodec::Flac96, 96_000u32, 48_000u32, true),
+                                             (SynthCodec::Flac96, 96_000, 44_100, false),
+                                             (SynthCodec::Flac44, 44_100, 48_000, false)] {
+            let frames = src as usize * 13;
+            let stems: Vec<Vec<i16>> = (1..=3).map(|s| sig(s, frames, src as f64).iter().map(|v| v / 3).collect()).collect();
+            let full = sum(&stems);
+            let d = tempfile::tempdir().unwrap();
+            let mut roles = BTreeMap::new();
+            for (r, s) in ROLES.iter().zip(&stems) { roles.insert(*r, s.clone()); }
+            roles.insert(Role::FullMix, full.clone());
+            let path = "/Contents/A/T.mp3";
+            write_stick(d.path(), &[SynthTrack { id: 1, onelibrary_id: None, file_path: path.into(), source: b"orig".to_vec(), roles }],
+                        codec, None).unwrap();
+            let file = d.path().join("Contents/A/T.mp3");
+            // The deck's decode: the full mix at the deck rate, 70 frames late.
+            let mut media = oc::DirMedia::new(d.path());
+            let entry = oc::Index::read(&mut media).unwrap().unwrap().by_path(path).unwrap().cloned().unwrap();
+            let full_deck = role_at(&mut media, &entry, Role::FullMix, deck_sr).unwrap();
+            let mut deck = vec![0f32; 140];
+            deck.extend(full_deck.iter().map(|v| *v as f32 / 32768.0));
+            let track = Arc::new(deck);
+            // The whole read, as the loader did before paging.
+            let offset = align(&track, &full_deck, deck_sr).unwrap();
+            let whole: Vec<Vec<i16>> = ROLES.iter().map(|r| shift(&role_at(&mut media, &entry, *r, deck_sr).unwrap(), offset, track.len())).collect();
+
+            let job = crate::separate::Job::default();
+            let bank = load_local(&file, &track, deck_sr, 2, Some(&job)).unwrap().unwrap();
+            assert!(job.bank.get().is_some_and(|b| Arc::ptr_eq(b, &bank)), "published on the job while filling");
+            assert_eq!(job.progress.load(Ordering::Relaxed), 1000);
+            assert_eq!(bank.offset_frames, offset);
+            for (k, w) in whole.iter().enumerate() {
+                let got = bank.stem(k);
+                let worst = got.iter().zip(w).map(|(a, b)| (*a as i32 - *b as i32).abs()).max().unwrap();
+                assert!(if exact { worst == 0 } else { worst <= 2 }, "{codec:?} → {deck_sr}: stem {k} differs by up to {worst}");
+            }
+
+            // A damaged page: refused, though it had started playing.
+            fn find(dir: &Path) -> Option<PathBuf> {
+                for e in std::fs::read_dir(dir).ok()?.flatten() {
+                    let p = e.path();
+                    if p.is_dir() { if let Some(f) = find(&p) { return Some(f); } }
+                    else if p.file_name().is_some_and(|n| n.to_string_lossy().contains("drums")) { return Some(p); }
+                }
+                None
+            }
+            let drums = find(&d.path().join("CDJMODS")).expect("drums file");
+            let mut bytes = std::fs::read(&drums).unwrap();
+            let n = bytes.len();
+            bytes[n - 100] ^= 0x55;
+            std::fs::write(&drums, bytes).unwrap();
+            let job = crate::separate::Job::default();
+            assert!(load_local(&file, &track, deck_sr, 2, Some(&job)).is_err(), "{codec:?}: a damaged page is refused");
+            assert!(job.bank.get().is_some(), "it had been published, so the deck drops it (poll_stems)");
+        }
+    }
+
+    /// A real OverCue track: how soon stems play, against the whole bank.
+    /// `OPENDECK_REAL_STEMS=/run/media/$USER/CDJ2/Contents/…/track.mp3
+    ///  cargo test --release -p opendeck-app real_stems_paged -- --ignored --nocapture`
+    #[test]
+    #[ignore]
+    fn real_stems_paged() {
+        use opendeck_types::Decoder;
+        let Some(file) = std::env::var_os("OPENDECK_REAL_STEMS") else { return };
+        let file = PathBuf::from(file);
+        let mut dec = opendeck_decode::symphonia_decoder::SymphoniaDecoder::open(&file).unwrap();
+        let mut buf = vec![0f32; 4096 * 2];
+        let mut pcm = Vec::new();
+        loop { match dec.decode(&mut buf).unwrap() { 0 => break, n => pcm.extend_from_slice(&buf[..n * 2]) } }
+        let sr = 48_000;
+        let track = Arc::new(crate::audio::resample_interleaved(&pcm, 2, dec.sample_rate(), sr).unwrap());
+        let job = Arc::new(crate::separate::Job::default());
+        let (j, t, f) = (Arc::clone(&job), Arc::clone(&track), file.clone());
+        let t0 = std::time::Instant::now();
+        let h = std::thread::spawn(move || load_local(&f, &t, sr, 2, Some(&j)).unwrap().unwrap());
+        let mut first = None;
+        while !h.is_finished() {
+            if first.is_none() && job.bank.get().is_some_and(|b| b.ready() >= sr as usize * 2 * 4) { first = Some(t0.elapsed()); }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let bank = h.join().unwrap();
+        let first = first.unwrap_or(t0.elapsed());
+        println!("{}: {:.0}s track, offset {} frames | first 4 s of stems playing after {:.2}s | whole bank {:.2}s",
+                 file.file_name().unwrap().to_string_lossy(), track.len() as f64 / 2.0 / sr as f64, bank.offset_frames,
+                 first.as_secs_f64(), t0.elapsed().as_secs_f64());
     }
 
     /// The enlarged waveform follows the stems: one stem alone is that

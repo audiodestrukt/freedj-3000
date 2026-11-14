@@ -122,6 +122,13 @@ impl RoleReader {
         Ok(RoleReader { role, path, codec, page_bytes, total_bytes: total, pages, full_sha256 })
     }
 
+    /// SHA-256 of the whole expanded role, as the index lists it (a paged
+    /// reader checks it once every page has gone by).
+    pub fn full_sha256(&self) -> [u8; 32] { self.full_sha256 }
+
+    /// Stereo frames in the whole role.
+    pub fn frames(&self) -> usize { (self.total_bytes / 4) as usize }
+
     /// Stereo frames in page `i`.
     pub fn page_frames(&self, i: usize) -> usize { self.pages[i].expanded as usize / 4 }
 

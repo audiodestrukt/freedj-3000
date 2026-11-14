@@ -2599,9 +2599,9 @@ impl DeckApp {
         let job = Arc::new(separate::Job { on_start: Some(split_start_trace), on_chunk: Some(split_chunk_trace), ..Default::default() });
         let j = Arc::clone(&job);
         let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
-            let got = match stems::load_local(&path, &track, sr, ch) {
+            let got = match stems::load_local(&path, &track, sr, ch, Some(&j)) {
                 Ok(None) if ch == 2 => split_on_device(&path, &track, sr, &j),
-                r => r.map(|b| b.map(Arc::new)),
+                r => r,
             };
             let _ = tx.send(got);
         });
