@@ -25,30 +25,91 @@ use opendeck_stems::{self as oc, Role};
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::atomic::{AtomicI16, AtomicU32, AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock, Weak};
 use opendeck_analysis::waveform::{WaveformBuilder, WaveformColumn};
 
 /// Stem order everywhere in the deck: drums, vocal, harmonics.
 pub const ROLES: [Role; 3] = Role::STEMS;
 
 /// A track's stems at the deck rate, aligned to its decode.
+///
+/// A bank can fill while it plays: a split on the device publishes an
+/// empty bank and writes each finished stretch in order, from the start.
+/// `ready` marks how far it has got (interleaved samples); the processor
+/// plays the stems before it and the original after it.  One writer; the
+/// samples are atomics so the audio thread can read them while it writes.
 pub struct StemBank {
     track: Weak<Vec<f32>>,
     /// Interleaved stereo i16, same length as the track's samples.
-    pub data: [Vec<i16>; 3],
+    data: [Box<[AtomicI16]>; 3],
+    ready: AtomicUsize,
     /// Frames the bank was shifted by to line up (for the log and tests).
     #[cfg_attr(not(test), allow(dead_code))]
     pub offset_frames: isize,
     /// Each stem's waveform columns (same analysis as the track's own), for
-    /// the enlarged waveform while the mix is changed.
-    pub waves: [Vec<WaveformColumn>; 3],
+    /// the enlarged waveform while the mix is changed.  Set once the bank
+    /// is complete.
+    pub waves: OnceLock<[Vec<WaveformColumn>; 3]>,
 }
 
+/// i16 → atomic in place (the same layout: `collect` reuses the buffer).
+fn atomics(v: Vec<i16>) -> Box<[AtomicI16]> { v.into_iter().map(AtomicI16::new).collect() }
+
 impl StemBank {
+    /// A complete bank (its waveforms come with [`finish`](Self::finish)).
+    pub fn new(track: &Arc<Vec<f32>>, data: [Vec<i16>; 3], offset_frames: isize) -> StemBank {
+        let ready = data.iter().map(Vec::len).min().unwrap_or(0);
+        StemBank { track: Arc::downgrade(track), data: data.map(atomics), ready: AtomicUsize::new(ready), offset_frames, waves: OnceLock::new() }
+    }
+
+    /// An empty bank for `track`, to be filled with [`append`](Self::append).
+    pub fn filling(track: &Arc<Vec<f32>>) -> StemBank {
+        let n = track.len();
+        StemBank {
+            track: Arc::downgrade(track),
+            data: std::array::from_fn(|_| (0..n).map(|_| AtomicI16::new(0)).collect()),
+            ready: AtomicUsize::new(0), offset_frames: 0, waves: OnceLock::new(),
+        }
+    }
+
     /// Built for exactly this sample buffer (the one the deck is playing)?
     pub fn is_for(&self, track: &Arc<Vec<f32>>) -> bool {
         std::ptr::eq(self.track.as_ptr(), Arc::as_ptr(track))
+    }
+
+    pub fn len(&self) -> usize { self.data[0].len() }
+    /// Samples (interleaved) written so far, from the start.
+    pub fn ready(&self) -> usize { self.ready.load(Ordering::Acquire) }
+    pub fn complete(&self) -> bool { self.ready() >= self.len() }
+    /// Percent written, for the panel.
+    pub fn percent(&self) -> u8 { (self.ready() as u64 * 100 / self.len().max(1) as u64) as u8 }
+
+    /// Stem `s` at sample `i` (0 past the end).  Only meaningful below
+    /// [`ready`](Self::ready).
+    #[inline]
+    pub fn sample(&self, s: usize, i: usize) -> i16 { self.data[s].get(i).map_or(0, |v| v.load(Ordering::Relaxed)) }
+
+    /// Stem `s` as plain samples (a copy, for tests).
+    #[cfg(test)]
+    pub fn stem(&self, s: usize) -> Vec<i16> { self.data[s].iter().map(|v| v.load(Ordering::Relaxed)).collect() }
+
+    /// Write the next stretch of all three stems (same length each, the
+    /// part past the track's end dropped).  The single writer only.
+    pub fn append(&self, block: [&[i16]; 3]) {
+        let at = self.ready.load(Ordering::Relaxed);
+        let n = block.iter().map(|b| b.len()).min().unwrap_or(0).min(self.len().saturating_sub(at));
+        for (d, b) in self.data.iter().zip(block) {
+            for (slot, v) in d[at..at + n].iter().zip(b) { slot.store(*v, Ordering::Relaxed); }
+        }
+        self.ready.store(at + n, Ordering::Release);
+    }
+
+    /// The writer is done: whatever was not written stays silent, and the
+    /// stems' waveforms are built.
+    pub fn finish(&self, sr: u32) {
+        self.ready.store(self.len(), Ordering::Release);
+        let _ = self.waves.set(stem_waves(self, sr));
     }
 }
 
@@ -67,8 +128,6 @@ impl Default for StemControl {
 impl StemControl {
     pub fn set_bank(&self, b: Option<Arc<StemBank>>) { self.bank.store(b); }
     pub fn bank(&self) -> Option<Arc<StemBank>> { self.bank.load_full() }
-    /// Stems are ready for this track (the STEMS panel greys out until then).
-    pub fn ready_for(&self, track: &Arc<Vec<f32>>) -> bool { self.bank.load().as_ref().is_some_and(|b| b.is_for(track)) }
     pub fn set_gain(&self, i: usize, g: f32) { self.gains[i].store(g.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed); }
     pub fn gains(&self) -> [f32; 3] { std::array::from_fn(|i| f32::from_bits(self.gains[i].load(Ordering::Relaxed))) }
     /// Every stem at full: the original plays.
@@ -93,7 +152,14 @@ impl Mixer {
     /// every stem at full with the blend already back on the original.
     pub fn mix(&mut self, x: &[f32], bank: Option<&StemBank>, target: [f32; 3], ranges: &[Range<usize>], out: &mut Vec<f32>) -> bool {
         let Some(bank) = bank else { self.m = 0.0; self.g = [1.0; 3]; return false };
-        let m_target = if target.iter().all(|g| *g >= 1.0) { 0.0 } else { 1.0 };
+        // While a split is still writing the bank: a block whose next block
+        // would reach past what is written ramps back to the original, so
+        // the fade happens over written stems and never steps at the edge.
+        // The stems take over again once the split is a block ahead.
+        let ready = bank.ready();
+        let span: usize = ranges.iter().map(|r| r.len()).sum();
+        let written = ranges.iter().all(|r| r.end + span <= ready) || ready >= bank.len();
+        let m_target = if !written || target.iter().all(|g| *g >= 1.0) { 0.0 } else { 1.0 };
         if self.m == 0.0 && m_target == 0.0 { self.g = target; return false; }
         let frames: usize = ranges.iter().map(|r| r.len() / 2).sum();
         out.clear();
@@ -107,7 +173,7 @@ impl Mixer {
                 let g: [f32; 3] = std::array::from_fn(|s| g0[s] + (target[s] - g0[s]) * t);
                 for c in 0..2 {
                     let i = f * 2 + c;
-                    let stems: f32 = (0..3).map(|s| g[s] * bank.data[s].get(i).copied().unwrap_or(0) as f32).sum::<f32>() / 32768.0;
+                    let stems: f32 = if i < ready { (0..3).map(|s| g[s] * bank.sample(s, i) as f32).sum::<f32>() / 32768.0 } else { x[i] };
                     out.push((1.0 - m) * x[i] + m * stems);
                 }
             }
@@ -121,8 +187,8 @@ impl Mixer {
     /// scrub, which reads at its own positions.
     pub fn at(&self, x: &[f32], bank: Option<&StemBank>, i: usize) -> f32 {
         match bank {
-            Some(b) if self.m > 0.0 => {
-                let stems: f32 = (0..3).map(|s| self.g[s] * b.data[s].get(i).copied().unwrap_or(0) as f32).sum::<f32>() / 32768.0;
+            Some(b) if self.m > 0.0 && i < b.ready() => {
+                let stems: f32 = (0..3).map(|s| self.g[s] * b.sample(s, i) as f32).sum::<f32>() / 32768.0;
                 (1.0 - self.m) * x[i] + self.m * stems
             }
             _ => x[i],
@@ -197,31 +263,23 @@ pub fn build(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32>>
     for (s, r) in ROLES.iter().enumerate() {
         data[s] = shift(&role_at(media, entry, *r, deck_sr)?, offset, track.len());
     }
-    let waves = stem_waves(&data, deck_sr);
+    let bank = StemBank::new(track, data, offset);
+    bank.finish(deck_sr);
     log::info!("stems: bank {} ready, offset {offset} frames ({:.2} ms), {:.1}s",
                entry.bundle, offset as f64 * 1e3 / deck_sr as f64, t0.elapsed().as_secs_f32());
-    Ok(StemBank { track: Arc::downgrade(track), data, offset_frames: offset, waves })
-}
-
-impl StemBank {
-    /// A bank from stems split on the device: already at the deck rate and
-    /// aligned to `track`.
-    pub fn from_split(track: &Arc<Vec<f32>>, data: [Vec<i16>; 3], deck_sr: u32) -> StemBank {
-        let waves = stem_waves(&data, deck_sr);
-        StemBank { track: Arc::downgrade(track), data, offset_frames: 0, waves }
-    }
+    Ok(bank)
 }
 
 /// Each stem's waveform columns, built as the track's own are (one thread
 /// per stem).
-pub fn stem_waves(data: &[Vec<i16>; 3], sr: u32) -> [Vec<WaveformColumn>; 3] {
+pub fn stem_waves(bank: &StemBank, sr: u32) -> [Vec<WaveformColumn>; 3] {
     std::thread::scope(|sc| {
-        let jobs: Vec<_> = data.iter().map(|d| sc.spawn(move || {
+        let jobs: Vec<_> = bank.data.iter().map(|d| sc.spawn(move || {
             let mut b = WaveformBuilder::new(sr);
             let mut buf = Vec::with_capacity(8192);
             for chunk in d.chunks(8192) {
                 buf.clear();
-                buf.extend(chunk.iter().map(|v| *v as f32 / 32768.0));
+                buf.extend(chunk.iter().map(|v| v.load(Ordering::Relaxed) as f32 / 32768.0));
                 b.push(&buf);
             }
             b.finish().columns
@@ -360,7 +418,7 @@ mod tests {
     fn mixer_passes_the_original_untouched_at_full() {
         let x: Vec<f32> = (0..200).map(|i| i as f32 / 1000.0).collect();
         let t = Arc::new(x.clone());
-        let bank = StemBank { track: Arc::downgrade(&t), data: [vec![100; 200], vec![200; 200], vec![300; 200]], offset_frames: 0, waves: Default::default() };
+        let bank = StemBank::new(&t, [vec![100; 200], vec![200; 200], vec![300; 200]], 0);
         let mut m = Mixer::default();
         let mut out = Vec::new();
         assert!(!m.mix(&x, Some(&bank), [1.0; 3], &[0..200], &mut out));
@@ -373,7 +431,7 @@ mod tests {
         let x = vec![0.5f32; n];
         let t = Arc::new(x.clone());
         let s = |v: i16| vec![v; n];
-        let bank = StemBank { track: Arc::downgrade(&t), data: [s(8192), s(4096), s(4096)], offset_frames: 0, waves: Default::default() }; // sums to 0.5
+        let bank = StemBank::new(&t, [s(8192), s(4096), s(4096)], 0); // sums to 0.5
         let mut m = Mixer::default();
         let mut out = Vec::new();
         // Mute drums: ramps from the original (0.5) to vocal+harmonics (0.25) across the block.
@@ -390,10 +448,50 @@ mod tests {
     }
 
     #[test]
+    fn a_filling_bank_plays_what_is_written_and_the_original_after() {
+        let n = 2000;
+        let x = vec![0.5f32; 3 * n];
+        let t = Arc::new(x.clone());
+        let bank = StemBank::filling(&t);
+        assert_eq!((bank.ready(), bank.percent(), bank.complete()), (0, 0, false));
+        let (d, v, h) = (vec![8192i16; n], vec![4096i16; n], vec![4096i16; n]);  // sums to 0.5
+        bank.append([&d, &v, &h]);
+        assert_eq!((bank.ready(), bank.percent()), (n, 33));
+
+        let mut m = Mixer::default();
+        let mut out = Vec::new();
+        let h2 = n / 2;
+        // Drums muted, well inside the written stretch: the stems play.
+        m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[0..h2], &mut out);
+        m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[0..h2], &mut out);
+        assert!(out.iter().all(|s| (s - 0.25).abs() < 0.001));
+        // The block before the unwritten part ramps back to the original,
+        // over written stems: no step.
+        assert!(m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[h2..n], &mut out));
+        assert!(out.windows(2).all(|w| (w[0] - w[1]).abs() < 0.001), "a ramp, not a step");
+        assert!((out[h2 - 1] - 0.5).abs() < 0.001);
+        // Past it: the original, untouched.
+        assert!(!m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[n..n + h2], &mut out));
+        assert_eq!(m.at(&x, Some(&bank), n + 5), 0.5);
+        // Once the split is a block ahead, the stems ramp back in there.
+        bank.append([&d, &v, &h]);
+        assert!(m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[n..n + h2], &mut out));
+        assert!(out.windows(2).all(|w| (w[0] - w[1]).abs() < 0.001), "a ramp, not a step");
+        m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[n..n + h2], &mut out);
+        assert!(out.iter().all(|s| (s - 0.25).abs() < 0.001));
+        // Appending past the end is dropped; finish completes the bank.
+        bank.append([&d, &v, &h]);
+        bank.append([&d, &v, &h]);
+        assert_eq!(bank.ready(), 3 * n);
+        bank.finish(48_000);
+        assert!(bank.complete() && bank.waves.get().is_some());
+    }
+
+    #[test]
     fn mixer_follows_loop_ranges() {
         let x: Vec<f32> = (0..100).map(|i| i as f32).collect();
         let t = Arc::new(x.clone());
-        let bank = StemBank { track: Arc::downgrade(&t), data: [(0..100).map(|i| i as i16).collect(), vec![0; 100], vec![0; 100]], offset_frames: 0, waves: Default::default() };
+        let bank = StemBank::new(&t, [(0..100).map(|i| i as i16).collect(), vec![0; 100], vec![0; 100]], 0);
         let mut m = Mixer { g: [1.0, 0.0, 0.0], m: 1.0 };
         let mut out = Vec::new();
         m.mix(&x, Some(&bank), [1.0, 0.0, 0.0], &[80..84, 10..12], &mut out);
@@ -405,7 +503,7 @@ mod tests {
     fn a_bank_only_plays_with_its_own_track() {
         let a = Arc::new(vec![0f32; 4]);
         let b = Arc::new(vec![0f32; 4]);
-        let bank = StemBank { track: Arc::downgrade(&a), data: Default::default(), offset_frames: 0, waves: Default::default() };
+        let bank = StemBank::new(&a, Default::default(), 0);
         assert!(bank.is_for(&a));
         assert!(!bank.is_for(&b));
     }
@@ -455,11 +553,12 @@ mod tests {
         let bank = load_local(&file, &track, 48_000, 2).unwrap().unwrap();
         assert_eq!(bank.offset_frames, -(late as isize));
         assert!(bank.is_for(&track));
-        assert_eq!(bank.data[0].len(), track.len());
+        assert_eq!(bank.len(), track.len());
+        assert!(bank.complete() && bank.waves.get().is_some());
         // Stems line up with the deck: their sum matches it sample for sample.
         let mid = track.len() / 2;
         for i in mid..mid + 2000 {
-            let s: i32 = bank.data.iter().map(|b| b[i] as i32).sum();
+            let s: i32 = (0..3).map(|k| bank.sample(k, i) as i32).sum();
             assert!((s as f32 / 32768.0 - track[i]).abs() < 4.0 / 32768.0, "sample {i}");
         }
 
@@ -512,8 +611,9 @@ mod tests {
             let v = ((n as f32 * 440.0 * std::f32::consts::TAU / sr as f32).sin() * 8000.0) as i16;
             [v, v]
         }).collect();
-        let data = [tone.clone(), vec![0; tone.len()], tone.clone()];
-        let w = stem_waves(&data, sr);
+        let t = Arc::new(vec![0f32; tone.len()]);
+        let bank = StemBank::new(&t, [tone.clone(), vec![0; tone.len()], tone.clone()], 0);
+        let w = stem_waves(&bank, sr);
         let mut b = WaveformBuilder::new(sr);
         b.push(&tone.iter().map(|v| *v as f32 / 32768.0).collect::<Vec<_>>());
         let own = b.finish().columns;

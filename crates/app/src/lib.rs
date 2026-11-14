@@ -93,7 +93,7 @@ const HISTORY_MAX: usize = 100;
 /// Each split logs each step with the memory in use; on iOS also to
 /// `Documents/opendeck-stems-test.txt` (only once a model was put there),
 /// line by line, so a split iOS kills for memory still shows how far it got.
-fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: &separate::Job) -> Result<Option<stems::StemBank>> {
+fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: &separate::Job) -> Result<Option<Arc<stems::StemBank>>> {
     use separate::model;
     if !model::present() { return Ok(None); }
     let secs = track.len() as f64 / 2.0 / sr as f64;
@@ -102,7 +102,12 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
     split_trace(&format!("{} {} | {name} | {secs:.0}s track | start | {}", utc_now(), model::device(), mem()));
     let res = model::with(|m| {
         split_trace(&format!("  model ready on {} | {}", model::units(), mem()));
-        separate::separate(track, sr, m, job)
+        // The deck picks this bank up and plays each stretch as it lands.
+        let bank = Arc::new(stems::StemBank::filling(track));
+        let _ = job.bank.set(Arc::clone(&bank));
+        let t = separate::separate(track, sr, m, job, &mut |b| bank.append(b))?;
+        bank.finish(sr);
+        Ok((bank, t))
     });
     let line = match &res {
         Ok(((_, t), load_s)) => format!(
@@ -111,8 +116,8 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
         Err(e) => format!("  split failed: {e:#} | {}", mem()),
     };
     split_trace(&line);
-    let ((data, _), _) = res?;
-    Ok(Some(stems::StemBank::from_split(track, data, sr)))
+    let ((bank, _), _) = res?;
+    Ok(Some(bank))
 }
 
 /// A split's input is ready and its first chunk goes to the model.
@@ -678,7 +683,7 @@ struct DeckApp {
     /// name being loaded.  The deck keeps running until the bytes arrive.
     fetch_rx:          Option<mpsc::Receiver<LoadMsg>>,
     /// The stems job for the loaded track (see `stems.rs`).
-    stems_rx:          Option<mpsc::Receiver<Result<Option<stems::StemBank>>>>,
+    stems_rx:          Option<mpsc::Receiver<Result<Option<Arc<stems::StemBank>>>>>,
     /// An on-device split in progress (progress, cancel), see `separate.rs`.
     stems_job:         Option<Arc<separate::Job>>,
     /// What the enlarged waveform shows now: the stem mix of (bank, gains,
@@ -2368,8 +2373,9 @@ impl DeckApp {
     fn stems_view(&self) -> snapshot::StemsView {
         use snapshot::StemsState as S;
         let state = if !self.settings.stems { S::Off }
-            else if self.audio.stems.ready_for(&self.audio.current()) { S::Ready }
-            else if let Some(j) = self.stems_job.as_ref().filter(|j| j.progress.load(std::sync::atomic::Ordering::Relaxed) > 0) { S::Splitting(j.percent()) }
+            else if let Some(b) = self.audio.stems.bank().filter(|b| b.is_for(&self.audio.current())) {
+                if b.complete() { S::Ready } else { S::Splitting(b.percent()) }
+            }
             else if self.stems_rx.is_some() { S::Loading }
             else { S::None };
         snapshot::StemsView { state, gains: self.audio.stems.gains() }
@@ -2508,7 +2514,7 @@ impl DeckApp {
         let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
             let got = match stems::load_local(&path, &track, sr, ch) {
                 Ok(None) if ch == 2 => split_on_device(&path, &track, sr, &j),
-                r => r,
+                r => r.map(|b| b.map(Arc::new)),
             };
             let _ = tx.send(got);
         });
@@ -2529,12 +2535,15 @@ impl DeckApp {
         let Some(r) = self.renderer.as_mut() else { return };
         let gains = self.audio.stems.gains();
         let n = self.waveform.columns.len();
-        let bank = self.audio.stems.bank().filter(|b| b.is_for(&self.audio.current()) && gains.iter().any(|g| *g < 1.0));
-        let want = bank.as_ref().map(|b| (Arc::as_ptr(b) as usize, gains.map(f32::to_bits), n));
+        // A bank still being split has no stem waveforms yet: the track's own.
+        let waves = self.audio.stems.bank()
+            .filter(|b| b.is_for(&self.audio.current()) && gains.iter().any(|g| *g < 1.0))
+            .filter(|b| b.waves.get().is_some());
+        let want = waves.as_ref().map(|b| (Arc::as_ptr(b) as usize, gains.map(f32::to_bits), n));
         if want == self.stem_wave_key { return; }
         self.stem_wave_key = want;
-        match bank {
-            Some(b) => r.set_detail(Some(&stems::mix_columns(&b.waves, gains, n))),
+        match waves.as_ref().and_then(|b| b.waves.get()) {
+            Some(w) => r.set_detail(Some(&stems::mix_columns(w, gains, n))),
             None => r.set_detail(None),
         }
         self.request_redraw();
@@ -2543,6 +2552,14 @@ impl DeckApp {
     /// Hand a finished stems job to the processor, if its track is still
     /// the one playing.
     fn poll_stems(&mut self) {
+        // A split in progress: play the stems it has written so far.
+        if let Some(b) = self.stems_job.as_ref().and_then(|j| j.bank.get()) {
+            let have = self.audio.stems.bank().is_some_and(|h| Arc::ptr_eq(&h, b));
+            if !have && b.is_for(&self.audio.current()) {
+                self.audio.stems.set_bank(Some(Arc::clone(b)));
+                self.request_redraw();
+            }
+        }
         let Some(rx) = &self.stems_rx else { return };
         let got = match rx.try_recv() {
             Ok(r) => r,
@@ -2550,10 +2567,16 @@ impl DeckApp {
             Err(mpsc::TryRecvError::Disconnected) => Err(anyhow::anyhow!("stems thread died")),
         };
         self.stems_rx = None;
-        self.stems_job = None;
+        let job = self.stems_job.take();
+        if got.is_err() {
+            // A failed split: drop what it had written, back to the track.
+            if let (Some(b), Some(h)) = (job.as_ref().and_then(|j| j.bank.get()), self.audio.stems.bank()) {
+                if Arc::ptr_eq(b, &h) { self.audio.stems.set_bank(None); }
+            }
+        }
         match got {
             Ok(Some(bank)) if bank.is_for(&self.audio.current()) => {
-                self.audio.stems.set_bank(Some(Arc::new(bank)));
+                self.audio.stems.set_bank(Some(bank));
                 self.request_redraw();
             }
             Ok(Some(_)) => log::info!("stems: ready for a track no longer loaded; dropped"),

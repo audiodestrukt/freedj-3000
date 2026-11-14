@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Stems: play with the stems while a track is still being split on the
+  device. The stem keys work as soon as the first stretch is split
+  (they still read "SPLITTING n%"), on the part split so far; past it the
+  track plays as normal, with a short fade where the split has not reached
+  yet. Splitting starts at the top of the track. The enlarged waveform
+  follows the stems once the split is done.
 - Stems, experimental: a track with no prepared stems can be split on the
   device with the HTDemucs model (MIT). With MENU → STEMS on, the stem keys
   read "SPLITTING n%" after a load, and the stems play once the split

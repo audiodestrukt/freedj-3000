@@ -438,7 +438,7 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
         if tap(ui, k, "cdj-key-stems").0 {
             set_panel(ctx, if open == Panel::Stems { Panel::None } else { Panel::Stems });
         }
-        let ready = snap.stems.state == StemsState::Ready;
+        let ready = snap.stems.state.playable();
         p.rect_filled(k, 0.0, if open == Panel::Stems { KEY_LIT } else { KEY_FACE });
         let changed = ready && snap.stems.changed() && open != Panel::Stems;
         let bar = Rect::from_center_size(Pos2::new(k.center().x, k.max.y - 3.0 * u), Vec2::new(if changed { 90.0 } else { 56.0 } * u, 3.0 * u));
@@ -928,7 +928,7 @@ fn stems_volume_id() -> Id { Id::new("cdj3k-stems-volume") }
 /// when every stem is fully on or off (its label greys until then).
 /// Everything is grey and inert until the track's stems are ready.
 fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
-    let ready = snap.stems.state == StemsState::Ready;
+    let ready = snap.stems.state.playable();
     let mut volume: bool = ctx.data(|d| d.get_temp(stems_volume_id())).unwrap_or(false);
     if !snap.stems.all_on_or_off() { volume = true; }
     let text_c = if ready { TEXT } else { DIM };

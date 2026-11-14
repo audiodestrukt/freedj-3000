@@ -1,15 +1,30 @@
 # Stems split on the device
 
 Status, 2026-11-14: a test build. Linux desktop runs it end to end; the
-iPad build is written but has not run on an iPad yet. Off unless a model is
+iPad Air 13" splits on 0.3.13 (with the increased memory limit). Off unless a model is
 supplied. Code: `crates/app/src/separate.rs`, shim in `ios/freedj/main.m`.
 
 ## What it does
 
 A track loaded with MENU → STEMS on, and no OverCue stems on its stick, is
-split by a separation model on the deck itself. The stem keys read
-"SPLITTING n%", then the stems play through the same engine as OverCue's
-(`stems.rs`): the model's output becomes an ordinary `StemBank`.
+split by a separation model on the deck itself. The stems play through the
+same engine as OverCue's (`stems.rs`): the model's output becomes an
+ordinary `StemBank`.
+
+**Playing while it splits.** Once the model is loaded the split publishes
+an empty bank (`StemBank::filling`, through `Job::bank`) and writes each
+finished stretch into it, in order from the top of the track; `ready`
+marks how far it has got. The stem keys work from then on and read
+"SPLITTING n%" (n is the bank's written share). The processor plays the
+stems below `ready` and the original above it. It decides per block, one
+block ahead: a block whose next block would reach past `ready` ramps the
+mix back to the original, so the fade runs over written stems and never
+steps at the edge, and the stems ramp back in once the split is a block
+ahead again. The samples are `AtomicI16` (relaxed loads cost the same as
+plain ones) with a release/acquire `ready`, so the audio thread reads while
+the split writes, with no lock and no copy. The stems' waveforms are built
+when the split finishes; until then the enlarged waveform is the track's.
+A failed split drops its partial bank.
 
 ## Model
 
@@ -111,8 +126,8 @@ the first chunk and reads `opendeck-stems.conf` in the OpenDeck folder
 
 - Run on the iPad: speed, memory, and whether iOS kills the app.
 - Cache splits, so a track is split once.
-- Fill the bank as chunks finish, from the cue point, so stems are usable
-  seconds after a load instead of after the whole split.
+- Split from the cue point (or the playhead) first instead of the top, so
+  the stems are under the playhead sooner on a long intro.
 - Getting the model onto the device: today by hand (Files app); a release
   would download it on first use, with consent.
 - Memory: the iPad may need the increased-memory-limit entitlement, or a

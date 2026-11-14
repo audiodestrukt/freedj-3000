@@ -1628,7 +1628,7 @@ fn expand_glyph(ui: &Ui, key_rect: Rect, h: f32) {
 /// mute or bring back, drag up or down to set a level; the fill shows it),
 /// pad 4 is FULL MIX (every stem back to full: the original track).
 fn draw_stem_pad(ui: &Ui, snap: &DeckSnapshot, i: usize, r: Rect, h: f32, out: &mut Vec<Event>) {
-    let ready = snap.stems.state == StemsState::Ready;
+    let ready = snap.stems.state.playable();
     let p = ui.painter();
     if i == 3 {
         let (clicked, down) = tap(ui, r, "pf-stem-full");

@@ -17,10 +17,16 @@ pub enum StemsState {
     None,
     /// On; the stems are being read and aligned.  Controls are greyed.
     Loading,
-    /// On; the device is splitting the track itself (percent done).
+    /// On; the device is splitting the track itself (percent done).  The
+    /// controls already work on the part split so far.
     Splitting(u8),
     /// On and playable.
     Ready,
+}
+
+impl StemsState {
+    /// The stem controls work: ready, or split far enough to start.
+    pub fn playable(self) -> bool { matches!(self, StemsState::Ready | StemsState::Splitting(_)) }
 }
 
 /// The stem controls' view: state plus drums / vocal / harmonics levels.
