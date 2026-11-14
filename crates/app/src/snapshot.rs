@@ -238,6 +238,25 @@ pub struct DeckSnapshot<'a> {
     /// (its track's detail waveform, track tempo and playhead in seconds).
     pub local_wave:   Option<&'a opendeck_analysis::waveform::WaveformCache>,
     pub remote_wave:  Option<RemoteWaveView>,
+    /// INFO's player tabs: the players heard, the tab selected (our own
+    /// number until another is tapped), and that player's track once fetched.
+    pub peers:        Vec<PeerBrief>,
+    pub info_player:  u8,
+    pub remote_info:  Option<RemoteInfoView>,
+}
+
+/// A player heard on the network.
+#[derive(Clone, Copy)]
+pub struct PeerBrief { pub player: u8, pub playing: bool, pub master: bool, pub loaded: bool }
+
+/// Another player's loaded track as the INFO screen shows it.
+#[derive(Clone)]
+pub struct RemoteInfoView {
+    pub tags: opendeck_decode::TrackTags,
+    pub bpm: Option<f32>,
+    pub length_s: Option<u32>,
+    /// Whose stick the track is on, and its colour label, for the source tile.
+    pub badge: Option<(u8, u8)>,
 }
 
 /// The other player's waveform as the meter draws it.
@@ -248,6 +267,8 @@ pub struct RemoteWaveView {
     /// The track's tempo, unpitched, and where its playhead is.
     pub bpm: f32,
     pub playhead_s: f64,
+    /// Its pitch (1.0 = +0%): media seconds per second.
+    pub pitch: f32,
 }
 
 impl DeckSnapshot<'_> {
@@ -295,7 +316,7 @@ impl<'a> DeckSnapshot<'a> {
             remain_mode: true, auto_cue: false, slip: false, sync: false, master: false, zoom_grid_mode: false,
             grid_edited: false, cue_set: false, sync_offset: 0.0, source_link: false, phase_ticks_view: false,
             linked: false, master_player: 0, player: 1, link_addr: String::new(), ip_line: String::new(), link_peers: String::new(),
-            cols_visible: 1.0, local_wave: None, remote_wave: None, beat_grid: None, beat2_bpm: 0.0, beat2_phase_beats: 0.0, beat2_beat_in_bar: 0, key_shift: 0,
+            cols_visible: 1.0, local_wave: None, remote_wave: None, peers: Vec::new(), info_player: 0, remote_info: None, beat_grid: None, beat2_bpm: 0.0, beat2_phase_beats: 0.0, beat2_beat_in_bar: 0, key_shift: 0,
         }
     }
 }

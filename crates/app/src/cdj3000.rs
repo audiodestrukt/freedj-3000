@@ -658,6 +658,11 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
 /// Whether the phase-meter slot shows the meter (the unit's PHASE METER view)
 /// or is left to the waveform view. Screen state, like the panels; a tap on
 /// the slot switches, as on the unit.
+/// The INFO screen's selected player tab (our own number until another is tapped).
+pub fn info_player(ctx: &egui::Context, own: u8) -> u8 {
+    ctx.data(|d| d.get_temp::<u8>(Id::new("cdj3k-info-player"))).unwrap_or(own)
+}
+
 /// The meter slot shows the waveform view (the phase meter is switched off).
 pub fn waveform_view(ctx: &egui::Context) -> bool { !meter_shown(ctx) }
 
@@ -716,15 +721,35 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
 }
 
 /// The meter slot's WAVEFORM view (photographed off a CDJ-3000): the other
-/// player's waveform, thin, in the slot above the main waveform, running past a
-/// white line at its playhead on the same beat scale as the phase meter, with
-/// that deck's beat ticks (red on the first beat of a bar) above it.
+/// player's waveform, thin, above the main waveform, running past a white
+/// line at its playhead, over this deck's beat grid (ticks along both edges,
+/// red on the first beat of a bar).  The scale is this deck's tempo, so when
+/// the other track is at the same tempo and in phase its beats fall on the
+/// grid, and when it is not they drift off it.
 fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, u: f32) {
     let p = ui.painter().with_clip_rect(r);
     let (cx, beat_px) = (r.center().x, 73.0 * u);
+    // This deck's grid: beat i is at (i - phase) beats from the centre line.
+    let ours = snap.beat_grid.map(|g| (g.bpm as f32 * snap.fader_speed, snap.beat_phase().unwrap_or(0.0), snap.beat_in_bar().unwrap_or(1) as i32));
+    if let Some((_, ph, bib)) = ours {
+        for i in -7..=7i32 {
+            let x = cx + (i as f32 - ph) * beat_px;
+            if x < r.min.x || x > r.max.x { continue; }
+            let bar = (i + bib - 1).rem_euclid(4) == 0;
+            let col = if bar { RED } else { TEXT };
+            let len = if bar { 12.0 } else { 8.0 } * u;
+            p.line_segment([Pos2::new(x, r.min.y + 2.0 * u), Pos2::new(x, r.min.y + 2.0 * u + len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.max.y - 2.0 * u), Pos2::new(x, r.max.y - 2.0 * u - len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.min.y + 14.0 * u), Pos2::new(x, r.max.y - 14.0 * u)],
+                           Stroke::new(1.0, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
+        }
+    }
     if let Some(w) = &snap.remote_wave {
-        let (mid, half) = (r.min.y + 46.0 * u, 22.0 * u);
-        let per_entry = beat_px * w.bpm / 60.0 / 150.0;   // points per 1/150 s of the track
+        let (mid, half) = (r.center().y, 24.0 * u);
+        // Points per 1/150 s of the other track: its media seconds pass at
+        // its pitch, and a beat of this deck is `beat_px` wide.
+        let our_bpm = ours.map_or(w.bpm * w.pitch, |(b, _, _)| b);
+        let per_entry = beat_px * our_bpm / 60.0 / w.pitch / 150.0;
         let first = w.playhead_s as f32 * 150.0;
         let n = w.bytes.len();
         let mut x = r.min.x;
@@ -744,16 +769,6 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, u: f32) {
                 }
             }
             x += 1.0;
-        }
-    }
-    if !snap.master && snap.beat2_bpm > 0.0 {
-        let bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
-        for i in -6..=6i32 {
-            let x = cx + (i as f32 - snap.beat2_phase_beats) * beat_px;
-            if x < r.min.x || x > r.max.x { continue; }
-            let bar = (i + bib - 1).rem_euclid(4) == 0;
-            p.line_segment([Pos2::new(x, r.min.y + 3.0 * u), Pos2::new(x, r.min.y + if bar { 20.0 } else { 14.0 } * u)],
-                           Stroke::new(2.0 * u, if bar { RED } else { TEXT }));
         }
     }
     p.line_segment([Pos2::new(cx, r.min.y + 2.0 * u), Pos2::new(cx, r.max.y - 2.0 * u)], Stroke::new(2.5 * u, TEXT));
@@ -1304,46 +1319,67 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
     p.line_segment([xi.left_top(), xi.right_bottom()], xs);
     p.line_segment([xi.right_top(), xi.left_bottom()], xs);
 
-    // Player tabs.
+    // Player tabs: ours, and every player heard (bright, with a green mark
+    // while it plays); tap one to read what it has loaded.
+    let sel_tab = if snap.info_player == 0 { snap.player } else { snap.info_player };
     for n in 1..=6u8 {
         let y = 92.0 + 64.0 * (n - 1) as f32;
         let t = r(0.0, y, 100.0, y + 62.0);
-        let me = n == snap.player;
-        p.rect_filled(t, 0.0, if me { KEY_LIT } else { Color32::from_rgb(25, 25, 25) });
-        let c = if me { TEXT } else { Color32::from_rgb(80, 80, 80) };
+        let peer = snap.peers.iter().find(|q| q.player == n);
+        let present = n == snap.player || peer.is_some();
+        let sel = n == sel_tab;
+        p.rect_filled(t, 0.0, if sel { KEY_LIT } else { Color32::from_rgb(25, 25, 25) });
+        let c = if present { TEXT } else { Color32::from_rgb(80, 80, 80) };
         label(ui, Pos2::new(t.center().x, t.min.y + 15.0 * u), Align2::CENTER_CENTER, "PLAYER", 12.0, u, c);
         label(ui, Pos2::new(t.center().x, t.min.y + 40.0 * u), Align2::CENTER_CENTER, n, 28.0, u, c);
+        if let Some(q) = peer {
+            if q.playing { p.circle_filled(Pos2::new(t.max.x - 12.0 * u, t.min.y + 12.0 * u), 5.0 * u, Color32::from_rgb(0, 220, 60)); }
+            else if q.loaded { p.circle_stroke(Pos2::new(t.max.x - 12.0 * u, t.min.y + 12.0 * u), 5.0 * u, Stroke::new(1.5 * u, LABEL)); }
+            if q.master { label(ui, Pos2::new(t.max.x - 12.0 * u, t.max.y - 12.0 * u), Align2::CENTER_CENTER, "M", 13.0, u, BARS_ORANGE); }
+        }
+        if present && tap(ui, t, &format!("cdj-info-tab-{n}")).0 {
+            ctx.data_mut(|d| d.insert_temp(Id::new("cdj3k-info-player"), n));
+        }
     }
+    // What the page shows: our own track, or the selected player's.
+    let remote = sel_tab != snap.player;
+    let rv = snap.remote_info.as_ref().filter(|_| remote);
+    let empty_tags = opendeck_decode::TrackTags::default();
+    let tags_ref: &opendeck_decode::TrackTags = if remote { rv.map_or(&empty_tags, |v| &v.tags) } else { snap.tags };
+    let title_text: String = if remote { rv.and_then(|v| v.tags.title.clone()).unwrap_or_default() } else { snap.title.to_string() };
 
     p.rect_filled(r(102.0, 92.0, 1280.0, 475.0), 0.0, BODY);
-    let t = &snap.tags;
+    let t = tags_ref;
     let dash = |o: &Option<String>| o.clone().unwrap_or_default();
 
     // Source + artwork, rating, then BPM / key / length / colour.
     let src = r(132.0, 112.0, 222.0, 202.0);
-    p.rect_filled(src, 0.0, SOURCE_TILE);
-    label(ui, Pos2::new(src.center().x, src.min.y + 64.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
-    draw_art(ui, ctx, snap.tags, "deck", r(222.0, 112.0, 312.0, 202.0));
+    let tile = if remote {
+        match rv { Some(v) => Tile { kind: crate::browser::SourceTile::Link, badge: v.badge }, None => Tile { kind: crate::browser::SourceTile::None, badge: None } }
+    } else { loaded_tile() };
+    draw_source_tile(ui, snap, src, tile, u);
+    draw_art(ui, ctx, t, if remote { "deck-remote" } else { "deck" }, r(222.0, 112.0, 312.0, 202.0));
     for i in 0..5 { star(ui, at(155.0 + 33.0 * i as f32, 237.0), 13.0 * u, u); }
     for y in [262.0, 313.0, 364.0, 415.0] {
         p.line_segment([at(140.0, y), at(312.0, y)], Stroke::new(1.0, RULE));
     }
     boxed(ui, "BPM", at(159.0, 288.0), u);
-    if let Some(g) = snap.beat_grid {
-        label(ui, at(185.0, 288.0), Align2::LEFT_CENTER, format!("{:.1}", g.bpm), 24.0, u, TEXT);
+    let bpm_shown = if remote { rv.and_then(|v| v.bpm) } else { snap.beat_grid.map(|g| g.bpm as f32) };
+    if let Some(b) = bpm_shown {
+        label(ui, at(185.0, 288.0), Align2::LEFT_CENTER, format!("{b:.1}"), 24.0, u, TEXT);
     }
     boxed(ui, "b#", at(159.0, 338.0), u);
     label(ui, at(185.0, 338.0), Align2::LEFT_CENTER, dash(&t.key), 24.0, u, TEXT);
     icon(ui, Icon::Clock, at(159.0, 390.0), u);
-    if snap.total_samples > 0 {
-        let secs = snap.total_secs().round() as u64;
+    let len_s = if remote { rv.and_then(|v| v.length_s).map(|l| l as u64) } else { (snap.total_samples > 0).then(|| snap.total_secs().round() as u64) };
+    if let Some(secs) = len_s {
         label(ui, at(180.0, 390.0), Align2::LEFT_CENTER, format!("{:02}:{:02}", secs / 60, secs % 60), 30.0, u, TEXT);
     }
     p.circle_filled(at(159.0, 441.0), 11.0 * u, SOURCE_TILE);
 
     // Title, album, artist across the page.
     let rows: [(Option<Icon>, String); 3] = [
-        (None, snap.title.to_string()),
+        (None, title_text),
         (Some(Icon::Disc), dash(&t.album)),
         (Some(Icon::Person), dash(&t.artist)),
     ];
