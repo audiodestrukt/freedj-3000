@@ -1,27 +1,27 @@
-# FreeDJ-3000
+# OpenDeck (FreeDJ-3000)
 
-A clean-room implementation of the Pioneer XDJ-1000MK2, in Rust. It is a
-single-deck DJ media player with the XDJ's screen, controls and behaviour, and
-it speaks Pro DJ Link on the wire, so it joins a network of CDJ-3000 and XDJ
-players as one more deck: it takes a player number, follows the master tempo
-or takes master and the real decks follow it, browses the other players'
-media and serves its own.
+An open-source DJ media player, in Rust. One deck with a CDJ-3000's screen,
+keys and behaviour (or the XDJ-1000MK2's, switchable in MENU → SCREEN) that
+speaks Pro DJ Link, so it joins a network of CDJ-3000s, XDJs and rekordbox as
+one more player:
 
-It has two screens, switchable in MENU → SCREEN: the **XDJ-1000MK2** it
-started as, and a **CDJ-3000** screen (BEAT LOOP / BEAT JUMP panels, SOURCE,
-LOAD PREVIOUS TRACK, rekordbox category browsing, SEARCH with the on-screen
-keyboard, GRID ADJUST). Both draw the same deck, so switching mid-set loses
-nothing. How it was built: [My XDJ clone grew a CDJ-3000
-screen](https://audiodestrukt.com/blog/posts/freedj-cdj-3000-skin.html).
+- it takes a free player number;
+- it follows the master tempo, or takes master and the real decks follow it;
+- it browses and loads from the other players' media;
+- it serves its own music, which a CDJ-3000 lists, loads and plays with
+  OpenDeck's beat grid, waveforms, key, hot cues and memory cues.
 
 It ships as **OpenDeck DJ** for iPad and iPhone on the
-[App Store](https://apps.apple.com/app/id6807472453), and the same code runs
-on a Raspberry Pi 5 and on any Linux desktop. Rendering is GPU-accelerated
-(wgpu: Vulkan on Linux and the Pi, Metal on iOS) and paced from the display,
-so the waveform scrolls at the panel's refresh rate on everything from a
-phone to a Pi, while the audio engine runs on its own real-time thread.
-The story of how it got here: [I cloned an XDJ-1000 and it runs on a
-Raspberry Pi](https://audiodestrukt.com/blog/posts/cloning-an-xdj-1000.html).
+[App Store](https://apps.apple.com/app/id6807472453), and as prebuilt
+releases for Linux (x86_64 and aarch64, including the Raspberry Pi), Windows,
+macOS and Android. Rendering is on the GPU (wgpu: Vulkan, Metal, or GL), with
+an SDL backend for boards as small as a Pi Zero W. Frames are paced from the
+display, and the audio engine runs on its own real-time thread.
+
+How it got here:
+
+- [I cloned an XDJ-1000 and it runs on a Raspberry Pi](https://audiodestrukt.com/blog/posts/cloning-an-xdj-1000.html)
+- [My XDJ clone grew a CDJ-3000 screen](https://audiodestrukt.com/blog/posts/freedj-cdj-3000-skin.html)
 
 > **"The CDJ-3000 costs $2,400. A Raspberry Pi 5 costs $80."**
 
@@ -34,16 +34,19 @@ and festival worldwide. It is also a closed, proprietary device that costs
 thousands of dollars, requires Pioneer's ecosystem to unlock basic features,
 and charges recurring subscription fees for music analysis software.
 
-FreeDJ-3000 reimplements the deck from the outside in. Nothing of Pioneer's is
-in it: no firmware, no code, no imagery. The screen was laid out from
-photographs of a real XDJ-1000MK2 (the CDJ-3000 screen was measured in
-pixels against an emulated CDJ-3000 showing the same state), the controls are rendered procedurally, and
-the protocols come from the public reverse-engineering work of the open source
-community ([dysentery](https://github.com/Deep-Symmetry/dysentery),
-[beat-link](https://github.com/Deep-Symmetry/beat-link),
-[crate-digger](https://github.com/Deep-Symmetry/crate-digger)) and from
-packets captured off the unit on the desk. Every Link feature is verified
-against that real XDJ, not a simulator.
+OpenDeck reimplements the deck from the outside in. Nothing of Pioneer's is in
+it: no firmware, no code, no imagery.
+
+- **Screens:** the XDJ-1000MK2 screen was laid out from photographs of a real
+  unit. The CDJ-3000 screen and faceplate were measured in pixels against an
+  emulated CDJ-3000 showing the same state.
+- **Controls** are drawn procedurally.
+- **Protocols** come from the public reverse-engineering work of the open
+  source community ([dysentery](https://github.com/Deep-Symmetry/dysentery),
+  [beat-link](https://github.com/Deep-Symmetry/beat-link),
+  [crate-digger](https://github.com/Deep-Symmetry/crate-digger)) and from
+  packets captured off the units: a real XDJ-1000MK2 on the desk and an
+  emulated CDJ-3000 on a private network.
 
 This project takes the position that DJ equipment protocols are
 infrastructure, not intellectual property. It is not a "compatible" or
@@ -54,74 +57,90 @@ interoperable with Pioneer hardware on the same network.
 
 ## Status
 
-**On the App Store and in daily use next to a real XDJ.** The deck, the Link
-protocol, media sharing and both screens work; the physical control surface
-and the sampler features are the roadmap. What is left on the CDJ-3000 side
-is listed in [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md).
-The full, current feature list by area and platform is
-[docs/FEATURES.md](docs/FEATURES.md); the audio formats, bit depths and
-sample rates it plays, and how pitch and key lock measure, are in
-[docs/AUDIO-FORMATS.md](docs/AUDIO-FORMATS.md).
+**On the App Store and in daily use next to a real XDJ.** The full feature
+list, by area, with what has been tested where, is
+**[docs/FEATURES.md](docs/FEATURES.md)**. What changed when is in
+[CHANGELOG.md](CHANGELOG.md).
 
-| Feature | Status |
-|---|---|
-| MP3/FLAC/AAC/OGG/WAV/AIFF decode | ✅ Working |
-| XDJ-1000MK2 screen: waveforms, beat grid, INFO, BROWSE, PERFORM, MENU/UTILITY | ✅ Working |
-| CDJ-3000 screen: playback, BEAT LOOP/JUMP, INFO, SOURCE, LOAD PREVIOUS TRACK, BROWSE/TAG LIST/UTILITY, GRID ADJUST (SNAP/SHIFT GRID), SEARCH | ✅ Working; sorting, TRACK FILTER, KEY SHIFT still to do ([TODO](docs/TODO-cdj-3000.md)) |
-| Play / CUE (hold-to-preview, back-cue) / hot cues A–H / memory cues / loops / beat jump | ✅ Working |
-| Jog wheel: VINYL and CDJ modes, nudge, scratch | ✅ Working |
-| SLIP mode | ✅ Working |
-| Tempo fader ±16 %, MASTER TEMPO key lock (Rubber Band R3, Bungee or WSOLA) | ✅ Working |
-| Beat detection + grid (MiniBPM + onset detector), GRID ADJUST | ✅ Working |
-| rekordbox USB sticks: export.pdb browsing (ARTIST/ALBUM/TRACK/KEY/PLAYLIST/HISTORY), grids, cues, preview waveforms, covers | ✅ Working |
-| rekordbox analysis import (beat grid, cues) over LINK | ✅ Working |
-| Pro DJ Link: announce, beats, status, SYNC, master handoff both ways | ✅ Working on a real XDJ-1000MK2 |
-| SYNC keeps a jog nudge as a phase offset; SHIFT GRID writes it into the grid | ✅ Working, end-to-end test against an emulated CDJ-3000 (`make test-shift-grid`) |
-| Pro DJ Link media: browse and load from linked players / rekordbox | ✅ Working (dbserver + NFS) |
-| Pro DJ Link media: serve tracks to other decks (metadata, grid, waveforms, art) | ✅ OpenDeck→OpenDeck proven; XDJ acceptance test pending |
-| iPad / iPhone app (OpenDeck DJ) | ✅ On the App Store |
-| Raspberry Pi 5 | ✅ 60 fps, ~0.6 of one core playing |
-| Raspberry Pi Zero W / older GPUs (SDL backend, WSOLA key lock) | ✅ Plays cleanly; 49 fps on KMSDRM |
-| Linux (x86_64, aarch64), Windows, macOS, Android (.apk) and iOS (.ipa) prebuilt releases | ✅ [Releases](https://github.com/audiodestrukt/freedj-3000/releases) |
-| Control surfaces: any USB MIDI controller, PCF8574 I2C boards on the Pi, mapped in `controllers.toml` with LED feedback | ✅ MIDI on a DJ2Go; I2C path built and unit-tested, first board pending ([docs/hardware/control-surfaces.md](docs/hardware/control-surfaces.md)) |
-| Sampler-deck: auto one-shots, quantized triggers, cue sequencing | 📋 Roadmap ([#24](https://github.com/audiodestrukt/freedj-3000/issues/24)) |
-| A CDJ-3000 as freedj's control surface and screen (HID over LINK, Control Mode) | 🧪 Experimental, emulator only ([docs/design/cdj-hid-display.md](docs/design/cdj-hid-display.md)) |
-| Hardware control surface (ADK-1000 panel board, RP2350 hub) | 📋 PCB generated and routed, not fabricated ([hardware/](hardware/README.md)) |
-| CDJ-3000-generation media transfer | 📋 Not started (the 3000 moves files differently) |
-| Running OpenDeck *on* a CDJ-3000 (RK3399, as a payload through the deck's updater) | 📋 Designed, not built ([docs/hardware/cdj-3000-install.md](docs/hardware/cdj-3000-install.md); the emulator and deck `.UPD`s: [docs/hardware/cdj-3000-upd.md](docs/hardware/cdj-3000-upd.md)) |
+In short:
 
-Everything in the Link rows has been exercised against an XDJ-1000MK2.
-CDJ-3000s speak the same Pro DJ Link sync protocol. Sync and master handoff
-have been tested against an emulated CDJ-3000 on a private network segment,
-but a physical CDJ-3000 has not been on this network yet, so treat it as
-compatible-by-protocol rather than tested.
-**Own a CDJ-3000?** Ten minutes and a Python script would settle it:
-[docs/testing/cdj-3000-interop.md](docs/testing/cdj-3000-interop.md).
+- **Deck:** PLAY / CUE, hot cues A–H, memory cues, loops, BEAT JUMP, SLIP,
+  QUANTIZE, jog (VINYL / CDJ), tempo ±6 to WIDE, and MASTER TEMPO key lock
+  (Rubber Band R3, Bungee or WSOLA).
+- **Tracks:**
+  - MP3, AAC, ALAC, FLAC, WAV, AIFF and OGG at any sample rate.
+  - A track is playable as soon as the audio around the cue is decoded, and
+    the rest streams in.
+  - rekordbox USB sticks browse by rekordbox's categories, with their grids
+    and cues.
+  - Stems prepared with OverCue play with per-stem levels. Splitting on the
+    device is experimental.
+- **Analysis:** BPM and beat grid, key and phrases, for tracks rekordbox has
+  not analysed (BPM matches rekordbox's on 222 of 226 test tracks).
+- **Screens:** the CDJ-3000 screen and faceplate (the default; the iPhone
+  keeps the XDJ-1000MK2 layout) and the XDJ-1000MK2 screen. Waveform colour
+  is 3BAND, RGB or BLUE.
+- **Pro DJ Link:**
+  - **Sync:** SYNC, MASTER handoff both ways, and PLAYER No. AUTO.
+  - **Media:** browse and load from other players and rekordbox, and serve
+    OpenDeck's own music to them.
+  - **Lighting and timecode tools:** the playing track's analysis is served
+    from the moment it loads, and CDJ-3000 Absolute Position packets go out
+    every 30 ms.
+
+**What has been tested on what:**
+- **Real XDJ-1000MK2:** every sync and master row.
+- **Emulated CDJ-3000** (Pioneer's firmware 3.22, on a private network
+  segment):
+  - It browses OpenDeck by artist, album, track, key and playlist.
+  - It loads a track and plays it with OpenDeck's waveforms, grid, key, hot
+    cues and memory cue, and its hot cue pads jump to them.
+  - Sync and SHIFT GRID work against it.
+  - Our position packets match its byte for byte.
+- **Physical CDJ-3000:** not on this network yet. **Own one?** Ten minutes and
+  a Python script would settle it:
+  [docs/testing/cdj-3000-interop.md](docs/testing/cdj-3000-interop.md).
+
+**Next:**
+- rekordbox's hot cue colours and comments, phrases and colour waveforms,
+  read from sticks and passed through to CDJs.
+- Cues set on OpenDeck saved across launches.
+- The remaining CDJ-3000 screen work:
+  [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md).
+- A hardware control surface and a sampler deck.
 
 ---
 
 ## Hardware targets
 
-**Primary: Raspberry Pi 5 (8GB) + RP2350 MCU**
+**Raspberry Pi 5.** The reference board. 60 fps with 0.12 ms frame jitter,
+about 0.6 of one core while playing with key lock on. wgpu runs on DRM/KMS
+with no X server. A Pi 4 runs it too, with the timestretcher taking most of a
+core. A Pi Zero W (one ARMv6 core) plays cleanly on the SDL renderer with the
+WSOLA key lock, at 49 fps. Bring-up, build and the gaps to expect are in
+**`docs/reference/raspberry-pi.md`**. Measurements are in
+**`docs/BENCHMARKS.md`**.
 
-The Pi 5 runs the audio engine and UI. An RP2350 microcontroller (Raspberry Pi's own chip) handles the physical control surface — jog wheel, encoders, buttons — over SPI/GPIO. The RP2350 firmware will be open source and part of this repo.
+**iPad and iPhone.** The same crates build into the iOS app (`ios/`),
+rendering through Metal. Pro DJ Link works over Wi-Fi or a USB ethernet
+adapter with no special entitlement.
 
-The Pi 5's GPU (VideoCore VII / Mesa V3DV) supports Vulkan 1.2, which is what the renderer requires. No X server needed — wgpu runs directly on DRM/KMS. Measured on the Pi 5: 60 fps with 0.12 ms frame jitter, about 0.6 of one core while playing with key lock on. A Pi 4 runs it as well, with the timestretcher taking most of one core.
+**Desktop and Android.**
+- Any Linux, Windows or Mac machine runs it.
+- Android runs it as an APK (not on Google Play).
 
-**iPad and iPhone**
+**A control surface.** Today the controls are:
+- any USB MIDI controller, mapped in `controllers.toml`;
+- PCF8574 I2C button boards on the Pi.
 
-The same crates build into the iOS app (`ios/`), rendering through Metal. Pro DJ Link works over Wi-Fi or a USB ethernet adapter with no special entitlement.
+The ADK-1000 panel board (RP2350 hub) is generated and routed but not made
+([hardware/](hardware/README.md)).
 
-**Fallback: Intel NUC or any x86 Linux box**
-
-Any Linux machine with Vulkan support works for development and testing.
-
-Bring-up on the Pi (hardware checklist, build, and the graphics/audio gaps to
-expect) is in **`docs/reference/raspberry-pi.md`**.
-Measured performance on real hardware — the Pi 5 is the reference target — is
-in **`docs/BENCHMARKS.md`**.
-
-**Display: any HDMI screen.** The reference layout is the XDJ-1000MK2's 7" 1024×600 panel (the window opens at that size); regions are fractions of the screen so the UI adapts to any resolution.
+**Display: any screen.**
+- The CDJ-3000 screen is drawn at the unit's 1280×720 and scales to any
+  window.
+- The XDJ-1000MK2 layout is 1024×600.
+- Both are laid out in fractions of the screen.
 
 ---
 
@@ -305,9 +324,9 @@ DELETE and press a pad to delete one), loops, BEAT JUMP, TRACK SEARCH and
 SEARCH down the left, CALL / DELETE / MEMORY over the jog, SYNC / MASTER,
 the tempo keys and the fader down the right. On Linux the default is the
 screen with SOURCE / BROWSE / TAG LIST / SEARCH / MENU and BACK / TAG TRACK /
-the rotary either side of it (`--faceplate` for the whole panel). The first
-window is scaled down to fit a smaller screen. The phone keeps the XDJ
-layout for now.
+the rotary either side of it (`--faceplate` for the whole panel). `F` or
+MENU → DECK VIEW switches between the two at any time, and the choice is
+saved. The first window is scaled down to fit a smaller screen.
 
 **USB sticks.** Mounted removable media appear as `USB: <label>` rows at the
 top of the browser (re-scanned once a second, so hot-plug works). A rekordbox
@@ -320,10 +339,10 @@ On a headless Pi install the appliance automount once
 (`sudo deploy/pi/usb-automount/install.sh`, udev + systemd, read-only mounts
 under `/media/usb`), see `docs/reference/raspberry-pi.md`.
 
-### Touch screen (mouse for now)
+### Touch screen
 
-egui treats mouse and touch as the same pointer, so the mouse stands in for
-the panel. Press or drag on the overview to needle-search; drag the
+On the iPad, iPhone and Android the screen is the panel; on the desktop the
+mouse stands in for a finger. Press or drag on the overview to needle-search; drag the
 enlarged waveform to jog; scroll over it to zoom; the on-screen keys and
 panels (BROWSE, BEAT LOOP, hot-cue pads, the SEARCH keyboard…) respond to a
 tap; the few still inert, like KEY SHIFT, are in the TODO list. Every input — keys and touch alike — is an `Event` on one bus applied in
@@ -337,7 +356,7 @@ the Pi, are mapped to deck actions in `controllers.toml`, with LED feedback
 **Numark DJ2Go** is the built-in preset (full map in
 `docs/reference/dj2go-midi-map.md`): play, cue, sync, loop in/out, pitch
 fader, jog, browse knob and load. `--deck A` (default) or `--deck B` picks
-which side of the controller drives this instance, so two freedj instances
+which side of the controller drives this instance, so two OpenDeck instances
 can share one DJ2Go. To map a different controller, run with
 `RUST_LOG=opendeck::midi=debug`; every message is logged.
 
@@ -367,38 +386,61 @@ a bare KMSDRM appliance use the SDL2 backend instead: build with
 pixel-for-pixel on the waveforms (`tools/render-parity.sh`); see
 `docs/reference/raspberry-pi.md`.
 
-### ProDJ Link
+### Pro DJ Link
 
-FreeDJ-3000 is a Link peer: it announces itself on UDP 50000 every 1.5 s and
-sends a beat packet on 50001 at every beat of the audible position, as player
-`--player N` (default 1; `OPENDECK_PLAYER` also works). It listens on 50001
-(where real CDJ/XDJ hardware sends beats) and 50002, ignoring its own
-broadcasts. Status packets go out on 50002; SYNC follows the master and the
-master handoff works both ways with a real XDJ. While synced, a jog nudge is
-kept as a phase offset (as a CDJ does) until SYNC is pressed again or SHIFT
-GRID writes it into the grid. `OPENDECK_LINK_IFACE=<iface>` pins Link to one
-network interface, for example a private bridge to an emulated deck.
+OpenDeck is a Link peer.
 
-**Media over the link.** The LINK folder in the browser lists every peer's
-media slots the way a player does ("3 USB: OPENDECK"; players and a
-rekordbox laptop in LINK mode), opens the source's category menu (PLAYLIST /
-ARTIST / ALBUM / TRACK / FILENAME) over Pioneer's dbserver protocol and loads
-over NFSv2. The app also *serves* its music folder the same way, with tags,
-duration, tempo, beat grid, waveforms and cover art filled in by a background
-analysis that is cached after the first launch, so other decks list it under
-LINK and load from it (`OPENDECK_SERVE=0` disables; `opendeck-serve <dir>` is
-the stand-alone server). A track in flight shows a LOADING readout in the
-title bar. Wire details, rekordbox quirks and test recipes:
+**Player number.** It announces itself on UDP 50000 and claims a free player
+number the way a CDJ does. PLAYER No. AUTO tries 4, 5, 6, 3, 2, 1 in that
+order, keeps the number it gets, and moves if another player takes it.
+`--player N` (or `OPENDECK_PLAYER`) fixes the number, 1–6; 5 and 6 work only
+on an all-CDJ-3000 network.
+
+**What it sends:**
+- beats on 50001, from the audible position;
+- status on 50002: the CDJ-3000's long form, with the active loop, and the
+  short form to older players;
+- CDJ-3000 Absolute Position packets every 30 ms, carrying the playhead, the
+  track length, the pitch and the BPM. They go to each device, as a CDJ-3000
+  sends them.
+
+**Sync.** It listens on 50001 and 50002. SYNC follows the master's tempo and
+phase. MASTER hands over both ways with a real XDJ. While synced, a jog nudge
+is kept as a phase offset, as a CDJ does, until SYNC is pressed again or
+SHIFT GRID writes it into the grid.
+
+`OPENDECK_LINK_IFACE=<iface>` pins Link to one network interface, for example
+a private bridge to an emulated deck, or `lo` to share the machine with
+[Deckbench](docs/testing/deckbench.md).
+
+**Media from other players.** The LINK rows in SOURCE list every peer's media
+slots the way a player does ("3 USB: OPENDECK", players and a rekordbox laptop
+in LINK mode). OpenDeck browses their categories over Pioneer's dbserver
+protocol and loads the audio over NFSv2.
+
+**OpenDeck as a media source.** The app serves its music folder the same way.
+It runs a dbserver on TCP 1051 (12523 tells players where to find it) and an
+NFSv2 server. A background analysis fills in each track's tags, duration,
+tempo, key, beat grid, waveforms (blue, RGB and 3-band), phrases and cover
+art, and caches them after the first launch. A CDJ-3000 then lists the
+folder in SOURCE, browses it by artist, album, track, key, playlist, history
+and matching, and loads from it. It shows OpenDeck's hot and memory cues.
+
+**The playing track.** Whatever OpenDeck is playing is served under the ID its
+status names, from the moment it loads, even when the file came from a stick
+or the Files app. Other players and lighting controllers can then look up its
+grid, waveforms and phrases. A grid adjusted on the deck is the grid they get.
+
+`OPENDECK_SERVE=0` turns the media source off. `opendeck-serve <dir>` is the
+stand-alone server. Wire details, rekordbox quirks and test recipes are in
 `docs/reference/prodj-link-media.md`.
 
 Two instances on one machine link to each other:
 
 ```bash
-make link-pair                     # players 1 and 2, same track
+make link-pair                     # two decks, same track
 make link-pair TRACK2=other.mp3
 ```
-
-When a CDJ on the same network sends beats, the phase meter shows that deck's tempo and bar phase, and SYNC follows it.
 
 For single-machine testing without real hardware:
 
@@ -406,32 +448,46 @@ For single-machine testing without real hardware:
 python3 tools/send_beat.py 130.0 127.0.0.1 50002   # or: make two-deck BPM=130
 ```
 
-With a real deck: connect it and this machine to the same switch (or a direct
-ethernet cable — Pioneer decks auto-negotiate crossover), start playback on the
-deck, and run `make dev`. Every packet received on 50000–50002 is logged in
-full hex, which is the reference for the packet-format work in
-`docs/WORKSTREAMS.md` §B1.
+With a real deck, connect it and this machine to the same switch, or use a
+direct ethernet cable (Pioneer decks auto-negotiate crossover). Start
+playback on the deck and run `make dev`. Every packet received on
+50000–50002 is logged in full hex.
 
 ---
 
 ## Testing
 
 ```bash
-cargo test --workspace      # ~215 unit tests, no hardware or network needed
+cargo test --workspace      # ~355 tests, no hardware or network needed
 make perf                   # key-lock engines' real-time factors on this machine
 make test-shift-grid        # end-to-end: SYNC + SHIFT GRID against an emulated CDJ-3000
 tools/cdj_parity.py --track T --out DIR   # the CDJ-3000 skin against the emulated unit, key by key
 ```
 
-The unit tests are hermetic: they build their own fake USB sticks and
-rekordbox exports and never scan the machine's real drives. The end-to-end
-test needs a private Link bridge and the emulator (setup in
+The tests are hermetic. They build their own fake USB sticks and rekordbox
+exports and never scan the machine's real drives.
+
+**Deck harness.** The deck runs headless in tests (`deck_harness`), with the
+real audio processor and no window or sound card. A test presses keys as a DJ
+would and checks what is heard: SLIP returning after a hot cue, a loop
+wrapping, TEMPO RANGE.
+
+**Protocol tests** check replies byte for byte against captures from an
+emulated CDJ-3000: track rows, cue lists, position packets.
+
+**Link checks** run against [Deckbench](docs/testing/deckbench.md), which
+simulates players and a mixer on the loopback.
+
+**End-to-end against the emulator.** These need a private Link bridge and the
+emulator (setup in
 [docs/design/cdj-grid-adjust.md](docs/design/cdj-grid-adjust.md)); without
-them it reports SKIP and exits 77. `OPENDECK_SCRIPT` drives the app from a
-timed script (`"1:play; 3:sync; 14:jog=3x20; 26:shiftsync; 36:quit"`) for
-tests like that one; see `crates/app/src/devscript.rs`. Its `press=` actions
-take the emulator's button names, so `tools/cdj_parity.py` runs one scenario
-on freedj and the emulated CDJ-3000 and compares their screens and lamps
+them they report SKIP and exit 77.
+
+**Scripts.** `OPENDECK_SCRIPT` drives the app from a timed script, such as
+`"1:play; 3:sync; 12:press=HOT_A; 26:shiftsync; 36:quit"`; see
+`crates/app/src/devscript.rs`. Its `press=` actions take the emulator's button
+names, so `tools/cdj_parity.py` runs one scenario on OpenDeck and on the
+emulated CDJ-3000 and compares their screens and lamps
 ([docs/testing/cdj-3000-parity.md](docs/testing/cdj-3000-parity.md)).
 
 ---
@@ -442,63 +498,86 @@ The project is a Cargo workspace. Each crate has a single responsibility.
 
 ```
 crates/
-  types/        — Core traits: Decoder, BeatAnalyzer, TimecodeDecoder
-  decode/       — Audio decoding via Symphonia 0.6 (MP3, FLAC, AAC, ALAC, OGG, WAV, AIFF; FLAC crate vendored for 32-bit, third_party/symphonia-bundle-flac)
-  analysis/     — Waveform FFT, beat grid computation
-  minibpm-sys/  — Bindings to MiniBPM for tempo estimation
+  types/        — Core traits and types shared by every crate
+  decode/       — Audio decoding via Symphonia (MP3, AAC, ALAC, FLAC, OGG, WAV, AIFF; FLAC vendored for 32-bit)
+  analysis/     — Beat grid, key, phrases, waveforms (offline and streaming)
+  minibpm-sys/  — Bindings to MiniBPM, the first tempo guess
   engine/       — Real-time audio transport
-  timestretch/  — Key lock (Rubber Band R3, Bungee, WSOLA) and speed change
+  timestretch/  — Key lock (Rubber Band R3, Bungee, WSOLA), speed change and resampling
   transport/    — CUE / PLAY rules as a pure state machine, checked against behaviour specs
-  timecode/     — DVS vinyl timecode decoder (stub; not a current priority)
-  link/         — Pro DJ Link packets: announce, beat, status, master handoff
-  dbserver/     — Pioneer dbserver protocol (menus and metadata over TCP), client and server
+  link/         — Pro DJ Link packets: announce, beats, status, position, master handoff
+  dbserver/     — Pioneer dbserver protocol (menus, metadata, analysis over TCP), client and server
   nfs/          — NFSv2/UDP client and server, the media transport between players
   rekordbox/    — export.pdb and ANLZ readers (vendored, patched rekordcrate)
   mediaserver/  — Serve a music folder to other decks (dbserver + NFS + background analysis)
+  stems/        — OverCue-prepared stems (the CDJMODS USB format)
   protocol/     — Control events; MCU serial protocol for the RP2350 control surface
-  db/           — SQLite track library (beat grids, cue points, playlists, FTS5 search)
+  timecode/     — DVS vinyl timecode decoder (stub; not a current priority)
+  db/           — SQLite track library (not yet used by the app)
   ui/           — Shared UI components
-  app/          — Main binary: deck, both screens (XDJ, CDJ-3000), browser, faceplate,
-                  wgpu and SDL renderers, Link glue, control surfaces, iOS entry
+  app/          — Main binary: the deck, both screens and faceplates, browser, Link
+                  glue, wgpu / SDL / framebuffer output, control surfaces, iOS and Android entry
 ```
 
-### Graphics stack
+### Graphics
 
-- **wgpu** — GPU abstraction: Vulkan on Linux and the Pi, Metal on iOS
-- **winit** — Window and input handling, DRM/KMS capable (no display server required)
-- **egui** — Immediate-mode UI overlay (transport info, time display)
-- **Custom WGSL shader** — Waveform renderer: frequency-colored bar chart, scrolls in real time
+- **wgpu**: Vulkan on Linux and the Pi, Metal on iOS and the Mac, GL where
+  that is all there is.
+- **SDL2**: for GLES 2 boards and bare KMSDRM.
+- **winit**: windows and input.
+- **egui**: the screens, keys and panels.
+- **WGSL shaders**: the waveforms.
 
-The UI philosophy is a **game HUD**, not an application. While playing, every frame redraws the full screen, paced by the compositor's frame callback so the playhead advances by whole display periods and never judders; paused and untouched, it idles at 10 fps. The drawn playhead free-runs at the true playback rate and is phase-locked to the audio clock. Audio runs on a separate real-time thread.
+The UI is a **game HUD**, not an application.
+- **Playing:** every frame redraws the whole screen, paced by the display's
+  frame callback, so the playhead moves in whole display periods and never
+  judders. The drawn playhead free-runs at the true playback rate and is
+  phase-locked to the audio clock.
+- **Paused and untouched:** it idles at 10 fps.
 
 ### Audio engine
 
-The audio engine runs on an isolated real-time thread and communicates with the UI via lock-free atomics. The callback-based cpal stream advances an `AtomicU64` position counter that the renderer reads each frame.
+The audio engine runs on its own real-time thread and talks to the UI through
+lock-free atomics.
 
-Speed changes use the Rubber Band R3 time-stretcher (`crates/timestretch/`, or Bungee / WSOLA, see above) for key-locked pitch-preserving playback across the full ±16% pitch range; MASTER TEMPO off switches to plain varispeed. Stops fade over 3 ms so a released CUE never clicks; starts have no fade, so CUE lands on the beat. SLIP keeps a shadow playhead running under loops and held hot cues, and jumps to it when they end. Every track, including the one opened at start-up, is resampled to the audio device's rate on load, so a 48 kHz file plays at the right speed on a 44.1 kHz device.
+- **Key lock:** MASTER TEMPO uses the selected key-lock engine across the full
+  tempo range. MASTER TEMPO off is plain varispeed.
+- **Stops and starts:** a stop fades over 3 ms, so a released CUE never
+  clicks. A start has no fade, so CUE lands on the beat.
+- **SLIP** keeps a shadow playhead running under loops, held hot cues and
+  scratches, and jumps to it when they end.
+- **Loading:** a load decodes in the background. Play can start as soon as
+  4 s past the cue are ready, and playback waits at the decode frontier if it
+  ever catches up. Every track is resampled to the output's rate.
 
-### Waveform analysis
+Details: `AUDIO_ENGINE.md` and `docs/design/track-loading.md`.
 
-Each waveform column is a 2048-sample FFT window (Hann-windowed, HOP_SIZE=512) mapped to three frequency bands:
+### Analysis
 
-- **R** — Bass (20–200 Hz)
-- **G** — Mid (200 Hz–2 kHz)
-- **B** — High (2 kHz–20 kHz)
-- **A** — Overall RMS amplitude (controls bar height)
-
-The entire waveform for a 5-minute track is computed in ~0.1 seconds and stored as a GPU storage buffer, one `u32` per column.
-
-### Beat detection
-
-Beat analysis runs offline before playback starts. A 6-second analysis window is fed to [MiniBPM](https://github.com/breakfastquay/minibpm) for tempo estimation, followed by a half-wave-rectified spectral flux onset detector that finds the beat anchor by maximising onset energy at grid positions. The result is a `BeatGrid` with a confidence score, BPM, and anchor sample position.
-
-The beat grid is displayed as white tick marks on the waveform (red on downbeats). The displayed BPM scales with the current pitch-fader position so it always shows the effective playback tempo.
-
-The phase meter shows the master deck's beat and bar position from Pro DJ Link beat packets. Over Wi-Fi those arrive in bursts (access points hold broadcasts for sleeping clients), so the other deck's phase is a phase-locked free-run nudged by each packet rather than a direct readout.
+- **Beat grid:** MiniBPM makes a first tempo guess. Then the tempo and phase
+  are fitted together against an onset curve over the whole track, placing
+  beats where rekordbox does. Tempo matches rekordbox's exactly on 222 of
+  226 test tracks, and grids land a median 1.3 ms from rekordbox's.
+- **Key:** a whitened, tuning-corrected chroma, matched against key profiles
+  learned from rekordbox-analysed tracks. Keys are named as rekordbox names
+  them.
+- **Phrases:** intro, verse, chorus and outro, written as rekordbox's PSSI
+  section.
+- **Waveforms:** built for both screens and for other players in rekordbox's
+  formats (blue, RGB, 3-band).
 
 ### Protocol compatibility
 
-**Pro DJ Link** — Pioneer's CDJ network protocol, documented by the [dysentery](https://github.com/Deep-Symmetry/dysentery) project. FreeDJ-3000 implements the announce, beat and status packets, the SYNC/master handshake, the dbserver menu protocol and the NFS media transport, so it syncs tempo and phase with real players, hands master back and forth with them, and exchanges tracks with them.
+**Pro DJ Link** is Pioneer's CDJ network protocol, documented by the
+[dysentery](https://github.com/Deep-Symmetry/dysentery) project. OpenDeck
+implements:
+- the announce, beat, status and position packets;
+- the SYNC / master handshake;
+- the dbserver protocol, both directions;
+- the NFS media transport.
+
+So it syncs tempo and phase with real players, hands master back and forth
+with them, and exchanges tracks with them.
 
 ---
 
@@ -508,26 +587,31 @@ Pioneer makes good hardware. They also use their market position to maintain a c
 
 The open source DJ tooling community (Mixxx, xwax, beat-link, dysentery) has done remarkable work. This project's goal is to turn that knowledge into a complete, deployable hardware product that any DJ can build, any venue can install, and any developer can extend.
 
-The name is deliberately provocative. The CDJ-3000 is not a trademark we are imitating — it is a benchmark we are matching. The deck it reproduces control for control is the XDJ-1000MK2, because that is the one on the desk.
+The name is deliberately provocative. The CDJ-3000 is not a trademark we are imitating; it is a benchmark we are matching.
 
 ---
 
 ## Contributing
 
-The codebase is Rust throughout. Contributions welcome in any area. The most useful near-term work:
+The codebase is Rust throughout. Contributions are welcome in any area. The
+most useful near-term work:
 
-- **CDJ-3000 parity** — the open items in [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md): sorting, TRACK FILTER, KEY SHIFT, key detection, hot-cue colours
-- **A physical CDJ-3000 on the network** — run the [interop kit](docs/testing/cdj-3000-interop.md) and report back
-- **RP2350 firmware** — no_std Rust for the control surface MCU
-- **XDJ media-source acceptance** — an XDJ browsing and loading from OpenDeck over LINK (dbserver + NFS servers are in; see `docs/reference/prodj-link-media.md`)
-- **Hardware** — the panel board is generated and routed ([hardware/](hardware/README.md)); it needs its control positions checked and a first fab
+- **A physical CDJ-3000 on the network.** Run the
+  [interop kit](docs/testing/cdj-3000-interop.md) and report back.
+- **rekordbox data, both ways.** Hot cue colours and comments, phrases and
+  colour waveforms from sticks, passed through to CDJs.
+- **CDJ-3000 parity.** The open items in
+  [docs/TODO-cdj-3000.md](docs/TODO-cdj-3000.md): sorting, TRACK FILTER and
+  KEY SHIFT.
+- **An XDJ loading from OpenDeck.** The servers are in; the acceptance test on
+  a real XDJ is not (see `docs/reference/prodj-link-media.md`).
+- **Hardware.** The panel board is generated and routed
+  ([hardware/](hardware/README.md)). It needs its control positions checked
+  and a first fab. RP2350 firmware for it is no_std Rust.
 
-A change that adds, removes or changes a feature updates
-[CHANGELOG.md](CHANGELOG.md) and [docs/FEATURES.md](docs/FEATURES.md) in the
-same commit.
-
-See `AUDIO_ENGINE.md` for detailed design documentation on the audio engine,
-and `docs/design/track-loading.md` for how a track load runs off the UI thread.
+**Docs in the same commit.** A change that adds, removes or changes a feature
+updates [CHANGELOG.md](CHANGELOG.md), [docs/FEATURES.md](docs/FEATURES.md) and
+any sentence in this README it makes false.
 
 ---
 

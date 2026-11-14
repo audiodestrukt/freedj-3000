@@ -1,6 +1,6 @@
 # CDJ-3000 work: what is left
 
-As of `35e39f6` (2026-11-09). Collected from the CDJ-3000 sessions (HID over
+As of `35e39f6` (2026-11-09), stale rows refreshed 2026-11-14. Collected from the CDJ-3000 sessions (HID over
 LINK, the native display feed, the CDJ-3000 skin, SYNC/SHIFT GRID) so nothing
 lives only in a chat. Detail lives in the linked docs; this is the list.
 
@@ -50,7 +50,7 @@ exceptions:
 | PLAYLIST bank | all | M |
 | MATCHING category (listed, does not open) | all | M |
 | Category column for LINK/dbserver sources (only local rekordbox sticks today) | all | M |
-| "H" mark by the ♪ (track has hot cues) | all | S |
+| "H" mark by the ♪ (track has hot cues) on OpenDeck's own BROWSE (a CDJ-3000 browsing OpenDeck already shows it) | all | S |
 | Green on the category a played track came from; dim green (22,139,22) in the preview pane | all | S |
 | Verify covers in the PREVIEW column and HISTORY on Dan's real stick; it is mounted on the dev box now (`/run/media/dan/CDJ2`) | all | S |
 | Header extras: PREVIEW toggle, text-size A A A, INFO key; ← BACK dimmed at the category root | all | S |
@@ -61,9 +61,9 @@ exceptions:
 | Item | Who | Size |
 |---|---|---|
 | KEY SHIFT panel (drawn, inert): needs a key-shift engine | all | M |
-| Key detection + KEY readout, green when compatible (WORKSTREAMS E1) | all | L |
+| ~~Key detection + KEY readout~~ done (0.3.10); green when compatible still open | all | S |
 | KEY SYNC | all | M |
-| Hot-cue colours from rekordbox (PCO2 in the `.EXT`), comments | all | M |
+| Hot-cue colours from rekordbox (PCO2 in the `.EXT`), comments; read from sticks and served to CDJs (OpenDeck's own cues already reach a CDJ-3000, uncoloured) | all | M |
 | Gate Cue, Smart Cue | all | S |
 | Beat-jump value settable (CALL/DELETE + BEAT JUMP); quantize beat value | all | S |
 | Slip reverse, reverse | all | M |
@@ -73,7 +73,8 @@ exceptions:
 | INFO overlay: EDIT RATING, other players' tabs | all | S |
 | SHORTCUT screen; full UTILITY list (phase 6) | all | M |
 | Waveform current position CENTER/LEFT | all | S |
-| 6 players on PRO DJ LINK (4 today; 6 only with all CDJ-3000s) | all | M |
+| Waveform Divisions PHRASE on our own overview (phrase bands from our PSSI). Low priority: fw 3.22 offers the setting for no source we have seen | all | S |
+| ~~6 players on PRO DJ LINK~~ done: PLAYER No. AUTO and 1–6 | all | ✓ |
 
 ## SYNC and grid (`docs/design/cdj-grid-adjust.md`)
 

@@ -31,6 +31,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Stems prepared with OverCue Desktop: mute / solo / level per stem (MENU → STEMS, off by default); the enlarged waveform follows the stem mix; BROWSE marks stem tracks "S" | ✅ | All |
 | Stems split on the device with HTDemucs when a track has none prepared; the stems play as the split goes ("SPLITTING n%"), the rest of the track as normal; model supplied by the user | 🧪 Linux desktop (`separate-onnx`) measured; runs on iPad Air 13" (0.3.13) | iOS, D (Linux) |
 | Sorting, TRACK FILTER, KEY SHIFT (CDJ-3000 screen) | 📋 | — |
+| From rekordbox sticks: hot cue colours and comments, rekordbox's phrases, its colour waveforms on load (today OpenDeck shows its own analysis); cues set on OpenDeck saved across launches and passed on to CDJs | 📋 | — |
 | OneLibrary sticks (rekordbox's new encrypted USB library, read by the CDJ-3000X); today OpenDeck reads the Device Library (`export.pdb`) that rekordbox 7.2.11+ writes alongside it | 📋 | — |
 
 ## Analysis
@@ -44,7 +45,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Waveforms for other players: blue, RGB (PWV4/PWV5) and 3-band (PWV6/PWV7), fitted to rekordbox's | ✅ | All |
 | Analysis cache (a track is analysed once) | ✅ | All |
 | Key detection for untagged tracks (72 % exact vs rekordbox on a house stick) | ✅ | All |
-| Phrase analysis served as rekordbox PSSI (phrase starts P 0.70 / R 0.73 vs rekordbox on 31 house tracks; mood needs more genres) | 🧪 | All |
+| Phrase analysis served as rekordbox PSSI (phrase starts P 0.70 / R 0.73 vs rekordbox on 31 house tracks; mood needs more genres) | 🧪 a CDJ-3000 (fw 3.22, emulator) fetches it but draws no phrases: its WAVEFORM DIVISIONS setting does not appear, for OpenDeck or for a rekordbox 6.8 stick | All |
 | Downbeat (bar 1) detection; drum & bass at full tempo; 4:5 / 2:3 tempo mistakes | 📋 | — |
 
 ## Playing
@@ -89,7 +90,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | MASTER, handoff both ways | ✅ tested on an XDJ-1000MK2 | All |
 | LINK: browse and load from other players' USB / SD and from rekordbox (dbserver + NFS), with their grids and cues | ✅ | All |
 | Players browsing OpenDeck: ARTIST, ALBUM, TRACK, KEY, PLAYLIST, HISTORY, MATCHING, FILE NAME | ✅ CDJ-3000 (emulator) | All |
-| Serve our own music to other decks (metadata, grid, waveforms, art, hot and memory cues) | ✅ OpenDeck→OpenDeck; a CDJ-3000 lists, browses (ARTIST, ALBUM, TRACK, PLAYLIST, FILE NAME, with PREVIEW, BPM and KEY columns), loads and plays it with its waveforms (emulator); XDJ untested | All |
+| Serve our own music to other decks (metadata, grid, waveforms, art, hot and memory cues) | ✅ OpenDeck→OpenDeck; a CDJ-3000 lists, browses (ARTIST, ALBUM, TRACK, PLAYLIST, FILE NAME, with PREVIEW, BPM and KEY columns), loads and plays it with its waveforms, shows the hot cues (A–H) and memory cues set on OpenDeck, and its hot cue pads jump to them (emulator, 2026-11-14); XDJ untested | All |
 | The playing track's metadata, grid, waveforms and phrases answer a lookup by the ID our status names, from the moment it loads, wherever the file came from (for other players and Pro DJ Link lighting controllers) | ✅ unit-tested; lighting hardware untested | All |
 | CDJ-3000 Absolute Position packets (playhead ms, length, pitch, BPM every 30 ms on 50001, to each device as a CDJ-3000 sends them) for lighting / video / timecode tools | ✅ measured on a test network; untested with the tester's tool | All |
 | Works over Wi-Fi or ethernet; survives iOS backgrounding | ✅ | All |
