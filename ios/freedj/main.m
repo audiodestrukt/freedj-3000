@@ -361,8 +361,35 @@ void freedj_device_model(char *buf, size_t len) {
     strlcpy(buf, u.machine, len);
 }
 
+// ── Audio session ────────────────────────────────────────────────────────────
+//
+// Without a category, iOS uses SoloAmbient: the ring/silent switch mutes the
+// app (the deck plays, the waveform scrolls, nothing is heard).  A player
+// must use Playback, which ignores the switch.  Set before cpal opens the
+// output device, and re-activate when an interruption (a call, Siri) ends.
+#import <AVFoundation/AVFoundation.h>
+
+static void freedj_audio_session_activate(void) {
+    NSError *e = nil;
+    AVAudioSession *s = [AVAudioSession sharedInstance];
+    if (![s setCategory:AVAudioSessionCategoryPlayback error:&e]) NSLog(@"audio session category: %@", e);
+    e = nil;
+    if (![s setActive:YES error:&e]) NSLog(@"audio session activate: %@", e);
+}
+
+static void freedj_audio_session_setup(void) {
+    freedj_audio_session_activate();
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:AVAudioSessionInterruptionNotification object:nil queue:nil
+                usingBlock:^(NSNotification *n) {
+        NSNumber *type = n.userInfo[AVAudioSessionInterruptionTypeKey];
+        if (type.unsignedIntegerValue == AVAudioSessionInterruptionTypeEnded) freedj_audio_session_activate();
+    }];
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
+        freedj_audio_session_setup();
         freedj_ios_main();
     }
     return 0;

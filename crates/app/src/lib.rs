@@ -799,6 +799,8 @@ struct DeckApp {
     /// Last frame that saw pointer/touch input; full rate is held for a
     /// second after, so a tap's feedback and a scroll are never throttled.
     last_input: Instant,
+    /// Whether the iOS auto-lock is currently held off (see `AWAKE_IDLE`).
+    keep_awake: bool,
     /// Last-seen audio glitch counters, to log only on change.
     prev_underruns: u64,
     prev_drops:     u64,
@@ -1117,6 +1119,7 @@ impl DeckApp {
             },
             full_rate:      true,
             last_input:     Instant::now(),
+            keep_awake:     true,
         }
     }
 
@@ -3386,6 +3389,16 @@ impl DeckApp {
             || self.transport.preview
             || egui_animating
             || frame_start.duration_since(self.last_input) < Duration::from_secs(1);
+        // Hold the screen awake only while the deck is in use: playing, loading,
+        // or touched in the last AWAKE_IDLE.  An idle deck on the desk then lets
+        // iOS dim and lock the iPad (a lit screen at full brightness is most of
+        // the battery drain and heat of an app sitting idle).
+        let awake = self.audio.playing.load(Ordering::Relaxed) || self.loading.is_some()
+            || frame_start.duration_since(self.last_input) < AWAKE_IDLE;
+        if awake != self.keep_awake {
+            self.keep_awake = awake;
+            set_idle_timer_disabled(awake);
+        }
         if phone { self.phone_swipe(&mut touch); }
         self.events.append(&mut touch);
         let mut pending = std::mem::take(&mut self.events);
@@ -3507,6 +3520,8 @@ extern "C" {
     fn freedj_set_idle_timer_disabled(disabled: bool);
     fn freedj_is_phone() -> bool;
 }
+/// How long an idle deck (not playing, untouched) keeps the iPad awake.
+const AWAKE_IDLE: Duration = Duration::from_secs(300);
 fn set_idle_timer_disabled(disabled: bool) {
     #[cfg(target_os = "ios")]
     unsafe { freedj_set_idle_timer_disabled(disabled); }
@@ -3990,6 +4005,7 @@ impl ApplicationHandler for DeckApp {
                 // Release the auto-lock hold in the background, re-assert it on
                 // foreground (iOS resets idleTimerDisabled when backgrounding).
                 set_idle_timer_disabled(!occluded);
+                if !occluded { self.keep_awake = true; self.last_input = Instant::now(); }
                 if occluded {
                     log::info!("occluded (background): pausing render");
                 } else {
@@ -4145,11 +4161,40 @@ pub struct Config {
 }
 
 fn init_logging() {
-    env_logger::Builder::from_env(
+    let mut b = env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,wgpu=warn,naga=warn"),
-    )
-    .format_timestamp_micros()   // beat and frame timing are measured from the log
-    .init();
+    );
+    b.format_timestamp_micros();   // beat and frame timing are measured from the log
+    // iOS: stderr goes nowhere without Xcode attached, so the log also goes to
+    // a file in the OpenDeck folder (Files app → OpenDeck DJ → opendeck-log.txt),
+    // this launch's, with the previous launch's kept beside it as
+    // opendeck-log-previous.txt.  Capped, so a long set cannot fill the iPad.
+    #[cfg(target_os = "ios")]
+    {
+        let dir = taglist::documents_dir();
+        let (cur, old) = (dir.join("opendeck-log.txt"), dir.join("opendeck-log-previous.txt"));
+        let _ = std::fs::rename(&cur, &old);
+        if let Ok(f) = std::fs::File::create(&cur) {
+            b.target(env_logger::Target::Pipe(Box::new(CappedLog { file: f, left: 4 << 20 })));
+        }
+    }
+    b.init();
+}
+
+/// A log file that stops growing at a size limit.
+#[cfg(target_os = "ios")]
+struct CappedLog { file: std::fs::File, left: usize }
+#[cfg(target_os = "ios")]
+impl std::io::Write for CappedLog {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.left > 0 {
+            let n = buf.len().min(self.left);
+            self.left -= n;
+            let _ = std::io::Write::write_all(&mut self.file, &buf[..n]);
+        }
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> { std::io::Write::flush(&mut self.file) }
 }
 
 pub fn desktop_main() -> Result<()> {
