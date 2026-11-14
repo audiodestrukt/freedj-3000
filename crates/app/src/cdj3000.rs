@@ -332,6 +332,10 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &Scree
             ScreenView::Info => draw_info(ui, ctx, snap, lay, u, out),
             ScreenView::Playback | ScreenView::Perform | ScreenView::History(..) => {
                 draw_header(ui, ctx, snap, lay, u, out);
+                // LOAD leaves BROWSE for this screen: say a track is on its way.
+                if let Some(name) = snap.loading {
+                    label(ui, Pos2::new(lay.screen.min.x + 1000.0 * u, lay.screen.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
+                }
                 draw_field(ui, snap, lay, u, out);
                 match panel(ctx) {
                     // GRID ADJUST's keys take the panel row.
@@ -1571,12 +1575,17 @@ fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: 
     p.rect_filled(pane, 0.0, PANE);
     if let Some(r) = rows.get(cursor) {
         let counts = r.path.as_deref().and_then(|root| b.rekordbox_counts(root));
-        let (songs, lists) = match counts {
-            Some((s, l)) => (s.to_string(), l.to_string()),
-            None if r.rekordbox => ("-".into(), "-".into()),
-            None => ("0".into(), "0".into()),
+        // A linked player reports its own counts, date and sizes.
+        let (songs, lists) = match (&r.info, counts) {
+            (Some(i), _) => (i.tracks.to_string(), i.playlists.to_string()),
+            (None, Some((s, l))) => (s.to_string(), l.to_string()),
+            (None, None) if r.rekordbox => ("-".into(), "-".into()),
+            (None, None) => ("0".into(), "0".into()),
         };
-        let space = r.path.as_deref().and_then(|root| cached_space(ui.ctx(), root));
+        let space = match &r.info {
+            Some(i) if i.total > 0 => Some((i.total, i.free)),
+            _ => r.path.as_deref().and_then(|root| cached_space(ui.ctx(), root)),
+        };
         let line = |y: f32, name: &str, value: Option<(String, &str)>| {
             label(ui, at(949.0, y), Align2::LEFT_CENTER, name, 17.0, u, LABEL);
             if let Some((v, unit)) = value {
@@ -1589,7 +1598,7 @@ fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: 
         };
         line(120.0, "Songs", Some((songs, "")));
         line(166.0, "Playlists", Some((lists, "")));
-        line(219.0, "Date", None);
+        line(219.0, "Date", r.info.as_ref().filter(|i| !i.date.is_empty()).map(|i| (i.date.clone(), "")));
         if let Some((total, free)) = space {
             let (t, tu) = size_text(total);
             let (f, fu) = size_text(free);
@@ -1751,10 +1760,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
             let tags = match e.load() {
                 Some(crate::browser::Load::Local { path, .. }) => browse_tags(ui.ctx(), path),
                 // A linked player's track: what its library knows.
-                Some(l @ crate::browser::Load::Db { .. }) => b.db_meta(l).map(|m| opendeck_decode::TrackTags {
-                    title: m.title.clone(), artist: m.artist.clone(), album: m.album.clone(), genre: m.genre.clone(),
-                    key: m.key.clone(), year: m.year.clone(), bpm: m.bpm, ..Default::default()
-                }),
+                Some(l @ crate::browser::Load::Db { .. }) => b.db_tags(l),
                 _ => None,
             }.unwrap_or_default();
             let title = tags.title.clone().unwrap_or_else(|| e.name.clone());

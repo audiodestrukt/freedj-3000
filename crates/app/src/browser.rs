@@ -109,6 +109,10 @@ impl Entry {
     }
 }
 
+/// What a linked player's library knows about one track: its metadata and
+/// the cover bytes (JPEG / PNG) when it has one.
+struct DbInfo { meta: opendeck_dbserver::TrackMeta, art: Option<Vec<u8>> }
+
 #[derive(Clone)]
 enum EntryKind {
     Descend(Loc),
@@ -286,6 +290,8 @@ pub struct SourceRow {
     /// A LINK source's address.
     pub ip:        Option<Ipv4Addr>,
     pub rekordbox: bool,
+    /// A linked player's report on the media: tracks, playlists, date, sizes.
+    pub info:      Option<opendeck_link::prodj::MediaInfo>,
 }
 
 impl SourceRow {
@@ -339,7 +345,7 @@ pub struct Browser {
     db_label:  String,
     /// Library metadata of tracks shown in a dbserver list, fetched as each
     /// is highlighted (a list row carries only title and artist).
-    meta_cache: std::collections::HashMap<(Ipv4Addr, u8, u32), Option<opendeck_dbserver::TrackMeta>>,
+    meta_cache: std::collections::HashMap<(Ipv4Addr, u8, u32), Option<DbInfo>>,
     link:      Arc<LinkState>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
@@ -458,15 +464,36 @@ impl Browser {
         let key = (*ip, *slot as u8, *id);
         if self.meta_cache.contains_key(&key) { return; }
         let id = *id;
-        let m = self.db_call(|c, s| c.track_meta(s, id)).and_then(|r| r.map_err(|e| log::info!("LINK metadata {id}: {e:#}")).ok());
-        self.meta_cache.insert(key, m);
+        let info = self.db_call(|c, s| {
+            let rows = c.metadata(s, id)?;
+            // What the player sent, once per track: shows which rows a player
+            // leaves out (key and year come up empty on some).
+            for r in &rows { log::info!("LINK metadata {id}: type 0x{:04x} id {} {:?} {:?}", r.item_type, r.id, r.label, r.label2); }
+            let meta = opendeck_dbserver::TrackMeta::from_rows(&rows);
+            let art = if meta.artwork_id != 0 { c.artwork(s, meta.artwork_id).ok().filter(|b| !b.is_empty()) } else { None };
+            log::info!("LINK metadata {id}: artwork id {} → {} bytes", meta.artwork_id, art.as_ref().map_or(0, |b| b.len()));
+            Ok(DbInfo { meta, art })
+        }).and_then(|r| r.map_err(|e| log::info!("LINK metadata {id}: {e:#}")).ok());
+        self.meta_cache.insert(key, info);
     }
 
-    /// The library metadata fetched for a dbserver track, if any.
-    pub fn db_meta(&self, l: &Load) -> Option<&opendeck_dbserver::TrackMeta> {
+    /// The tags (title, artist, album, key, BPM, cover) fetched for a
+    /// dbserver track, if any.
+    pub fn db_tags(&self, l: &Load) -> Option<opendeck_decode::TrackTags> {
+        let i = self.meta_cache.get(&Self::meta_key(l)?)?.as_ref()?;
+        let m = &i.meta;
+        Some(opendeck_decode::TrackTags {
+            title: m.title.clone(), artist: m.artist.clone(), album: m.album.clone(), genre: m.genre.clone(),
+            key: m.key.clone(), year: m.year.clone(), bpm: m.bpm,
+            artwork: i.art.as_ref().map(|b| (if b.starts_with(&[0x89, b'P']) { "image/png" } else { "image/jpeg" }.to_string(), b.clone())),
+            ..Default::default()
+        })
+    }
+
+    fn meta_key(l: &Load) -> Option<(Ipv4Addr, u8, u32)> {
         let Load::Db { ip, id, sd, rekordbox, .. } = l else { return None };
         let slot = if *rekordbox { Slot::Collection } else if *sd { Slot::Sd } else { Slot::Usb };
-        self.meta_cache.get(&(*ip, slot as u8, *id))?.as_ref()
+        Some((*ip, slot as u8, *id))
     }
 
     pub fn title(&self) -> String {
@@ -795,7 +822,8 @@ impl Browser {
             Err(e) => return Some(Err(e)),
         };
         let grid = self.db_call(|c, s| c.beat_grid(s, id)).unwrap_or_else(|| Err(anyhow::anyhow!("session closed")));
-        let meta = self.db_call(|c, s| c.track_meta(s, id)).and_then(|r| r.ok());
+        // The highlight already fetched it; no extra round trip on the UI thread.
+        let meta = self.meta_cache.get(&(ip, slot as u8, id)).and_then(|i| i.as_ref()).map(|i| i.meta.clone());
         Some(Ok((path, grid, meta)))
     }
 
@@ -1098,7 +1126,7 @@ impl Browser {
         let name = self.home.file_name().and_then(|n| n.to_str()).unwrap_or("/").to_string();
         let mut out = vec![SourceRow {
             kind: SourceKind::Local, label: name, player: None,
-            path: Some(self.home.clone()), ip: None, rekordbox: media::has_rekordbox(&self.home),
+            path: Some(self.home.clone()), ip: None, rekordbox: media::has_rekordbox(&self.home), info: None,
         }];
         // A row with no path asks the OS for access when opened.
         for m in &self.media {
@@ -1106,16 +1134,16 @@ impl Browser {
                 Access::Ready      => (format!("USB: {}", m.label), Some(m.path.clone())),
                 Access::NeedsGrant => (format!("USB: {} (ALLOW ACCESS)", m.label), None),
             };
-            out.push(SourceRow { kind: SourceKind::Usb, label, player: None, path, ip: None, rekordbox: m.rekordbox });
+            out.push(SourceRow { kind: SourceKind::Usb, label, player: None, path, ip: None, rekordbox: m.rekordbox, info: None });
         }
         if let Some(add) = media::ADD_DRIVE {
-            out.push(SourceRow { kind: SourceKind::Usb, label: format!("USB: {add}"), player: None, path: None, ip: None, rekordbox: false });
+            out.push(SourceRow { kind: SourceKind::Usb, label: format!("USB: {add}"), player: None, path: None, ip: None, rekordbox: false, info: None });
         }
         for e in self.link_entries() {
-            let (ip, rekordbox) = match e.kind {
-                EntryKind::ConnectLink(ip, _) => (Some(ip), false),
-                EntryKind::ConnectDb(ip) => (Some(ip), true),
-                _ => (None, false),
+            let (ip, rekordbox, slot) = match e.kind {
+                EntryKind::ConnectLink(ip, slot) => (Some(ip), false, Some(slot as u8)),
+                EntryKind::ConnectDb(ip) => (Some(ip), true, None),
+                _ => (None, false, None),
             };
             // "3 USB: NAME" → badge 3, "USB: NAME".
             let (player, label) = match e.name.split_once(' ') {
@@ -1125,7 +1153,8 @@ impl Browser {
                 },
                 _ => (None, e.name.clone()),
             };
-            out.push(SourceRow { kind: SourceKind::Link, label, player, path: None, ip, rekordbox });
+            let info = player.zip(slot).and_then(|(p, sl)| self.link.media(p).into_iter().find(|m| m.slot == sl));
+            out.push(SourceRow { kind: SourceKind::Link, label, player, path: None, ip, rekordbox, info });
         }
         out
     }
@@ -1588,6 +1617,7 @@ mod tests {
         link.peer_names.lock().unwrap().extend([(3u8, "CDJ-3000".to_string()), (17u8, "rekordbox".to_string())]);
         link.peer_media.lock().unwrap().insert((3, 3), (opendeck_link::prodj::MediaInfo {
             player: 3, slot: 3, name: "OPENDECK".into(), tracks: 12, playlists: 1,
+            date: "2026-09-17".into(), total: 32 << 30, free: 16 << 30,
         }, std::time::Instant::now()));
         let b = Browser::new(home.path(), link);
         let rows = b.sources();

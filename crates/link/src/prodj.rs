@@ -49,6 +49,11 @@ pub struct MediaInfo {
     pub name:      String,
     pub tracks:    u16,
     pub playlists: u16,
+    /// When the media was created, as the player writes it ("2026-08-25").
+    pub date:      String,
+    /// Capacity and free space in bytes.
+    pub total:     u64,
+    pub free:      u64,
 }
 
 impl MediaInfo {
@@ -345,6 +350,9 @@ impl ProDjLink {
             name:      String::from_utf16_lossy(&units),
             tracks:    u16::from_be_bytes([data[0xa6], data[0xa7]]),
             playlists: u16::from_be_bytes([data[0xae], data[0xaf]]),
+            date:      String::from_utf16_lossy(&data[0x6c..0x84].chunks(2).map(|c| u16::from_be_bytes([c[0], c[1]])).take_while(|&u| u != 0).collect::<Vec<_>>()),
+            total:     u64::from_be_bytes(data[0xb0..0xb8].try_into().ok()?),
+            free:      u64::from_be_bytes(data[0xb8..0xc0].try_into().ok()?),
         })
     }
 
@@ -1015,7 +1023,7 @@ mod tests {
         let cdj: Vec<u8> = (0..CDJ3000_MEDIA_RESPONSE.len()).step_by(2)
             .map(|i| u8::from_str_radix(&CDJ3000_MEDIA_RESPONSE[i..i + 2], 16).unwrap()).collect();
         assert_eq!(ProDjLink::parse_media_response(&cdj),
-                   Some(MediaInfo { player: 1, slot: 3, name: String::new(), tracks: 226, playlists: 1 }));
+                   Some(MediaInfo { player: 1, slot: 3, name: String::new(), tracks: 226, playlists: 1, date: "2026-08-25".into(), total: 2_143_272_960, free: 1_075_691_520 }));
         // Same structure from us as player 1: header, owner and slot words,
         // the "1000" field, counts and type, sizes aside.
         let ours = ProDjLink::new(1).build_media_response(Ipv4Addr::new(169, 254, 77, 1), 3, "", 226, 1, 0, 0);
@@ -1033,7 +1041,7 @@ mod tests {
         assert_eq!(ProDjLink::parse_media_query(&q), Some((2, Ipv4Addr::new(10, 0, 0, 2), 3, 3)));
         let src = ProDjLink::new(3);
         let r = src.build_media_response(Ipv4Addr::new(10, 0, 0, 2), 3, "OPENDECK", 226, 4, 32 << 30, 16 << 30);
-        assert_eq!(ProDjLink::parse_media_response(&r), Some(MediaInfo { player: 3, slot: 3, name: "OPENDECK".into(), tracks: 226, playlists: 4 }));
+        assert_eq!(ProDjLink::parse_media_response(&r), Some(MediaInfo { player: 3, slot: 3, name: "OPENDECK".into(), tracks: 226, playlists: 4, date: "2026-09-17".into(), total: 32 << 30, free: 16 << 30 }));
         assert_eq!(ProDjLink::parse_media_response(&q), None);
     }
 }

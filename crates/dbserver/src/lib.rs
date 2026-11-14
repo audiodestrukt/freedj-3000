@@ -284,6 +284,8 @@ pub struct TrackMeta {
     pub title: Option<String>, pub artist: Option<String>, pub album: Option<String>,
     pub genre: Option<String>, pub key: Option<String>, pub year: Option<String>,
     pub bpm: Option<f32>,
+    /// The cover's id for [`Client::artwork`] (0 = none).
+    pub artwork_id: u32,
 }
 
 impl TrackMeta {
@@ -292,7 +294,7 @@ impl TrackMeta {
         let text = |r: &MenuItem| Some(r.label.clone()).filter(|l| !l.trim().is_empty());
         for r in rows {
             match r.item_type & 0xffff {
-                0x04 if m.title.is_none()  => m.title  = text(r),
+                0x04 if m.title.is_none()  => { m.title = text(r); m.artwork_id = r.artwork_id; }
                 0x07 if m.artist.is_none() => m.artist = text(r),
                 0x02 if m.album.is_none()  => m.album  = text(r),
                 0x06 if m.genre.is_none()  => m.genre  = text(r),
@@ -458,6 +460,12 @@ impl Client {
     /// folded into title, artist, album, genre, key, BPM and year.
     pub fn track_meta(&mut self, slot: Slot, rekordbox_id: u32) -> Result<TrackMeta> {
         Ok(TrackMeta::from_rows(&self.metadata(slot, rekordbox_id)?))
+    }
+
+    /// A track's cover: the JPEG or PNG bytes the player stores (0x2003).
+    pub fn artwork(&mut self, slot: Slot, artwork_id: u32) -> Result<Vec<u8>> {
+        let d = self.dmst(8, slot, TrackType::Rekordbox);
+        self.blob(kind::ARTWORK, kind::ARTWORK_BLOB, vec![d, Field::U32(artwork_id)])
     }
 
     /// SEARCH: the tracks whose title, artist or album contain `text` (the
