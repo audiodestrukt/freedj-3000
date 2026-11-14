@@ -347,6 +347,8 @@ pub struct Browser {
     /// descend), and the source's own label ("3 USB: OPENDECK") for the root.
     db_title:  String,
     db_label:  String,
+    /// The linked player's category menu, kept for the left-hand column.
+    db_cats:   Vec<Entry>,
     /// Library metadata of tracks shown in a dbserver list, fetched as each
     /// is highlighted (a list row carries only title and artist).
     meta_cache: std::collections::HashMap<(Ipv4Addr, u8, u32), Option<DbInfo>>,
@@ -419,6 +421,7 @@ impl Browser {
             media_at: Some(Instant::now()),
             db_title: String::new(),
             db_label: String::new(),
+            db_cats: Vec::new(),
             meta_cache: Default::default(),
             link,
             preview: Default::default(),
@@ -712,7 +715,7 @@ impl Browser {
             Some(Err(e)) => { log::info!("LINK: no category menu ({e:#}); showing playlists"); return self.db_folder_entries(0); }
         };
         for i in &items { log::info!("LINK category: {:?} item_type 0x{:x} id {} → {}", i.label, i.item_type, i.id, db_category(i)); }
-        items.into_iter().map(|i| {
+        let rows: Vec<Entry> = items.into_iter().map(|i| {
             let kind = match db_category(&i) {
                 "root-track"    => EntryKind::Descend(Loc::DbAllTracks),
                 "root-playlist" => EntryKind::Descend(Loc::DbFolder(0)),
@@ -727,7 +730,9 @@ impl Browser {
                 },
             };
             Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None, kind }
-        }).collect()
+        }).collect();
+        self.db_cats = rows.clone();
+        rows
     }
 
     /// One of the `Cat` categories: the names to pick from at this level, or
@@ -926,6 +931,25 @@ impl Browser {
     /// The category column of a rekordbox source (CDJ-3000 skin): the
     /// categories and which one is open, while browsing inside one.
     pub fn rb_categories(&self) -> Option<(Vec<String>, Option<usize>)> {
+        if let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::DbRoot)) {
+            // A linked player: its categories down the left, like a unit.
+            if self.db_cats.is_empty() { return None; }
+            let group = |l: &Loc| -> (u8, Option<Cat>) { match l {
+                Loc::DbFolder(_) | Loc::DbPlaylist(_) => (0, None),
+                Loc::DbArtists | Loc::DbArtist(_) => (1, None),
+                Loc::DbAlbums | Loc::DbAlbum(_) => (2, None),
+                Loc::DbAllTracks => (3, None),
+                Loc::DbFilenames => (4, None),
+                Loc::DbTree(_) => (5, None),
+                Loc::DbCat(c, _) => (6, Some(*c)),
+                _ => (255, None),
+            } };
+            let open = self.stack.get(r + 1).and_then(|l| self.db_cats.iter().position(|c| match &c.kind {
+                EntryKind::Descend(k) => group(k) == group(l) && group(l).0 != 255,
+                _ => false,
+            }));
+            return Some((self.db_cats.iter().map(|c| c.name.clone()).collect(), open));
+        }
         let r = self.stack.iter().position(|l| matches!(l, Loc::RbRoot))?;
         let cats = self.rb_root_entries();
         let open = self.stack.get(r + 1).and_then(|l| cats.iter().position(|c| match (&c.kind, l) {
@@ -1038,8 +1062,9 @@ impl Browser {
 
     /// Open the `i`th rekordbox category from anywhere inside the source.
     pub fn open_rb_category(&mut self, i: usize) {
-        let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot)) else { return };
+        let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot | Loc::DbRoot)) else { return };
         self.stack.truncate(r + 1);
+        self.names.truncate(r + 1);
         self.rebuild();
         if i < self.entries.len() {
             self.selected = i;
@@ -1119,6 +1144,7 @@ impl Browser {
                     self.stack.push(Loc::DbRoot);
                     self.selected = 0;
                     self.rebuild();
+                    self.open_rb_category(0);
                     Enter::Folder
                 }
                 Err(e) => { log::warn!("LINK rekordbox {ip} failed: {e:#}"); Enter::Nothing }
@@ -1131,6 +1157,7 @@ impl Browser {
                     self.stack.push(Loc::DbRoot);
                     self.selected = 0;
                     self.rebuild();
+                    self.open_rb_category(0);
                     Enter::Folder
                 }
                 Err(e) => {

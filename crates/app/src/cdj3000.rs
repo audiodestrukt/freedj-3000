@@ -1737,8 +1737,11 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     let head = match names {
         Some(f) => f_label(f),
         None if b.on_rb_history() => "HISTORY".to_string(),
-        None if cats.is_some() => "PLAYLIST".to_string(),
-        None => "FOLDER".to_string(),
+        None => match &cats {
+            Some((n, Some(o))) => n.get(*o).cloned().unwrap_or_else(|| "PLAYLIST".to_string()),
+            Some(_) => "PLAYLIST".to_string(),
+            None => "FOLDER".to_string(),
+        },
     };
     let left = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 730.0 * u, sc.min.y + 628.0 * u));
     draw_list(ui, left, &head, &rows, b.selected, "— empty —", u, Some(out));
