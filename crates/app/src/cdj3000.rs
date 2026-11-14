@@ -695,7 +695,7 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
     // Shown once there is another player to follow; the meter of a deck
     // alone has nothing to measure against.
     if !(snap.linked || snap.beat2_bpm > 0.0) { return; }
-    if !meter_shown(ui.ctx()) { return draw_wave_view(ui, snap, r, u); }
+    if !meter_shown(ui.ctx()) { return draw_wave_view(ui, snap, r, lay.wave.width(), u); }
     let beat_px = 73.0 * u;
     let cx = r.center().x;
     let master_bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
@@ -720,15 +720,23 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
     p.line_segment([Pos2::new(cx, r.min.y + 6.0 * u), Pos2::new(cx, r.max.y - 4.0 * u)], Stroke::new(3.0 * u, TEXT));
 }
 
-/// The meter slot's WAVEFORM view (photographed off a CDJ-3000): the other
+/// The meter slot's WAVEFORM view (photographed off a CDJ-3000, zoomed with the
+/// main waveform): the other
 /// player's waveform, thin, above the main waveform, with its own beat grid
 /// (ticks along both edges, red on the first beat of a bar) moving with it
 /// past a white line at its playhead.  The scale is this deck's tempo, so
 /// when the other track is at the same tempo and in phase its beats line up
 /// with this deck's grid on the main waveform, and when it is not they drift.
-fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, u: f32) {
+fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
     let p = ui.painter().with_clip_rect(r);
-    let (cx, beat_px) = (r.center().x, 73.0 * u);
+    // The same zoom as the main waveform: its columns across its width set how
+    // wide a beat of this deck's grid is; with no grid, the phase meter's width.
+    let beat_px = match snap.beat_grid.filter(|g| g.bpm > 0.0) {
+        Some(g) => wave_w / snap.cols_visible.max(1.0) * snap.sample_rate as f32 * 60.0
+                   / (g.bpm as f32 * opendeck_analysis::waveform::HOP_SIZE as f32),
+        None => 73.0 * u,
+    };
+    let cx = r.center().x;
     if let Some(w) = &snap.remote_wave {
         let (mid, half) = (r.center().y, 24.0 * u);
         // Points per 1/150 s of the other track: its media seconds pass at
