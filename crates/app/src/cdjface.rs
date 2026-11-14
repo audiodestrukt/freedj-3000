@@ -160,7 +160,7 @@ impl Key {
     /// Nothing behind it yet: drawn for the panel's sake, dimmed, and a tap
     /// does nothing.
     pub fn inert(self) -> bool {
-        matches!(self, Key::Playlist | Key::TrackFilter | Key::Shortcut | Key::KeySync)
+        matches!(self, Key::TrackFilter | Key::Shortcut | Key::KeySync)
     }
 
     /// The button's name in cdj3k-emu's control API (`press <name>`).
@@ -201,6 +201,7 @@ impl Key {
             Key::Source => ui(UiEvent::Screen(TopScreen::Source)),
             Key::Browse => ui(UiEvent::Screen(TopScreen::Browse)),
             Key::TagList => ui(UiEvent::Screen(TopScreen::TagList)),
+            Key::Playlist => ui(UiEvent::Screen(TopScreen::Playlist)),
             Key::Search => ui(UiEvent::Search(SearchEdit::Open)),
             // A tap opens UTILITY (the deck's settings, STEMS among them).
             // The unit has it the other way round (tap: LOAD PREVIOUS TRACK,
@@ -234,7 +235,7 @@ impl Key {
             // Held, not tapped (CALL / DELETE is a modifier for the pads,
             // SEARCH scans while held), or inert.
             Key::CallDelete | Key::SearchPrev | Key::SearchNext
-            | Key::Playlist | Key::TrackFilter | Key::Shortcut | Key::KeySync => None,
+            | Key::TrackFilter | Key::Shortcut | Key::KeySync => None,
         }
     }
 
@@ -784,7 +785,8 @@ mod tests {
         assert!(matches!(Key::Menu.tap(None), Some(Event::Ui(UiEvent::Screen(TopScreen::Menu)))));
         assert!(matches!(Key::TimeMode.long(), Some(Event::Ui(UiEvent::AutoCue))));
         assert!(matches!(Key::Quantize.tap(None), Some(Event::Ui(UiEvent::CycleSetting(Setting::Quantize)))));
-        for k in [Key::Playlist, Key::TrackFilter, Key::Shortcut, Key::KeySync] { assert!(k.tap(None).is_none()); }
+        assert!(matches!(Key::Playlist.tap(None), Some(Event::Ui(UiEvent::Screen(TopScreen::Playlist)))));
+        for k in [Key::TrackFilter, Key::Shortcut, Key::KeySync] { assert!(k.tap(None).is_none()); }
     }
 
     /// The lamps by the emulator's rules: screen keys dim until their screen,

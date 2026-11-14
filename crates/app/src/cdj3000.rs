@@ -332,10 +332,6 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &Scree
             ScreenView::Info => draw_info(ui, ctx, snap, lay, u, out),
             ScreenView::Playback | ScreenView::Perform | ScreenView::History(..) => {
                 draw_header(ui, ctx, snap, lay, u, out);
-                // LOAD leaves BROWSE for this screen: say a track is on its way.
-                if let Some(name) = snap.loading {
-                    label(ui, Pos2::new(lay.screen.min.x + 1000.0 * u, lay.screen.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
-                }
                 draw_field(ui, snap, lay, u, out);
                 match panel(ctx) {
                     // GRID ADJUST's keys take the panel row.

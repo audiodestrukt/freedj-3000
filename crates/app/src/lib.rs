@@ -1825,6 +1825,13 @@ impl DeckApp {
                     };
                     log::info!("screen → {:?}", self.screen_mode);
                 }
+                TopScreen::Playlist => {
+                    // PLAY LIST: the playlists of the source being browsed,
+                    // else of the stick the last track came from.
+                    self.browser.open_playlists();
+                    self.screen_mode = ScreenMode::Browse;
+                    log::info!("screen → {:?} (playlists)", self.screen_mode);
+                }
                 TopScreen::Info => {
                     // INFO: the loaded track's details, in the middle band.
                     self.screen_mode = if self.screen_mode == ScreenMode::Info {

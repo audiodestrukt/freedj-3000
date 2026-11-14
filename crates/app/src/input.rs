@@ -107,7 +107,7 @@ pub enum Source { Link, Usb }
 pub enum SearchEdit { Open, Char(char), Backspace, Clear }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Screen { Browse, TagList, Info, Menu, Perform, Source, History }
+pub enum Screen { Browse, TagList, Info, Menu, Perform, Source, History, Playlist }
 
 /// PERFORM pad mode: the pads are hot cues, or beat jumps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

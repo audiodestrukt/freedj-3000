@@ -1244,6 +1244,23 @@ impl Browser {
         }
     }
 
+    /// PLAY LIST: from anywhere inside a rekordbox or linked source, its
+    /// playlist tree; outside one, the stick the browser last used.
+    pub fn open_playlists(&mut self) {
+        let is_root = |l: &Loc| matches!(l, Loc::RbRoot | Loc::DbRoot);
+        if !self.stack.iter().any(is_root) { self.go_root(); }
+        let Some(r) = self.stack.iter().position(is_root) else { return };
+        self.stack.truncate(r + 1);
+        self.selected = 0;
+        self.rebuild();
+        let at = self.entries.iter().position(|e| matches!(e.kind,
+            EntryKind::Descend(Loc::RbTree(0) | Loc::DbFolder(0))));
+        if let Some(i) = at {
+            self.selected = i;
+            self.enter();
+        }
+    }
+
     /// The LINK source key: jump to the list of linked players (from wherever
     /// the browser is).
     pub fn go_link(&mut self) {
