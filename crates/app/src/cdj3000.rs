@@ -658,6 +658,9 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
 /// Whether the phase-meter slot shows the meter (the unit's PHASE METER view)
 /// or is left to the waveform view. Screen state, like the panels; a tap on
 /// the slot switches, as on the unit.
+/// The meter slot shows the waveform view (the phase meter is switched off).
+pub fn waveform_view(ctx: &egui::Context) -> bool { !meter_shown(ctx) }
+
 fn meter_shown(ctx: &egui::Context) -> bool {
     !ctx.data(|d| d.get_temp::<bool>(Id::new("cdj3k-meter-off"))).unwrap_or(false)
 }
@@ -686,7 +689,8 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
     }
     // Shown once there is another player to follow; the meter of a deck
     // alone has nothing to measure against.
-    if !meter_shown(ui.ctx()) || !(snap.linked || snap.beat2_bpm > 0.0) { return; }
+    if !(snap.linked || snap.beat2_bpm > 0.0) { return; }
+    if !meter_shown(ui.ctx()) { return draw_wave_view(ui, snap, r, u); }
     let beat_px = 73.0 * u;
     let cx = r.center().x;
     let master_bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
@@ -709,6 +713,50 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
         }
     }
     p.line_segment([Pos2::new(cx, r.min.y + 6.0 * u), Pos2::new(cx, r.max.y - 4.0 * u)], Stroke::new(3.0 * u, TEXT));
+}
+
+/// The meter slot's WAVEFORM view (photographed off a CDJ-3000): the other
+/// player's waveform, thin, in the slot above the main waveform, running past a
+/// white line at its playhead on the same beat scale as the phase meter, with
+/// that deck's beat ticks (red on the first beat of a bar) above it.
+fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, u: f32) {
+    let p = ui.painter().with_clip_rect(r);
+    let (cx, beat_px) = (r.center().x, 73.0 * u);
+    if let Some(w) = &snap.remote_wave {
+        let (mid, half) = (r.min.y + 46.0 * u, 22.0 * u);
+        let per_entry = beat_px * w.bpm / 60.0 / 150.0;   // points per 1/150 s of the track
+        let first = w.playhead_s as f32 * 150.0;
+        let n = w.bytes.len();
+        let mut x = r.min.x;
+        while x < r.max.x {
+            let (a, b) = (first + (x - cx) / per_entry, first + (x + 1.0 - cx) / per_entry);
+            let (a, b) = ((a.floor().max(0.0)) as usize, (b.ceil().max(0.0)) as usize);
+            if a < n {
+                let (h, wh) = w.bytes[a..b.max(a + 1).min(n)].iter().fold((0u8, 0u8), |m, &v| {
+                    let (h, wh) = (v & 0x1f, v >> 5);
+                    if h > m.0 { (h, wh) } else { m }
+                });
+                if h > 0 {
+                    let k = wh as f32 / 7.0;
+                    let col = Color32::from_rgb((18.0 + 190.0 * k) as u8, (96.0 + 120.0 * k) as u8, (151.0 + 80.0 * k) as u8);
+                    let hh = half * h as f32 / 31.0;
+                    p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0, col));
+                }
+            }
+            x += 1.0;
+        }
+    }
+    if !snap.master && snap.beat2_bpm > 0.0 {
+        let bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
+        for i in -6..=6i32 {
+            let x = cx + (i as f32 - snap.beat2_phase_beats) * beat_px;
+            if x < r.min.x || x > r.max.x { continue; }
+            let bar = (i + bib - 1).rem_euclid(4) == 0;
+            p.line_segment([Pos2::new(x, r.min.y + 3.0 * u), Pos2::new(x, r.min.y + if bar { 20.0 } else { 14.0 } * u)],
+                           Stroke::new(2.0 * u, if bar { RED } else { TEXT }));
+        }
+    }
+    p.line_segment([Pos2::new(cx, r.min.y + 2.0 * u), Pos2::new(cx, r.max.y - 2.0 * u)], Stroke::new(2.5 * u, TEXT));
 }
 
 /// Which GRID ADJUST keys are lit: SNAP GRID, SHIFT GRID, ◀◀ 1/2, ▶▶ 1/2,

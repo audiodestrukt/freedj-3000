@@ -233,6 +233,21 @@ pub struct DeckSnapshot<'a> {
     /// Waveform columns (of `HOP_SIZE` frames) across the enlarged waveform:
     /// the zoom, for turning a drag in points into samples.
     pub cols_visible: f32,
+
+    /// The waveform meter: this deck's own waveform, and the other player's
+    /// (its track's detail waveform, track tempo and playhead in seconds).
+    pub local_wave:   Option<&'a opendeck_analysis::waveform::WaveformCache>,
+    pub remote_wave:  Option<RemoteWaveView>,
+}
+
+/// The other player's waveform as the meter draws it.
+#[derive(Clone)]
+pub struct RemoteWaveView {
+    /// 150 entries a second: height in the low 5 bits, whiteness above.
+    pub bytes: std::sync::Arc<Vec<u8>>,
+    /// The track's tempo, unpitched, and where its playhead is.
+    pub bpm: f32,
+    pub playhead_s: f64,
 }
 
 impl DeckSnapshot<'_> {
@@ -280,7 +295,7 @@ impl<'a> DeckSnapshot<'a> {
             remain_mode: true, auto_cue: false, slip: false, sync: false, master: false, zoom_grid_mode: false,
             grid_edited: false, cue_set: false, sync_offset: 0.0, source_link: false, phase_ticks_view: false,
             linked: false, master_player: 0, player: 1, link_addr: String::new(), ip_line: String::new(), link_peers: String::new(),
-            cols_visible: 1.0, beat_grid: None, beat2_bpm: 0.0, beat2_phase_beats: 0.0, beat2_beat_in_bar: 0, key_shift: 0,
+            cols_visible: 1.0, local_wave: None, remote_wave: None, beat_grid: None, beat2_bpm: 0.0, beat2_phase_beats: 0.0, beat2_beat_in_bar: 0, key_shift: 0,
         }
     }
 }

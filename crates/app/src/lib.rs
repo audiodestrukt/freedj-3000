@@ -17,6 +17,7 @@ mod input;
 mod media;
 mod surface;
 mod prodj;
+mod remotewave;
 mod renderer;
 mod screen;
 mod cdj3000;
@@ -907,6 +908,8 @@ struct DeckApp {
     last_input: Instant,
     /// Whether the iOS auto-lock is currently held off (see `AWAKE_IDLE`).
     keep_awake: bool,
+    /// The other player's waveform for the CDJ-3000 screen's waveform meter.
+    remote_waves: remotewave::RemoteWaves,
     /// Last-seen audio glitch counters, to log only on change.
     prev_underruns: u64,
     prev_drops:     u64,
@@ -1004,6 +1007,7 @@ fn make_snapshot<'a>(
         ip_line:       String::new(),
         link_peers:    String::new(),
         cols_visible:  ZOOM_LEVELS[ZOOM_DEFAULT],
+        local_wave: None, remote_wave: None,
         beat_grid,
         beat2_bpm,
         beat2_phase_beats,
@@ -1243,6 +1247,7 @@ impl DeckApp {
             full_rate:      true,
             last_input:     Instant::now(),
             keep_awake:     true,
+            remote_waves:   remotewave::RemoteWaves::default(),
         }
     }
 
@@ -3305,6 +3310,24 @@ impl DeckApp {
     /// CDJ-3000's waveform spans the whole screen and its default view is
     /// about 34 s wide (18 px per beat at 128 BPM on the unit), about 5.3× the
     /// XDJ's, so the same steps are scaled for it.
+    /// The waveform meter's data: this deck's waveform, and the other
+    /// player's (fetched from its database while the meter slot shows
+    /// WAVEFORM, positioned from its Absolute Position packets).
+    fn fill_waves<'a>(snap: &mut snapshot::DeckSnapshot<'a>, wave: &'a opendeck_analysis::waveform::WaveformCache,
+                      link: &prodj::LinkState, remote: &remotewave::RemoteWaves, ctx: &egui::Context, other: u32) {
+        snap.local_wave = Some(wave);
+        if other == 0 || !cdj3000::waveform_view(ctx) { return; }
+        let p = other as u8;
+        let Some(st) = link.peer_status.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
+        let Some(ip) = link.peers.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
+        let Some(bytes) = remote.get(ip, link.player(), st.track) else { return };
+        let Some(bpm) = st.bpm.filter(|b| *b > 0.0) else { return };
+        let Some((pos, at)) = link.positions.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
+        // Between packets (about 30 ms apart) the playhead runs on at the pitch.
+        let run = if st.playing { at.elapsed().as_secs_f64() * pos.pitch as f64 } else { 0.0 };
+        snap.remote_wave = Some(snapshot::RemoteWaveView { bytes, bpm, playhead_s: pos.playhead_ms as f64 / 1000.0 + run });
+    }
+
     fn cols_visible(&self) -> f32 { Self::cols_for(self.settings.skin, self.zoom_level) }
 
     fn cols_for(skin: settings::Skin, zoom_level: usize) -> f32 {
@@ -3636,6 +3659,7 @@ impl DeckApp {
         }
         snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
+        Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote_waves, &self.egui_ctx, beat2_player);
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = self.stems_view();
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
@@ -3900,6 +3924,7 @@ impl DeckApp {
         }
         snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
+        Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote_waves, &self.egui_ctx, beat2_player);
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = stems_view;
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }

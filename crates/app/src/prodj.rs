@@ -100,6 +100,8 @@ pub struct LinkState {
     /// Each player's latest Absolute Position (a CDJ-3000 or an OpenDeck,
     /// ~33 a second, sent straight to us) and when it came.
     pub positions:     Mutex<HashMap<u8, (AbsPosition, Instant)>>,
+    /// Each player's latest status (its loaded track, tempo, …).
+    pub peer_status:   Mutex<HashMap<u8, Status>>,
     /// Tracks we serve as a Link media source (0 = not serving).  Non-zero
     /// answers media queries and flags our USB slot loaded in status.
     pub serve_tracks:  AtomicU32,
@@ -232,6 +234,7 @@ impl LinkState {
             peers: Mutex::new(HashMap::new()),
             peer_names: Mutex::new(HashMap::new()),
             positions: Mutex::new(HashMap::new()),
+            peer_status: Mutex::new(HashMap::new()),
             serve_tracks: AtomicU32::new(0),
             peer_media: Mutex::new(HashMap::new()),
             beat2_beat_ms: AtomicU64::new(0),
@@ -1176,6 +1179,7 @@ impl StatusRx {
             return out;
         }
         let Some(st) = ProDjLink::parse_status(data) else { return out };
+        if let Ok(mut m) = link.peer_status.lock() { m.insert(st.player, st); }
         if st.player == link.player() { return out; }
 
         let changed = last.get(&st.player).map_or(true, |p| {
