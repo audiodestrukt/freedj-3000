@@ -1802,6 +1802,7 @@ impl DeckApp {
                     S::Clear => self.browser.set_search_query(String::new()),
                 }
             }
+            Event::Ui(UiEvent::BrowseDetail) => self.browser.cycle_detail(),
             Event::Ui(UiEvent::BrowseCategory(i)) => {
                 self.browser.open_rb_category(i);
                 self.screen_mode = ScreenMode::Browse;

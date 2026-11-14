@@ -113,7 +113,7 @@ impl Entry {
 
 /// What a linked player's library knows about one track: its metadata and
 /// the cover bytes (JPEG / PNG) when it has one.
-struct DbInfo { meta: opendeck_dbserver::TrackMeta, art: Option<Vec<u8>> }
+struct DbInfo { meta: opendeck_dbserver::TrackMeta, art: Option<Vec<u8>>, wave: Option<Arc<Vec<(u8, u8)>>> }
 
 #[derive(Clone)]
 enum EntryKind {
@@ -379,6 +379,10 @@ pub struct Browser {
     /// The source browsed last: the USB / BROWSE key goes back to it rather
     /// than to whatever stick was mounted most recently.
     last_root: Option<PathBuf>,
+    /// PLAY LIST: the playlists only, no category column.
+    playlist_only: bool,
+    /// The second row of the track table: 0 off, then ARTIST, ALBUM, GENRE.
+    detail: u8,
     /// Which local tracks have OverCue stems (the "S" mark in lists).
     stem_marks: std::cell::RefCell<crate::stems::StemMarks>,
 }
@@ -432,6 +436,8 @@ impl Browser {
             names: Vec::new(),
             positions: Default::default(),
             last_root: None,
+            playlist_only: false,
+            detail: 0,
             stem_marks: Default::default(),
         };
         b.rebuild();
@@ -465,21 +471,42 @@ impl Browser {
     /// artist, album, key, BPM, year) for the INFO pane.  Call each frame;
     /// it asks the player only when the highlight lands on a new track.
     pub fn prefetch_meta(&mut self) {
-        let Some(Entry { kind: EntryKind::Track(Load::Db { ip, id, .. }), .. }) = self.entries.get(self.selected) else { return };
+        // The highlighted row first, then one neighbour per frame, so the
+        // table's previews and second rows fill in around it.
+        let n = self.entries.len();
+        let order = std::iter::once(self.selected)
+            .chain((1..=6usize).flat_map(|d| [self.selected + d, self.selected.wrapping_sub(d)]))
+            .filter(|&i| i < n);
+        let todo = order.into_iter().find(|&i| {
+            matches!(&self.entries[i].kind, EntryKind::Track(l @ Load::Db { .. }) if Self::meta_key(l).is_some_and(|k| !self.meta_cache.contains_key(&k)))
+        });
+        let Some(i) = todo else { return };
+        let Some(Entry { kind: EntryKind::Track(Load::Db { ip, id, .. }), .. }) = self.entries.get(i) else { return };
         let Some((cur, _, slot)) = self.db.as_ref() else { return };
         if cur != ip { return; }
         let key = (*ip, *slot as u8, *id);
-        if self.meta_cache.contains_key(&key) { return; }
         let id = *id;
+        let verbose = i == self.selected;
         let info = self.db_call(|c, s| {
             let rows = c.metadata(s, id)?;
-            // What the player sent, once per track: shows which rows a player
-            // leaves out (key and year come up empty on some).
-            for r in &rows { log::info!("LINK metadata {id}: type 0x{:04x} id {} {:?} {:?}", r.item_type, r.id, r.label, r.label2); }
+            if verbose {
+                // What the player sent, once per track: shows which rows a
+                // player leaves out (key and year come up empty on some).
+                for r in &rows { log::info!("LINK metadata {id}: type 0x{:04x} id {} {:?} {:?}", r.item_type, r.id, r.label, r.label2); }
+            }
             let meta = opendeck_dbserver::TrackMeta::from_rows(&rows);
             let art = if meta.artwork_id != 0 { c.artwork(s, meta.artwork_id).ok().filter(|b| !b.is_empty()) } else { None };
-            log::info!("LINK metadata {id}: artwork id {} → {} bytes", meta.artwork_id, art.as_ref().map_or(0, |b| b.len()));
-            Ok(DbInfo { meta, art })
+            let wave = match c.waveform_preview(s, id) {
+                Ok(b) => {
+                    if verbose { log::info!("LINK preview {id}: {} bytes", b.len()); }
+                    // 400 columns, one byte each: height in the low 5 bits,
+                    // whiteness in the top 3.  Some replies carry a header.
+                    let d = if b.len() > 400 { &b[b.len() - 400..] } else { &b[..] };
+                    Some(Arc::new(d.iter().map(|&v| (v & 0x1f, v >> 5)).collect::<Vec<_>>())).filter(|w| w.iter().any(|&(h, _)| h > 0))
+                }
+                Err(e) => { log::info!("LINK preview {id}: {e:#}"); None }
+            };
+            Ok(DbInfo { meta, art, wave })
         }).and_then(|r| r.map_err(|e| log::info!("LINK metadata {id}: {e:#}")).ok());
         self.meta_cache.insert(key, info);
     }
@@ -541,7 +568,27 @@ impl Browser {
         }
     }
 
-    pub fn refresh(&mut self) { self.rebuild(); }
+    pub fn refresh(&mut self) { self.playlist_only = false; self.rebuild(); }
+    pub fn playlist_only(&self) -> bool { self.playlist_only }
+    /// The table's second-row key: off → ARTIST → ALBUM → GENRE → off.
+    pub fn cycle_detail(&mut self) { self.detail = (self.detail + 1) % 4; }
+    pub fn detail_name(&self) -> Option<&'static str> {
+        [None, Some("ARTIST"), Some("ALBUM"), Some("GENRE")][self.detail as usize]
+    }
+    /// What the second row shows for an entry (empty when not known yet).
+    pub fn detail_text(&self, e: &Entry) -> String {
+        let tags = e.load().and_then(|l| self.db_tags(l));
+        match self.detail {
+            1 => e.artist.clone().or_else(|| tags.and_then(|t| t.artist)).unwrap_or_default(),
+            2 => tags.and_then(|t| t.album).unwrap_or_default(),
+            3 => tags.and_then(|t| t.genre).unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+    /// The blue preview of a linked track, once fetched.
+    pub fn db_wave(&self, l: &Load) -> Option<Arc<Vec<(u8, u8)>>> {
+        self.meta_cache.get(&Self::meta_key(l)?)?.as_ref()?.wave.clone()
+    }
 
     /// What is inside the highlighted row, if it is a folder on the
     /// filesystem: `(is_dir, name)` for its folders then audio files, sorted
@@ -991,6 +1038,7 @@ impl Browser {
 
     /// SEARCH: start (or restart) a search from where the browser is.
     pub fn begin_search(&mut self) {
+        self.playlist_only = false;
         if !self.in_search() { self.stack.push(Loc::Search); }
         self.search_query.clear();
         self.selected = 0;
@@ -1062,6 +1110,7 @@ impl Browser {
 
     /// Open the `i`th rekordbox category from anywhere inside the source.
     pub fn open_rb_category(&mut self, i: usize) {
+        self.playlist_only = false;
         let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot | Loc::DbRoot)) else { return };
         self.stack.truncate(r + 1);
         self.names.truncate(r + 1);
@@ -1222,6 +1271,7 @@ impl Browser {
     /// CDJ's SOURCE screen does). Returns false when there is no such row or
     /// a LINK source would not connect.
     pub fn open_source(&mut self, i: usize) -> bool {
+        self.playlist_only = false;
         let rows = self.sources();
         let Some(row) = rows.get(i) else { return false };
         if row.kind == SourceKind::Usb && row.path.is_none() { media::request_access(); return false; }
@@ -1275,7 +1325,15 @@ impl Browser {
     /// playlist tree; outside one, the stick the browser last used.
     pub fn open_playlists(&mut self) {
         let is_root = |l: &Loc| matches!(l, Loc::RbRoot | Loc::DbRoot);
-        if !self.stack.iter().any(is_root) { self.go_root(); }
+        // Not inside a source: a linked player's session still open is the
+        // one the last track came from.
+        if !self.stack.iter().any(is_root) {
+            if self.db.is_some() && !self.db_cats.is_empty() {
+                self.stack = vec![self.stack.first().cloned().unwrap_or_else(|| Loc::Fs(self.home.clone())), Loc::Link, Loc::DbRoot];
+                self.names.resize(3, String::new());
+            } else { self.go_root(); }
+        }
+        self.playlist_only = true;
         let Some(r) = self.stack.iter().position(is_root) else { return };
         self.stack.truncate(r + 1);
         self.selected = 0;
@@ -1291,6 +1349,7 @@ impl Browser {
     /// The LINK source key: jump to the list of linked players (from wherever
     /// the browser is).
     pub fn go_link(&mut self) {
+        self.playlist_only = false;
         self.remember();
         self.stack.truncate(1);
         self.stack.push(Loc::Link);
@@ -1313,6 +1372,7 @@ impl Browser {
     /// is mounted (on its rekordbox categories when it has an export), else
     /// the local root folder.
     pub fn go_root(&mut self) {
+        self.playlist_only = false;
         // Back to the source browsed last, where it was left, while it is
         // still there: a stick mounted since does not take the key over.
         self.remember();
@@ -1475,6 +1535,7 @@ impl Browser {
     }
 
     pub fn back(&mut self) {
+        if self.playlist_only && matches!(self.stack.last(), Some(Loc::DbFolder(0) | Loc::RbTree(0))) { return; }
         if self.stack.len() > 1 {
             self.stack.pop();
             let came_from = self.names.pop().unwrap_or_default();

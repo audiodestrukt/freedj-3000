@@ -68,6 +68,8 @@ pub enum UiEvent {
     /// BROWSE on a rekordbox source: open the `n`th category (ARTIST, ALBUM…)
     /// from the CDJ-3000 skin's category column.
     BrowseCategory(usize),
+    /// The track table's second-row key.
+    BrowseDetail,
     /// MENU: a row was tapped — select it and step its value.
     MenuTap(usize),
     /// GRID ADJUST touch keys (shown in place of the Bars readouts while the

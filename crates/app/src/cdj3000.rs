@@ -1722,13 +1722,16 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     // The unit titles a category's name list BROWSE, a track list by its name.
     let title = if names.is_some() || b.on_rb_history() { "BROWSE".to_string() } else { b.title() };
     draw_list_header(ui, snap, lay, &title, cats.is_none(), u, out);
+    let bar = !b.playlist_only();
+    let lx = if bar { 92.0 } else { 0.0 };
     match &cats {
-        Some((names, open)) => draw_rb_categories(ui, lay, names, *open, u, out),
+        Some((names, open)) if bar => draw_rb_categories(ui, lay, names, *open, u, out),
+        Some(_) => {}
         None => draw_categories(ui, lay, &["FOLDER"], u),
     }
     // A rekordbox track list is one full-width table (PREVIEW, TRACK, BPM, KEY).
     if cats.is_some() && !b.entries().is_empty() && b.entries().iter().all(|e| !e.is_dir) {
-        draw_track_table(ui, lay, b, &rows, 92.0, 628.0, 4, u, out);
+        draw_track_table(ui, lay, b, &rows, lx, 628.0, 4, u, out);
         if let Some(name) = snap.loading {
             label(ui, Pos2::new(sc.min.x + 1000.0 * u, sc.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
         }
@@ -1743,7 +1746,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
             None => "FOLDER".to_string(),
         },
     };
-    let left = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 730.0 * u, sc.min.y + 628.0 * u));
+    let left = Rect::from_min_max(Pos2::new(sc.min.x + lx * u, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 730.0 * u, sc.min.y + 628.0 * u));
     draw_list(ui, left, &head, &rows, b.selected, "— empty —", u, Some(out));
     let right = Rect::from_min_max(Pos2::new(sc.min.x + 732.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(right, 0.0, BG);
@@ -1881,12 +1884,14 @@ fn file_art(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::Texture
 
 /// The PREVIEW cell of a track row: the blue preview bottom-anchored on black
 /// (unit: 192×44 at x 92), then the cover in the 47 px square at x 284.
-fn draw_row_preview(ui: &Ui, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32) {
+fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32) {
     let p = ui.painter();
     let wave = Rect::from_min_max(Pos2::new(x0 + 1.0 * u, y0 + 2.0 * u), Pos2::new(x0 + 191.0 * u, y0 + 46.0 * u));
     p.rect_filled(wave, 0.0, Color32::BLACK);
     let anlz = match e.load() { Some(crate::browser::Load::Local { analyze: Some(a), .. }) => Some(a.clone()), _ => None };
-    if let Some(w) = anlz.as_deref().and_then(|a| rb_wave(ui.ctx(), a)) {
+    let wave_data = anlz.as_deref().and_then(|a| rb_wave(ui.ctx(), a))
+        .or_else(|| e.load().and_then(|l| b.db_wave(l)));
+    if let Some(w) = wave_data {
         let n = w.len().max(1);
         let cols = wave.width().floor().max(1.0) as usize;
         for c in 0..cols {
@@ -1937,9 +1942,13 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
     label(ui, Pos2::new(tx + 22.0 * u, th.center().y), Align2::LEFT_CENTER, format!("[{:0w$}]", rows.len(), w = count_digits), 21.0, u, LABEL);
     up(label(ui, at(1090.0, 122.0), Align2::LEFT_CENTER, "BPM", 21.0, u, LABEL), LABEL);
     up(label(ui, at(1200.0, 122.0), Align2::LEFT_CENTER, "KEY", 21.0, u, LABEL), LABEL);
-    // The sort-order key (inert): a box with ⌃⌄.
+    // The second-row key: a box with ⌃⌄, lit while a detail row shows.
     let sb = Rect::from_min_max(at(1011.0, 98.0), at(1069.0, 146.0));
-    p.rect_filled(sb, 0.0, Color32::from_rgb(50, 50, 50));
+    p.rect_filled(sb, 0.0, if b.detail_name().is_some() { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });
+    if tap(ui, sb, "cdj-trk-detail").0 { out.push(Event::Ui(UiEvent::BrowseDetail)); }
+    if let Some(n) = b.detail_name() {
+        label(ui, at(left + 11.0, 140.0), Align2::LEFT_CENTER, n, 12.0, u, LABEL);
+    }
     outline(ui, sb, Color32::BLACK, u);
     let (cx, cy) = (sb.center().x, sb.center().y);
     let st = Stroke::new(1.5 * u, LABEL);
@@ -1967,7 +1976,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
         let lit = i == sel;
         let stripe = if k % 2 == 0 { Color32::from_rgb(40, 40, 40) } else { BG };
         p.rect_filled(Rect::from_min_max(at(left, y), at(pv, y + ROW_H)), 0.0, stripe);
-        draw_row_preview(ui, e, sc.min.x + left * u, sc.min.y + y * u, u);
+        draw_row_preview(ui, b, e, sc.min.x + left * u, sc.min.y + y * u, u);
         p.rect_filled(Rect::from_min_max(at(tr, y), at(1280.0, y + ROW_H)), 0.0, if lit { SEL_BLUE } else { stripe });
         let cy = sc.min.y + (y + ROW_H / 2.0) * u;
         let title = Rect::from_min_max(at(tr, y), at(1079.0, y + ROW_H));
@@ -1975,8 +1984,14 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
             out.push(Event::Deck(if lit { ControlEvent::Load } else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - sel as i32 } }));
         }
         track_icon(ui, Pos2::new(sc.min.x + (tr + 23.0) * u, cy), r.stems, u);
-        p.with_clip_rect(title.shrink2(Vec2::new(0.0, 0.0)).intersect(Rect::from_min_max(at(tr, y), at(1075.0, y + ROW_H))))
-            .text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), if r.played { PLAYED } else { TEXT });
+        let clip = p.with_clip_rect(title.intersect(Rect::from_min_max(at(tr, y), at(1075.0, y + ROW_H))));
+        let tcol = if r.played { PLAYED } else { TEXT };
+        if b.detail_name().is_some() {
+            clip.text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy - 9.0 * u), Align2::LEFT_CENTER, r.text, FontId::proportional(22.0 * u), tcol);
+            clip.text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy + 13.0 * u), Align2::LEFT_CENTER, b.detail_text(e), FontId::proportional(16.0 * u), LABEL);
+        } else {
+            clip.text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), tcol);
+        }
         if r.tagged { p.circle_filled(Pos2::new(sc.min.x + 1068.0 * u, cy), 5.0 * u, BARS_ORANGE); }
         rules(lit);
         if lit {
