@@ -1,11 +1,9 @@
-Loads like a CDJ, looks like a CDJ-3000, and plays nicely with CDJ-3000s, rekordbox and lighting.
+Cues for other players, a three-colour waveform, and wider file support.
 
-INSTANT LOAD: a track is playable almost the moment you load it. The deck starts as soon as the audio around the cue is ready and the rest loads while it plays, so long tracks no longer keep you waiting.
+WAVEFORM COLOR: MENU → WAVEFORM COLOR picks BLUE, RGB or 3BAND, and remembers your choice. 3BAND is the new default: lows blue, mids amber, highs white.
 
-CDJ-3000 SCREEN: the CDJ-3000 screen and keys are now the default on the iPad (MENU > SCREEN switches back to the XDJ-1000MK2). BROWSE remembers where you were in each source, and BACK returns to the folder you came from.
+STEMS: on tracks with prepared stems (MENU → STEMS on), the enlarged waveform now shows only the parts you are playing: mute the drums and the kicks leave the picture, and FULL MIX brings the whole track back. In the second player layout the STEMS keys show each part's level, and BROWSE marks tracks that have stems with a small "S".
 
-PRO DJ LINK: a CDJ-3000 on the same network lists OpenDeck's music in SOURCE, browses it by artist, album, track, key, playlist, history and matching, and loads and plays it with OpenDeck's beat grid, cues and colour waveforms. rekordbox shows OpenDeck as a player. The track you are playing shares its beat grid, waveforms and phrases straight away, so other players and Pro DJ Link lighting controllers can follow it. PLAYER No. AUTO picks a free player number by itself, starting at 4.
+PRO DJ LINK: players that load a track from OpenDeck now get its hot cues and memory cues. Lighting, video and timecode tools can follow OpenDeck's play position and active loop, and tools that look up track titles directly now find them. A pitched OpenDeck now reports the right tempo, so decks synced to it and lighting get the correct BPM.
 
-ANALYSIS: tracks without a key tag get a detected key, named as rekordbox names it. Beat grids land on the beat and BPMs match rekordbox's closely. OpenDeck also marks phrases (intro, verse, chorus, outro), which a CDJ-3000 can show as coloured bands on the waveform.
-
-FIXES: Apple Lossless (ALAC) and mono tracks load. MP3s were 24 ms off from rekordbox and the players; they now line up. Big folders on a linked player are no longer cut short. No more brief freeze after loading a track for the first time.
+FIXES: touch keys respond reliably, including with another finger on the jog or the tempo fader. SLIP now works with held hot cues and scratching. LOOP IN and LOOP OUT set the loop where you press. TEMPO RANGE no longer moves the tempo fader. The fader stays where it is and the tempo follows the new range, so +3% on ±6 becomes +8% on ±16. 32-bit FLAC files load and play. AIFF files show their key, BPM and artwork, and no longer end in a short burst of noise. OGG files with tags open. Files at 88.2 kHz and above get a beat grid that lands on the beat (they are analysed again once). In the second player layout, the 16 and 32 marks under the waveform stay still.

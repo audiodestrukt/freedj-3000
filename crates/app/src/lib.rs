@@ -93,6 +93,15 @@ const HISTORY_MAX: usize = 100;
 /// Each split logs each step with the memory in use; on iOS also to
 /// `Documents/opendeck-stems-test.txt` (only once a model was put there),
 /// line by line, so a split iOS kills for memory still shows how far it got.
+/// A held SLIP action: where the track was and when; the shadow runs at
+/// `per_sec` interleaved samples a second (the fader's speed) from there.
+#[derive(Clone, Copy, Debug)]
+struct SlipHold { pos: f64, since: Instant, per_sec: f64, hot: Option<u8> }
+
+impl SlipHold {
+    fn shadow(&self, now: Instant) -> f64 { self.pos + now.duration_since(self.since).as_secs_f64() * self.per_sec }
+}
+
 fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: &separate::Job) -> Result<Option<Arc<stems::StemBank>>> {
     use separate::model;
     if !model::present() { return Ok(None); }
@@ -723,6 +732,9 @@ struct DeckApp {
     /// began, audio.source_consumed then).  Shadow = pos + consumed-since.
     /// Ending the action jumps there; a manual seek cancels it.
     slip_anchor:       Option<(f64, u64)>,
+    /// SLIP for a held action (a hot cue held, the platter held in VINYL),
+    /// where the audio stops counting: the shadow runs in wall time.
+    slip_hold:         Option<SlipHold>,
     exit_after_capture: bool,
     /// Dev script: buttons held (`hold=`), and the lamp report / screenshot
     /// due this frame (`lamps=`, `shot=`).
@@ -1057,6 +1069,7 @@ impl DeckApp {
             perform_delete:    false,
             loop_beats:        0.0,
             slip_anchor:       None,
+            slip_hold:         None,
             exit_after_capture: false,
             script_held: Vec::new(),
             panel_held: Vec::new(),
@@ -1130,11 +1143,13 @@ impl DeckApp {
                 // is no scrub audio yet, so this is a silent scratch.
                 let vinyl = self.settings.jog_vinyl;
                 if touched && vinyl && self.audio.playing.load(Ordering::Relaxed) {
+                    self.slip_hold_begin(self.smoothed_pos, None);   // SLIP: the track runs on under the scratch
                     self.audio.playing.store(false, Ordering::Relaxed);
                     self.jog_hold_resume = true;
                     log::debug!("jog touch: holding transport (VINYL)");
                 } else if !touched && self.jog_hold_resume {
                     self.jog_hold_resume = false;
+                    self.slip_hold_end(None);
                     self.lock_in_play();
                     log::debug!("jog release: transport resumes");
                 }
@@ -1301,10 +1316,15 @@ impl DeckApp {
                     self.serve_deck_cues();
                 }
             }
-            Event::Deck(ControlEvent::HotCueTrigger { slot, .. }) => {
+            Event::Deck(ControlEvent::HotCueRelease { slot }) => self.slip_hold_end(Some(slot)),
+            Event::Deck(ControlEvent::HotCueTrigger { slot, held }) => {
                 // A hot cue is jump + play (latching), unlike momentary CUE.
                 if let Some(pos) = self.hot_cues.get(slot as usize).copied().flatten() {
+                    // SLIP: while the pad is held the track runs on from here;
+                    // letting go returns to where it would be.
+                    let (from, playing) = (self.smoothed_pos, self.audio.playing.load(Ordering::Relaxed));
                     self.seek_to(pos);
+                    if held && playing { self.slip_hold_begin(from, Some(slot)); }
                     self.lock_in_play();
                     log::info!("hot cue {}: play", (b'A' + slot) as char);
                 } else {
@@ -1362,6 +1382,7 @@ impl DeckApp {
                     if self.audio.loop_active.load(Ordering::Relaxed) { self.slip_begin(); }
                 } else {
                     self.slip_anchor = None;   // disengaged: no jump, just stop shadowing
+                    self.slip_hold = None;
                 }
                 log::info!("slip {}", if self.slip { "on" } else { "off" });
             }
@@ -1904,6 +1925,27 @@ impl DeckApp {
         }
     }
 
+    /// SLIP on and a held action starts at `from` (interleaved samples):
+    /// shadow from there at the fader's speed.
+    fn slip_hold_begin(&mut self, from: f64, hot: Option<u8>) {
+        if !self.slip || self.slip_hold.is_some() { return; }
+        let speed = f32::from_bits(self.fader_speed.load(Ordering::Relaxed)) as f64;
+        let per_sec = self.audio.sample_rate as f64 * self.audio.channels as f64 * speed;
+        self.slip_anchor = None;
+        self.slip_hold = Some(SlipHold { pos: from.max(0.0), since: Instant::now(), per_sec, hot });
+        log::info!("slip: shadowing from {:.2}s ({})", from / (self.audio.sample_rate as f64 * self.audio.channels as f64),
+                   hot.map_or("scratch".to_string(), |s| format!("hot cue {}", (b'A' + s) as char)));
+    }
+
+    /// The held action `hot` (None: the platter) let go: back to the shadow.
+    fn slip_hold_end(&mut self, hot: Option<u8>) {
+        let Some(h) = self.slip_hold.filter(|h| h.hot == hot) else { return };
+        let ch = self.audio.channels as u64;
+        let target = ((h.shadow(Instant::now()).min(self.audio.len() as f64) as u64) / ch) * ch;
+        self.seek_to(target);
+        log::info!("slip: back to {:.2}s", target as f64 / (self.audio.sample_rate as f64 * ch as f64));
+    }
+
     /// The slip action ended: snap to the shadow and stop shadowing.
     fn slip_end(&mut self) {
         if let Some(shadow) = self.slip_shadow() {
@@ -1939,6 +1981,7 @@ impl DeckApp {
             if pos < s || pos >= e { self.exit_loop(); }
         }
         self.slip_anchor = None;
+        self.slip_hold = None;
         // The seek_request channel is what the processor actually acts on; it
         // can't be clobbered by the processor's own progress store (which lost
         // seeks and made CUE sometimes not return).  `position` is set too, as
@@ -4535,4 +4578,21 @@ fn start_media_server(root: &std::path::Path, player: opendeck_dbserver::server:
     log::info!("media server: {n} tracks under {} — nfs portmap {} nfsd {}, dbserver {}", root.display(), nfs.portmap, nfs.nfsd, db.db_port);
     opendeck_mediaserver::start_analysis(scanned.library, scanned.files, Some(link_cache_dir()))?;
     Ok(n)
+}
+
+#[cfg(test)]
+mod slip_hold_tests {
+    use super::*;
+
+    /// A held SLIP action's shadow runs on at the fader's speed: 2 s held
+    /// at 48 kHz stereo, +10 %, from 10 s, lands at 12.2 s.
+    #[test]
+    fn the_shadow_runs_at_the_fader_speed() {
+        let t0 = Instant::now();
+        let per_sec = 48_000.0 * 2.0 * 1.1;
+        let h = SlipHold { pos: 10.0 * 96_000.0, since: t0, per_sec, hot: Some(0) };
+        let at = h.shadow(t0 + Duration::from_secs(2)) / 96_000.0;
+        assert!((at - 12.2).abs() < 1e-9, "{at}");
+        assert_eq!(h.shadow(t0), h.pos);
+    }
 }

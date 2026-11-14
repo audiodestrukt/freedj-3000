@@ -238,6 +238,10 @@ impl Key {
         }
     }
 
+    /// Acts the moment the finger lands, as on the unit: a loop point is
+    /// where the press was, not where the lift was.
+    pub fn on_press(self) -> bool { matches!(self, Key::LoopIn | Key::LoopOut | Key::Reloop) }
+
     /// What a long press sends instead of the tap, if the key has one.
     pub fn long(self) -> Option<Event> {
         match self {
@@ -554,12 +558,16 @@ fn draw_keys(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, keys: &[(Rect, K
     let now = ui.input(|i| i.time);
     let dt = ui.input(|i| i.stable_dt).min(0.1);
     let mut call_delete_held = false;
-    for (r, k) in keys.iter() {
+    // Fingers beyond the first (one already on the jog or the fader): the
+    // same keys, acting on the press or the tap as the first finger would.
+    let hits: Vec<(Rect, bool)> = keys.iter().map(|(r, k)| (hit_rect(*r, *k, sx), k.on_press())).collect();
+    let sec = screen::second_touches_in(ui, "cdjface-keys", &hits);
+    for (n, (r, k)) in keys.iter().enumerate() {
         let id = Id::new(("cdjface-key", k.emu_name()));
-        let hit = hit_rect(*r, *k, sx);
+        let hit = hits[n].0;
         // Press / release (Sense::drag): a still finger counts at once.
         let resp = ui.interact(hit, id, Sense::drag());
-        let down = resp.is_pointer_button_down_on();
+        let down = resp.is_pointer_button_down_on() || sec[n].down;
         let lamp = match lamp_of(*k) {
             Lamp::Blink => { ctx.request_repaint_after(std::time::Duration::from_millis(100)); if (now * 2.0) as i64 % 2 == 0 { Lamp::Full } else { Lamp::Off } }
             l => l,
@@ -624,7 +632,9 @@ fn draw_keys(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, keys: &[(Rect, K
                 out.push(e);
             }
         }
-        if (resp.drag_stopped() && !st.long_fired) || tap {
+        let fire = if k.on_press() { resp.drag_started() || tap || sec[n].pressed }
+                   else { (resp.drag_stopped() && !st.long_fired) || tap || sec[n].tapped };
+        if fire {
             if let Some(e) = k.tap(snap.loop_active.then_some(snap.loop_beats)) {
                 // The unit's 4 / 8 keys bring up the BEAT LOOP panel too.
                 if matches!(k, Key::Loop4 | Key::Loop8) { crate::cdj3000::open_panel(ctx, crate::cdj3000::Panel::BeatLoop); }
@@ -853,5 +863,51 @@ mod tests {
         assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::Screen(TopScreen::Menu))]), "{out:?}");
         let out = click(Key::Back);
         assert!(matches!(out.as_slice(), [Event::Deck(ControlEvent::Back)]), "{out:?}");
+    }
+
+    /// LOOP IN acts on the press (the loop point is where the finger
+    /// landed), once; and a second finger works a key while the first
+    /// holds something else (the jog, the fader).
+    #[test]
+    fn loop_in_fires_on_the_press_and_keys_take_a_second_finger() {
+        use egui::{Event as E, PointerButton, RawInput, TouchDeviceId, TouchId, TouchPhase};
+        let base = Rect::from_min_size(Pos2::ZERO, DECK_ASPECT * 0.5);
+        let (_, f) = deck_layout(base);
+        let tags = opendeck_decode::TrackTags::default();
+        let snap = DeckSnapshot::test(&tags);
+        let ctx = egui::Context::default();
+        let screen_rect = Some(Rect::from_min_size(Pos2::ZERO, base.size()));
+        let frame = |events: Vec<E>| {
+            let mut out = Vec::new();
+            let _ = ctx.run(RawInput { events, screen_rect, ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::none())
+                    .show(ctx, |ui| draw_keys(ui, ctx, &snap, &f.keys, |_| Lamp::Off, 1.0, f.text, &mut out));
+            });
+            out
+        };
+        let at = |k: Key| f.keys.iter().find(|(_, kk)| *kk == k).unwrap().0.center();
+        let btn = |pos, pressed| E::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+
+        frame(vec![E::PointerMoved(at(Key::LoopIn))]);
+        let pressed = frame(vec![btn(at(Key::LoopIn), true)]);
+        assert!(matches!(pressed.as_slice(), [Event::Deck(ControlEvent::LoopIn)]), "on the press: {pressed:?}");
+        let lifted = frame(vec![btn(at(Key::LoopIn), false)]);
+        assert!(lifted.is_empty(), "not again on the lift: {lifted:?}");
+        // Press and lift inside one frame (a quick tap at the idle rate): once.
+        let quick = frame(vec![E::PointerMoved(at(Key::LoopOut)), btn(at(Key::LoopOut), true), btn(at(Key::LoopOut), false)]);
+        let quick: Vec<_> = quick.into_iter().chain(frame(vec![])).collect();
+        assert!(matches!(quick.as_slice(), [Event::Deck(ControlEvent::LoopOut)]), "{quick:?}");
+
+        // First finger down away from the keys, second finger taps SLIP.
+        let touch = |id: u64, phase, pos| E::Touch { device_id: TouchDeviceId(0), id: TouchId(id), phase, pos, force: None };
+        let away = Pos2::new(1.0, 1.0);
+        frame(vec![touch(1, TouchPhase::Start, away)]);
+        let mut out = frame(vec![touch(2, TouchPhase::Start, at(Key::Slip))]);
+        out.extend(frame(vec![touch(2, TouchPhase::End, at(Key::Slip))]));
+        assert!(matches!(out.as_slice(), [Event::Deck(ControlEvent::SlipToggle)]), "second-finger tap: {out:?}");
+        // A second finger on LOOP OUT acts on its press.
+        let out = frame(vec![touch(3, TouchPhase::Start, at(Key::LoopOut))]);
+        assert!(matches!(out.as_slice(), [Event::Deck(ControlEvent::LoopOut)]), "second-finger press: {out:?}");
+        assert!(frame(vec![touch(3, TouchPhase::End, at(Key::LoopOut))]).is_empty());
     }
 }

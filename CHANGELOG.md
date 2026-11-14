@@ -75,6 +75,16 @@ All notable changes to this project will be documented in this file.
   at full scale and keep the MP3 encoder delay, as before; tags read as before.
 
 ### Fixed
+- SLIP works with hot cues and scratching: hold a hot cue (or hold the
+  platter in VINYL mode) with SLIP on and the track carries on underneath;
+  letting go returns to where it would have been. Before, SLIP only
+  covered loops.
+- LOOP IN, LOOP OUT and RELOOP act the moment the key is pressed, as on
+  the unit, so a loop point lands where you pressed, not where you lifted.
+- Touch keys on the iPad no longer miss taps: a tap counts when the finger
+  wobbles a little, when it is very quick, and when another finger is
+  already on the jog or the fader (panel tabs such as STEMS / BEAT JUMP,
+  faceplate keys and screen keys).
 - TEMPO RANGE no longer moves the tempo fader. The fader stays where it
   is and the tempo follows the new range, as on a CDJ: +3 % on ±6 becomes
   +8 % on ±16.

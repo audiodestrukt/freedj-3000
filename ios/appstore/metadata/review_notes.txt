@@ -7,3 +7,5 @@ On iPhone (new in 0.2) the app is landscape-only and has two pages: SCREEN (the 
 New in 0.3 (iPad): MENU (the on-screen MENU key) → SCREEN switches to a second player layout with its own full faceplate. On its faceplate, hold MENU for a second to reach the menu again (a short press opens the previously loaded tracks); set SCREEN back to switch layouts again. On iPhone the setting stays on the original layout.
 
 On first launch iOS asks for Local Network permission. This is used only for Pro DJ Link on the local network: beat-syncing with Pioneer CDJ/XDJ players if any are present, and letting those players browse and load the app's music folder. Denying it leaves every other feature working. Nothing is sent off the device.
+
+The app carries the com.apple.developer.kernel.increased-memory-limit entitlement for an optional, experimental feature that is off by default and not described in the listing: separating a track into stems on the device with a Core ML model file the user places in the app's Files folder themselves. No model is bundled or downloaded, no code is downloaded, and nothing leaves the device. Without a model file the feature never runs.

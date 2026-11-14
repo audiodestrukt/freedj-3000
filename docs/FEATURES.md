@@ -55,7 +55,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Hot cues (A–D on the XDJ screen, A–H on the CDJ-3000 faceplate), memory cues | ✅ | All |
 | Loops: manual IN / OUT, beat loops 1/2–16, BEAT JUMP | ✅ | All |
 | QUANTIZE for cues and loops | ✅ | All |
-| SLIP mode | ✅ | All |
+| SLIP mode: loops, held hot cues, VINYL scratches (the track runs on underneath and returns) | ✅ | All |
 | Jog wheel: VINYL (scratch) and CDJ (nudge) modes; the platter turns under the finger, one turn = one record turn | ✅ | All |
 | Scrub audio: a paused jog (or a VINYL scratch) plays the audio under the playhead | ✅ | All |
 | Drag the big waveform to seek | ✅ | All |

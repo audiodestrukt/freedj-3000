@@ -1464,10 +1464,38 @@ fn draw_jog_center(p: &egui::Painter, center: Pos2, radius: f32, snap: &DeckSnap
     }
 }
 
-/// A touch target.  Returns true on tap (press + release inside).
+/// A touch target.  Returns (tapped, held): tapped on a lift inside the
+/// rect.  Not egui's click: that drops a touch that wobbles more than 6
+/// points, one held longer than 0.8 s, and a second finger (another finger
+/// already on the jog or the fader), so keys on the iPad missed taps.  Here
+/// a lift inside counts after up to [`TAP_SLOP`] points of travel, a press
+/// and lift in one frame counts, and a second finger counts too.
 pub(crate) fn tap(ui: &Ui, r: Rect, name: &str) -> (bool, bool) {
-    let resp = ui.interact(r, Id::new(name), Sense::click());
-    (resp.clicked(), resp.is_pointer_button_down_on())
+    let id = Id::new(name);
+    let resp = ui.interact(r, id, Sense::drag());
+    let sec = second_touches_in(ui, name, &[(r, false)])[0];
+    let start = id.with("tap-start");
+    if resp.drag_started() {
+        let at = ui.input(|i| i.pointer.press_origin()).unwrap_or(r.center());
+        ui.data_mut(|d| d.insert_temp(start, at));
+    }
+    let lifted = resp.drag_stopped() && {
+        let from: Pos2 = ui.data(|d| d.get_temp(start)).unwrap_or(r.center());
+        let to = release_pos(ui).unwrap_or(from);
+        r.contains(to) && from.distance(to) <= TAP_SLOP
+    };
+    (lifted || same_frame_tap(ui, r) || sec.tapped, resp.is_pointer_button_down_on() || sec.down)
+}
+
+/// How far a finger may travel and still tap.
+const TAP_SLOP: f32 = 24.0;
+
+/// Where the pointer was released this frame, if it was.
+fn release_pos(ui: &Ui) -> Option<Pos2> {
+    ui.input(|i| i.events.iter().rev().find_map(|e| match e {
+        egui::Event::PointerButton { pos, pressed: false, .. } => Some(*pos),
+        _ => None,
+    }))
 }
 
 /// A stem's touch control, shared by both skins.  A drag along the control
@@ -2474,5 +2502,58 @@ mod stem_touch_tests {
         up.push(vec![btn(Pos2::new(200.0, 110.0), false)]);
         let (g, _) = drive(up, 0.2, false, true, true);
         assert!(g > 0.5 && g < 0.7, "{g}");
+    }
+}
+
+#[cfg(test)]
+mod tap_tests {
+    use super::*;
+    use egui::{Event as E, PointerButton, RawInput, TouchDeviceId, TouchId, TouchPhase};
+
+    /// Runs frames over one key and counts its taps.
+    struct Rig { ctx: egui::Context, r: Rect }
+    impl Rig {
+        fn new() -> Rig { Rig { ctx: egui::Context::default(), r: Rect::from_min_size(Pos2::new(100.0, 100.0), egui::vec2(120.0, 60.0)) } }
+        fn frame(&self, events: Vec<E>) -> bool {
+            let mut hit = false;
+            let r = self.r;
+            let _ = self.ctx.run(RawInput { events, screen_rect: Some(Rect::from_min_size(Pos2::ZERO, egui::vec2(800.0, 600.0))), ..Default::default() }, |ctx| {
+                egui::CentralPanel::default().frame(egui::Frame::none()).show(ctx, |ui| hit = tap(ui, r, "key").0);
+            });
+            hit
+        }
+        /// Press at `from`, move to `to`, lift there: was it a tap?
+        fn press_move_lift(&self, from: Pos2, to: Pos2) -> bool {
+            let btn = |pos, pressed| E::PointerButton { pos, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+            let mut hit = self.frame(vec![E::PointerMoved(from)]);
+            hit |= self.frame(vec![btn(from, true)]);
+            hit |= self.frame(vec![E::PointerMoved(to)]);
+            hit |= self.frame(vec![btn(to, false)]);
+            hit | self.frame(vec![E::PointerGone])
+        }
+    }
+
+    #[test]
+    fn a_wobbly_tap_counts_a_slide_off_does_not() {
+        let k = Rig::new();
+        let c = k.r.center();
+        assert!(k.press_move_lift(c, c), "a still tap");
+        assert!(k.press_move_lift(c, c + egui::vec2(15.0, 8.0)), "a finger that wobbles 17 points still taps");
+        assert!(!k.press_move_lift(c, c + egui::vec2(200.0, 0.0)), "sliding off the key is not a tap");
+        assert!(!k.press_move_lift(c + egui::vec2(-50.0, 0.0), c + egui::vec2(50.0, 0.0)), "a long drag across it is not a tap");
+    }
+
+    #[test]
+    fn a_quick_tap_and_a_second_finger_count() {
+        let k = Rig::new();
+        let c = k.r.center();
+        let btn = |pressed| E::PointerButton { pos: c, button: PointerButton::Primary, pressed, modifiers: Default::default() };
+        let quick = k.frame(vec![E::PointerMoved(c), btn(true), btn(false)]) | k.frame(vec![E::PointerGone]);
+        assert!(quick, "press and lift in one frame");
+
+        let touch = |id: u64, phase, pos| E::Touch { device_id: TouchDeviceId(0), id: TouchId(id), phase, pos, force: None };
+        assert!(!k.frame(vec![touch(1, TouchPhase::Start, Pos2::new(5.0, 5.0))]));
+        assert!(!k.frame(vec![touch(2, TouchPhase::Start, c)]));
+        assert!(k.frame(vec![touch(2, TouchPhase::End, c)]), "a second finger, the first held elsewhere");
     }
 }
