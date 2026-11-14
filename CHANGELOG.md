@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.23] — 2026-11-14
+
 ### Added
 - MENU (UTILITY) shows the deck's IP address in its footer: the address Pro
   DJ Link uses first, then the device's other networks (up to three on the
