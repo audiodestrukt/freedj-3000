@@ -101,7 +101,7 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
     let mem = || { let (used, left) = model::memory_mb(); format!("mem {used} MB, {left} MB left") };
     split_trace(&format!("{} {} | {name} | {secs:.0}s track | start | {}", utc_now(), model::device(), mem()));
     let res = model::with(|m| {
-        split_trace(&format!("  model ready | {}", mem()));
+        split_trace(&format!("  model ready on {} | {}", model::units(), mem()));
         separate::separate(track, sr, m, job)
     });
     let line = match &res {
@@ -113,6 +113,12 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
     split_trace(&line);
     let ((data, _), _) = res?;
     Ok(Some(stems::StemBank::from_split(track, data, sr)))
+}
+
+/// A split's input is ready and its first chunk goes to the model.
+fn split_start_trace(n: usize) {
+    let (used, left) = separate::model::memory_mb();
+    split_trace(&format!("  input ready, {n} chunks, running chunk 1 | mem {used} MB, {left} MB left"));
 }
 
 /// After each chunk of a split: its time and the memory in use (the first
@@ -2497,7 +2503,7 @@ impl DeckApp {
         if !self.settings.stems || std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") || !self.path.is_file() { return; }
         let (tx, rx) = mpsc::channel();
         let (path, track, sr) = (self.path.clone(), Arc::clone(track), self.audio.sample_rate);
-        let job = Arc::new(separate::Job { on_chunk: Some(split_chunk_trace), ..Default::default() });
+        let job = Arc::new(separate::Job { on_start: Some(split_start_trace), on_chunk: Some(split_chunk_trace), ..Default::default() });
         let j = Arc::clone(&job);
         let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
             let got = match stems::load_local(&path, &track, sr, ch) {

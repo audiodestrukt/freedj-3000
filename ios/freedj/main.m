@@ -231,6 +231,20 @@ static NSURL *freedj_sep_find(void) {
 
 bool freedj_sep_model_present(void) { return freedj_sep_find() != nil; }
 
+static MLComputeUnits freedj_units_wanted(void) {
+    NSURL *docs = [[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
+    NSString *conf = [NSString stringWithContentsOfURL:[docs URLByAppendingPathComponent:@"opendeck-stems.conf"]
+                                              encoding:NSUTF8StringEncoding error:nil].lowercaseString;
+    if ([conf containsString:@"cpu"] && ![conf containsString:@"gpu"]) return MLComputeUnitsCPUOnly;
+    if ([conf containsString:@"all"]) return MLComputeUnitsAll;
+    return MLComputeUnitsCPUAndGPU;
+}
+
+void freedj_sep_units(char *buf, size_t len) {
+    MLComputeUnits u = freedj_units_wanted();
+    strlcpy(buf, u == MLComputeUnitsCPUOnly ? "cpu" : u == MLComputeUnitsAll ? "all" : "cpu+gpu", len);
+}
+
 static NSDate *freedj_mtime(NSURL *u) {
     NSDate *d = nil;
     [u getResourceValue:&d forKey:NSURLContentModificationDateKey error:nil];
@@ -263,9 +277,12 @@ void *freedj_sep_open(char *err, size_t errlen) {
                 }
             }
             MLModelConfiguration *cfg = [MLModelConfiguration new];
-            // GPU: the Neural Engine rejects this model's inverse transform
-            // (the converter's notes), and trying it costs compile time and memory.
-            cfg.computeUnits = MLComputeUnitsCPUAndGPU;
+            // CPU + GPU by default: the Neural Engine rejects this model's
+            // inverse transform (the converter's notes), and trying it costs
+            // compile time and memory.  For testing without a rebuild, a file
+            // opendeck-stems.conf in the OpenDeck folder saying "cpu" or "all"
+            // picks those instead.
+            cfg.computeUnits = freedj_units_wanted();
             MLModel *m = [MLModel modelWithContentsOfURL:compiled configuration:cfg error:&e];
             if (!m) { freedj_err(err, errlen, [NSString stringWithFormat:@"load: %@", e.localizedDescription]); return NULL; }
             return (__bridge_retained void *)m;

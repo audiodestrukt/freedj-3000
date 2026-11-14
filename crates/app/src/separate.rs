@@ -47,6 +47,8 @@ pub struct Job {
     /// 0–1000 (tenths of a percent).
     pub progress: AtomicU32,
     pub cancel: AtomicBool,
+    /// Called once the input is ready, before the first chunk: (chunks).
+    pub on_start: Option<fn(usize)>,
     /// Called after each chunk: (chunk index, chunks, seconds the model took).
     pub on_chunk: Option<fn(usize, usize, f64)>,
 }
@@ -126,6 +128,7 @@ pub fn separate(track: &[f32], deck_sr: u32, sep: &mut dyn Separator, job: &Job)
     let mut input = vec![0f32; 2 * seg];
     let mut output = vec![0f32; 8 * seg];
     let mut timing = Timing { chunks, ..Default::default() };
+    if let Some(f) = job.on_start { f(chunks); }
     for k in 0..chunks {
         if job.cancel.load(Ordering::Relaxed) { bail!("cancelled"); }
         let off = k * stride;
@@ -189,6 +192,7 @@ pub mod coreml {
         fn freedj_mem_footprint() -> u64;
         fn freedj_mem_available() -> u64;
         fn freedj_device_model(buf: *mut c_char, len: usize);
+        fn freedj_sep_units(buf: *mut c_char, len: usize);
     }
 
     /// The loaded model, shared by every split (one at a time).
@@ -237,6 +241,13 @@ pub mod coreml {
     pub fn device() -> String {
         let mut b = [0u8; 64];
         unsafe { freedj_device_model(b.as_mut_ptr() as *mut c_char, b.len()) };
+        err_text(&b)
+    }
+
+    /// Where Core ML runs the model ("cpu+gpu", "cpu", "all").
+    pub fn units() -> String {
+        let mut b = [0u8; 32];
+        unsafe { freedj_sep_units(b.as_mut_ptr() as *mut c_char, b.len()) };
         err_text(&b)
     }
 }
@@ -331,6 +342,12 @@ pub mod model {
                 .find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)?.parse::<u64>().ok())).unwrap_or(0);
             (kb("/proc/self/status", "VmHWM:") >> 10, kb("/proc/meminfo", "MemAvailable:") >> 10)
         }
+    }
+
+    /// Where the model runs, for the log.
+    pub fn units() -> String {
+        #[cfg(target_os = "ios")] { return super::coreml::units(); }
+        #[allow(unreachable_code)] { "cpu".into() }
     }
 
     pub fn device() -> String {

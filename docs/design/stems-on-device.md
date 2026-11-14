@@ -94,6 +94,19 @@ signs with no entitlements file by default (`FREEDJ_ENTITLEMENTS=""`, to
 keep the ungranted multicast entitlement out), so the key never reached the
 app. 0.3.13 signs with `freedj-memory.entitlements`, which holds only it.
 
+0.3.12's log on the iPad Air 13" (iPad16,10), Amplificate (8:47):
+
+```text
+start        | mem 701 MB, 4418 MB left
+model ready  | mem 893 MB, 4226 MB left
+```
+
+then nothing: the app died in the first chunk, before it was logged. So the
+model loads cheaply (≈200 MB; the weights are mapped, not copied), and the
+first GPU prediction is where memory runs out. 0.3.13 logs the moment before
+the first chunk and reads `opendeck-stems.conf` in the OpenDeck folder
+("cpu" or "all") to try other Core ML compute units without a rebuild.
+
 ## Open
 
 - Run on the iPad: speed, memory, and whether iOS kills the app.
