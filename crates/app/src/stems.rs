@@ -51,6 +51,10 @@ pub struct StemBank {
     /// the enlarged waveform while the mix is changed.  Set once the bank
     /// is complete.
     pub waves: OnceLock<[Vec<WaveformColumn>; 3]>,
+    /// Prepared stems (a stick bank) read page by page, rather than a split
+    /// on the device: the controls count as ready while it fills (it fills
+    /// in a second or two, from the top).
+    pub prepared: bool,
 }
 
 /// i16 → atomic in place (the same layout: `collect` reuses the buffer).
@@ -60,7 +64,7 @@ impl StemBank {
     /// A complete bank (its waveforms come with [`finish`](Self::finish)).
     pub fn new(track: &Arc<Vec<f32>>, data: [Vec<i16>; 3], offset_frames: isize) -> StemBank {
         let ready = data.iter().map(Vec::len).min().unwrap_or(0);
-        StemBank { track: Arc::downgrade(track), data: data.map(atomics), ready: AtomicUsize::new(ready), offset_frames, waves: OnceLock::new() }
+        StemBank { track: Arc::downgrade(track), data: data.map(atomics), ready: AtomicUsize::new(ready), offset_frames, waves: OnceLock::new(), prepared: true }
     }
 
     /// An empty bank for `track`, to be filled with [`append`](Self::append).
@@ -69,7 +73,7 @@ impl StemBank {
         StemBank {
             track: Arc::downgrade(track),
             data: std::array::from_fn(|_| (0..n).map(|_| AtomicI16::new(0)).collect()),
-            ready: AtomicUsize::new(0), offset_frames: 0, waves: OnceLock::new(),
+            ready: AtomicUsize::new(0), offset_frames: 0, waves: OnceLock::new(), prepared: false,
         }
     }
 
@@ -414,6 +418,7 @@ fn build_paged(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32
     drop(full);
     let mut bank = StemBank::filling(track);
     bank.offset_frames = offset;
+    bank.prepared = true;
     let bank = Arc::new(bank);
     if let Some(j) = job { let _ = j.bank.set(Arc::clone(&bank)); }
     let frames = track.len() / 2;

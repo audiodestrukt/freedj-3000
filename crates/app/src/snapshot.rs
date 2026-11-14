@@ -20,6 +20,13 @@ pub enum StemsState {
     /// On; the device is splitting the track itself (percent done).  The
     /// controls already work on the part split so far.
     Splitting(u8),
+    /// On; the stem model is downloading (percent), first use only.
+    Downloading(u8),
+    /// On; the downloaded model is being checked and unpacked.
+    Preparing,
+    /// On, but this device has too little memory to split a track (no
+    /// model is downloaded for it either).
+    NoMemory,
     /// On and playable.
     Ready,
 }

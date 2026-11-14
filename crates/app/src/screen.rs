@@ -1681,6 +1681,9 @@ fn draw_stem_pad(ui: &Ui, snap: &DeckSnapshot, i: usize, r: Rect, h: f32, out: &
         StemsState::Ready => format!("{:.0}%", g * 100.0),
         StemsState::Loading => "LOADING".into(),
         StemsState::Splitting(p) => format!("SPLITTING {p}%"),
+        StemsState::Downloading(p) => format!("DOWNLOADING {p}%"),
+        StemsState::Preparing => "PREPARING".into(),
+        StemsState::NoMemory => "NEEDS MORE MEMORY".into(),
         _ => "NO STEMS".into(),
     };
     text(ui, Pos2::new(r.center().x, r.max.y - h * 0.018), Align2::CENTER_CENTER, sub, h * 0.016, c);
@@ -1723,7 +1726,7 @@ fn draw_perform(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, h: f32, out: &mut Ve
     // STEMS (MENU → STEMS on): the pads become the stem controls; tap
     // again to go back to hot cues.
     if snap.stems.state != StemsState::Off {
-        let sub = match snap.stems.state { StemsState::Loading | StemsState::Splitting(_) => "LOADING", StemsState::None => "NONE", _ => "" };
+        let sub = match snap.stems.state { StemsState::Loading | StemsState::Splitting(_) | StemsState::Downloading(_) | StemsState::Preparing => "LOADING", StemsState::None => "NONE", _ => "" };
         if key(ui, pl.mode_stems, "pf-stems", "STEMS", sub, h, stems.then_some(BLUE)) {
             out.push(Event::Ui(UiEvent::PerformMode(if stems { PM::HotCue } else { PM::Stems })));
         }

@@ -29,6 +29,7 @@ opendeck-dbserver    = { path = "../dbserver" }
 opendeck-mediaserver = { path = "../mediaserver" }
 opendeck-stems       = { path = "../stems" }
 sha2                 = "0.10"   # stems: check the original against its prepared hash
+flate2               = "1"      # stems model: unzip the downloaded package as a stream
 opendeck-timestretch = { workspace = true }
 cpal              = { workspace = true }
 rtrb              = { workspace = true }

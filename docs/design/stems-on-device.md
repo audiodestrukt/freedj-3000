@@ -128,7 +128,17 @@ the first chunk and reads `opendeck-stems.conf` in the OpenDeck folder
 - Cache splits, so a track is split once.
 - Split from the cue point (or the playhead) first instead of the top, so
   the stems are under the playhead sooner on a long intro.
-- Getting the model onto the device: today by hand (Files app); a release
-  would download it on first use, with consent.
-- Memory: the iPad may need the increased-memory-limit entitlement, or a
-  smaller chunk.
+- ~~Getting the model onto the device~~ done 2026-11-14 (`modelfetch.rs`):
+  downloaded the first time STEMS is on, from a pinned Hugging Face
+  revision, size and SHA-256 checked, unzipped as a stream (9.5 MB peak for
+  the 423 MB weights), installed atomically in Application Support, excluded
+  from backup. The model is picked from a catalogue by the device's memory
+  limit; one entry today, room for a lighter one for smaller devices. The
+  download restarts from scratch if iOS suspends the app partway (a
+  background `NSURLSession` would continue it; not done).
+- ~~Memory~~ measured on the iPad (CPU): 548 MB at start, 4693 MB with the
+  model loaded, 5219 MB peak; 3.5× real time. Since 2026-11-14 the model is
+  released after each split (it used to stay loaded, ~4 GB, for the
+  session), the CPU is the default, and a split needs `SPLIT_NEEDS_MB`
+  (5 GB) free or it is refused with "NEEDS MORE MEMORY" rather than killed.
+  GPU with the increased memory limit is untested.

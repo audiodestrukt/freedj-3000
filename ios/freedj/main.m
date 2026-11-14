@@ -210,6 +210,22 @@ static void freedj_err(char *err, size_t len, NSString *msg) {
     strlcpy(err, u, len);
 }
 
+// Application Support/opendeck/models: where the app keeps the stem model it
+// downloads (crates/app/src/modelfetch.rs) and the compiled copy.  Excluded
+// from iCloud backup: it can always be fetched again.
+static NSURL *freedj_models_url(void) {
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSURL *dir = [[[fm URLsForDirectory:NSApplicationSupportDirectory inDomains:NSUserDomainMask].firstObject
+                   URLByAppendingPathComponent:@"opendeck" isDirectory:YES] URLByAppendingPathComponent:@"models" isDirectory:YES];
+    [fm createDirectoryAtURL:dir withIntermediateDirectories:YES attributes:nil error:nil];
+    [dir setResourceValue:@YES forKey:NSURLIsExcludedFromBackupKey error:nil];
+    return dir;
+}
+
+void freedj_models_dir(char *buf, size_t len) {
+    strlcpy(buf, freedj_models_url().path.fileSystemRepresentation ?: "", len);
+}
+
 static NSURL *freedj_sep_find(void) {
     NSFileManager *fm = [NSFileManager defaultManager];
     NSURL *docs = [fm URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
@@ -226,7 +242,74 @@ static NSURL *freedj_sep_find(void) {
                 && [u.lastPathComponent.lowercaseString containsString:@"demucs"]) return u;
         }
     }
+    // Then the one the app downloaded (a model the user put in the OpenDeck
+    // folder wins).  The package, not a compiled copy: freedj_sep_open
+    // compiles it once and keeps the result beside it.
+    NSURL *got = [freedj_models_url() URLByAppendingPathComponent:@"htdemucs.mlpackage"];
+    if ([fm fileExistsAtPath:[got URLByAppendingPathComponent:@"Data/com.apple.CoreML/weights/weight.bin"].path]) return got;
     return nil;
+}
+
+// ── Stem model download ──────────────────────────────────────────────────────
+//
+// One download at a time, driven and polled from Rust (modelfetch.rs), which
+// checks and unpacks the file.  NSURLSession streams it to a temporary file;
+// on completion it is moved to `dest`.  State: 0 idle, 1 running, 2 done,
+// 3 failed.
+
+#include <stdatomic.h>
+static _Atomic int64_t freedj_dl_got = 0, freedj_dl_total = 0;
+static _Atomic int32_t freedj_dl_state = 0;
+
+@interface FreedjDownload : NSObject <NSURLSessionDownloadDelegate>
+@property (copy) NSString *dest;
+@end
+
+@implementation FreedjDownload
+- (void)URLSession:(NSURLSession *)s downloadTask:(NSURLSessionDownloadTask *)t didWriteData:(int64_t)w
+ totalBytesWritten:(int64_t)got totalBytesExpectedToWrite:(int64_t)total {
+    (void)s; (void)t; (void)w;
+    atomic_store(&freedj_dl_got, got);
+    if (total > 0) atomic_store(&freedj_dl_total, total);
+}
+- (void)URLSession:(NSURLSession *)s downloadTask:(NSURLSessionDownloadTask *)t didFinishDownloadingToURL:(NSURL *)loc {
+    (void)s;
+    NSInteger code = [t.response isKindOfClass:[NSHTTPURLResponse class]] ? ((NSHTTPURLResponse *)t.response).statusCode : 200;
+    NSFileManager *fm = [NSFileManager defaultManager];
+    NSURL *dst = [NSURL fileURLWithPath:self.dest];
+    [fm removeItemAtURL:dst error:nil];
+    BOOL ok = code == 200 && [fm moveItemAtURL:loc toURL:dst error:nil];
+    atomic_store(&freedj_dl_state, ok ? 2 : 3);
+}
+- (void)URLSession:(NSURLSession *)s task:(NSURLSessionTask *)t didCompleteWithError:(NSError *)e {
+    (void)s; (void)t;
+    if (e) atomic_store(&freedj_dl_state, 3);
+}
+@end
+
+bool freedj_dl_start(const char *url, const char *dest) {
+    @autoreleasepool {
+        NSURL *u = [NSURL URLWithString:[NSString stringWithUTF8String:url]];
+        if (!u) return false;
+        atomic_store(&freedj_dl_got, 0);
+        atomic_store(&freedj_dl_total, 0);
+        atomic_store(&freedj_dl_state, 1);
+        FreedjDownload *d = [FreedjDownload new];
+        d.dest = [NSString stringWithUTF8String:dest];
+        NSURLSessionConfiguration *cfg = [NSURLSessionConfiguration defaultSessionConfiguration];
+        cfg.waitsForConnectivity = YES;          // no network yet: wait instead of failing
+        cfg.timeoutIntervalForResource = 60 * 60;
+        NSURLSession *session = [NSURLSession sessionWithConfiguration:cfg delegate:d delegateQueue:nil];
+        [[session downloadTaskWithURL:u] resume];
+        [session finishTasksAndInvalidate];      // the session keeps its delegate until done
+        return true;
+    }
+}
+
+void freedj_dl_status(int64_t *got, int64_t *total, int32_t *state) {
+    *got = atomic_load(&freedj_dl_got);
+    *total = atomic_load(&freedj_dl_total);
+    *state = atomic_load(&freedj_dl_state);
 }
 
 bool freedj_sep_model_present(void) { return freedj_sep_find() != nil; }
@@ -235,9 +318,13 @@ static MLComputeUnits freedj_units_wanted(void) {
     NSURL *docs = [[NSFileManager defaultManager] URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject;
     NSString *conf = [NSString stringWithContentsOfURL:[docs URLByAppendingPathComponent:@"opendeck-stems.conf"]
                                               encoding:NSUTF8StringEncoding error:nil].lowercaseString;
-    if ([conf containsString:@"cpu"] && ![conf containsString:@"gpu"]) return MLComputeUnitsCPUOnly;
+    // The CPU by default: the run measured end to end on the iPad (3.5x real
+    // time, about 4.7 GB above the app's own use).  The first GPU attempt
+    // ran out of memory in its first chunk.  "gpu" or "all" in the file
+    // tries those.
     if ([conf containsString:@"all"]) return MLComputeUnitsAll;
-    return MLComputeUnitsCPUAndGPU;
+    if ([conf containsString:@"gpu"]) return MLComputeUnitsCPUAndGPU;
+    return MLComputeUnitsCPUOnly;
 }
 
 void freedj_sep_units(char *buf, size_t len) {
@@ -255,7 +342,7 @@ void *freedj_sep_open(char *err, size_t errlen) {
     @autoreleasepool {
         if (@available(iOS 18.0, *)) {
             NSURL *src = freedj_sep_find();
-            if (!src) { freedj_err(err, errlen, @"no *demucs*.mlpackage in the OpenDeck folder"); return NULL; }
+            if (!src) { freedj_err(err, errlen, @"the stems model is not downloaded yet"); return NULL; }
             NSError *e = nil;
             NSURL *compiled = src;
             if ([src.pathExtension isEqualToString:@"mlpackage"]) {
@@ -290,6 +377,11 @@ void *freedj_sep_open(char *err, size_t errlen) {
         freedj_err(err, errlen, @"stem splitting needs iOS 18");
         return NULL;
     }
+}
+
+// Let go of a loaded model (its ~4 GB), from freedj_sep_open.
+void freedj_sep_close(void *h) {
+    if (h) CFBridgingRelease(h);
 }
 
 size_t freedj_sep_segment(void *h) {

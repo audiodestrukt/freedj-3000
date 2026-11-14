@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Stems on the iPad and iPhone without copying files: the first time STEMS is
+  on and a track has no prepared stems, the app downloads the stem model
+  itself (287 MB, once; the stem keys read "DOWNLOADING n%", then
+  "PREPARING"), checks it against a pinned hash, and starts splitting the
+  loaded track as soon as it is in. It is kept out of iCloud backups. A model
+  put in the OpenDeck folder by hand still takes precedence.
 - KEY SHIFT on the CDJ-3000 screen. The KEY SHIFT key opens its panel: − and
   + move the key a semitone each (up to an octave either way), labelled with
   the key they lead to; the middle shows the key and its offset, and RESET
@@ -85,6 +91,12 @@ All notable changes to this project will be documented in this file.
   `--screen-only` still override it for one run.
 
 ### Changed
+- Splitting stems on an iPad or iPhone no longer keeps the model (about 4 GB)
+  in memory after the split, so the deck is not carrying it through the rest
+  of the set; the next split loads it again in a few seconds. The model runs
+  on the CPU by default, the path measured end to end on the iPad. A device
+  that cannot give a split the memory it needs shows "NEEDS MORE MEMORY"
+  instead of being closed by iOS partway, and downloads nothing.
 - Stems from an OverCue stick play almost at once. The bank is read page by
   page from the start of the track, each page checked as it arrives, and the
   deck plays the stems as far as they have got and the track itself beyond

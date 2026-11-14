@@ -971,6 +971,9 @@ fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Lay
         let sub = match snap.stems.state {
             StemsState::Loading => "LOADING".to_string(),
             StemsState::Splitting(p) => format!("SPLITTING {p}%"),
+            StemsState::Downloading(p) => format!("DOWNLOADING {p}%"),
+            StemsState::Preparing => "PREPARING".to_string(),
+            StemsState::NoMemory => "NEEDS MORE MEMORY".to_string(),
             StemsState::None => "NO STEMS".to_string(),
             _ => String::new(),
         };

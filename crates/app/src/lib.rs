@@ -30,6 +30,7 @@ mod waveform_cpu;
 mod settings;
 mod stems;
 mod separate;
+mod modelfetch;
 mod snapshot;
 mod taglist;
 #[cfg(target_os = "android")]
@@ -109,6 +110,13 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mem = || { let (used, left) = model::memory_mb(); format!("mem {used} MB, {left} MB left") };
     split_trace(&format!("{} {} | {name} | {secs:.0}s track | start | {}", utc_now(), model::device(), mem()));
+    // Refuse rather than be killed partway: the model needs ~4.7 GB above
+    // what the deck already uses (measured; see SPLIT_NEEDS_MB).
+    let (_, left) = model::memory_mb();
+    if left < model::SPLIT_NEEDS_MB {
+        split_trace(&format!("  not enough memory: {left} MB left, needs {} MB", model::SPLIT_NEEDS_MB));
+        return Err(separate::NotEnoughMemory { need_mb: model::SPLIT_NEEDS_MB, have_mb: left }.into());
+    }
     let res = model::with(|m| {
         split_trace(&format!("  model ready on {} | {}", model::units(), mem()));
         // The deck picks this bank up and plays each stretch as it lands.
@@ -124,6 +132,9 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
             t.chunks, t.model_s, t.total_s, secs / t.total_s.max(1e-9), mem()),
         Err(e) => format!("  split failed: {e:#} | {}", mem()),
     };
+    // Give the model's memory back: the deck plays on without it, and the
+    // next split loads it again in a few seconds.
+    model::release();
     split_trace(&line);
     let ((bank, _), _) = res?;
     Ok(Some(bank))
@@ -698,6 +709,11 @@ struct DeckApp {
     fetch_rx:          Option<mpsc::Receiver<LoadMsg>>,
     /// The stems job for the loaded track (see `stems.rs`).
     stems_rx:          Option<mpsc::Receiver<Result<Option<Arc<stems::StemBank>>>>>,
+    /// The loaded track has no prepared stems and the stem model is still
+    /// downloading: split it once the model is in.
+    stems_await_model: bool,
+    /// This device could not give a split the memory it needs.
+    stems_no_memory: bool,
     /// An on-device split in progress (progress, cancel), see `separate.rs`.
     stems_job:         Option<Arc<separate::Job>>,
     /// What the enlarged waveform shows now: the stem mix of (bank, gains,
@@ -1064,6 +1080,8 @@ impl DeckApp {
             indicators,
             fetch_rx: None,
             stems_rx: None,
+            stems_await_model: false,
+            stems_no_memory: false,
             stems_job: None,
             stem_wave_key: None,
             loading: None,
@@ -2461,9 +2479,17 @@ impl DeckApp {
         use snapshot::StemsState as S;
         let state = if !self.settings.stems { S::Off }
             else if let Some(b) = self.audio.stems.bank().filter(|b| b.is_for(&self.audio.current())) {
-                if b.complete() { S::Ready } else { S::Splitting(b.percent()) }
+                if b.complete() || b.prepared { S::Ready } else { S::Splitting(b.percent()) }
             }
             else if self.stems_rx.is_some() { S::Loading }
+            else if self.stems_no_memory { S::NoMemory }
+            else if self.stems_await_model {
+                match modelfetch::state() {
+                    modelfetch::Fetch::Unsupported => S::NoMemory,
+                    modelfetch::Fetch::Unpacking | modelfetch::Fetch::Ready => S::Preparing,
+                    f => f.percent().map_or(S::None, S::Downloading),
+                }
+            }
             else { S::None };
         snapshot::StemsView { state, gains: self.audio.stems.gains() }
     }
@@ -2594,6 +2620,10 @@ impl DeckApp {
     fn start_stems(&mut self, track: &Arc<Vec<f32>>, ch: usize) {
         self.stop_stems();
         if !self.settings.stems || std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") || !self.path.is_file() { return; }
+        // First use: fetch the stem model (iOS) in the background; until it
+        // is in, a track without prepared stems waits for it.
+        modelfetch::ensure();
+        self.stems_await_model = cfg!(target_os = "ios") && !separate::model::present();
         let (tx, rx) = mpsc::channel();
         let (path, track, sr) = (self.path.clone(), Arc::clone(track), self.audio.sample_rate);
         let job = Arc::new(separate::Job { on_start: Some(split_start_trace), on_chunk: Some(split_chunk_trace), ..Default::default() });
@@ -2612,6 +2642,8 @@ impl DeckApp {
     /// its next chunk.
     fn stop_stems(&mut self) {
         self.stems_rx = None;
+        self.stems_await_model = false;
+        self.stems_no_memory = false;
         if let Some(j) = self.stems_job.take() { j.cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
     }
 
@@ -2639,6 +2671,14 @@ impl DeckApp {
     /// Hand a finished stems job to the processor, if its track is still
     /// the one playing.
     fn poll_stems(&mut self) {
+        // The model just finished downloading: split the track that waited.
+        if self.stems_await_model && self.stems_rx.is_none() && modelfetch::state() == modelfetch::Fetch::Ready {
+            self.stems_await_model = false;
+            let (t, ch) = (self.audio.current(), self.audio.channels as usize);
+            if !t.is_empty() { self.start_stems(&t, ch); }
+            return;
+        }
+        if self.settings.stems { modelfetch::ensure(); }
         // A split in progress: play the stems it has written so far.
         if let Some(b) = self.stems_job.as_ref().and_then(|j| j.bank.get()) {
             let have = self.audio.stems.bank().is_some_and(|h| Arc::ptr_eq(&h, b));
@@ -2663,12 +2703,16 @@ impl DeckApp {
         }
         match got {
             Ok(Some(bank)) if bank.is_for(&self.audio.current()) => {
+                self.stems_await_model = false;
                 self.audio.stems.set_bank(Some(bank));
                 self.request_redraw();
             }
             Ok(Some(_)) => log::info!("stems: ready for a track no longer loaded; dropped"),
             Ok(None) => {}
-            Err(e) => log::warn!("stems refused: {e:#}"),
+            Err(e) => {
+                if e.downcast_ref::<separate::NotEnoughMemory>().is_some() { self.stems_no_memory = true; }
+                log::warn!("stems refused: {e:#}");
+            }
         }
     }
 

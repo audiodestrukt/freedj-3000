@@ -57,6 +57,18 @@ pub struct Job {
 }
 
 
+/// A split refused because the device cannot give it the memory it needs
+/// (it would be killed partway); the stem keys say so instead.
+#[derive(Debug)]
+pub struct NotEnoughMemory { pub need_mb: u64, pub have_mb: u64 }
+
+impl std::fmt::Display for NotEnoughMemory {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "splitting needs about {} MB free; {} MB is", self.need_mb, self.have_mb)
+    }
+}
+impl std::error::Error for NotEnoughMemory {}
+
 /// What a split took, for the test log.
 #[derive(Debug, Default, Clone)]
 pub struct Timing {
@@ -189,6 +201,7 @@ pub mod coreml {
     extern "C" {
         fn freedj_sep_model_present() -> bool;
         fn freedj_sep_open(err: *mut c_char, errlen: usize) -> *mut c_void;
+        fn freedj_sep_close(h: *mut c_void);
         fn freedj_sep_segment(h: *mut c_void) -> usize;
         fn freedj_sep_run(h: *mut c_void, mix: *const f32, out: *mut f32, n: usize, err: *mut c_char, errlen: usize) -> bool;
         fn freedj_mem_footprint() -> u64;
@@ -235,6 +248,13 @@ pub mod coreml {
             }
             Ok(())
         }
+    }
+
+    /// Unload the model: it holds about 4 GB, which the deck should not
+    /// carry through a set.  The next split loads it again (~4.5 s).
+    pub fn release() {
+        let mut g = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = g.take() { unsafe { freedj_sep_close(m.h) }; }
     }
 
     /// Process memory: (footprint, still available before iOS kills us), MB.
@@ -335,6 +355,16 @@ pub mod model {
         #[cfg(all(not(target_os = "ios"), feature = "separate-onnx"))] { return super::onnx::with(|m| f(m)); }
         #[allow(unreachable_code)] Err(anyhow::anyhow!("no separation model on this platform"))
     }
+
+    /// Unload the model after a split, where it is big (iOS).
+    pub fn release() {
+        #[cfg(target_os = "ios")] { super::coreml::release(); }
+    }
+
+    /// Memory a split needs on top of what the app already uses, MB:
+    /// measured on an iPad (Core ML on the CPU) at 548 → 5219 MB, and on
+    /// Linux (ONNX Runtime) at about 4.9 GB peak.  With a margin.
+    pub const SPLIT_NEEDS_MB: u64 = 5_000;
 
     /// (process memory, memory left before the OS steps in), MB.
     pub fn memory_mb() -> (u64, u64) {
