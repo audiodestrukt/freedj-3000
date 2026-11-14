@@ -1732,6 +1732,13 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     // A rekordbox track list is one full-width table (PREVIEW, TRACK, BPM, KEY).
     if cats.is_some() && !b.entries().is_empty() && b.entries().iter().all(|e| !e.is_dir) {
         draw_track_table(ui, lay, b, &rows, lx, 628.0, 4, u, out);
+        // INFO (the key in the table head): the highlighted track's details
+        // over the right of the table.
+        if let Some(e) = b.selected_entry().filter(|e| !e.is_dir).filter(|_| b.info_on()) {
+            let right = Rect::from_min_max(Pos2::new(sc.min.x + 732.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
+            ui.painter().rect_filled(right, 0.0, Color32::from_rgb(50, 50, 50));
+            draw_browse_info(ui, b, e, sc, right, u, out);
+        }
         if let Some(name) = snap.loading {
             label(ui, Pos2::new(sc.min.x + 1000.0 * u, sc.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
         }
@@ -1752,58 +1759,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     ui.painter().rect_filled(right, 0.0, BG);
     ui.painter().line_segment([Pos2::new(right.min.x - 1.0 * u, right.min.y), Pos2::new(right.min.x - 1.0 * u, right.max.y)], Stroke::new(2.0 * u, PANE_HEAD));
     match b.selected_entry() {
-        Some(e) if !e.is_dir => {
-            // A track: its details (tags for a local file; what the source
-            // listed otherwise), the cover, and LOAD, on the pane's grey.
-            ui.painter().rect_filled(right, 0.0, Color32::from_rgb(50, 50, 50));
-            let hb = Rect::from_min_size(right.min, Vec2::new(right.width(), 60.0 * u));
-            ui.painter().rect_filled(hb, 0.0, PANE_HEAD);
-            label(ui, Pos2::new(hb.min.x + 11.0 * u, hb.center().y), Align2::LEFT_CENTER, "INFO", 21.0, u, LABEL);
-            let tags = match e.load() {
-                Some(crate::browser::Load::Local { path, .. }) => browse_tags(ui.ctx(), path),
-                // A linked player's track: what its library knows.
-                Some(l @ crate::browser::Load::Db { .. }) => b.db_tags(l),
-                _ => None,
-            }.unwrap_or_default();
-            let title = tags.title.clone().unwrap_or_else(|| e.name.clone());
-            let artist = tags.artist.clone().or_else(|| e.artist.clone()).unwrap_or_default();
-            let bpm = tags.bpm.or(e.bpm).map(|b| format!("{b:.1}")).unwrap_or_default();
-            let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
-            let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0, Color32::from_rgb(70, 70, 70)));
-            let clip = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 152.0), at(1270.0, 248.0)));
-            label(ui, at(758.0, 176.0), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
-            clip.text(at(780.0, 176.0), Align2::LEFT_CENTER, &title, FontId::proportional(26.0 * u), TEXT);
-            rule(200.0, 1270.0);
-            icon(ui, Icon::Person, at(758.0, 224.0), u);
-            clip.text(at(780.0, 224.0), Align2::LEFT_CENTER, &artist, FontId::proportional(26.0 * u), TEXT);
-            rule(248.0, 1270.0);
-            let small = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 248.0), at(1062.0, 440.0)));
-            let rows: [(&str, String); 4] = [
-                ("disc", tags.album.clone().unwrap_or_default()),
-                ("BPM", bpm),
-                ("b#", tags.key.clone().unwrap_or_default()),
-                ("cal", tags.year.clone().unwrap_or_default()),
-            ];
-            for (i, (k, v)) in rows.iter().enumerate() {
-                let y = 272.0 + 48.0 * i as f32;
-                match *k {
-                    "disc" => icon(ui, Icon::Disc, at(758.0, y), u),
-                    "cal" => icon(ui, Icon::Calendar, at(758.0, y), u),
-                    t => boxed(ui, t, at(758.0, y), u),
-                }
-                small.text(at(780.0, y), Align2::LEFT_CENTER, v, FontId::proportional(22.0 * u), TEXT);
-                rule(y + 24.0, 1062.0);
-            }
-            draw_art(ui, ui.ctx(), &tags, "browse", Rect::from_min_max(at(1073.0, 252.0), at(1260.0, 439.0)));
-            icon(ui, Icon::Bubble, at(758.0, 513.0), u);
-            ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 490.0), at(1270.0, 536.0)))
-                .text(at(780.0, 513.0), Align2::LEFT_CENTER, tags.comment.clone().unwrap_or_default(), FontId::proportional(20.0 * u), TEXT);
-            rule(537.0, 1270.0);
-            let load = Rect::from_min_max(at(935.0, 552.0), at(1085.0, 602.0));
-            if tap(ui, load, "cdj-browse-load").0 { out.push(Event::Deck(ControlEvent::Load)); }
-            ui.painter().rect_filled(load, 0.0, Color32::from_rgb(225, 225, 225));
-            label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::from_rgb(30, 30, 30));
-        }
+        Some(e) if !e.is_dir => draw_browse_info(ui, b, e, sc, right, u, out),
         _ if b.rb_preview().is_some() => {
             // A rekordbox name: an artist's albums, else its tracks.
             let (head, items) = b.rb_preview().unwrap();
@@ -1824,6 +1780,61 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         label(ui, Pos2::new(sc.min.x + 1000.0 * u, sc.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
     }
     draw_status_strip(ui, snap, lay, u, out);
+}
+
+/// The INFO pane for a highlighted track (right side of BROWSE): details,
+/// cover, comment and LOAD.
+fn draw_browse_info(ui: &Ui, b: &Browser, e: &crate::browser::Entry, sc: Rect, right: Rect, u: f32, out: &mut Vec<Event>) {
+    // A track: its details (tags for a local file; what the source
+    // listed otherwise), the cover, and LOAD, on the pane's grey.
+    ui.painter().rect_filled(right, 0.0, Color32::from_rgb(50, 50, 50));
+    let hb = Rect::from_min_size(right.min, Vec2::new(right.width(), 60.0 * u));
+    ui.painter().rect_filled(hb, 0.0, PANE_HEAD);
+    label(ui, Pos2::new(hb.min.x + 11.0 * u, hb.center().y), Align2::LEFT_CENTER, "INFO", 21.0, u, LABEL);
+    let tags = match e.load() {
+        Some(crate::browser::Load::Local { path, .. }) => browse_tags(ui.ctx(), path),
+        // A linked player's track: what its library knows.
+        Some(l @ crate::browser::Load::Db { .. }) => b.db_tags(l),
+        _ => None,
+    }.unwrap_or_default();
+    let title = tags.title.clone().unwrap_or_else(|| e.name.clone());
+    let artist = tags.artist.clone().or_else(|| e.artist.clone()).unwrap_or_default();
+    let bpm = tags.bpm.or(e.bpm).map(|b| format!("{b:.1}")).unwrap_or_default();
+    let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
+    let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0, Color32::from_rgb(70, 70, 70)));
+    let clip = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 152.0), at(1270.0, 248.0)));
+    label(ui, at(758.0, 176.0), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
+    clip.text(at(780.0, 176.0), Align2::LEFT_CENTER, &title, FontId::proportional(26.0 * u), TEXT);
+    rule(200.0, 1270.0);
+    icon(ui, Icon::Person, at(758.0, 224.0), u);
+    clip.text(at(780.0, 224.0), Align2::LEFT_CENTER, &artist, FontId::proportional(26.0 * u), TEXT);
+    rule(248.0, 1270.0);
+    let small = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 248.0), at(1062.0, 440.0)));
+    let rows: [(&str, String); 4] = [
+        ("disc", tags.album.clone().unwrap_or_default()),
+        ("BPM", bpm),
+        ("b#", tags.key.clone().unwrap_or_default()),
+        ("cal", tags.year.clone().unwrap_or_default()),
+    ];
+    for (i, (k, v)) in rows.iter().enumerate() {
+        let y = 272.0 + 48.0 * i as f32;
+        match *k {
+            "disc" => icon(ui, Icon::Disc, at(758.0, y), u),
+            "cal" => icon(ui, Icon::Calendar, at(758.0, y), u),
+            t => boxed(ui, t, at(758.0, y), u),
+        }
+        small.text(at(780.0, y), Align2::LEFT_CENTER, v, FontId::proportional(22.0 * u), TEXT);
+        rule(y + 24.0, 1062.0);
+    }
+    draw_art(ui, ui.ctx(), &tags, "browse", Rect::from_min_max(at(1073.0, 252.0), at(1260.0, 439.0)));
+    icon(ui, Icon::Bubble, at(758.0, 513.0), u);
+    ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 490.0), at(1270.0, 536.0)))
+        .text(at(780.0, 513.0), Align2::LEFT_CENTER, tags.comment.clone().unwrap_or_default(), FontId::proportional(20.0 * u), TEXT);
+    rule(537.0, 1270.0);
+    let load = Rect::from_min_max(at(935.0, 552.0), at(1085.0, 602.0));
+    if tap(ui, load, "cdj-browse-load").0 { out.push(Event::Deck(ControlEvent::Load)); }
+    ui.painter().rect_filled(load, 0.0, Color32::from_rgb(225, 225, 225));
+    label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::from_rgb(30, 30, 30));
 }
 
 fn f_label(f: crate::browser::RbField) -> String {
@@ -1942,6 +1953,12 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
     label(ui, Pos2::new(tx + 22.0 * u, th.center().y), Align2::LEFT_CENTER, format!("[{:0w$}]", rows.len(), w = count_digits), 21.0, u, LABEL);
     up(label(ui, at(1090.0, 122.0), Align2::LEFT_CENTER, "BPM", 21.0, u, LABEL), LABEL);
     up(label(ui, at(1200.0, 122.0), Align2::LEFT_CENTER, "KEY", 21.0, u, LABEL), LABEL);
+    // INFO key, left of the second-row key.
+    let ib = Rect::from_min_max(at(940.0, 98.0), at(1005.0, 146.0));
+    p.rect_filled(ib, 0.0, if b.info_on() { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });
+    outline(ui, ib, Color32::BLACK, u);
+    label(ui, ib.center(), Align2::CENTER_CENTER, "INFO", 15.0, u, TEXT);
+    if tap(ui, ib, "cdj-trk-info").0 { out.push(Event::Ui(UiEvent::BrowseInfo)); }
     // The second-row key: a box with ⌃⌄, lit while a detail row shows.
     let sb = Rect::from_min_max(at(1011.0, 98.0), at(1069.0, 146.0));
     p.rect_filled(sb, 0.0, if b.detail_name().is_some() { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });

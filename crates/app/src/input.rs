@@ -70,6 +70,8 @@ pub enum UiEvent {
     BrowseCategory(usize),
     /// The track table's second-row key.
     BrowseDetail,
+    /// The track table's INFO key.
+    BrowseInfo,
     /// MENU: a row was tapped — select it and step its value.
     MenuTap(usize),
     /// GRID ADJUST touch keys (shown in place of the Bars readouts while the

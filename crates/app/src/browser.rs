@@ -383,6 +383,7 @@ pub struct Browser {
     playlist_only: bool,
     /// The second row of the track table: 0 off, then ARTIST, ALBUM, GENRE.
     detail: u8,
+    info: bool,
     /// Which local tracks have OverCue stems (the "S" mark in lists).
     stem_marks: std::cell::RefCell<crate::stems::StemMarks>,
 }
@@ -438,6 +439,7 @@ impl Browser {
             last_root: None,
             playlist_only: false,
             detail: 0,
+            info: false,
             stem_marks: Default::default(),
         };
         b.rebuild();
@@ -569,6 +571,8 @@ impl Browser {
     }
 
     pub fn refresh(&mut self) { self.playlist_only = false; self.rebuild(); }
+    pub fn info_on(&self) -> bool { self.info }
+    pub fn toggle_info(&mut self) { self.info = !self.info; }
     pub fn playlist_only(&self) -> bool { self.playlist_only }
     /// The table's second-row key: off → ARTIST → ALBUM → GENRE → off.
     pub fn cycle_detail(&mut self) { self.detail = (self.detail + 1) % 4; }
