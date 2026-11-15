@@ -54,6 +54,10 @@ pub struct Job {
     /// The bank a split is filling, published once the model is loaded so
     /// the deck can play the stems already written.
     pub bank: std::sync::OnceLock<std::sync::Arc<crate::stems::StemBank>>,
+    /// The deck's playhead (interleaved samples at the deck rate), so the
+    /// split starts just ahead of it and follows its jumps.  `None`: split
+    /// from the top.
+    pub playhead: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
 }
 
 
@@ -78,17 +82,31 @@ pub struct Timing {
 }
 
 /// Split `track` (interleaved stereo at `deck_sr`) into drums, vocal and
-/// harmonics: interleaved stereo i16 at `deck_sr`, handed to `sink` in
-/// order from the start as each stretch is finished (the same length for
-/// all three; together they run to about the track's length).
-pub fn separate(track: &[f32], deck_sr: u32, sep: &mut dyn Separator, job: &Job, sink: &mut dyn FnMut([&[i16]; 3])) -> Result<Timing> {
+/// harmonics, written into `bank` (interleaved stereo i16 at `deck_sr`)
+/// as each stretch is finished.
+///
+/// The split runs in **runs** of consecutive chunks
+/// (`docs/design/stems-from-playhead.md`).  A run starts at the first page
+/// of the bank not yet written from just ahead of the playhead (the
+/// look-ahead: a chunk's compute time plus a second), goes on until it
+/// reaches a written page or the track's end, and gives up early when the
+/// playhead jumps somewhere it won't reach soon (a hot cue, a needle
+/// search).  The next run starts again from the playhead, wrapping round to
+/// the top, until every page is written.  Without a playhead
+/// ([`Job::playhead`]) it is one run from the top: the classic split.
+///
+/// Inside a run the chunks overlap and crossfade as Demucs's own does, on
+/// a fixed grid, so a run from the top is the whole-track split.  The
+/// first chunk of a run that starts mid-track has no earlier chunk to
+/// crossfade with; its first quarter comes from it alone.
+pub fn separate(track: &[f32], deck_sr: u32, sep: &mut dyn Separator, job: &Job, bank: &crate::stems::StemBank) -> Result<Timing> {
     let t0 = std::time::Instant::now();
     let frames = track.len() / 2;
     ensure!(frames > 0, "empty track");
     let seg = sep.segment();
     ensure!(seg >= 4, "model segment too short ({seg})");
 
-    // Demucs normalises by the mono sum's statistics.
+    // Demucs normalises by the mono sum's statistics (of the whole track).
     let (mean, std) = {
         let n = frames as f64;
         let mut s = 0.0f64;
@@ -103,12 +121,7 @@ pub fn separate(track: &[f32], deck_sr: u32, sep: &mut dyn Separator, job: &Job,
         (mean as f32, (var.sqrt() as f32).max(1e-8))
     };
 
-    let mix: Vec<f32> = {
-        let norm: Vec<f32> = track.iter().map(|v| (v - mean) / std).collect();
-        crate::audio::resample_interleaved(&norm, 2, deck_sr, MODEL_SR)?
-    };
-    let len = mix.len() / 2;
-
+    let geo = Geometry::new(deck_sr, frames, seg);
     // Demucs's crossfade: 1, 2, … up to the middle, then back down; never 0.
     let weight: Vec<f32> = {
         let half = seg / 2;
@@ -116,76 +129,229 @@ pub fn separate(track: &[f32], deck_sr: u32, sep: &mut dyn Separator, job: &Job,
         let max = w.iter().cloned().fold(0.0, f32::max);
         w.into_iter().map(|v| v / max).collect()
     };
-    let stride = ((1.0 - OVERLAP) * seg as f64) as usize;
-    let chunks = len.div_ceil(stride);
+    let mut timing = Timing { ..Default::default() };
+    if let Some(f) = job.on_start { f(geo.chunks); }
+    let mut st = RunState { input: vec![0f32; 2 * seg], output: vec![0f32; 8 * seg], chunk_s: None };
 
+    loop {
+        if job.cancel.load(Ordering::Relaxed) { bail!("cancelled"); }
+        let target = geo.target(job, st.chunk_s);
+        let Some(page) = bank.first_unready_from(target / crate::stems::PAGE_FRAMES) else { break };
+        let from = page * crate::stems::PAGE_FRAMES;
+        log::info!("stems: split run from {:.1}s ({}% ready, {:.1}s in)", from as f64 / deck_sr as f64, bank.percent(), t0.elapsed().as_secs_f64());
+        run(track, &geo, (mean, std), &weight, sep, job, bank, &mut st, &mut timing, from)?;
+        job.progress.store(bank.percent() as u32 * 10, Ordering::Relaxed);
+    }
+    job.progress.store(1000, Ordering::Relaxed);
+    timing.total_s = t0.elapsed().as_secs_f64();
+    Ok(timing)
+}
+
+/// Model frames a run computes before the first frame it writes, beyond
+/// the quarter chunk it has to itself: the output converter's start-up.
+const RUN_IN: usize = 4096;
+
+/// The fixed geometry of a split: the model's chunk grid at 44.1 kHz and
+/// how it maps onto the deck's frames.
+struct Geometry {
+    deck_sr: u32,
+    /// Deck frames.
+    frames: usize,
+    /// Model frames.
+    len: usize,
+    seg: usize,
+    stride: usize,
+    chunks: usize,
+    /// `mq` model frames are exactly `dq` deck frames.
+    dq: usize,
+    mq: usize,
+}
+
+impl Geometry {
+    fn new(deck_sr: u32, frames: usize, seg: usize) -> Geometry {
+        fn gcd(a: usize, b: usize) -> usize { if b == 0 { a } else { gcd(b, a % b) } }
+        let g = gcd(deck_sr as usize, MODEL_SR as usize);
+        let (dq, mq) = (deck_sr as usize / g, MODEL_SR as usize / g);
+        let len = (frames as u64 * mq as u64 / dq as u64) as usize;
+        let stride = (((1.0 - OVERLAP) * seg as f64) as usize).max(1);
+        Geometry { deck_sr, frames, len, seg, stride, chunks: len.div_ceil(stride).max(1), dq, mq }
+    }
+    fn to_model(&self, deck: usize) -> usize { (deck as u64 * self.mq as u64 / self.dq as u64) as usize }
+    fn to_deck(&self, model: usize) -> usize { (model as u64 * self.dq as u64 / self.mq as u64) as usize }
+
+    /// Where a run should start now, in deck frames: the playhead plus the
+    /// look-ahead (0 without a playhead).
+    fn target(&self, job: &Job, chunk_s: Option<f64>) -> usize {
+        match &job.playhead {
+            None => 0,
+            Some(p) => (p.load(Ordering::Relaxed) as usize / 2 + self.look(chunk_s)).min(self.frames.saturating_sub(1)),
+        }
+    }
+    /// Deck frames the playhead moves while a chunk is computed, and a
+    /// second's margin: 3 s for the first chunk, before one is timed.
+    fn look(&self, chunk_s: Option<f64>) -> usize {
+        ((chunk_s.unwrap_or(2.0) * 1.5 + 1.0) * self.deck_sr as f64) as usize
+    }
+}
+
+struct RunState { input: Vec<f32>, output: Vec<f32>, chunk_s: Option<f64> }
+
+/// One run from the chunk holding deck frame `from` (a page boundary):
+/// writes from `from` until a written page, the track's end, or the
+/// playhead jumps away.
+#[allow(clippy::too_many_arguments)]
+fn run(track: &[f32], geo: &Geometry, (mean, std): (f32, f32), weight: &[f32], sep: &mut dyn Separator,
+       job: &Job, bank: &crate::stems::StemBank, st: &mut RunState, timing: &mut Timing, from: usize) -> Result<()> {
+    use crate::stems::PAGE_FRAMES;
+    let deck_sr = geo.deck_sr;
+    let (seg, stride, len) = (geo.seg, geo.stride, geo.len);
+    // Start a quarter chunk and a margin early: the stretch a run's first
+    // chunk has to itself (no earlier chunk to crossfade with) and the
+    // output converter's start-up fall before `from`, which is all that
+    // gets written.
+    let k0 = (geo.to_model(from).saturating_sub(seg - stride + RUN_IN) / stride).min(geo.chunks - 1);
     // Overlap-add window: frames [base, base + acc.len()/6) of the three
     // stems (interleaved d L, d R, v L, v R, h L, h R) and their weights.
     let mut acc: Vec<f32> = Vec::new();
     let mut wsum: Vec<f32> = Vec::new();
-    let mut base = 0usize;
-    let mut rs = crate::audio::StreamResampler::new(MODEL_SR, deck_sr, 6)?;
+    let mut base = k0 * stride;
+    // The output converter starts on a model frame that maps exactly onto
+    // a deck frame, so runs land on the deck's frames without drift.
+    let b0 = base.div_ceil(geo.mq) * geo.mq;
+    let mut skip = b0 - base;
+    let mut deck_pos = geo.to_deck(b0);
+    let mut rs = if deck_sr != MODEL_SR { Some(crate::audio::StreamResampler::new(MODEL_SR, deck_sr, 6)?) } else { None };
+    // The first written page at or after where this run writes: it stops
+    // there (another run filled it).
+    let stop_at = |pos: usize| -> usize {
+        let p0 = pos.div_ceil(PAGE_FRAMES);
+        (p0..bank.page_count()).find(|&p| bank.page_started(p)).map_or(geo.frames, |p| p * PAGE_FRAMES)
+    };
+    let stop = stop_at(from);
     let mut outs: [Vec<i16>; 3] = Default::default();
     // The mix's DC goes back on harmonics, so the three stems add up to it.
-    let mut emit = |block: &[f32]| {
-        for o in &mut outs { o.clear(); }
-        for f in block.chunks_exact(6) {
-            for s in 0..3 {
-                for c in 0..2 {
-                    let v = f[s * 2 + c] * std + if s == 2 { mean } else { 0.0 };
-                    outs[s].push((v * 32768.0).round().clamp(-32768.0, 32767.0) as i16);
+    let mut write = |block: &[f32], deck_pos: &mut usize, stop: usize| {
+        let n = block.len() / 6;
+        let (lo, hi) = ((*deck_pos).max(from), (*deck_pos + n).min(stop));
+        if lo < hi {
+            for o in &mut outs { o.clear(); }
+            for f in block[(lo - *deck_pos) * 6..(hi - *deck_pos) * 6].chunks_exact(6) {
+                for s in 0..3 {
+                    for c in 0..2 {
+                        let v = f[s * 2 + c] * std + if s == 2 { mean } else { 0.0 };
+                        outs[s].push((v * 32768.0).round().clamp(-32768.0, 32767.0) as i16);
+                    }
+                }
+            }
+            bank.write(lo * 2, [&outs[0], &outs[1], &outs[2]]);
+        }
+        *deck_pos += n;
+    };
+
+    let mut wrote_page = false;
+    for k in k0..geo.chunks {
+        if job.cancel.load(Ordering::Relaxed) { bail!("cancelled"); }
+        // The playhead jumped: stop if the next run would start somewhere
+        // this one won't reach within a chunk (once this run has written
+        // a page, so a restless playhead can't stall the split).
+        if k > k0 && wrote_page && job.playhead.is_some() {
+            let want = geo.target(job, st.chunk_s) / PAGE_FRAMES;
+            if let Some(p) = bank.first_unready_from(want) {
+                let start = p * PAGE_FRAMES;
+                if start < from || start > deck_pos + geo.to_deck(stride) + geo.look(st.chunk_s) {
+                    bank.forget_partial(deck_pos.max(from) / PAGE_FRAMES);
+                    return Ok(());
                 }
             }
         }
-        if !outs[0].is_empty() { sink([&outs[0], &outs[1], &outs[2]]); }
-    };
-
-    let mut input = vec![0f32; 2 * seg];
-    let mut output = vec![0f32; 8 * seg];
-    let mut timing = Timing { chunks, ..Default::default() };
-    if let Some(f) = job.on_start { f(chunks); }
-    for k in 0..chunks {
-        if job.cancel.load(Ordering::Relaxed) { bail!("cancelled"); }
         let off = k * stride;
         let n = seg.min(len - off);
-        input.iter_mut().for_each(|v| *v = 0.0);
-        for i in 0..n {
-            input[i] = mix[(off + i) * 2];
-            input[seg + i] = mix[(off + i) * 2 + 1];
-        }
+        mix_window(track, geo, (mean, std), off, n, &mut st.input)?;
         let tm = std::time::Instant::now();
-        sep.run(&input, &mut output)?;
+        sep.run(&st.input, &mut st.output)?;
         let dt = tm.elapsed().as_secs_f64();
+        st.chunk_s = Some(dt);
         timing.model_s += dt;
-        if let Some(f) = job.on_chunk { f(k, chunks, dt); }
+        timing.chunks += 1;
+        if let Some(f) = job.on_chunk { f(k, geo.chunks, dt); }
 
         let need = off + n - base;
         if acc.len() < need * 6 { acc.resize(need * 6, 0.0); wsum.resize(need, 0.0); }
-        let plane = |p: usize, i: usize| output[p * seg + i];
+        let out = &st.output;
+        let plane = |p: usize, i: usize| out[p * seg + i];
         for i in 0..n {
             let w = weight[i];
             let a = (off - base + i) * 6;
             for c in 0..2 {
                 acc[a + c]     += w * plane(c, i);                                 // drums
-                acc[a + 2 + c] += w * plane(6 + c, i);                             // vocals
+                acc[a + 2 + c] += w * (plane(6 + c, i));                           // vocals
                 acc[a + 4 + c] += w * (plane(2 + c, i) + plane(4 + c, i));          // bass + other
             }
             wsum[off - base + i] += w;
         }
         // Everything before the next chunk's start is final.
-        let done_to = if k + 1 < chunks { (k + 1) * stride } else { len };
+        let last = k + 1 >= geo.chunks;
+        let done_to = if last { len } else { (k + 1) * stride };
         let ready = done_to - base;
         let mut block: Vec<f32> = acc.drain(..ready * 6).collect();
         for (f, w) in block.chunks_exact_mut(6).zip(wsum.drain(..ready)) {
             f.iter_mut().for_each(|v| *v /= w);
         }
         base = done_to;
-        emit(&rs.push(&block)?);
-        job.progress.store(((k + 1) * 1000 / chunks) as u32, Ordering::Relaxed);
+        let s0 = skip.min(block.len() / 6);
+        skip -= s0;
+        let block = &block[s0 * 6..];
+        let mut conv = match rs.as_mut() { Some(r) => r.push(block)?, None => block.to_vec() };
+        if last { if let Some(r) = rs.as_mut() { conv.extend(r.finish()?); } }
+        write(&conv, &mut deck_pos, stop);
+        if deck_pos > from + PAGE_FRAMES { wrote_page = true; }
+        if last {
+            bank.end_at(deck_pos.max(from).min(stop) * 2);
+            return Ok(());
+        }
+        // Up to a page another run wrote: this run is done.
+        if deck_pos >= stop { return Ok(()); }
+        job.progress.store(bank.percent() as u32 * 10, Ordering::Relaxed);
     }
-    emit(&rs.finish()?);
-    timing.total_s = t0.elapsed().as_secs_f64();
-    Ok(timing)
+    Ok(())
+}
+
+/// The normalised model input for model frames `[off, off + n)`, planar
+/// into `input` (`2 × seg`, zero past `n`): the deck's audio around them,
+/// converted to 44.1 kHz with a margin so the converter's edges fall
+/// outside.
+fn mix_window(track: &[f32], geo: &Geometry, (mean, std): (f32, f32), off: usize, n: usize, input: &mut [f32]) -> Result<()> {
+    let seg = geo.seg;
+    input.iter_mut().for_each(|v| *v = 0.0);
+    let norm = |v: f32| (v - mean) / std;
+    if geo.deck_sr == MODEL_SR {
+        for i in 0..n {
+            input[i] = norm(track[(off + i) * 2]);
+            input[seg + i] = norm(track[(off + i) * 2 + 1]);
+        }
+        return Ok(());
+    }
+    const MARGIN: usize = 4096;
+    // Window start on the exact grid, so model frame ↔ deck frame is exact.
+    let ws = off.saturating_sub(MARGIN) / geo.mq * geo.mq;
+    let we = (off + n + MARGIN).div_ceil(geo.mq) * geo.mq;
+    let (d0, d1) = (geo.to_deck(ws), geo.to_deck(we));
+    let mut win: Vec<f32> = Vec::with_capacity((d1 - d0) * 2);
+    for f in d0..d1 {
+        if f < geo.frames { win.push(norm(track[f * 2])); win.push(norm(track[f * 2 + 1])); }
+        else { win.push(0.0); win.push(0.0); }
+    }
+    let mut rs = crate::audio::StreamResampler::new(geo.deck_sr, MODEL_SR, 2)?;
+    let mut res = rs.push(&win)?;
+    res.extend(rs.finish()?);
+    for i in 0..n {
+        let j = off - ws + i;
+        if let Some(f) = res.get(j * 2..j * 2 + 2) {
+            input[i] = f[0];
+            input[seg + i] = f[1];
+        }
+    }
+    Ok(())
 }
 
 /// HTDemucs through Core ML, on iOS (the shim is in `ios/freedj/main.m`).
@@ -401,9 +567,78 @@ mod tests {
     pub(super) fn split(track: &[f32], sr: u32, sep: &mut dyn Separator, job: &Job) -> Result<([Vec<i16>; 3], Timing)> {
         let t = std::sync::Arc::new(track.to_vec());
         let bank = crate::stems::StemBank::filling(&t);
-        let timing = separate(track, sr, sep, job, &mut |b| bank.append(b))?;
+        let timing = separate(track, sr, sep, job, &bank)?;
         bank.finish(sr);
         Ok(([bank.stem(0), bank.stem(1), bank.stem(2)], timing))
+    }
+
+    /// The chunks a split ran, in order, for the run tests (on_chunk runs on
+    /// the split's own thread).
+    thread_local! {
+        static RAN: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+        static JUMP: std::cell::RefCell<Option<(usize, std::sync::Arc<std::sync::atomic::AtomicU64>, u64)>> = const { std::cell::RefCell::new(None) };
+    }
+    fn record(k: usize, _n: usize, _dt: f64) {
+        let ran = RAN.with(|r| { r.borrow_mut().push(k); r.borrow().len() });
+        JUMP.with(|j| if let Some((after, ph, to)) = j.borrow().as_ref() {
+            if ran == *after { ph.store(*to, Ordering::Relaxed); }
+        });
+    }
+
+    /// The split with the deck's playhead: it starts just ahead of it (the
+    /// look-ahead, 4 s before a chunk is timed), runs to the end, wraps to
+    /// the top and stops where it began; the bank is the classic split.
+    #[test]
+    fn a_split_starts_ahead_of_the_playhead_and_wraps() {
+        let sr = 48_000;
+        let track = tone(sr as usize * 20, sr);
+        let (classic, _) = split(&track, sr, &mut Fake { seg: 10_000, calls: 0 }, &Job::default()).unwrap();
+        let ph = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(2 * sr as u64 * 2));
+        let job = Job { playhead: Some(ph), on_chunk: Some(record), ..Default::default() };
+        RAN.with(|r| r.borrow_mut().clear());
+        let (got, t) = split(&track, sr, &mut Fake { seg: 10_000, calls: 0 }, &job).unwrap();
+        let ran = RAN.with(|r| r.borrow().clone());
+        let stride = 7_500usize;
+        let first_s = ran[0] as f64 * stride as f64 / 44_100.0;
+        assert!((5.5..6.0).contains(&first_s), "first chunk at {first_s:.2}s (playhead 2 s + 4 s look-ahead, less the run-in)");
+        // Runs: first from the untimed 4 s look-ahead; once a chunk is timed
+        // (look-ahead ~1 s) the gap it skipped comes first; the top last.
+        let starts: Vec<f64> = std::iter::once(ran[0]).chain(ran.windows(2).filter(|w| w[1] != w[0] + 1).map(|w| w[1]))
+            .map(|k| k as f64 * stride as f64 / 44_100.0).collect();
+        assert!(starts.len() <= 4, "a few runs: {starts:?}");
+        assert!((2.5..3.2).contains(&starts[1]), "then from just ahead of the playhead: {starts:?}");
+        assert_eq!(*starts.last().unwrap(), 0.0, "and the top last: {starts:?}");
+        let _ = t;
+        assert!(ran.len() <= 128 + 3 * 3, "about one pass plus each run's run-in ({} chunks)", ran.len());
+        assert_eq!(job.progress.load(Ordering::Relaxed), 1000);
+        for s in 0..3 {
+            let worst = (0..track.len()).map(|i| (got[s][i] as i32 - classic[s][i] as i32).abs()).max().unwrap();
+            assert!(worst <= 2, "stem {s} differs from the classic split by {worst}");
+        }
+    }
+
+    /// A hot cue during a split: the run stops and the next starts ahead of
+    /// the new playhead.
+    #[test]
+    fn a_split_follows_a_jump() {
+        let sr = 48_000;
+        let track = tone(sr as usize * 30, sr);
+        let ph = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let job = Job { playhead: Some(std::sync::Arc::clone(&ph)), on_chunk: Some(record), ..Default::default() };
+        RAN.with(|r| r.borrow_mut().clear());
+        JUMP.with(|j| *j.borrow_mut() = Some((5, std::sync::Arc::clone(&ph), 20 * sr as u64 * 2)));
+        let (got, _) = split(&track, sr, &mut Fake { seg: 10_000, calls: 0 }, &job).unwrap();
+        JUMP.with(|j| *j.borrow_mut() = None);
+        let ran = RAN.with(|r| r.borrow().clone());
+        let secs = |k: usize| k as f64 * 7_500.0 / 44_100.0;
+        assert!(secs(ran[0]) < 4.5, "first run near the start: {:.2}s", secs(ran[0]));
+        let next = ran[6..].first().copied().unwrap();
+        assert!((20.0..22.5).contains(&secs(next)), "after the jump to 20 s the split moves to {:.2}s", secs(next));
+        let (classic, _) = split(&track, sr, &mut Fake { seg: 10_000, calls: 0 }, &Job::default()).unwrap();
+        for s in 0..3 {
+            let worst = (0..track.len()).map(|i| (got[s][i] as i32 - classic[s][i] as i32).abs()).max().unwrap();
+            assert!(worst <= 2, "stem {s} differs from the classic split by {worst}");
+        }
     }
 
     /// A model with a known answer: drums = ½ mix, bass = other = ¼ mix,

@@ -23,6 +23,7 @@
 //! | `rotary=<n>` | turn the rotary `n` detents (positive = down the list) |
 //! | `lamps=<path>` | write the faceplate's lamps as cdj3k-emu reports them (JSON) |
 //! | `shot=<path>` | save the next frame as a PNG and carry on |
+//! | `seek=<seconds>` | NEEDLE SEARCH to that point of the loaded track |
 //! | `deckview` | DECK VIEW: full deck ↔ screen only (the F key) |
 //! | `quit` | exit the process (status 0) |
 //!
@@ -36,6 +37,7 @@ pub enum Action {
     Play,
     JogVinyl(bool),
     Jog { delta: i32, frames: u32 },
+    Seek(f64),
     ShiftSync,
     SnapGrid,
     GridReset,
@@ -94,6 +96,7 @@ pub fn parse(src: &str) -> Result<Vec<(f64, Action)>, String> {
             _ if act.starts_with("rotary=") => Action::Rotary(act[7..].trim().parse().map_err(|_| format!("{entry:?}: bad detents"))?),
             _ if act.starts_with("lamps=") => Action::Lamps(act[6..].trim().to_string()),
             _ if act.starts_with("shot=") => Action::Shot(act[5..].trim().to_string()),
+            _ if act.starts_with("seek=") => Action::Seek(act[5..].trim().parse().map_err(|_| format!("{entry:?}: bad seconds"))?),
             _ if act.starts_with("keyshift=") => Action::KeyShift(act[9..].trim().parse().map_err(|_| format!("{entry:?}: bad semitones"))?),
             _ if act.starts_with("stems=") => {
                 let g: Vec<f32> = act[6..].split(',').map(|v| v.trim().parse::<f32>()).collect::<Result<_, _>>()

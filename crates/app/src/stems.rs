@@ -34,16 +34,26 @@ pub const ROLES: [Role; 3] = Role::STEMS;
 
 /// A track's stems at the deck rate, aligned to its decode.
 ///
-/// A bank can fill while it plays: a split on the device publishes an
-/// empty bank and writes each finished stretch in order, from the start.
-/// `ready` marks how far it has got (interleaved samples); the processor
-/// plays the stems before it and the original after it.  One writer; the
-/// samples are atomics so the audio thread can read them while it writes.
+/// A bank can fill while it plays, in any order: a split on the device
+/// publishes an empty bank and writes each finished stretch where it
+/// belongs, starting near the playhead
+/// (`docs/design/stems-from-playhead.md`).  The bank is cut into pages of
+/// [`PAGE`] samples. A page counts as ready once every sample in it is
+/// written; the processor plays the stems on ready pages and the original
+/// elsewhere.  One writer at a time, and each sample written once (writers
+/// start on a page boundary and stop at the first page already written);
+/// the samples are atomics so the audio thread can read them while it
+/// writes.
 pub struct StemBank {
     track: Weak<Vec<f32>>,
     /// Interleaved stereo i16, same length as the track's samples.
     data: [Box<[AtomicI16]>; 3],
+    /// Samples written in each page.
+    pages: Box<[AtomicU32]>,
+    /// Samples in ready pages, for the progress readout.
     ready: AtomicUsize,
+    /// Where [`append`](Self::append) writes next.
+    cursor: AtomicUsize,
     /// Frames the bank was shifted by to line up (for the log and tests).
     #[cfg_attr(not(test), allow(dead_code))]
     pub offset_frames: isize,
@@ -57,24 +67,38 @@ pub struct StemBank {
     pub prepared: bool,
 }
 
+/// Stereo frames per bank page (85 ms at 48 kHz).
+pub const PAGE_FRAMES: usize = 4096;
+/// Interleaved samples per bank page.
+pub const PAGE: usize = PAGE_FRAMES * 2;
+
 /// i16 → atomic in place (the same layout: `collect` reuses the buffer).
 fn atomics(v: Vec<i16>) -> Box<[AtomicI16]> { v.into_iter().map(AtomicI16::new).collect() }
 
 impl StemBank {
-    /// A complete bank (its waveforms come with [`finish`](Self::finish)).
-    pub fn new(track: &Arc<Vec<f32>>, data: [Vec<i16>; 3], offset_frames: isize) -> StemBank {
-        let ready = data.iter().map(Vec::len).min().unwrap_or(0);
-        StemBank { track: Arc::downgrade(track), data: data.map(atomics), ready: AtomicUsize::new(ready), offset_frames, waves: OnceLock::new(), prepared: true }
+    fn with_data(track: &Arc<Vec<f32>>, data: [Box<[AtomicI16]>; 3], offset_frames: isize, prepared: bool) -> StemBank {
+        let n = data[0].len();
+        StemBank {
+            track: Arc::downgrade(track), data,
+            pages: (0..n.div_ceil(PAGE)).map(|_| AtomicU32::new(0)).collect(),
+            ready: AtomicUsize::new(0), cursor: AtomicUsize::new(0),
+            offset_frames, waves: OnceLock::new(), prepared,
+        }
     }
 
-    /// An empty bank for `track`, to be filled with [`append`](Self::append).
+    /// A complete bank (its waveforms come with [`finish`](Self::finish)).
+    pub fn new(track: &Arc<Vec<f32>>, data: [Vec<i16>; 3], offset_frames: isize) -> StemBank {
+        let n = data.iter().map(Vec::len).min().unwrap_or(0);
+        let b = StemBank::with_data(track, data.map(|mut v| { v.truncate(n); atomics(v) }), offset_frames, true);
+        b.mark_ready_from(0);
+        b
+    }
+
+    /// An empty bank for `track`, to be filled with [`write`](Self::write)
+    /// or [`append`](Self::append).
     pub fn filling(track: &Arc<Vec<f32>>) -> StemBank {
         let n = track.len();
-        StemBank {
-            track: Arc::downgrade(track),
-            data: std::array::from_fn(|_| (0..n).map(|_| AtomicI16::new(0)).collect()),
-            ready: AtomicUsize::new(0), offset_frames: 0, waves: OnceLock::new(), prepared: false,
-        }
+        StemBank::with_data(track, std::array::from_fn(|_| (0..n).map(|_| AtomicI16::new(0)).collect()), 0, false)
     }
 
     /// Built for exactly this sample buffer (the one the deck is playing)?
@@ -83,14 +107,39 @@ impl StemBank {
     }
 
     pub fn len(&self) -> usize { self.data[0].len() }
-    /// Samples (interleaved) written so far, from the start.
+    /// Samples (interleaved) on ready pages, wherever they are.
     pub fn ready(&self) -> usize { self.ready.load(Ordering::Acquire) }
     pub fn complete(&self) -> bool { self.ready() >= self.len() }
-    /// Percent written, for the panel.
+    /// Percent ready, for the panel.
     pub fn percent(&self) -> u8 { (self.ready() as u64 * 100 / self.len().max(1) as u64) as u8 }
 
-    /// Stem `s` at sample `i` (0 past the end).  Only meaningful below
-    /// [`ready`](Self::ready).
+    pub fn page_count(&self) -> usize { self.pages.len() }
+    fn page_len(&self, p: usize) -> usize { PAGE.min(self.len() - p * PAGE) }
+    /// Every sample of page `p` is written.
+    #[inline]
+    pub fn page_ready(&self, p: usize) -> bool {
+        self.pages.get(p).is_some_and(|c| c.load(Ordering::Acquire) as usize == self.page_len(p))
+    }
+    /// Page `p` has some samples written (by a writer still going, or one
+    /// that stopped there).
+    pub fn page_started(&self, p: usize) -> bool { self.pages.get(p).is_some_and(|c| c.load(Ordering::Acquire) > 0) }
+    /// The stems at interleaved sample `i` are written.
+    #[inline]
+    pub fn ready_at(&self, i: usize) -> bool { self.page_ready(i / PAGE) }
+    /// Every sample of `r` (clipped to the bank) is written.
+    pub fn range_ready(&self, r: Range<usize>) -> bool {
+        let end = r.end.min(self.len());
+        r.start >= end || (r.start / PAGE..=(end - 1) / PAGE).all(|p| self.page_ready(p))
+    }
+    /// The first page from `p` on that is not ready, wrapping round to the
+    /// start; `None` once every page is.
+    pub fn first_unready_from(&self, p: usize) -> Option<usize> {
+        let n = self.pages.len();
+        (p.min(n)..n).chain(0..p.min(n)).find(|&q| !self.page_ready(q))
+    }
+
+    /// Stem `s` at sample `i` (0 past the end).  Only meaningful where
+    /// [`ready_at`](Self::ready_at).
     #[inline]
     pub fn sample(&self, s: usize, i: usize) -> i16 { self.data[s].get(i).map_or(0, |v| v.load(Ordering::Relaxed)) }
 
@@ -98,21 +147,62 @@ impl StemBank {
     #[cfg(test)]
     pub fn stem(&self, s: usize) -> Vec<i16> { self.data[s].iter().map(|v| v.load(Ordering::Relaxed)).collect() }
 
-    /// Write the next stretch of all three stems (same length each, the
-    /// part past the track's end dropped).  The single writer only.
-    pub fn append(&self, block: [&[i16]; 3]) {
-        let at = self.ready.load(Ordering::Relaxed);
+    /// Write all three stems at interleaved sample `at` (same length each,
+    /// the part past the track's end dropped).  Each sample is written
+    /// once; a page is ready when its last sample lands.
+    pub fn write(&self, at: usize, block: [&[i16]; 3]) {
         let n = block.iter().map(|b| b.len()).min().unwrap_or(0).min(self.len().saturating_sub(at));
+        if n == 0 { return; }
         for (d, b) in self.data.iter().zip(block) {
             for (slot, v) in d[at..at + n].iter().zip(b) { slot.store(*v, Ordering::Relaxed); }
         }
-        self.ready.store(at + n, Ordering::Release);
+        let mut i = at;
+        while i < at + n {
+            let p = i / PAGE;
+            let upto = ((p + 1) * PAGE).min(at + n);
+            let full = self.page_len(p);
+            let was = self.pages[p].fetch_add((upto - i) as u32, Ordering::AcqRel) as usize;
+            if was < full && was + (upto - i) >= full { self.ready.fetch_add(full, Ordering::AcqRel); }
+            i = upto;
+        }
     }
+
+    /// Write the next stretch after the last one (a writer going from the
+    /// start to the end).
+    pub fn append(&self, block: [&[i16]; 3]) {
+        let at = self.cursor.load(Ordering::Relaxed);
+        self.write(at, block);
+        let n = block.iter().map(|b| b.len()).min().unwrap_or(0);
+        self.cursor.store((at + n).min(self.len()), Ordering::Relaxed);
+    }
+
+    /// A writer stopped partway through page `p`: forget what it wrote
+    /// there, so the next writer can fill the whole page.  (A page that is
+    /// not ready is never played.)
+    pub fn forget_partial(&self, p: usize) {
+        if let Some(c) = self.pages.get(p) {
+            if (c.load(Ordering::Acquire) as usize) < self.page_len(p) { c.store(0, Ordering::Release); }
+        }
+    }
+
+    /// Count every page from the one holding sample `i` to the end as
+    /// ready, as written so far (silence where nothing was).
+    fn mark_ready_from(&self, i: usize) {
+        for p in i / PAGE..self.pages.len() {
+            let full = self.page_len(p);
+            let was = self.pages[p].swap(full as u32, Ordering::AcqRel) as usize;
+            if was < full { self.ready.fetch_add(full, Ordering::AcqRel); }
+        }
+    }
+
+    /// A writer reached the track's end at sample `i`: the few samples a
+    /// rate converter leaves short of it stay silent.
+    pub fn end_at(&self, i: usize) { self.mark_ready_from(i.min(self.len())); }
 
     /// The writer is done: whatever was not written stays silent, and the
     /// stems' waveforms are built.
     pub fn finish(&self, sr: u32) {
-        self.ready.store(self.len(), Ordering::Release);
+        self.mark_ready_from(0);
         let _ = self.waves.set(stem_waves(self, sr));
     }
 }
@@ -157,12 +247,12 @@ impl Mixer {
     pub fn mix(&mut self, x: &[f32], bank: Option<&StemBank>, target: [f32; 3], ranges: &[Range<usize>], out: &mut Vec<f32>) -> bool {
         let Some(bank) = bank else { self.m = 0.0; self.g = [1.0; 3]; return false };
         // While a split is still writing the bank: a block whose next block
-        // would reach past what is written ramps back to the original, so
-        // the fade happens over written stems and never steps at the edge.
-        // The stems take over again once the split is a block ahead.
-        let ready = bank.ready();
+        // would reach an unwritten page ramps back to the original, so the
+        // fade happens over written stems and never steps at the edge of a
+        // written stretch.  The stems take over again once the pages a
+        // block ahead are written.
         let span: usize = ranges.iter().map(|r| r.len()).sum();
-        let written = ranges.iter().all(|r| r.end + span <= ready) || ready >= bank.len();
+        let written = bank.complete() || ranges.iter().all(|r| bank.range_ready(r.start..r.end + span));
         let m_target = if !written || target.iter().all(|g| *g >= 1.0) { 0.0 } else { 1.0 };
         if self.m == 0.0 && m_target == 0.0 { self.g = target; return false; }
         let frames: usize = ranges.iter().map(|r| r.len() / 2).sum();
@@ -177,7 +267,7 @@ impl Mixer {
                 let g: [f32; 3] = std::array::from_fn(|s| g0[s] + (target[s] - g0[s]) * t);
                 for c in 0..2 {
                     let i = f * 2 + c;
-                    let stems: f32 = if i < ready { (0..3).map(|s| g[s] * bank.sample(s, i) as f32).sum::<f32>() / 32768.0 } else { x[i] };
+                    let stems: f32 = if bank.ready_at(i) { (0..3).map(|s| g[s] * bank.sample(s, i) as f32).sum::<f32>() / 32768.0 } else { x[i] };
                     out.push((1.0 - m) * x[i] + m * stems);
                 }
             }
@@ -191,7 +281,7 @@ impl Mixer {
     /// scrub, which reads at its own positions.
     pub fn at(&self, x: &[f32], bank: Option<&StemBank>, i: usize) -> f32 {
         match bank {
-            Some(b) if self.m > 0.0 && i < b.ready() => {
+            Some(b) if self.m > 0.0 && b.ready_at(i) => {
                 let stems: f32 = (0..3).map(|s| self.g[s] * b.sample(s, i) as f32).sum::<f32>() / 32768.0;
                 (1.0 - self.m) * x[i] + self.m * stems
             }
@@ -727,7 +817,7 @@ mod tests {
 
     #[test]
     fn a_filling_bank_plays_what_is_written_and_the_original_after() {
-        let n = 2000;
+        let n = 2 * PAGE;  // whole pages: a page counts once all of it is in
         let x = vec![0.5f32; 3 * n];
         let t = Arc::new(x.clone());
         let bank = StemBank::filling(&t);
@@ -763,6 +853,47 @@ mod tests {
         assert_eq!(bank.ready(), 3 * n);
         bank.finish(48_000);
         assert!(bank.complete() && bank.waves.get().is_some());
+    }
+
+    /// Pages written out of order (a split that started mid-track): the
+    /// stems play on ready pages only, ramping at the edges; a partial page
+    /// a stopped writer left is forgotten and filled again whole.
+    #[test]
+    fn a_bank_written_out_of_order_plays_ready_pages_only() {
+        let n = 8 * PAGE;
+        let x = vec![0.5f32; n];
+        let bank = StemBank::filling(&Arc::new(x.clone()));
+        let stems = |k: usize| (vec![8192i16; k], vec![4096i16; k], vec![4096i16; k]);
+        let (d, v, h) = stems(2 * PAGE);
+        bank.write(4 * PAGE, [&d, &v, &h]);                     // pages 4 and 5
+        assert!(!bank.ready_at(0) && bank.ready_at(4 * PAGE) && bank.ready_at(6 * PAGE - 1) && !bank.ready_at(6 * PAGE));
+        assert!(bank.range_ready(4 * PAGE..6 * PAGE) && !bank.range_ready(3 * PAGE..5 * PAGE));
+        assert_eq!((bank.percent(), bank.first_unready_from(4), bank.first_unready_from(7)), (25, Some(6), Some(7)));
+        // Drums muted: the original before, the stems on pages 4–5 once a
+        // block ahead is ready, the original after.
+        let mut m = Mixer::default();
+        let mut out = Vec::new();
+        let blk = PAGE / 2;
+        assert!(!m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[2 * PAGE..2 * PAGE + blk], &mut out), "not ready: the original");
+        m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[4 * PAGE..4 * PAGE + blk], &mut out);
+        m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[4 * PAGE + blk..5 * PAGE], &mut out);
+        assert!(out.iter().all(|s| (s - 0.25).abs() < 0.001), "the stems on ready pages");
+        assert!(m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[6 * PAGE - blk..6 * PAGE], &mut out));
+        assert!((out[blk - 1] - 0.5).abs() < 0.001 && out.windows(2).all(|w| (w[0] - w[1]).abs() < 0.001), "ramps out before page 6");
+        // A writer stopped halfway into page 0: forgotten, then written whole.
+        let (d, v, h) = stems(PAGE / 2);
+        bank.write(0, [&d, &v, &h]);
+        assert!(!bank.ready_at(0) && bank.page_started(0));
+        bank.forget_partial(0);
+        assert!(!bank.page_started(0));
+        let (d, v, h) = stems(PAGE);
+        bank.write(0, [&d, &v, &h]);
+        assert!(bank.ready_at(0) && bank.percent() == 37);
+        // The end: whatever a converter left short counts as written.
+        bank.end_at(7 * PAGE + 10);
+        assert!(bank.ready_at(n - 1) && !bank.complete());
+        bank.finish(48_000);
+        assert!(bank.complete());
     }
 
     #[test]

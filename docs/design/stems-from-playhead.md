@@ -1,6 +1,38 @@
 # Stems from the playhead
 
-Status: **proposal** (2026-11-14). Dan wants it; not started.
+Status: **built** 2026-11-15 (parts 1–3 below); an iPad pass is still to
+come. Code: `StemBank` pages (`crates/app/src/stems.rs`), `separate`,
+`run`, `Geometry` (`crates/app/src/separate.rs`),
+`DeckApp::release_idle_model`.
+
+**Measured** (Linux desktop, ONNX Runtime on the CPU, debug build). Opened
+STEMS 2:00 into a 3-minute track: model load 3.8 s, the first run started
+at 2:08 (the playhead plus the 4 s untimed look-ahead), chunks 2.0–2.3 s
+each (about 2.6× real time), so the stems were at the playhead about 8 s
+after the panel opened. The old top-to-bottom split needed about 46 s of
+chunks to get to 2:00, plus the load. With the model kept loaded, the next
+track saves the load.
+
+**As built, where it differs from the proposal below:**
+- Pages are 4,096 frames (85 ms at 48 kHz), not a stride; a per-page count
+  of written samples, and a page is ready when full.
+- Runs always start writing on a page boundary and stop at the first page
+  another run has written, so each sample is written once. A run that
+  stops partway through a page (a jump) forgets that page
+  (`forget_partial`) for the next run to fill.
+- A run starts a quarter chunk plus 4,096 model frames before the page it
+  writes from, so the stretch its first chunk has to itself and the output
+  converter's start-up fall before it. With a pointwise model a run-split
+  bank matches a top-to-bottom one within 2 LSB (tests).
+- Model frames map exactly onto deck frames: input windows and the output
+  converter start on multiples of 147 model / 160 deck frames (48 kHz).
+- The untimed look-ahead is 4 s; once a chunk is timed it's 1.5 × the
+  chunk time + 1 s. The first run may give way after one chunk to fill the
+  gap the 4 s skipped.
+- Model release: 10 s after STEMS closes with no split running, on a
+  thread of its own. A memory-warning release on iOS is not done yet.
+- Prepared stick banks still fill from the top (0.15 s to audible); reading
+  them cue-first is not done yet.
 
 ## The problem
 

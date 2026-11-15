@@ -122,7 +122,7 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
         // The deck picks this bank up and plays each stretch as it lands.
         let bank = Arc::new(stems::StemBank::filling(track));
         let _ = job.bank.set(Arc::clone(&bank));
-        let t = separate::separate(track, sr, m, job, &mut |b| bank.append(b))?;
+        let t = separate::separate(track, sr, m, job, &bank)?;
         bank.finish(sr);
         Ok((bank, t))
     });
@@ -132,9 +132,9 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
             t.chunks, t.model_s, t.total_s, secs / t.total_s.max(1e-9), mem()),
         Err(e) => format!("  split failed: {e:#} | {}", mem()),
     };
-    // Give the model's memory back: the deck plays on without it, and the
-    // next split loads it again in a few seconds.
-    model::release();
+    // The model stays loaded while the STEMS panel is open, so the next
+    // track's split starts without the load; the deck releases it once the
+    // panel has been closed a while (DeckApp::release_idle_model).
     split_trace(&line);
     let ((bank, _), _) = res?;
     Ok(Some(bank))
@@ -731,6 +731,10 @@ struct DeckApp {
     stems_no_memory: bool,
     /// A split has been started (or refused) for the loaded track.
     stems_split_tried: bool,
+    /// A split loaded the stem model and nothing has released it yet.
+    stems_model_held: bool,
+    /// When the STEMS panel was last seen closed with the model held.
+    stems_model_idle: Option<Instant>,
     /// MENU footer addresses and when they were looked up.
     ip_cache: (Option<Instant>, String),
     /// An on-device split in progress (progress, cancel), see `separate.rs`.
@@ -1105,6 +1109,8 @@ impl DeckApp {
             stems_await_model: false,
             stems_no_memory: false,
             stems_split_tried: false,
+            stems_model_held: false,
+            stems_model_idle: None,
             ip_cache: (None, String::new()),
             stems_job: None,
             stem_wave_key: None,
@@ -2171,6 +2177,10 @@ impl DeckApp {
                 A::Stems(g) => { for (i, v) in g.iter().enumerate() { self.audio.stems.set_gain(i, *v); } log::info!("script: stems {g:?}"); }
                 A::DeckView => self.events.push(Event::Ui(UiEvent::DeckView)),
                 A::KeyShift(n) => self.apply(Event::Deck(ControlEvent::KeyShift { semitones: n })),
+                A::Seek(secs) => {
+                    let len_s = self.audio.len() as f64 / (self.audio.sample_rate as f64 * self.audio.channels as f64);
+                    if len_s > 0.0 { self.apply(Event::Deck(ControlEvent::NeedleSearch { position: (secs / len_s).clamp(0.0, 1.0) as f32 })); }
+                }
                 A::Quit => { log::info!("script: quit"); log::logger().flush(); std::process::exit(0); }
             }
         }
@@ -2673,7 +2683,10 @@ impl DeckApp {
         }
         let (tx, rx) = mpsc::channel();
         let (path, track, sr) = (self.path.clone(), Arc::clone(track), self.audio.sample_rate);
-        let job = Arc::new(separate::Job { on_start: Some(split_start_trace), on_chunk: Some(split_chunk_trace), ..Default::default() });
+        // The split starts just ahead of the playhead and follows its jumps.
+        let job = Arc::new(separate::Job { on_start: Some(split_start_trace), on_chunk: Some(split_chunk_trace),
+                                           playhead: Some(Arc::clone(&self.audio.position)), ..Default::default() });
+        if split { self.stems_model_held = true; }
         let j = Arc::clone(&job);
         let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
             let got = match stems::load_local(&path, &track, sr, ch, Some(&j)) {
@@ -2740,7 +2753,25 @@ impl DeckApp {
             && (cdj3000::panel(&self.egui_ctx) == cdj3000::Panel::Stems || self.perform_mode == input::PerformMode::Stems)
     }
 
+    /// Unload the stem model once the STEMS panel has been closed for
+    /// `MODEL_IDLE` and no split is running: it is big on iOS, and the deck
+    /// should not carry it through a set nobody is splitting in.  Unloaded
+    /// on a thread of its own, so the frame never waits on it.
+    fn release_idle_model(&mut self) {
+        const MODEL_IDLE: Duration = Duration::from_secs(10);
+        if !self.stems_model_held { return; }
+        if self.stems_wanted() || self.stems_rx.is_some() { self.stems_model_idle = None; return; }
+        let since = *self.stems_model_idle.get_or_insert_with(Instant::now);
+        if since.elapsed() >= MODEL_IDLE {
+            self.stems_model_held = false;
+            self.stems_model_idle = None;
+            let _ = std::thread::Builder::new().name("stem-model-release".into()).spawn(separate::model::release);
+            log::info!("stems: model released (STEMS closed)");
+        }
+    }
+
     fn poll_stems(&mut self) {
+        self.release_idle_model();
         // The model just finished downloading: split the track that waited.
         if self.stems_await_model && self.stems_rx.is_none() && modelfetch::state() == modelfetch::Fetch::Ready {
             self.stems_await_model = false;
@@ -5055,6 +5086,27 @@ mod deck_tests {
         d.perform_mode = PerformMode::Stems;
         d.poll_stems();
         assert!(d.stems_split_tried, "opening the stems starts the split");
+        let job = d.stems_job.as_ref().expect("a split job");
+        assert!(job.playhead.as_ref().is_some_and(|p| Arc::ptr_eq(p, &d.audio.position)), "the split follows the deck's playhead");
+    }
+
+    /// The stem model stays loaded while STEMS is open (the next track's
+    /// split starts without the load) and is let go once the panel has
+    /// been closed a while with no split running.
+    #[test]
+    fn the_stem_model_is_released_once_stems_close() {
+        let mut d = deck(2.0);
+        d.settings.stems = true;
+        d.stems_model_held = true;
+        d.perform_mode = PerformMode::Stems;
+        d.release_idle_model();
+        assert!(d.stems_model_held && d.stems_model_idle.is_none(), "kept while STEMS is open");
+        d.perform_mode = PerformMode::HotCue;
+        d.release_idle_model();
+        assert!(d.stems_model_held && d.stems_model_idle.is_some(), "kept for a while after closing");
+        d.stems_model_idle = Some(Instant::now() - Duration::from_secs(11));
+        d.release_idle_model();
+        assert!(!d.stems_model_held, "released after 10 s closed");
     }
 
     /// KEY SHIFT sets the audio's semitones (an octave at most), leaves the

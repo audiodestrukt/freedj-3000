@@ -138,8 +138,13 @@ the first chunk and reads `opendeck-stems.conf` in the OpenDeck folder
   limit; one entry today, room for a lighter one for smaller devices. The
   download restarts from scratch if iOS suspends the app partway (a
   background `NSURLSession` would continue it; not done).
-- Memory: since 2026-11-14 the model is released after each split (it used
-  to stay loaded for the session), and a split needs `SPLIT_NEEDS_MB`
+- Order: since 2026-11-15 a split starts just ahead of the playhead and
+  follows its jumps, wrapping to the top last
+  ([stems-from-playhead.md](stems-from-playhead.md)).
+- Memory: since 2026-11-15 the model stays loaded while the STEMS panel (or
+  the XDJ screen's STEMS pad mode) is open and is released 10 s after it
+  closes with no split running (2026-11-14 to -15 it was released after
+  each split; before that it stayed loaded for the session). A split needs `SPLIT_NEEDS_MB`
   (4.6 GB) free or is refused with "NEEDS MORE MEMORY" rather than killed.
   That figure comes from the one iPad failure (0.3.12, standard limit:
   killed in the first chunk with 4.2 GB left after the model loaded); the

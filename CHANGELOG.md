@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Stems from the playhead. A track split on the device starts just ahead of
+  where it is playing, not at the top, and follows a hot cue or needle jump
+  to wherever the deck goes next; the rest of the track is split after.
+  Opened 2:00 into a track, the stems were at the playhead about 8 s later on
+  a desktop, where they used to wait for the first two minutes to be split.
+  Each stretch plays as stems as soon as it is split, the original elsewhere,
+  with a short crossfade at the edges.
+- The stem model stays loaded while the STEMS panel is open, so the next
+  track's split starts without loading it again; it is let go 10 s after the
+  panel closes.
+- Dev script: `seek=<seconds>` needle-searches the loaded track.
+
 ### Changed
 - Loading from a linked player: the track starts decoding while it still
   downloads, so the deck is playable after the first seconds instead of after
