@@ -24,6 +24,9 @@ All notable changes to this project will be documented in this file.
   only files are read. Against an emulated CDJ-3000 a 2:27 track had its
   first stems in 0.4 s and the whole bank in 6.5 s. A LINK track without
   prepared stems can be split on the device like a local one.
+- Prepared stems (from a stick or over LINK) are read from where the deck
+  is first, the cue or the playhead, then the rest; a jump to a stretch not
+  read yet is read next.
 - Dev script: `seek=<seconds>` needle-searches the loaded track.
 
 ### Changed

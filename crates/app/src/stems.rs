@@ -743,9 +743,19 @@ fn build_paged(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32
     if let Some(j) = job { let _ = j.bank.set(Arc::clone(&bank)); }
     let frames = track.len() / 2;
     let step = deck_sr as usize * PAGED_STEP_SECS;
+    let steps = frames.div_ceil(step).max(1);
+    let mut done = vec![false; steps];
     let mut first = None;
-    for o0 in (0..frames).step_by(step) {
+    // Steps in the playhead's order: from the one it is in (the cue, right
+    // after a load) to the end, then the top; a jump to a stretch not read
+    // yet is read next.  Without a playhead, from the top.
+    let at = || job.and_then(|j| j.playhead.as_ref())
+        .map_or(0, |p| (p.load(Ordering::Relaxed) as usize / 2 / step).min(steps - 1));
+    let start = at();
+    let mut n_done = 0;
+    while let Some(k) = { let p = at(); (p..steps).chain(0..p).find(|&k| !done[k]) } {
         if job.is_some_and(|j| j.cancel.load(Ordering::Relaxed)) { bail!("cancelled"); }
+        let o0 = k * step;
         let o1 = (o0 + step).min(frames);
         let (a, b) = (o0 as isize + offset, o1 as isize + offset);
         let mut got: [Vec<i16>; 3] = Default::default();
@@ -753,14 +763,16 @@ fn build_paged(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32
             got[s] = deck_span(role, media, from, deck_sr, a, b)?;
             role.drop_before((a.max(0) as usize * from as usize / deck_sr as usize).saturating_sub(2 * PAGED_MARGIN));
         }
-        bank.append([&got[0], &got[1], &got[2]]);
-        if let Some(j) = job { j.progress.store((o1 as u64 * 1000 / frames.max(1) as u64) as u32, Ordering::Relaxed); }
+        bank.write(o0 * 2, [&got[0], &got[1], &got[2]]);
+        done[k] = true;
+        n_done += 1;
+        if let Some(j) = job { j.progress.store((n_done * 1000 / steps) as u32, Ordering::Relaxed); }
         first.get_or_insert(t0.elapsed());
     }
     for role in roles { role.finish(media)?; }
     bank.finish(deck_sr);
-    log::info!("stems: bank {} ready, offset {offset} frames ({:.2} ms); first {}s playable in {:.2}s, whole bank {:.1}s",
-               entry.bundle, offset as f64 * 1e3 / deck_sr as f64, PAGED_STEP_SECS,
+    log::info!("stems: bank {} ready, offset {offset} frames ({:.2} ms); first {}s (from {}s) playable in {:.2}s, whole bank {:.1}s",
+               entry.bundle, offset as f64 * 1e3 / deck_sr as f64, PAGED_STEP_SECS, start * PAGED_STEP_SECS,
                first.unwrap_or_default().as_secs_f32(), t0.elapsed().as_secs_f32());
     Ok(bank)
 }
@@ -1290,6 +1302,44 @@ mod tests {
         let s = t.elapsed().as_secs_f64();
         eprintln!("drums of [{}]: {n} pages, {:.1} MB PCM in {s:.2}s = {:.0}x real time", e.bundle, bytes as f64 / 1e6,
                   r.frames() as f64 / e.sample_rate as f64 / s);
+    }
+
+    /// A paged load with the playhead at 12 s reads that stretch first (the
+    /// drums role's first page read is there), then the rest, and ends with
+    /// the bank a load from the top gives.
+    #[test]
+    fn a_paged_load_reads_from_the_playhead_first() {
+        struct Spy { inner: oc::DirMedia, reads: Vec<(String, u64)> }
+        impl oc::Media for Spy {
+            fn size(&mut self, p: &str) -> Result<Option<u64>> { self.inner.size(p) }
+            fn read_at(&mut self, p: &str, off: u64, len: usize) -> Result<Vec<u8>> { self.reads.push((p.to_string(), off)); self.inner.read_at(p, off, len) }
+        }
+        let frames96 = 96_000 * 24;
+        let stems: Vec<Vec<i16>> = (1..=3).map(|k| sig(k, frames96, 96_000.0).iter().map(|v| v / 3).collect()).collect();
+        let full = sum(&stems);
+        let d = tempfile::tempdir().unwrap();
+        let mut roles = BTreeMap::new();
+        for (r, x) in ROLES.iter().zip(&stems) { roles.insert(*r, x.clone()); }
+        roles.insert(Role::FullMix, full.clone());
+        let path = "/Contents/T.mp3";
+        write_stick(d.path(), &[SynthTrack { id: 1, onelibrary_id: None, file_path: path.into(), source: b"t".to_vec(), roles }],
+                    SynthCodec::Flac96, None).unwrap();
+        let track = Arc::new(oc::decimate::decimate2(&full).iter().map(|v| *v as f32 / 32768.0).collect::<Vec<f32>>());
+        let entry = oc::Index::read(&mut oc::DirMedia::new(d.path())).unwrap().unwrap().by_path(path).unwrap().unwrap().clone();
+        let top = build(&mut oc::DirMedia::new(d.path()), &entry, &track, 48_000, 2, None).unwrap();
+
+        let ph = Arc::new(std::sync::atomic::AtomicU64::new(12 * 48_000 * 2));
+        let job = crate::separate::Job { playhead: Some(ph), ..Default::default() };
+        let mut spy = Spy { inner: oc::DirMedia::new(d.path()), reads: Vec::new() };
+        let bank = build(&mut spy, &entry, &track, 48_000, 2, Some(&job)).unwrap();
+        let drums = oc::RoleReader::open(&mut oc::DirMedia::new(d.path()), &entry, Role::Drums).unwrap();
+        let first = spy.reads.iter().filter(|(p, _)| p.contains("drums")).map(|(_, o)| *o)
+            .find(|o| *o as usize >= 24 + 48 * drums.pages.len()).expect("a drums page read");   // past the header and table
+        let page = drums.pages.iter().position(|pg| pg.offset == first).expect("a page offset");
+        let at_s = (page * drums.page_frames(0)) as f64 / 96_000.0;
+        assert!((11.0..12.1).contains(&at_s), "first drums page read is at {at_s:.2}s (playhead 12 s)");
+        for k in 0..3 { assert!(bank.stem(k) == top.stem(k), "stem {k}: playhead-first = top-first"); }
+        assert!(bank.complete());
     }
 
     /// A stick bank read page by page is the bank a whole read gives: at

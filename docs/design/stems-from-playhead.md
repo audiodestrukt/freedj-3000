@@ -34,8 +34,13 @@ track saves the load.
   (`UIApplicationDidReceiveMemoryWarningNotification`, counted in
   `ios/freedj/main.m`) when no split is running. A warning during a split
   is only logged to `opendeck-stems-test.txt` with the memory figures.
-- Prepared stick banks still fill from the top (0.15 s to audible); reading
-  them cue-first is not done yet.
+- Prepared banks (local stick or LINK) are read in 4 s steps in the same
+  order: from the step the playhead is in (the cue, right after a load),
+  then a jump's stretch next if it isn't read yet, the top last. Steps are
+  independent (each converts with its own margin), so any order gives the
+  same bank. The whole-role hash is still taken in page order; pages a
+  later start skipped past are read again at the end to finish it (no
+  extra reads when the start is the top).
 
 ## The problem
 
