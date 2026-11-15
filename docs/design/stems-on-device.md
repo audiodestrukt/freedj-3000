@@ -224,6 +224,20 @@ frequency branch is kept as (freq, channel, time), which makes every
 convolution, along time or along frequency, a strided matrix multiply over
 the tensor in place: no im2col, no layout copies. `tests/reference.rs`
 compares each stage with a PyTorch run on a real chunk: the stems agree at
-102-123 dB (ONNX Runtime's export: 80-86, 56 on vocals). First version is
-single-threaded: 11.2 s a chunk on the desktop (ONNX Runtime, 4 threads:
-3.0 s). Next: threads, a fused attention, then the Pi.
+102-123 dB (ONNX Runtime's export: 80-86, 56 on vocals).
+
+| `opendeck-demucs`, per chunk | Desktop, 4 cores | Pi 5, 2.4 GHz |
+|---|---|---|
+| ONNX Runtime 1.23 (for comparison) | 3.0 s | 15.3 s |
+| first version, 1 thread | 11.2 s | — |
+| softmax subnormals flushed | 4.9 s (1 thread) | — |
+| threads (rayon, disjoint output blocks) | 2.5 s | 11.4 s |
+| vectorisable exp/erf, threaded norms and GLU | 2.3 s | 10.2 s |
+
+On the Pi, `perf` puts 77 % of the time in `matrixmultiply`: 52 % in its
+NEON kernel, 24 % packing operands (weights are re-packed every call, and
+the strided time-branch convolutions re-pack each tap). Its kernel does
+32 GFLOPS on one core but ~16 per core with all four running. Next: our own
+matrix multiply with weights packed once at load, blocked for the A76's
+512 KB L2; then fp16 arithmetic (the cores have `asimdhp`, twice the fp32
+rate) where the reference test says it holds.

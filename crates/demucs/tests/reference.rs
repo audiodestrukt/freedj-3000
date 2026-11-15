@@ -32,12 +32,15 @@ fn matches_pytorch_layer_by_layer() {
     let mut out = vec![0f32; 8 * SEGMENT];
     let mut worst = f64::INFINITY;
     let t0 = std::time::Instant::now();
+    let mut last = t0;
     model.run_tapped(mix, &mut out, Some(&mut |name: &str, shape: &[usize], got: &[f32]| {
+        let ms = last.elapsed().as_secs_f64() * 1e3;
         let (rs, want) = reference.get(name).unwrap_or_else(|| panic!("no reference for {name}"));
         assert_eq!(&rs[1..], shape, "{name} shape");
         let a = agreement(want, got);
-        println!("{name:8} {a:6.1} dB");
+        println!("{name:8} {a:6.1} dB  {ms:7.1} ms");
         if name != "spec" { worst = worst.min(a) }
+        last = std::time::Instant::now();
     }));
     println!("one chunk in {:.2} s", t0.elapsed().as_secs_f64());
     let (_, stems) = reference.get("stems").unwrap();
