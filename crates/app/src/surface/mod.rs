@@ -174,6 +174,36 @@ pub fn start(file: SurfaceFile, deck: Deck, tx: Sender<Event>, ind: Arc<Indicato
 mod tests {
     use super::*;
 
+    /// controllers.toml: a surface of its own is added to the presets; one
+    /// under a preset's name replaces it; a broken file leaves the presets.
+    #[test]
+    fn the_users_file_adds_to_and_overrides_the_presets() {
+        let dir = tempfile::tempdir().unwrap();
+        let user = dir.path().join("controllers.toml");
+        let pad = "[[surface]]\nname = \"pad\"\n[surface.midi]\nport = \"Pad\"\n\
+                   [[surface.button]]\nnote = 1\naction = \"play_pause\"\n";
+        std::fs::write(&user, pad).unwrap();
+        let f = load(Some(&user));
+        let names: Vec<&str> = f.surface.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["dj2go", "pad"]);
+
+        let mine = "[[surface]]\nname = \"dj2go\"\n[surface.midi]\nport = \"My DJ2Go\"\n\
+                    [[surface.button]]\nnote = 2\naction = \"cue\"\n";
+        std::fs::write(&user, mine).unwrap();
+        let f = load(Some(&user));
+        assert_eq!(f.surface.len(), 1, "replaced, not added");
+        assert_eq!(f.surface[0].midi.as_ref().unwrap().port, "My DJ2Go");
+        assert_eq!(f.surface[0].button.len(), 1);
+
+        std::fs::write(&user, "[[surface]]\nname = \"broken\"\n").unwrap();
+        let f = load(Some(&user));
+        assert_eq!(f.surface.len(), 1, "the preset still works");
+        assert_eq!(f.surface[0].midi.as_ref().unwrap().port, "DJ2Go");
+
+        let f = load(Some(&dir.path().join("missing.toml")));
+        assert_eq!(f.surface.len(), 1, "a missing file: just the presets");
+    }
+
     #[test]
     fn presets_parse() {
         for (name, text) in PRESETS {

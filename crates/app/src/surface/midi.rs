@@ -219,3 +219,56 @@ mod tests {
         }
     }
 }
+
+/// A controller plugged in, played, pulled out and plugged back, as the
+/// surfaces thread sees it: through a virtual ALSA MIDI port standing in
+/// for the hardware.  Skipped where there is no ALSA sequencer (CI).
+#[cfg(all(test, target_os = "linux"))]
+mod port_tests {
+    use super::*;
+    use super::super::config::SurfaceFile;
+    use crate::input::ControlEvent as CE;
+    use midir::os::unix::VirtualOutput;
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    fn plug(name: &str) -> Option<MidiOutputConnection> {
+        MidiOutput::new(name).ok()?.create_virtual(name).ok()
+    }
+
+    #[test]
+    fn a_controller_is_found_played_unplugged_and_found_again() {
+        if !std::path::Path::new("/dev/snd/seq").exists() || MidiInput::new("probe").is_err() {
+            eprintln!("skipped: no ALSA sequencer");
+            return;
+        }
+        let name = format!("odtestpad{}", std::process::id());
+        let toml = format!("[[surface]]\nname = \"pad\"\n[surface.midi]\nport = \"{name}\"\n\
+                            [[surface.button]]\nnote = 0x3B\naction = \"play_pause\"\n");
+        let s = SurfaceFile::parse(&toml).unwrap().surface.remove(0);
+        let (tx, rx) = mpsc::channel();
+        let mut m = MidiSurface::new(s, Deck::A, tx, Arc::new(Indicators::default()));
+
+        m.reconcile(&port_names());
+        assert!(m.connected_to.is_none(), "nothing plugged in yet");
+
+        let press = |pad: &mut MidiOutputConnection| pad.send(&[0x90, 0x3B, 0x7F]).unwrap();
+        let heard = |rx: &mpsc::Receiver<Event>| matches!(rx.recv_timeout(Duration::from_secs(2)), Ok(Event::Deck(CE::PlayPause)));
+
+        let mut pad = plug(&name).expect("a virtual port");
+        m.reconcile(&port_names());
+        assert!(m.connected_to.as_deref().is_some_and(|p| p.contains(&name)), "{:?}", m.connected_to);
+        press(&mut pad);
+        assert!(heard(&rx), "PLAY from the pad");
+
+        drop(pad);
+        m.reconcile(&port_names());
+        assert!(m.connected_to.is_none(), "unplugged");
+
+        let mut pad = plug(&name).expect("plugged back");
+        m.reconcile(&port_names());
+        assert!(m.connected_to.is_some(), "found again without a restart");
+        press(&mut pad);
+        assert!(heard(&rx), "and it plays again");
+    }
+}
