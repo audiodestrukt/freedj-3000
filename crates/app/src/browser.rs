@@ -338,10 +338,17 @@ impl Browser {
         if !self.played.contains(l) { self.played.push(l.clone()); }
     }
     pub fn was_played(&self, l: &Load) -> bool { self.played.contains(l) }
-    /// A local track with OverCue stems prepared (lists mark it "S").
+    /// A track with OverCue stems prepared, local or on a linked player's
+    /// media (lists mark it "S").
     pub fn has_stems(&self, l: &Load) -> bool {
         match l {
             Load::Local { path, .. } => self.stem_marks.borrow_mut().has_stems(path),
+            // A linked player's USB / SD, by the track's rekordbox ID; a
+            // rekordbox laptop's collection has no stems folder.
+            Load::Db { ip, id, rekordbox: false, sd, .. } =>
+                self.stem_marks.borrow_mut().has(crate::stems::MarkKey::Link { ip: *ip, export: if *sd { "/B/" } else { "/C/" }, id: *id }),
+            Load::Link { ip, id, .. } if *id > 0 =>
+                self.stem_marks.borrow_mut().has(crate::stems::MarkKey::Link { ip: *ip, export: "/C/", id: *id }),
             _ => false,
         }
     }

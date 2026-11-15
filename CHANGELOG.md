@@ -35,6 +35,9 @@ All notable changes to this project will be documented in this file.
   read, as OverCue's player finds them, instead of reading the whole
   `index.json`. OverCue now lets that file grow to 256 MiB. Sticks without
   index-v2 work as before.
+- BROWSE marks a linked player's tracks with "S" too, when the stems are
+  prepared on that player's USB or SD (looked up over the network by the
+  track's rekordbox ID).
 - BROWSE's "S" marks are looked up in the background: scrolling a big
   prepared stick never waits on its stems index. A mark can appear a moment
   after its row.

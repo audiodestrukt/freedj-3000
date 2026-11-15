@@ -319,7 +319,10 @@ low on the left of its ♪. `stems::StemMarks` asks a worker thread (`entry_for`
 as loading uses) and caches the answer per file; drawing never waits on a
 stick, since OverCue now lets `index.json` grow to 256 MiB. The first draw
 of a row has no mark, and the mark appears a frame or two later. A stick
-coming or going clears it. The unit also draws a stock "H" above the S; freedj doesn't
+coming or going clears it. Rows from a linked player's USB / SD (2026-11-15)
+are looked up by rekordbox ID over NFS on the same worker, one mount per
+player: index-v2 when the stick has it, else `index.json` (up to 32 MiB) by
+ID. The unit also draws a stock "H" above the S; freedj doesn't
 draw it yet.
 
 **Panel faces** (built 2026-11-13). The panel takes OverCue's own key

@@ -375,28 +375,40 @@ pub fn entry_for(root: &Path, rel: &str) -> Result<Option<oc::Entry>> {
     }
 }
 
-/// Which local files have prepared stems, for the "S" mark in BROWSE lists
-/// (as OverCue marks them on the unit).  The lookups run on a worker
-/// thread: the first ask for a file answers "no" and queues it, and the
-/// mark appears on a later frame once the answer is in.  The list's
-/// drawing never waits on a stick (OverCue lets `index.json` reach
+/// A row to mark: a local file, or a track on a linked player's media by
+/// its rekordbox ID.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MarkKey {
+    File(PathBuf),
+    Link { ip: std::net::Ipv4Addr, export: &'static str, id: u32 },
+}
+
+/// Which tracks have prepared stems, for the "S" mark in BROWSE lists (as
+/// OverCue marks them on the unit): local files, and tracks on a linked
+/// player's USB / SD (looked up over NFS by ID).  The lookups run on a
+/// worker thread: the first ask answers "no" and queues it, and the mark
+/// appears on a later frame once the answer is in.  The list's drawing
+/// never waits on a stick or the network (OverCue lets `index.json` reach
 /// 256 MiB).
 #[derive(Default)]
 pub struct StemMarks {
-    files: HashMap<PathBuf, bool>,
-    asked: std::collections::HashSet<PathBuf>,
-    worker: Option<(std::sync::mpsc::Sender<PathBuf>, std::sync::mpsc::Receiver<(PathBuf, bool)>)>,
+    files: HashMap<MarkKey, bool>,
+    asked: std::collections::HashSet<MarkKey>,
+    worker: Option<(std::sync::mpsc::Sender<MarkKey>, std::sync::mpsc::Receiver<(MarkKey, bool)>)>,
 }
 
 impl StemMarks {
-    /// Known to have stems.  Never blocks: an unknown file is looked up in
+    /// A local file known to have stems.  Never blocks (see [`has`](Self::has)).
+    pub fn has_stems(&mut self, file: &Path) -> bool { self.has(MarkKey::File(file.to_path_buf())) }
+
+    /// Known to have stems.  Never blocks: an unknown row is looked up in
     /// the background and reads `false` until the answer arrives.
-    pub fn has_stems(&mut self, file: &Path) -> bool {
+    pub fn has(&mut self, key: MarkKey) -> bool {
         self.take_answers();
-        if let Some(v) = self.files.get(file) { return *v; }
-        if self.asked.insert(file.to_path_buf()) {
+        if let Some(v) = self.files.get(&key) { return *v; }
+        if self.asked.insert(key.clone()) {
             let (tx, _) = self.worker.get_or_insert_with(spawn_marks_worker);
-            if tx.send(file.to_path_buf()).is_err() { self.worker = None; self.asked.remove(file); }
+            if tx.send(key.clone()).is_err() { self.worker = None; self.asked.remove(&key); }
         }
         false
     }
@@ -416,13 +428,47 @@ impl StemMarks {
     }
 }
 
-fn spawn_marks_worker() -> (std::sync::mpsc::Sender<PathBuf>, std::sync::mpsc::Receiver<(PathBuf, bool)>) {
-    let (tx, jobs) = std::sync::mpsc::channel::<PathBuf>();
+/// A linked player's media as the marks worker keeps it: one NFS mount,
+/// whether it has index-v2, and its index.json once read (without index-v2).
+struct PeerMarks { media: NfsMedia, v2: bool, index: Option<Option<oc::Index>> }
+
+impl PeerMarks {
+    fn open(ip: std::net::Ipv4Addr, export: &str) -> Result<PeerMarks> {
+        let mut media = NfsMedia::connect(ip, export)?;
+        let v2 = oc::v2::current(&mut media)?.is_some();
+        Ok(PeerMarks { media, v2, index: None })
+    }
+    fn has(&mut self, id: u32) -> Result<bool> {
+        if self.v2 { return Ok(oc::v2::lookup(&mut self.media, oc::index::Namespace::DeviceLibrary, id)?.is_some()); }
+        if self.index.is_none() {
+            let bytes = oc::Media::read_all(&mut self.media, "/CDJMODS/index.json", LINK_INDEX_MAX)?;
+            self.index = Some(bytes.map(|b| oc::Index::parse(&b)).transpose()?);
+        }
+        Ok(self.index.as_ref().unwrap().as_ref().is_some_and(|i| i.by_id(oc::index::Namespace::DeviceLibrary, id).is_some()))
+    }
+}
+
+fn spawn_marks_worker() -> (std::sync::mpsc::Sender<MarkKey>, std::sync::mpsc::Receiver<(MarkKey, bool)>) {
+    let (tx, jobs) = std::sync::mpsc::channel::<MarkKey>();
     let (answer, rx) = std::sync::mpsc::channel();
     let _ = std::thread::Builder::new().name("stem-marks".into()).spawn(move || {
-        for file in jobs {
-            let v = find_stick(&file).is_some_and(|(root, rel)| entry_for(&root, &rel).ok().flatten().is_some());
-            if answer.send((file, v)).is_err() { break; }
+        // One mount per player and export; a player that can't be reached
+        // stays unmarked until the marks are cleared.
+        let mut peers: HashMap<(std::net::Ipv4Addr, &'static str), Option<PeerMarks>> = HashMap::new();
+        for key in jobs {
+            let v = match &key {
+                MarkKey::File(file) => find_stick(file).is_some_and(|(root, rel)| entry_for(&root, &rel).ok().flatten().is_some()),
+                MarkKey::Link { ip, export, id } => {
+                    let peer = peers.entry((*ip, *export)).or_insert_with(|| PeerMarks::open(*ip, export)
+                        .map_err(|e| log::info!("stems: marks for {ip}{export}: {e:#}")).ok());
+                    match peer.as_mut().map(|p| p.has(*id)) {
+                        Some(Ok(v)) => v,
+                        Some(Err(e)) => { log::info!("stems: mark {ip}{export} #{id}: {e:#}"); peers.remove(&(*ip, *export)); false }
+                        None => false,
+                    }
+                }
+            };
+            if answer.send((key, v)).is_err() { break; }
         }
     });
     (tx, rx)
@@ -451,6 +497,10 @@ pub fn load_local(file: &Path, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize, j
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkStick { pub ip: std::net::Ipv4Addr, pub export: &'static str, pub rel: String, pub id: Option<u32> }
 
+/// Tests: the loopback NFS server's portmap port, for `NfsMedia::connect`.
+#[cfg(test)]
+static TEST_PORTMAP: std::sync::Mutex<Option<u16>> = std::sync::Mutex::new(None);
+
 /// A linked player's media over NFS, as the stems reader wants it: the same
 /// page tables, hashes and checks as a local stick, each page an offset read
 /// (32 reads in flight) rather than the whole file.
@@ -459,6 +509,8 @@ pub struct NfsMedia { nfs: opendeck_nfs::Nfs, root: opendeck_nfs::Fh, files: Has
 impl NfsMedia {
     /// Connect to `ip` (portmap on 111, else 50111) and mount `export`.
     pub fn connect(ip: std::net::Ipv4Addr, export: &str) -> Result<NfsMedia> {
+        #[cfg(test)]
+        if let Some(port) = *TEST_PORTMAP.lock().unwrap() { return NfsMedia::mount(opendeck_nfs::Nfs::connect_at(ip, port)?, export); }
         NfsMedia::mount(opendeck_nfs::Nfs::connect_any(ip)?, export)
     }
 
@@ -1019,15 +1071,43 @@ mod tests {
     }
 
     /// The "S" mark for `file`, once the background lookup has answered.
-    fn mark(marks: &mut StemMarks, file: &Path) -> bool {
+    fn mark(marks: &mut StemMarks, file: &Path) -> bool { mark_key(marks, MarkKey::File(file.to_path_buf())) }
+
+    fn mark_key(marks: &mut StemMarks, key: MarkKey) -> bool {
         let t0 = std::time::Instant::now();
         loop {
-            let v = marks.has_stems(file);
+            let v = marks.has(key.clone());
             marks.take_answers();
-            if v || marks.files.contains_key(file) { return marks.files.get(file).copied().unwrap_or(v); }
-            assert!(t0.elapsed() < std::time::Duration::from_secs(10), "no answer for {}", file.display());
+            if v || marks.files.contains_key(&key) { return marks.files.get(&key).copied().unwrap_or(v); }
+            assert!(t0.elapsed() < std::time::Duration::from_secs(10), "no answer for {key:?}");
             std::thread::sleep(std::time::Duration::from_millis(2));
         }
+    }
+
+    /// BROWSE marks a linked player's tracks "S" by rekordbox ID, over NFS:
+    /// through index-v2, and through index.json on a stick without it.
+    #[test]
+    fn link_rows_are_marked_by_id_over_nfs() {
+        let roles = || {
+            let s: Vec<Vec<i16>> = (1..=3).map(|k| sig(k, 96_000, 96_000.0).iter().map(|v| v / 3).collect()).collect();
+            let mut r = BTreeMap::new();
+            for (role, x) in ROLES.iter().zip(&s) { r.insert(*role, x.clone()); }
+            r.insert(Role::FullMix, sum(&s));
+            r
+        };
+        let lo = std::net::Ipv4Addr::LOCALHOST;
+        for v2 in [Some(2), None] {
+            let d = tempfile::tempdir().unwrap();
+            write_stick(d.path(), &[SynthTrack { id: 5, onelibrary_id: None, file_path: "/Contents/A.mp3".into(), source: b"a".to_vec(), roles: roles() }],
+                        SynthCodec::Flac96, v2).unwrap();
+            let srv = opendeck_nfs::server::NfsServer::start(opendeck_nfs::server::Tree::scan(d.path()).unwrap(), "/C/", 0, 0).unwrap();
+            *TEST_PORTMAP.lock().unwrap() = Some(srv.portmap);
+            let mut marks = StemMarks::default();
+            assert!(!marks.has(MarkKey::Link { ip: lo, export: "/C/", id: 5 }), "the first ask answers at once");
+            assert!(mark_key(&mut marks, MarkKey::Link { ip: lo, export: "/C/", id: 5 }), "prepared (index-v2: {v2:?})");
+            assert!(!mark_key(&mut marks, MarkKey::Link { ip: lo, export: "/C/", id: 6 }), "another track");
+        }
+        *TEST_PORTMAP.lock().unwrap() = None;
     }
 
     /// Prepared stems on a rekordbox stick with index-v2: a track is found
