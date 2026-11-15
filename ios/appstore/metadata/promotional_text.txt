@@ -1,1 +1,1 @@
-A single-deck DJ player that plays your own tracks and beat-syncs with CDJ/XDJ players over Pro DJ Link. No account, no sign-in, nothing collected.
+Split tracks into stems on your iPad, play your own music and beat-sync with CDJ/XDJ players over Pro DJ Link. A single-deck DJ player: no account, nothing collected.

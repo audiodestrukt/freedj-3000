@@ -1,5 +1,8 @@
 OpenDeck DJ turns your iPhone or iPad into a single-deck DJ player modeled on a professional club media player: a large jog wheel with a spinning platter display, a tempo fader, transport controls, a zoomable waveform, hot cues, beat loops, and automatic BPM and beat-grid analysis.
 
+SPLIT ANY TRACK INTO STEMS
+On iPad, open the STEMS panel and OpenDeck DJ separates the playing track into drums, vocals and the rest, right on the device. It starts just ahead of the playhead and follows you to a hot cue or a needle jump, so you can mute or level each part within seconds instead of waiting for the whole track. The separation model (about 290 MB) is downloaded once, the first time you open STEMS; after that nothing leaves the device. Stems prepared on a USB stick play as soon as the track loads.
+
 BRING YOUR OWN MUSIC
 Drop MP3, AAC/M4A, WAV, AIFF, FLAC or OGG files into the OpenDeck DJ folder in the Files app (On My iPhone / On My iPad → OpenDeck DJ), or from a Mac via Finder, and browse them from the deck's BROWSE screen. A demo track is included so you can try everything straight away.
 
@@ -12,8 +15,10 @@ OpenDeck DJ speaks Pro DJ Link. On a local network it appears as another player 
 FEATURES
 • Jog wheel with vinyl (scratch) and nudge modes and a live centre display
 • Tempo fader with ±6 / ±10 / ±16 / WIDE ranges and MASTER TEMPO key lock
-• CUE with AUTO CUE, hot cues A–D, memory points, beat loops from 1/2 to 16 and SLIP
+• CUE with AUTO CUE, hot cues (A–H on iPad, in their rekordbox colours), memory points, beat loops from 1/2 to 16 and SLIP
 • Zoomable waveform with beat and bar markers, full-track overview and needle search
+• STEMS on iPad: drums, vocals and the rest, split on the device, each with its own mute and level
+• KEY SHIFT up or down a semitone at a time without changing tempo
 • Automatic BPM and beat-grid analysis, with GRID ADJUST (snap, shift, reset)
 • QUANTIZE so cues and loops land on the beat
 • Pro DJ Link: SYNC, MASTER, beat and phase meter, LINK browsing of other players' media, and serving your own to them
