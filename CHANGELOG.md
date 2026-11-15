@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Tempo `+` / `−` keys, and a controller's `tempo_nudge` buttons, went the
+  wrong way: `+` slowed the deck by 1 % and `−` sped it up, since the tempo
+  fader was turned round (down = faster) in August. They now move the tempo
+  the way they say, and stop at the TEMPO RANGE.
 - Stems split on the device no longer clip. A stem can be louder than the
   mix it came from (the drums of a techno track peaked at 1.21 against a
   1.0 mix), and the bank's 16-bit samples flattened every peak above full

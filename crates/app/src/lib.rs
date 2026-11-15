@@ -1213,10 +1213,13 @@ impl DeckApp {
                 log::info!("{}", if latching { "play locked in from cue preview" } else if playing { "paused" } else { "playing" });
             }
             Event::Deck(ControlEvent::TempoNudge { delta }) => {
+                // `delta` is tempo: +0.01 = 1 % faster.  The fader runs the
+                // other way (down = faster, 9897300), so the step is
+                // subtracted from its position.
                 let range = self.settings.tempo_range;
                 let step = delta / (2.0 * range);
                 let f = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)), range);
-                self.apply(Event::Deck(ControlEvent::TempoFader { position: f + step }));
+                self.apply(Event::Deck(ControlEvent::TempoFader { position: f - step }));
             }
             Event::Deck(ControlEvent::JogModeToggle) => {
                 self.settings.jog_vinyl = !self.settings.jog_vinyl;
@@ -3030,15 +3033,13 @@ impl DeckApp {
         let total   = self.audio.len().max(1) as f32;
         let frac    = self.audio.position.load(Ordering::Relaxed) as f32 / total;
         let ten_s   = (self.audio.sample_rate as f32 * self.audio.channels as f32 * 10.0) / total;
-        let range   = self.settings.tempo_range;
-        let fader   = input::speed_to_fader(f32::from_bits(self.fader_speed.load(Ordering::Relaxed)), range);
-        let step    = 0.01 / (2.0 * range);   // ±1% per press, as the DJ2Go buttons
         let ev = match code {
             Space      => Some(Event::Deck(if playing { ControlEvent::Pause } else { ControlEvent::Play })),
             ArrowRight => Some(Event::Deck(ControlEvent::NeedleSearch { position: (frac + ten_s).min(1.0) })),
             ArrowLeft  => Some(Event::Deck(ControlEvent::NeedleSearch { position: (frac - ten_s).max(0.0) })),
-            Equal | NumpadAdd      => Some(Event::Deck(ControlEvent::TempoFader { position: fader + step })),
-            Minus | NumpadSubtract => Some(Event::Deck(ControlEvent::TempoFader { position: fader - step })),
+            // ±1 % per press, as the DJ2Go buttons.
+            Equal | NumpadAdd      => Some(Event::Deck(ControlEvent::TempoNudge { delta:  0.01 })),
+            Minus | NumpadSubtract => Some(Event::Deck(ControlEvent::TempoNudge { delta: -0.01 })),
             Digit0 | Numpad0       => Some(Event::Deck(ControlEvent::TempoFader { position: 0.5 })),
             KeyK => Some(Event::Deck(ControlEvent::KeyLockToggle)),
             KeyV => Some(Event::Deck(ControlEvent::JogModeToggle)),
@@ -5410,5 +5411,155 @@ mod link_load_tests {
         assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
         assert!(d.loading.is_none());
         assert_eq!(d.path, before);
+    }
+}
+
+/// The desktop keyboard, end to end: a key press (and release) in, what the
+/// deck does out.  The same keys a DJ reads in docs/FEATURES.md.
+#[cfg(test)]
+mod keyboard_tests {
+    use super::deck_harness::*;
+    use super::*;
+
+    impl DeckApp {
+        /// Tap a key: down, up, then the frame applies what it queued.
+        /// Returns whether the key asked to quit.
+        fn key(&mut self, code: KeyCode) -> bool {
+            let quit = self.key_input(code, true, false);
+            self.key_input(code, false, false);
+            self.flush();
+            quit
+        }
+        fn key_edge(&mut self, code: KeyCode, pressed: bool) {
+            self.key_input(code, pressed, false);
+            self.flush();
+        }
+        fn flush(&mut self) {
+            for ev in std::mem::take(&mut self.events) { self.apply(ev); }
+            self.tick();
+        }
+        fn playing(&self) -> bool { self.audio.playing.load(Ordering::Relaxed) }
+        fn tempo(&self) -> f32 { f32::from_bits(self.fader_speed.load(Ordering::Relaxed)) }
+    }
+
+    #[test]
+    fn space_plays_and_pauses() {
+        let mut d = deck(20.0);
+        d.key(KeyCode::Space);
+        assert!(d.playing());
+        d.run(0.2);
+        d.key(KeyCode::Space);
+        assert!(!d.playing());
+    }
+
+    #[test]
+    fn enter_is_a_momentary_cue_and_ignores_key_repeat() {
+        let mut d = deck(20.0);
+        d.key_edge(KeyCode::Enter, true);
+        assert!(d.playing(), "held at the cue: it previews");
+        assert!(!d.key_input(KeyCode::Enter, true, true) && d.events.is_empty(), "OS repeat adds nothing");
+        d.run(0.3);
+        d.key_edge(KeyCode::Enter, false);
+        d.run(0.1);
+        assert!(!d.playing(), "let go: back to the cue");
+        assert!(d.at() < 0.05, "at the cue: {:.2}s", d.at());
+    }
+
+    #[test]
+    fn arrows_search_ten_seconds() {
+        let mut d = deck(60.0);
+        d.key(KeyCode::ArrowRight);
+        d.key(KeyCode::ArrowRight);
+        d.run(0.1);
+        assert!((d.at() - 20.0).abs() < 0.2, "{:.2}", d.at());
+        d.key(KeyCode::ArrowLeft);
+        d.run(0.1);
+        assert!((d.at() - 10.0).abs() < 0.2, "{:.2}", d.at());
+    }
+
+    #[test]
+    fn plus_and_minus_move_the_tempo_a_percent_and_zero_resets_it() {
+        let mut d = deck(5.0);
+        d.key(KeyCode::Equal);
+        d.key(KeyCode::Equal);
+        assert!((d.tempo() - 1.02).abs() < 0.001, "{}", d.tempo());
+        d.key(KeyCode::Minus);
+        assert!((d.tempo() - 1.01).abs() < 0.001, "{}", d.tempo());
+        d.key(KeyCode::Digit0);
+        assert!((d.tempo() - 1.0).abs() < 1e-6, "{}", d.tempo());
+    }
+
+    /// A controller's tempo_nudge, as the docs give it: delta 0.01 = 1 %
+    /// faster, on any TEMPO RANGE, and never past the range.
+    #[test]
+    fn a_tempo_nudge_moves_the_tempo_the_way_its_sign_says() {
+        use opendeck_protocol::ControlEvent as C;
+        let mut d = deck(5.0);
+        d.send(C::TempoNudge { delta: 0.01 });
+        assert!((d.tempo() - 1.01).abs() < 0.001, "{}", d.tempo());
+        d.send(C::TempoNudge { delta: -0.03 });
+        assert!((d.tempo() - 0.98).abs() < 0.001, "{}", d.tempo());
+        d.settings.tempo_range = 0.06;
+        d.send(C::TempoFader { position: 0.5 });
+        for _ in 0..10 { d.send(C::TempoNudge { delta: 0.01 }); }
+        assert!((d.tempo() - 1.06).abs() < 0.001, "held at +6 %: {}", d.tempo());
+    }
+
+    #[test]
+    fn letter_keys_toggle_the_deck_buttons() {
+        let mut d = deck(5.0);
+        let kl = d.key_lock;
+        d.key(KeyCode::KeyK);
+        assert_eq!(d.key_lock, !kl, "K = MASTER TEMPO");
+        assert!(!d.slip);
+        d.key(KeyCode::KeyS);
+        assert!(d.slip, "S = SLIP");
+        // The CDJ-3000 (the default skin) syncs only with a player to follow.
+        d.link.peers.lock().unwrap().insert(2, std::net::Ipv4Addr::new(192, 168, 1, 20));
+        d.key(KeyCode::KeyY);
+        assert!(d.link.sync.load(Ordering::Relaxed), "Y = SYNC");
+        d.key(KeyCode::KeyM);
+        assert!(d.link.want_master.load(Ordering::Relaxed), "M = MASTER");
+        let rm = d.remain_mode;
+        d.key(KeyCode::KeyT);
+        assert_eq!(d.remain_mode, !rm, "T = TIME / REMAIN");
+    }
+
+    #[test]
+    fn n_sets_a_memory_point_at_the_cue_and_delete_removes_it() {
+        let mut d = deck(20.0);
+        d.key(KeyCode::KeyN);
+        assert_eq!(d.memory_cues.len(), 1);
+        d.key(KeyCode::KeyN);
+        assert_eq!(d.memory_cues.len(), 1, "one point per place");
+        d.key(KeyCode::BracketRight);
+        d.key(KeyCode::Delete);
+        assert!(d.memory_cues.is_empty());
+    }
+
+    #[test]
+    fn in_browse_the_keys_navigate_instead_of_playing() {
+        let mut d = deck(5.0);
+        d.key(KeyCode::KeyB);
+        assert_eq!(d.screen_mode, ScreenMode::Browse);
+        d.key(KeyCode::Space);
+        assert!(!d.playing(), "Space does nothing in a list");
+        assert!(!d.key(KeyCode::Escape), "Esc leaves BROWSE, it does not quit");
+        assert_eq!(d.screen_mode, ScreenMode::Playback);
+        assert!(d.key(KeyCode::KeyQ), "on the deck screen Q quits");
+    }
+
+    #[test]
+    fn slash_opens_search_and_the_keyboard_types_into_it() {
+        let mut d = deck(5.0);
+        d.key(KeyCode::KeyB);
+        d.key(KeyCode::Slash);
+        assert!(d.browser.in_search(), "/ = SEARCH");
+        let kl = d.key_lock;
+        for k in [KeyCode::KeyK, KeyCode::KeyI, KeyCode::KeyC, KeyCode::KeyK] { d.key(k); }
+        assert_eq!(d.browser.search_query().to_ascii_lowercase(), "kick");
+        assert_eq!(d.key_lock, kl, "K typed a letter, not MASTER TEMPO");
+        d.key(KeyCode::Backspace);
+        assert_eq!(d.browser.search_query().to_ascii_lowercase(), "kic");
     }
 }

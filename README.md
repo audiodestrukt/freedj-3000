@@ -304,7 +304,7 @@ The keyboard stands in for the deck's buttons on a desktop.
 | `,` / `.` | Jog: nudge (playing) / scrub (paused) |
 | `V` | Jog mode: VINYL ↔ CDJ |
 | `←` / `→` | Seek ±10 seconds |
-| `+` / `−` / `0` | Tempo fader up / down / centre |
+| `+` / `−` / `0` | Tempo +1 % / −1 % / back to 0 % |
 | `K` `S` `Y` `M` | MASTER TEMPO · SLIP · SYNC · MASTER |
 | `N` · `[` / `]` · `Delete` | Memory cue: set · CALL previous / next · delete |
 | `A` | GRID ADJUST (the arrows then move the grid) |
