@@ -59,6 +59,10 @@ All notable changes to this project will be documented in this file.
 - A track loaded from a linked player takes its title, artist, album, key,
   BPM and year from the player's library when the file's own tags lack them,
   instead of showing the file name.
+- BROWSE on a linked player: BPM lists the tempos (they were blank rows:
+  a player's BPM rows carry the tempo as a number, not a label), then a
+  tempo's ranges ±0 … ±6, then the tracks, as on the unit.  Picking a tempo
+  went straight to its tracks at ±0.
 
 ### Added
 - Stems from the playhead. A track split on the device starts just ahead of
@@ -107,6 +111,11 @@ All notable changes to this project will be documented in this file.
 - Text too long for its field (titles, list rows, the INFO pane, the playback
   title) scrolls through it like an LED sign, pauses at the end and starts
   again; only the highlighted row of a list scrolls.
+- BROWSE on a linked player: the right-hand pane shows what the highlighted
+  row opens, as on the unit: a tempo's ranges, a range's tracks, a genre's
+  artists, a playlist folder's playlists, an artist's, album's or
+  playlist's tracks, a FOLDER level.  It is listed in the background, so
+  scrolling never waits on it.
 
 ### Changed
 - Splitting stems with ONNX Runtime (Linux) takes 1.45 GB instead of
@@ -135,6 +144,12 @@ All notable changes to this project will be documented in this file.
   highlighted tracks' metadata, cover and previews are asked on the
   dbserver session's own thread and fill in a frame or two later; opening
   a category goes ahead of them.
+- BACK in BROWSE stops at the source: from a category's list (ALBUM, KEY,
+  FOLDER on a stick …) it moves the highlight into the category column on
+  the left, where the wheel steps through the categories and pressing it
+  goes back into the list.  It used to back out of the stick into the
+  folders; FOLDER and SOURCE lead there.  Linked players and rekordbox
+  sticks alike.
 
 ### Added
 - iOS: the log is written to `opendeck-log.txt` in the OpenDeck folder (Files
