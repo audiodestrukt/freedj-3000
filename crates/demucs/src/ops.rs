@@ -94,12 +94,117 @@ fn moments(x: &[f32]) -> (f64, f64) {
     (mean, var)
 }
 
-/// `x += s[row] * g` over `(c, t)` (DConv's LayerScale residual).
-pub fn add_scaled_rows(x: &mut [f32], g: &[f32], s: &[f32], t: usize) {
-    let run = |(ch, (xr, gr)): (usize, (&mut [f32], &[f32]))| { let k = s[ch]; for (a, b) in xr.iter_mut().zip(gr) { *a += k * b } };
-    if x.len() < PAR_ELEMS { x.chunks_mut(t).zip(g.chunks(t)).enumerate().for_each(run) }
-    else { x.par_chunks_mut(t).zip(g.par_chunks(t)).enumerate().for_each(run) }
+/// Mean and biased variance in one pass (sum and sum of squares, f64).
+fn moments1(x: &[f32]) -> (f64, f64) {
+    let part = |c: &[f32]| c.iter().fold((0f64, 0f64), |(s, q), &v| { let v = v as f64; (s + v, q + v * v) });
+    let (s, q) = if x.len() < PAR_ELEMS { part(x) } else {
+        x.par_chunks(PAR_ELEMS).map(part).reduce(|| (0.0, 0.0), |a, b| (a.0 + b.0, a.1 + b.1))
+    };
+    let n = x.len() as f64;
+    let mean = s / n;
+    (mean, (q / n - mean * mean).max(0.0))
 }
+
+/// Per-channel scale and offset of `GroupNorm(1, c)` on a `(c, t)` block.
+fn gn_affine(x: &[f32], c: usize, w: &[f32], b: &[f32]) -> Vec<(f32, f32)> {
+    let (mean, var) = moments1(x);
+    let inv = 1.0 / (var + 1e-5).sqrt();
+    (0..c).map(|ch| ((w[ch] as f64 * inv) as f32, (b[ch] as f64 - mean * w[ch] as f64 * inv) as f32)).collect()
+}
+
+/// `GELU(GroupNorm(1, c)(x))` in place on `(c, t)`: one pass for the
+/// statistics, one to apply both.
+pub fn gn_gelu(x: &mut [f32], c: usize, t: usize, w: &[f32], b: &[f32]) {
+    let ab = gn_affine(&x[..c * t], c, w, b);
+    let run = |(ch, row): (usize, &mut [f32])| { let (s, o) = ab[ch]; for v in row { *v = gelu(*v * s + o) } };
+    if c * t < PAR_ELEMS { x[..c * t].chunks_mut(t).enumerate().for_each(run) }
+    else { x[..c * t].par_chunks_mut(t).enumerate().for_each(run) }
+}
+
+/// The end of a DConv layer in one pass after the statistics:
+/// `x += scale · GLU(GroupNorm(1, 2c)(z))`, z `(2c, t)`, x `(c, t)`.
+#[allow(clippy::too_many_arguments)]
+pub fn gn_glu_add(z: &[f32], c: usize, t: usize, w: &[f32], b: &[f32], scale: &[f32], x: &mut [f32]) {
+    let ab = gn_affine(&z[..2 * c * t], 2 * c, w, b);
+    let run = |(ch, xr): (usize, &mut [f32])| {
+        let ((sa, oa), (sb, ob), k) = (ab[ch], ab[c + ch], scale[ch]);
+        let (za, zb) = (&z[ch * t..(ch + 1) * t], &z[(c + ch) * t..(c + ch + 1) * t]);
+        for ((xv, a), bv) in xr.iter_mut().zip(za).zip(zb) { *xv += k * (a * sa + oa) * sigmoid(bv * sb + ob) }
+    };
+    if c * t < PAR_ELEMS { x[..c * t].chunks_mut(t).enumerate().for_each(run) }
+    else { x[..c * t].par_chunks_mut(t).enumerate().for_each(run) }
+}
+
+/// The end of a DConv layer without materialising `z = W·y + b` (`(2c, t)`):
+/// GroupNorm(1, 2c)'s statistics follow exactly from y's channel sums and
+/// its `h × h` Gram matrix (z is linear in y), then one pass computes each
+/// gated pair of z on the fly: `x += scale · GLU(GN(z))`. For small `h`,
+/// where z is the biggest tensor of the block and costs more to write and
+/// read than to recompute. `w2` is `(2c, h)` row-major.
+#[allow(clippy::too_many_arguments)]
+pub fn dconv_tail(y: &[f32], h: usize, t: usize, w2: &[f32], b2: &[f32], gw: &[f32], gb: &[f32],
+                  scale: &[f32], c: usize, x: &mut [f32]) {
+    // Σ_t y and Σ_t y·yᵀ, in f64, threaded over time.
+    let part = |t0: usize, t1: usize| {
+        let mut sum = vec![0f64; h];
+        let mut g = vec![0f64; h * h];
+        for tt in t0..t1 {
+            for i in 0..h {
+                let yi = y[i * t + tt] as f64;
+                sum[i] += yi;
+                for j in i..h { g[i * h + j] += yi * y[j * t + tt] as f64 }
+            }
+        }
+        (sum, g)
+    };
+    const SPAN: usize = 4096;
+    let (sum, g) = (0..t.div_ceil(SPAN)).into_par_iter().map(|s| part(s * SPAN, ((s + 1) * SPAN).min(t)))
+        .reduce(|| (vec![0f64; h], vec![0f64; h * h]), |mut a, b| {
+            for (x, y) in a.0.iter_mut().zip(&b.0) { *x += y }
+            for (x, y) in a.1.iter_mut().zip(&b.1) { *x += y }
+            a
+        });
+    let gram = |i: usize, j: usize| if i <= j { g[i * h + j] } else { g[j * h + i] };
+    let n = t as f64;
+    let (mut zs, mut zq) = (0f64, 0f64);
+    for co in 0..2 * c {
+        let wr = &w2[co * h..(co + 1) * h];
+        let bc = b2[co] as f64;
+        let ws: f64 = (0..h).map(|i| wr[i] as f64 * sum[i]).sum();
+        let mut wgw = 0f64;
+        for i in 0..h { for j in 0..h { wgw += wr[i] as f64 * gram(i, j) * wr[j] as f64 } }
+        zs += ws + bc * n;
+        zq += wgw + 2.0 * bc * ws + bc * bc * n;
+    }
+    let cnt = n * (2 * c) as f64;
+    let mean = zs / cnt;
+    let var = (zq / cnt - mean * mean).max(0.0);
+    let inv = 1.0 / (var + 1e-5).sqrt();
+    let aff = |co: usize| ((gw[co] as f64 * inv) as f32, (gb[co] as f64 - mean * gw[co] as f64 * inv) as f32);
+    let run = |(ch, xr): (usize, &mut [f32])| {
+        let ((sa, oa), (sb, ob), k) = (aff(ch), aff(c + ch), scale[ch]);
+        let (wa, wb) = (&w2[ch * h..(ch + 1) * h], &w2[(c + ch) * h..(c + ch + 1) * h]);
+        // z rows for this channel, a block of time at a time, then the gate.
+        const B: usize = 256;
+        let (mut za, mut zb) = ([0f32; B], [0f32; B]);
+        for t0 in (0..t).step_by(B) {
+            let nb = (t - t0).min(B);
+            za[..nb].fill(b2[ch]);
+            zb[..nb].fill(b2[c + ch]);
+            for i in 0..h {
+                let yr = &y[i * t + t0..i * t + t0 + nb];
+                let (ka, kb) = (wa[i], wb[i]);
+                for ((a, b), v) in za[..nb].iter_mut().zip(zb[..nb].iter_mut()).zip(yr) { *a += ka * v; *b += kb * v }
+            }
+            for ((xv, a), b) in xr[t0..t0 + nb].iter_mut().zip(&za[..nb]).zip(&zb[..nb]) {
+                *xv += k * (a * sa + oa) * sigmoid(b * sb + ob);
+            }
+        }
+    };
+    if c * t < PAR_ELEMS { x[..c * t].chunks_mut(t).enumerate().for_each(run) }
+    else { x[..c * t].par_chunks_mut(t).enumerate().for_each(run) }
+}
+
 
 /// `x += y`, threaded for big buffers.
 pub fn add(x: &mut [f32], y: &[f32]) {
@@ -107,18 +212,6 @@ pub fn add(x: &mut [f32], y: &[f32]) {
     x.par_chunks_mut(PAR_ELEMS).zip(y.par_chunks(PAR_ELEMS)).for_each(|(x, y)| for (a, b) in x.iter_mut().zip(y) { *a += b });
 }
 
-/// `GroupNorm(1, c)` on one `(c, t)` block in place: statistics over the whole
-/// block, then a per-channel affine. eps 1e-5, biased variance.
-pub fn group_norm1(x: &mut [f32], c: usize, t: usize, w: &[f32], b: &[f32]) {
-    let (mean, var) = moments(&x[..c * t]);
-    let inv = 1.0 / (var + 1e-5).sqrt();
-    let run = |(ch, row): (usize, &mut [f32])| {
-        let (s, o) = ((w[ch] as f64 * inv) as f32, (b[ch] as f64 - mean * w[ch] as f64 * inv) as f32);
-        for v in row { *v = *v * s + o }
-    };
-    if c * t < PAR_ELEMS { x[..c * t].chunks_mut(t).enumerate().for_each(run) }
-    else { x[..c * t].par_chunks_mut(t).enumerate().for_each(run) }
-}
 
 /// `GroupNorm(1, c)` on tokens `(n, c)` (the transformer's `norm_out`).
 pub fn group_norm1_tokens(x: &mut [f32], c: usize, w: &[f32], b: &[f32]) {

@@ -236,6 +236,9 @@ compares each stage with a PyTorch run on a real chunk: the stems agree at
 | own matrix multiply, weights packed at load (`gemm.rs`) | 5.2 s* | 7.9 s |
 | no zeroing/clones, fused degree-5 exp | 5.2 s* | 7.6 s |
 | transformer in fp16 (`OPENDECK_DEMUCS_F16=1`) | — | 6.85 s |
+| flash-style attention (256-key tiles, online softmax) | — | 6.91 s (fp16 6.62) |
+| DConv fused; its second conv folded into the GroupNorm/GLU tail | — | 6.48 s |
+| transposed convs written straight to the trimmed output / all 8 taps at once | — | 6.4 s (fp16 6.04) |
 
 \* the desktop runs the portable kernel; only aarch64 has the NEON one.
 

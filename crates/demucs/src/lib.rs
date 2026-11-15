@@ -73,7 +73,12 @@ impl Lin {
 struct Norm { w: Vec<f32>, b: Vec<f32> }
 
 /// One DConv residual layer: conv k3 (dilated) → GN → GELU → conv 1x1 → GN → GLU → scale.
-struct DLayer { c1: Lin, n1: Norm, c2: Lin, n2: Norm, scale: Vec<f32>, dil: usize, hidden: usize }
+struct DLayer { c1: Lin, n1: Norm, c2: Lin, n2: Norm, scale: Vec<f32>, dil: usize, hidden: usize,
+                /// c2's weights row-major `(2c, hidden)`, for [`ops::dconv_tail`].
+                w2: Vec<f32> }
+
+/// Hidden widths up to which DConv's second conv is folded into its tail.
+const TAIL_MAX_HIDDEN: usize = 12;
 
 struct Enc { cin: usize, cout: usize, conv: Lin, rewrite: Lin, dconv: Vec<DLayer> }
 struct Dec { cin: usize, cout: usize, last: bool, conv_tr: Lin, rewrite: Lin, dconv: Vec<DLayer> }
@@ -133,10 +138,12 @@ fn dconv(t: &mut Tensors, p: &str, c: usize) -> Result<Vec<DLayer>> {
     let h = c / 8;
     (0..2).map(|d| {
         let q = format!("{p}.dconv.layers.{d}");
+        let w2;
         Ok(DLayer {
             c1: lin(t, &format!("{q}.0"), &[h, c, 3])?.rows(h, 3 * c), n1: norm(t, &format!("{q}.1"), h)?,
-            c2: lin(t, &format!("{q}.3"), &[2 * c, h, 1])?.rows(2 * c, h), n2: norm(t, &format!("{q}.4"), 2 * c)?,
-            scale: t.take(&format!("{q}.6.scale"), &[c])?, dil: 1 << d, hidden: h,
+            c2: { let l = lin(t, &format!("{q}.3"), &[2 * c, h, 1])?; w2 = l.w.clone(); l.rows(2 * c, h) },
+            n2: norm(t, &format!("{q}.4"), 2 * c)?,
+            scale: t.take(&format!("{q}.6.scale"), &[c])?, dil: 1 << d, hidden: h, w2,
         })
     }).collect()
 }
@@ -189,7 +196,8 @@ impl HtDemucs {
             let (cout_z, cout) = if last { (16, 8) } else { (cin / 2, cin / 2) };
             let mut conv_tr = lin_tr(t, &format!("decoder.{i}.conv_tr"), &[cin, cout_z, 8, 1])?;
             conv_tr.w = freq_kernel_tr(&conv_tr.w, cin, cout_z, 8);
-            let conv_tr = conv_tr.taps(8, cout_z, cin, |w, k, co, ci| w[(k * cout_z + co) * cin + ci]);
+            // All 8 taps as one (8·cout, cin) matrix, rows (tap, cout).
+            let conv_tr = conv_tr.taps(1, 8 * cout_z, cin, |w, _, r, ci| w[r * cin + ci]);
             let mut rewrite = lin(t, &format!("decoder.{i}.rewrite"), &[2 * cin, cin, 3, 3])?;
             rewrite.w = kernel_3x3(&rewrite.w, 2 * cin, cin);
             // Column (dt·3 + df)·cin + ci of the (dt, cout, df, cin) layout.
@@ -244,16 +252,18 @@ fn conv1d(x: &[f32], cin: usize, t: usize, l: &Lin, cout: usize, k: usize, strid
 /// then the `[pad, pad+len)` window.
 #[allow(clippy::too_many_arguments)]
 fn conv_tr1d(x: &[f32], cin: usize, t: usize, l: &Lin, cout: usize, k: usize, stride: usize, pad: usize, len: usize) -> Vec<f32> {
-    let full = (t - 1) * stride + k;
-    let mut out = vec![0f32; cout * full];
-    fill_bias(&mut out, &l.b, full);
+    let mut out = vec![0f32; cout * len];
+    fill_bias(&mut out, &l.b, len);
     let rows: Vec<usize> = (0..cin).map(|c| c * t).collect();
     for kk in 0..k {
-        gemm::gemm(&l.p[kk], View { b: x, base: 0, row_off: &rows, cs: 1 }, t, &mut out, Out { off: kk, rs: full, cs: stride });
+        // Input sample i lands at i·stride + kk - pad; keep the ones inside [0, len).
+        let lo = (pad.saturating_sub(kk)).div_ceil(stride);
+        let hi = t.min((len + pad - kk - 1) / stride + 1);
+        if lo >= hi { continue }
+        gemm::gemm(&l.p[kk], View { b: x, base: lo, row_off: &rows, cs: 1 }, hi - lo, &mut out,
+                   Out { off: lo * stride + kk - pad, rs: len, cs: stride });
     }
-    let mut r = vec![0f32; cout * len];
-    for co in 0..cout { r[co * len..(co + 1) * len].copy_from_slice(&out[co * full + pad..co * full + pad + len]) }
-    r
+    out
 }
 
 /// Fill each row (length `t`) of a `(c, t)` block with that channel's bias.
@@ -282,19 +292,28 @@ fn conv_freq(x: &[f32], f: usize, cin: usize, t: usize, l: &Lin, cout: usize) ->
 /// Computed per output band: band `o` (untrimmed `o+2`) gets tap `o+2-4i`
 /// of input bands `i = (o+2)/4` and the one before.
 fn conv_tr_freq(x: &[f32], f: usize, cin: usize, t: usize, l: &Lin, cout: usize) -> Vec<f32> {
-    let (k, s, p) = (8, 4, 2);
+    let (k, s, p): (usize, usize, usize) = (8, 4, 2);
+    debug_assert_eq!(cout % gemm::MR, 0);
     let rows: Vec<usize> = (0..cin).map(|c| c * t).collect();
-    let mut out = vec![0f32; f * s * cout * t];
-    out.par_chunks_mut(cout * t).enumerate().for_each(|(o, band)| {
-        fill_bias(band, &l.b, t);
-        let full = o + p;
-        for i in [full / s, (full / s).wrapping_sub(1)] {
-            if i >= f { continue }
-            let tap = full - i * s;
-            if tap >= k { continue }
-            gemm::gemm1(&l.p[tap], View { b: x, base: i * cin * t, row_off: &rows, cs: 1 }, t, band, Out { off: 0, rs: t, cs: 1 });
-        }
-    });
+    let fo = f * s;
+    let mut out = vec![0f32; fo * cout * t];
+    out.par_chunks_mut(cout * t).for_each(|band| fill_bias(band, &l.b, t));
+    // Input band i, all 8 taps in one product, lands on output bands
+    // 4i-2 .. 4i+6. Bands i and i+2 never share an output band, so the even
+    // inputs run in parallel, then the odd ones.
+    let op = out.as_mut_ptr() as usize;
+    for parity in 0..2 {
+        (parity..f).step_by(2).collect::<Vec<_>>().into_par_iter().for_each(|i| {
+            let k_lo = p.saturating_sub(i * s);
+            let k_hi = k.min(fo + p - i * s);
+            let band0 = i * s + k_lo - p;
+            // SAFETY: this task writes only output bands [band0, band0 + k_hi - k_lo),
+            // which no other input band of the same parity touches (see above).
+            let dst = unsafe { std::slice::from_raw_parts_mut((op as *mut f32).add(band0 * cout * t), (k_hi - k_lo) * cout * t) };
+            gemm::gemm1_part(&l.p[0], k_lo * cout / gemm::MR..k_hi * cout / gemm::MR, 0..cin,
+                             View { b: x, base: i * cin * t, row_off: &rows, cs: 1 }, t, dst, Out { off: 0, rs: t, cs: 1 }, false);
+        });
+    }
     out
 }
 
@@ -329,13 +348,13 @@ fn conv3x3_freq(x: &[f32], f: usize, cin: usize, t: usize, l: &Lin, cout: usize)
 fn dconv_block(x: &mut [f32], c: usize, t: usize, layers: &[DLayer]) {
     for d in layers {
         let (mut y, _) = conv1d(x, c, t, &d.c1, d.hidden, 3, 1, d.dil, d.dil);
-        ops::group_norm1(&mut y, d.hidden, t, &d.n1.w, &d.n1.b);
-        ops::gelu_all(&mut y);
-        let (mut z, _) = conv1d(&y, d.hidden, t, &d.c2, 2 * c, 1, 1, 0, 1);
-        ops::group_norm1(&mut z, 2 * c, t, &d.n2.w, &d.n2.b);
-        let mut g = vec![0f32; c * t];
-        ops::glu(&z, c, t, &mut g);
-        ops::add_scaled_rows(x, &g, &d.scale, t);
+        ops::gn_gelu(&mut y, d.hidden, t, &d.n1.w, &d.n1.b);
+        if d.hidden <= TAIL_MAX_HIDDEN {
+            ops::dconv_tail(&y, d.hidden, t, &d.w2, &d.c2.b, &d.n2.w, &d.n2.b, &d.scale, c, x);
+        } else {
+            let (z, _) = conv1d(&y, d.hidden, t, &d.c2, 2 * c, 1, 1, 0, 1);
+            ops::gn_glu_add(&z, c, t, &d.n2.w, &d.n2.b, &d.scale, x);
+        }
     }
 }
 
@@ -343,10 +362,14 @@ fn dconv_block(x: &mut [f32], c: usize, t: usize, layers: &[DLayer]) {
 
 /// Frequency encoder layer: `(f, cin, t)` → `(f/4, cout, t)`.
 fn enc_freq(e: &Enc, x: &[f32], f: usize, t: usize) -> (Vec<f32>, usize) {
+    let mut lap = Lap::new();
     let (mut y, fo) = conv_freq(x, f, e.cin, t, &e.conv, e.cout);
+    lap.lap("e.conv");
     ops::gelu_all(&mut y);
     y.par_chunks_mut(e.cout * t).for_each(|band| dconv_block(band, e.cout, t, &e.dconv));
+    lap.lap("e.dconv");
     let z = conv1x1_freq(&y, fo, e.cout, t, &e.rewrite, 2 * e.cout);
+    lap.lap("e.rewrite");
     let mut out = vec![0f32; fo * e.cout * t];
     out.par_chunks_mut(e.cout * t).zip(z.par_chunks(2 * e.cout * t))
         .for_each(|(o, zb)| ops::glu(zb, e.cout, t, o));
@@ -363,10 +386,14 @@ fn enc_time(e: &Enc, x: &[f32], t: usize) -> (Vec<f32>, usize) {
         padded = p;
         &padded[..]
     };
+    let mut lap = Lap::new();
     let (mut y, to) = conv1d(x, e.cin, tt, &e.conv, e.cout, 8, 4, 2, 1);
+    lap.lap("te.conv");
     ops::gelu_all(&mut y);
     dconv_block(&mut y, e.cout, to, &e.dconv);
+    lap.lap("te.dconv");
     let (z, _) = conv1d(&y, e.cout, to, &e.rewrite, 2 * e.cout, 1, 1, 0, 1);
+    lap.lap("te.rewrite");
     let mut out = vec![0f32; e.cout * to];
     ops::glu(&z, e.cout, to, &mut out);
     (out, to)
@@ -374,26 +401,34 @@ fn enc_time(e: &Enc, x: &[f32], t: usize) -> (Vec<f32>, usize) {
 
 /// Frequency decoder layer: `x + skip` `(f, cin, t)` → `(4f, cout, t)`.
 fn dec_freq(d: &Dec, x: &mut [f32], skip: &[f32], f: usize, t: usize) -> Vec<f32> {
+    let mut lap = Lap::new();
     ops::add(x, skip);
     let z = conv3x3_freq(x, f, d.cin, t, &d.rewrite, 2 * d.cin);
+    lap.lap("d.rewrite");
     let mut y = vec![0f32; f * d.cin * t];
     y.par_chunks_mut(d.cin * t).zip(z.par_chunks(2 * d.cin * t)).for_each(|(yb, zb)| {
         ops::glu(zb, d.cin, t, yb);
         dconv_block(yb, d.cin, t, &d.dconv);
     });
+    lap.lap("d.dconv");
     let mut out = conv_tr_freq(&y, f, d.cin, t, &d.conv_tr, d.cout);
+    lap.lap("d.conv_tr");
     if !d.last { ops::gelu_all(&mut out) }
     out
 }
 
 /// Time decoder layer: `x + skip` `(cin, t)` → `(cout, len)`.
 fn dec_time(d: &Dec, x: &mut [f32], skip: &[f32], t: usize, len: usize) -> Vec<f32> {
+    let mut lap = Lap::new();
     ops::add(x, skip);
     let (z, _) = conv1d(x, d.cin, t, &d.rewrite, 2 * d.cin, 3, 1, 1, 1);
+    lap.lap("td.rewrite");
     let mut y = vec![0f32; d.cin * t];
     ops::glu(&z, d.cin, t, &mut y);
     dconv_block(&mut y, d.cin, t, &d.dconv);
+    lap.lap("td.dconv");
     let mut out = conv_tr1d(&y, d.cin, t, &d.conv_tr, d.cout, 8, 4, 2, len);
+    lap.lap("td.conv_tr");
     if !d.last { ops::gelu_all(&mut out) }
     out
 }
