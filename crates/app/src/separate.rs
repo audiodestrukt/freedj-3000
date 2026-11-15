@@ -239,6 +239,8 @@ fn run(track: &[f32], geo: &Geometry, (mean, std): (f32, f32), weight: &[f32], s
     };
     let stop = stop_at(from);
     let mut outs: [Vec<i16>; 3] = Default::default();
+    // Stored at 1/scale (headroom: a stem can be louder than its mix).
+    let q = 32768.0 / bank.scale;
     // The mix's DC goes back on harmonics, so the three stems add up to it.
     let mut write = |block: &[f32], deck_pos: &mut usize, stop: usize| {
         let n = block.len() / 6;
@@ -249,7 +251,7 @@ fn run(track: &[f32], geo: &Geometry, (mean, std): (f32, f32), weight: &[f32], s
                 for s in 0..3 {
                     for c in 0..2 {
                         let v = f[s * 2 + c] * std + if s == 2 { mean } else { 0.0 };
-                        outs[s].push((v * 32768.0).round().clamp(-32768.0, 32767.0) as i16);
+                        outs[s].push((v * q).round().clamp(-32768.0, 32767.0) as i16);
                     }
                 }
             }
@@ -622,12 +624,16 @@ mod tests {
 
     /// A split through the deck's own path: into a filling bank, as the
     /// app does, then read back.
-    pub(super) fn split(track: &[f32], sr: u32, sep: &mut dyn Separator, job: &Job) -> Result<([Vec<i16>; 3], Timing)> {
+    pub(super) fn split(track: &[f32], sr: u32, sep: &mut dyn Separator, job: &Job) -> Result<([Vec<f32>; 3], Timing)> {
+        let (bank, timing) = split_bank(track, sr, sep, job)?;
+        Ok(([bank.stem_levels(0), bank.stem_levels(1), bank.stem_levels(2)], timing))
+    }
+    pub(super) fn split_bank(track: &[f32], sr: u32, sep: &mut dyn Separator, job: &Job) -> Result<(crate::stems::StemBank, Timing)> {
         let t = std::sync::Arc::new(track.to_vec());
-        let bank = crate::stems::StemBank::filling(&t);
+        let bank = crate::stems::StemBank::filling_split(&t);
         let timing = separate(track, sr, sep, job, &bank)?;
         bank.finish(sr);
-        Ok(([bank.stem(0), bank.stem(1), bank.stem(2)], timing))
+        Ok((bank, timing))
     }
 
     /// The chunks a split ran, in order, for the run tests (on_chunk runs on
@@ -772,22 +778,22 @@ mod tests {
         // Away from the very ends (the rate converters' edges).
         let lo = 2_000;
         let hi = track.len() - 2_000;
-        let err = |got: &[i16], want: f32| (lo..hi).map(|i| (got[i] as f32 / 32768.0 - want * track[i]).abs()).fold(0.0, f32::max);
+        let err = |got: &[f32], want: f32| (lo..hi).map(|i| (got[i] - want * track[i]).abs()).fold(0.0, f32::max);
         // The fake splits the normalised mix, so drums miss half the DC
         // and harmonics carry it; the tone's DC is small.
         assert!(err(&drums, 0.5) < 0.02, "drums off by {}", err(&drums, 0.5));
         assert!(err(&harm, 0.5) < 0.02, "harmonics off by {}", err(&harm, 0.5));
-        assert!(vocal[lo..hi].iter().all(|v| v.unsigned_abs() < 700), "vocal should be near silent");
+        assert!(vocal[lo..hi].iter().all(|v| v.abs() < 700.0 / 32768.0), "vocal should be near silent");
         // No lag: the drums match the track best unshifted (a one-frame
         // slip would still pass the tolerance above).
         let lag_err = |lag: isize| (lo..hi).step_by(2).map(|i| {
             let j = (i as isize + 2 * lag) as usize;
-            (drums[j] as f32 / 32768.0 - 0.5 * track[i]).powi(2)
+            (drums[j] - 0.5 * track[i]).powi(2)
         }).sum::<f32>();
         let best = (-4..=4).min_by(|a, b| lag_err(*a).total_cmp(&lag_err(*b))).unwrap();
         assert_eq!(best, 0, "drums are {best} frames off the track");
         // Drums + harmonics rebuild the mix.
-        let sum_err = (lo..hi).map(|i| ((drums[i] as f32 + harm[i] as f32) / 32768.0 - track[i]).abs()).fold(0.0, f32::max);
+        let sum_err = (lo..hi).map(|i| (drums[i] + harm[i] - track[i]).abs()).fold(0.0, f32::max);
         assert!(sum_err < 0.03, "stems do not add back to the mix: {sum_err}");
     }
 
@@ -799,6 +805,53 @@ mod tests {
         assert_eq!(t.chunks, 1);
         assert_eq!(d.len(), track.len());
         assert_eq!(h.len(), track.len());
+    }
+
+    /// A separator whose drums come out louder than the mix (as real
+    /// drums do: 1.21 against a 1.0 mix on techno.mp3), the rest
+    /// cancelling it back down to the mix.
+    struct Loud { seg: usize }
+    impl Separator for Loud {
+        fn segment(&self) -> usize { self.seg }
+        fn run(&mut self, mix: &[f32], out: &mut [f32]) -> Result<()> {
+            let s = self.seg;
+            for c in 0..2 {
+                for i in 0..s {
+                    let x = mix[c * s + i];
+                    out[c * s + i] = 1.6 * x;           // drums
+                    out[(2 + c) * s + i] = -0.6 * x;    // bass
+                    out[(4 + c) * s + i] = 0.0;         // other
+                    out[(6 + c) * s + i] = 0.0;         // vocals
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Drums soloed on the deck play a stem louder than its mix at its own
+    /// level: the 16-bit bank used to clamp it at full scale.
+    #[test]
+    fn a_stem_louder_than_its_mix_plays_unclipped() {
+        let sr = 44_100;
+        // A mix peaking at 0.9: the drums peak at 1.44.
+        let track: Vec<f32> = (0..sr as usize * 2).flat_map(|n| {
+            let v = 0.9 * (2.0 * std::f32::consts::PI * 110.0 * n as f32 / sr as f32).sin();
+            [v, v]
+        }).collect();
+        let (bank, _) = split_bank(&track, sr, &mut Loud { seg: 10_000 }, &Job::default()).unwrap();
+        let mut mixer = crate::stems::Mixer::default();
+        let mut out = Vec::new();
+        let (a, b) = (sr as usize, sr as usize + 8192);   // a block mid-track
+        // The first block fades into the stems; the second plays them.
+        mixer.mix(&track, Some(&bank), [1.0, 0.0, 0.0], &[a - 8192..a, 0..0], &mut out);
+        assert!(mixer.mix(&track, Some(&bank), [1.0, 0.0, 0.0], &[a..b, 0..0], &mut out));
+        let peak = out.iter().fold(0.0f32, |m, v| m.max(v.abs()));
+        assert!(peak > 1.4, "drums solo peaks at {peak}, want ~1.44 (clipped at 1.0 before)");
+        let worst = out.iter().zip(&track[a..b]).map(|(o, x)| (o - 1.6 * x).abs()).fold(0.0f32, f32::max);
+        assert!(worst < 1e-3, "drums solo off the 1.6x mix by {worst}");
+        // All three at full rebuild the mix, through the same scale.
+        let all: f32 = (a..b).map(|i| (0..3).map(|s| bank.stem_levels(s)[i]).sum::<f32>() - track[i]).map(f32::abs).fold(0.0, f32::max);
+        assert!(all < 1e-3, "stems add back to the mix within {all}");
     }
 
     #[test]
@@ -862,25 +915,25 @@ mod real {
         if let Ok(Some(oc)) = crate::stems::load_local(std::path::Path::new(&inp), &track, sr, 2, None) {
             for (i, name) in ["drums", "vocal", "harmonics"].iter().enumerate() {
                 let (mut num, mut den) = (0f64, 0f64);
-                for (a, b) in oc.stem(i).iter().zip(&stems[i]) {
+                for (a, b) in oc.stem_levels(i).iter().zip(&stems[i]) {
                     let (a, b) = (*a as f64, *b as f64);
                     num += a * a;
                     den += (a - b) * (a - b);
                 }
-                println!("vs OverCue {name:<9} SDR {:5.1} dB", 10.0 * (num / den.max(1.0)).log10());
+                println!("vs OverCue {name:<9} SDR {:5.1} dB", 10.0 * (num / den.max(1e-12)).log10());
             }
         }
         let out = std::path::PathBuf::from(out);
         std::fs::create_dir_all(&out).unwrap();
         for (name, s) in ["drums", "vocal", "harmonics"].iter().zip(&stems) {
-            // 16-bit stereo WAV.
-            let bytes = (s.len() * 2) as u32;
+            // 32-bit float stereo WAV: a stem can be louder than full scale.
+            let bytes = (s.len() * 4) as u32;
             let mut w = Vec::with_capacity(44 + bytes as usize);
             w.extend_from_slice(b"RIFF"); w.extend_from_slice(&(36 + bytes).to_le_bytes()); w.extend_from_slice(b"WAVEfmt ");
             for v in [16u32] { w.extend_from_slice(&v.to_le_bytes()); }
-            for v in [1u16, 2] { w.extend_from_slice(&v.to_le_bytes()); }
-            for v in [sr, sr * 4] { w.extend_from_slice(&v.to_le_bytes()); }
-            for v in [4u16, 16] { w.extend_from_slice(&v.to_le_bytes()); }
+            for v in [3u16, 2] { w.extend_from_slice(&v.to_le_bytes()); }
+            for v in [sr, sr * 8] { w.extend_from_slice(&v.to_le_bytes()); }
+            for v in [8u16, 32] { w.extend_from_slice(&v.to_le_bytes()); }
             w.extend_from_slice(b"data"); w.extend_from_slice(&bytes.to_le_bytes());
             for v in s { w.extend_from_slice(&v.to_le_bytes()); }
             std::fs::write(out.join(format!("{name}.wav")), w).unwrap();

@@ -65,7 +65,16 @@ pub struct StemBank {
     /// on the device: the controls count as ready while it fills (it fills
     /// in a second or two, from the top).
     pub prepared: bool,
+    /// The level an i16 full scale stands for: 1.0 for prepared stems (as
+    /// the stick has them), [`SPLIT_SCALE`] for a split on the device.
+    pub scale: f32,
 }
+
+/// A device split stores its stems at half level, so a stem louder than
+/// its mix (drums often are: 1.21 against a 1.0 mix, measured) keeps its
+/// peaks instead of clipping at the i16's full scale.  Costs one bit: a
+/// noise floor 90 dB down instead of 96.
+pub const SPLIT_SCALE: f32 = 2.0;
 
 /// Stereo frames per bank page (85 ms at 48 kHz).
 pub const PAGE_FRAMES: usize = 4096;
@@ -82,7 +91,7 @@ impl StemBank {
             track: Arc::downgrade(track), data,
             pages: (0..n.div_ceil(PAGE)).map(|_| AtomicU32::new(0)).collect(),
             ready: AtomicUsize::new(0), cursor: AtomicUsize::new(0),
-            offset_frames, waves: OnceLock::new(), prepared,
+            offset_frames, waves: OnceLock::new(), prepared, scale: 1.0,
         }
     }
 
@@ -99,6 +108,18 @@ impl StemBank {
     pub fn filling(track: &Arc<Vec<f32>>) -> StemBank {
         let n = track.len();
         StemBank::with_data(track, std::array::from_fn(|_| (0..n).map(|_| AtomicI16::new(0)).collect()), 0, false)
+    }
+
+    /// An empty bank for a split on the device: stored with headroom
+    /// ([`SPLIT_SCALE`]).
+    pub fn filling_split(track: &Arc<Vec<f32>>) -> StemBank {
+        StemBank { scale: SPLIT_SCALE, ..StemBank::filling(track) }
+    }
+
+    /// Stem `s` as levels (the i16s times [`scale`](Self::scale)).
+    pub fn stem_levels(&self, s: usize) -> Vec<f32> {
+        let k = self.scale / 32768.0;
+        self.data[s].iter().map(|v| v.load(Ordering::Relaxed) as f32 * k).collect()
     }
 
     /// Built for exactly this sample buffer (the one the deck is playing)?
@@ -260,6 +281,7 @@ impl Mixer {
         let m_target = if !written || target.iter().all(|g| *g >= 1.0) { 0.0 } else { 1.0 };
         if self.m == 0.0 && m_target == 0.0 { self.g = target; return false; }
         let frames: usize = ranges.iter().map(|r| r.len() / 2).sum();
+        let level = bank.scale / 32768.0;
         out.clear();
         let (g0, m0) = (self.g, self.m);
         let mut k = 0usize;
@@ -271,7 +293,7 @@ impl Mixer {
                 let g: [f32; 3] = std::array::from_fn(|s| g0[s] + (target[s] - g0[s]) * t);
                 for c in 0..2 {
                     let i = f * 2 + c;
-                    let stems: f32 = if bank.ready_at(i) { (0..3).map(|s| g[s] * bank.sample(s, i) as f32).sum::<f32>() / 32768.0 } else { x[i] };
+                    let stems: f32 = if bank.ready_at(i) { (0..3).map(|s| g[s] * bank.sample(s, i) as f32).sum::<f32>() * level } else { x[i] };
                     out.push((1.0 - m) * x[i] + m * stems);
                 }
             }
@@ -286,7 +308,7 @@ impl Mixer {
     pub fn at(&self, x: &[f32], bank: Option<&StemBank>, i: usize) -> f32 {
         match bank {
             Some(b) if self.m > 0.0 && b.ready_at(i) => {
-                let stems: f32 = (0..3).map(|s| self.g[s] * b.sample(s, i) as f32).sum::<f32>() / 32768.0;
+                let stems: f32 = (0..3).map(|s| self.g[s] * b.sample(s, i) as f32).sum::<f32>() * (b.scale / 32768.0);
                 (1.0 - self.m) * x[i] + self.m * stems
             }
             _ => x[i],
@@ -784,13 +806,14 @@ fn build_paged(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32
 /// Each stem's waveform columns, built as the track's own are (one thread
 /// per stem).
 pub fn stem_waves(bank: &StemBank, sr: u32) -> [Vec<WaveformColumn>; 3] {
+    let k = bank.scale / 32768.0;
     std::thread::scope(|sc| {
         let jobs: Vec<_> = bank.data.iter().map(|d| sc.spawn(move || {
             let mut b = WaveformBuilder::new(sr);
             let mut buf = Vec::with_capacity(8192);
             for chunk in d.chunks(8192) {
                 buf.clear();
-                buf.extend(chunk.iter().map(|v| v.load(Ordering::Relaxed) as f32 / 32768.0));
+                buf.extend(chunk.iter().map(|v| v.load(Ordering::Relaxed) as f32 * k));
                 b.push(&buf);
             }
             b.finish().columns

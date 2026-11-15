@@ -120,7 +120,7 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
     let res = model::with(|m| {
         split_trace(&format!("  model ready on {} | {}", model::units(), mem()));
         // The deck picks this bank up and plays each stretch as it lands.
-        let bank = Arc::new(stems::StemBank::filling(track));
+        let bank = Arc::new(stems::StemBank::filling_split(track));
         let _ = job.bank.set(Arc::clone(&bank));
         let t = separate::separate(track, sr, m, job, &bank)?;
         bank.finish(sr);

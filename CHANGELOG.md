@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- Stems split on the device no longer clip. A stem can be louder than the
+  mix it came from (the drums of a techno track peaked at 1.21 against a
+  1.0 mix), and the bank's 16-bit samples flattened every peak above full
+  scale (532 drum samples on that track). Splits are now stored with 6 dB
+  of headroom and played back at their own level; agreement with Meta's
+  own HTDemucs rose from 55 to 60 dB on the drums. Prepared stems from a
+  stick are unchanged.
 - Stems from a split still in progress play again. Since the split started
   from the playhead (0.3.24), the STEMS keys moved but the deck kept playing
   the original until the whole split was done: the mixer also checked an

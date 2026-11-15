@@ -119,9 +119,11 @@ Two things to know when comparing:
 - **Same input or nothing.** HTDemucs is not shift-invariant: decoding the
   MP3 with and without the encoder delay (1,105 samples) moves every chunk
   boundary and alone drops agreement to 11–25 dB.
-- **Our stems clip.** A stem can be louder than its mix (drums peak 1.21
-  here, the mix 1.0); the bank stores 16-bit and clamps: 532 drum samples
-  and 18 harmonics samples clipped on this track. Not fixed yet.
+- **Stems can be louder than their mix** (drums peak 1.21 here, the mix
+  1.0). The bank stores 16-bit, so a split is stored at half level
+  (`stems::SPLIT_SCALE`, one bit for 6 dB of headroom) and played back at
+  its own; before, it clamped 532 drum samples on this track. Drums now
+  agree with the reference to 60.2 dB over the whole track.
 
 ## Platforms
 
