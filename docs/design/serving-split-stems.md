@@ -1,7 +1,12 @@
-# Serving split stems over Pro DJ Link
+# StemStream: serving split stems over Pro DJ Link
 
 Status: **proposal** (2026-11-15). Nothing here is built yet; it is the
 plan for when we get to it.
+
+**StemStream** is the name for the whole feature: OpenDeck splits the
+music it serves and players play those stems over Pro DJ Link. It is a
+feature name, not a wire protocol; the wire is Link (dbserver + NFS +
+`CDJMODS`).
 
 ## Goal
 
