@@ -50,6 +50,22 @@ pub type DbTrackFile = (Option<String>, anyhow::Result<Vec<u8>>, Option<opendeck
 
 /// Which category a dbserver root-menu row is: by its label when it is one
 /// we know (a source may number the item types its own way), else by type.
+/// A category row's name (`level`: entries picked so far).  Rows are named
+/// by their label; a row with only a second label (a count, a key) shows
+/// that.  BPM rows have neither: the tempo ×100 is the id of a BPM row
+/// (a player's 0x000d row, as our own server sends it), and a range row's
+/// id is its range, shown ±0 … ±6 as on the unit.
+fn cat_row_name(cat: Cat, level: usize, i: &opendeck_dbserver::MenuItem) -> String {
+    if !i.label.is_empty() { return i.label.clone(); }
+    if !i.label2.is_empty() { return i.label2.clone(); }
+    match (cat, level) {
+        (Cat::Bpm, 0) if i.id % 100 == 0 => (i.id / 100).to_string(),
+        (Cat::Bpm, 0) => format!("{:.1}", i.id as f32 / 100.0),
+        (Cat::Bpm, 1) => format!("\u{b1}{}", i.id),
+        _ => String::new(),
+    }
+}
+
 fn db_category(i: &opendeck_dbserver::MenuItem) -> &'static str {
     match i.label.to_ascii_uppercase().as_str() {
         "TRACK" => "root-track",
@@ -208,8 +224,9 @@ impl Cat {
     /// How many entries are picked before the tracks: GENRE → artist → tracks.
     fn depth(self) -> usize {
         match self {
-            Cat::Bpm | Cat::Rating | Cat::Color | Cat::Time | Cat::History => 1,
-            Cat::Genre | Cat::Year | Cat::Label | Cat::Key | Cat::OrigArtist | Cat::Remixer => 2,
+            Cat::Rating | Cat::Color | Cat::Time | Cat::History => 1,
+            // BPM → its range (±0 … ±6) → tracks, as on the unit.
+            Cat::Bpm | Cat::Genre | Cat::Year | Cat::Label | Cat::Key | Cat::OrigArtist | Cat::Remixer => 2,
         }
     }
     /// The request that lists the names at this level (`picked` ids so far).
@@ -218,7 +235,8 @@ impl Cat {
         match (self, picked) {
             (Cat::Genre, [])      => (k::GENRE_MENU, vec![]),
             (Cat::Genre, [g])     => (0x1101, vec![*g]),
-            (Cat::Bpm, _)         => (k::BPM_MENU, vec![]),
+            (Cat::Bpm, [])        => (k::BPM_MENU, vec![]),
+            (Cat::Bpm, [t])       => (0x1106, vec![*t]),
             (Cat::Rating, _)      => (k::RATING_MENU, vec![]),
             (Cat::Year, [])       => (k::YEAR_MENU, vec![]),
             (Cat::Year, [d])      => (0x1108, vec![*d]),
@@ -242,7 +260,7 @@ impl Cat {
         let at = |i: usize| p.get(i).copied().unwrap_or(0);
         match self {
             Cat::Genre      => (0x1301, vec![at(0), at(1), ALL]),
-            Cat::Bpm        => (0x1206, vec![at(0), 0]),
+            Cat::Bpm        => (0x1206, vec![at(0), at(1)]),
             Cat::Rating     => (0x1107, vec![at(0)]),
             Cat::Year       => (0x1208, vec![at(0), at(1)]),
             Cat::Label      => (0x130a, vec![at(0), at(1), ALL]),
@@ -854,14 +872,15 @@ impl Browser {
         let req = ids.clone();
         let Some(r) = self.db_call(move |c, s| c.browse(kind, s, &req)) else { return Vec::new() };
         match r {
-            Ok(items) => items.into_iter().map(|i| {
-                let mut next = picked.clone();
-                next.push(i.id);
-                // Rows are named by their label; a row with only a second
-                // label (a count, a key) shows that instead of nothing.
-                let name = if i.label.is_empty() { i.label2.clone() } else { i.label.clone() };
-                Entry { name, is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(Loc::DbCat(cat, next)) }
-            }).collect(),
+            Ok(items) => {
+                // What the player sent, so a list of blank rows shows why.
+                for i in items.iter().take(3) { log::info!("LINK {} row: type 0x{:04x} id {} {:?} {:?}", cat.label(), i.item_type, i.id, i.label, i.label2); }
+                items.into_iter().map(|i| {
+                    let mut next = picked.clone();
+                    next.push(i.id);
+                    Entry { name: cat_row_name(cat, picked.len(), &i), is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(Loc::DbCat(cat, next)) }
+                }).collect()
+            }
             Err(e) => { log::warn!("LINK {}: 0x{kind:04x} {ids:x?}: {e:#}", cat.label()); Vec::new() }
         }
     }
@@ -1633,6 +1652,27 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BPM on a CDJ-3000: the tempos, then a tempo's ranges (±0 … ±6), then
+    /// the tracks.  Neither level has labels: the tempo ×100 and the range
+    /// are the rows' ids, and lists of them came up blank.
+    #[test]
+    fn bpm_lists_tempos_then_ranges_then_tracks() {
+        let row = |t: u32, id: u32, label: &str| opendeck_dbserver::MenuItem {
+            parent_id: 0, id, label: label.into(), label2: String::new(), item_type: t, flags: 0,
+            artwork_id: 0, position: 0, key: String::new(), bpm_x100: 0 };
+        assert_eq!(Cat::Bpm.depth(), 2);
+        assert_eq!(Cat::Bpm.names_request(&[]), (opendeck_dbserver::kind::BPM_MENU, vec![]));
+        assert_eq!(Cat::Bpm.names_request(&[12800]), (0x1106, vec![12800]));
+        assert_eq!(Cat::Bpm.tracks_request(&[12800, 3]), (0x1206, vec![12800, 3]));
+        assert_eq!(cat_row_name(Cat::Bpm, 0, &row(0x000d, 12800, "")), "128");
+        assert_eq!(cat_row_name(Cat::Bpm, 0, &row(0x000d, 12850, "")), "128.5");
+        assert_eq!(cat_row_name(Cat::Bpm, 1, &row(0, 0, "")), "\u{b1}0");
+        assert_eq!(cat_row_name(Cat::Bpm, 1, &row(0, 6, "")), "\u{b1}6");
+        // A label, when the player sends one, wins.
+        assert_eq!(cat_row_name(Cat::Bpm, 1, &row(0, 2, "\u{b1}2")), "\u{b1}2");
+        assert_eq!(cat_row_name(Cat::Genre, 0, &row(0x0006, 4, "Techno")), "Techno");
+    }
 
     // A rekordbox stick appears as a USB row, its playlist tree opens from
     // the "rekordbox" row, and pulling the stick drops the browser back to
