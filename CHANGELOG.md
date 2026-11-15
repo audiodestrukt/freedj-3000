@@ -10,6 +10,12 @@ All notable changes to this project will be documented in this file.
   the original until the whole split was done: the mixer also checked an
   empty placeholder range, which asked whether the start of the track was
   split, and a split from the playhead does that last.
+- A split no longer slows itself down. With the deck paused it kept giving
+  way to its own look-ahead (re-measured from each chunk's time) and
+  restarting: 38 chunks and 80 s for a 3-minute track that needs 31. Now a
+  split gives way only when the playhead really jumps or overtakes it, and
+  aims each new run where the last one did while the playhead stays put: 32
+  chunks, 67 s, paused or playing.
 
 ### Added
 - Stems from the playhead. A track split on the device starts just ahead of

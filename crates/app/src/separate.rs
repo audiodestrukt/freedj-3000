@@ -133,9 +133,19 @@ pub fn separate(track: &[f32], deck_sr: u32, sep: &mut dyn Separator, job: &Job,
     if let Some(f) = job.on_start { f(geo.chunks); }
     let mut st = RunState { input: vec![0f32; 2 * seg], output: vec![0f32; 8 * seg], chunk_s: None };
 
+    // Where the last run was aimed, and the playhead then.  While the
+    // playhead stays put the next run aims at the same place: a look-ahead
+    // re-measured from each chunk's time wobbles, and every wobble back
+    // left a sliver unsplit that cost a run (and its run-in) of its own.
+    let mut aimed: Option<(usize, usize)> = None;
     loop {
         if job.cancel.load(Ordering::Relaxed) { bail!("cancelled"); }
-        let target = geo.target(job, st.chunk_s);
+        let ph = job.playhead.as_ref().map(|p| p.load(Ordering::Relaxed) as usize / 2);
+        let target = match (aimed, ph) {
+            (Some((p0, t0)), Some(p)) if p.abs_diff(p0) < deck_sr as usize / 2 => t0,
+            _ => geo.target(job, st.chunk_s),
+        };
+        if let Some(p) = ph { aimed = Some((p, target)); }
         let Some(page) = bank.first_unready_from(target / crate::stems::PAGE_FRAMES) else { break };
         let from = page * crate::stems::PAGE_FRAMES;
         log::info!("stems: split run from {:.1}s ({}% ready, {:.1}s in)", from as f64 / deck_sr as f64, bank.percent(), t0.elapsed().as_secs_f64());
@@ -249,18 +259,36 @@ fn run(track: &[f32], geo: &Geometry, (mean, std): (f32, f32), weight: &[f32], s
     };
 
     let mut wrote_page = false;
+    let playhead = || job.playhead.as_ref().map(|p| p.load(Ordering::Relaxed) as usize / 2);
+    let (mut last_ph, mut last_t) = (playhead(), std::time::Instant::now());
+    // Only a run that began ahead of the playhead can be overtaken; one
+    // filling the stretch behind it (the top, after a wrap) is meant to be.
+    let began_ahead = last_ph.is_some_and(|p| p <= from);
     for k in k0..geo.chunks {
         if job.cancel.load(Ordering::Relaxed) { bail!("cancelled"); }
-        // The playhead jumped: stop if the next run would start somewhere
-        // this one won't reach within a chunk (once this run has written
-        // a page, so a restless playhead can't stall the split).
-        if k > k0 && wrote_page && job.playhead.is_some() {
-            let want = geo.target(job, st.chunk_s) / PAGE_FRAMES;
-            if let Some(p) = bank.first_unready_from(want) {
-                let start = p * PAGE_FRAMES;
-                if start < from || start > deck_pos + geo.to_deck(stride) + geo.look(st.chunk_s) {
-                    bank.forget_partial(deck_pos.max(from) / PAGE_FRAMES);
-                    return Ok(());
+        // Give way only when the playhead really moved somewhere this run
+        // won't serve: it jumped (further than playing at up to 4x could
+        // take it, a hot cue, a needle search) or it overtook the run (a
+        // split slower than the music).  The look-ahead alone follows the
+        // chunk times, so with a still playhead it wobbles by a page or two;
+        // giving way to that restarted runs over and over (38 chunks for a
+        // 31-chunk track, paused).  And only once this run has written a
+        // page, so a restless playhead can't stall the split.
+        if let (true, Some(ph)) = (k > k0 && wrote_page, playhead()) {
+            let prev = last_ph.unwrap_or(ph);
+            let reach = (last_t.elapsed().as_secs_f64() * 4.0 * deck_sr as f64) as usize + deck_sr as usize / 2;
+            let jumped = ph + deck_sr as usize / 2 < prev || ph > prev + reach;
+            let overtaken = began_ahead && ph > deck_pos.max(from) + geo.to_deck(stride);
+            last_ph = Some(ph);
+            last_t = std::time::Instant::now();
+            if jumped || overtaken {
+                let want = geo.target(job, st.chunk_s) / PAGE_FRAMES;
+                if let Some(p) = bank.first_unready_from(want) {
+                    let start = p * PAGE_FRAMES;
+                    if start < from || start > deck_pos + geo.to_deck(stride) + geo.look(st.chunk_s) {
+                        bank.forget_partial(deck_pos.max(from) / PAGE_FRAMES);
+                        return Ok(());
+                    }
                 }
             }
         }
@@ -601,20 +629,47 @@ mod tests {
         let stride = 7_500usize;
         let first_s = ran[0] as f64 * stride as f64 / 44_100.0;
         assert!((5.5..6.0).contains(&first_s), "first chunk at {first_s:.2}s (playhead 2 s + 4 s look-ahead, less the run-in)");
-        // Runs: first from the untimed 4 s look-ahead; once a chunk is timed
-        // (look-ahead ~1 s) the gap it skipped comes first; the top last.
+        // Two runs: from the playhead plus the (untimed, 4 s) look-ahead to
+        // the end, then the top.  The playhead stays put, so the second run
+        // aims where the first did and wraps to the top: no slivers.
         let starts: Vec<f64> = std::iter::once(ran[0]).chain(ran.windows(2).filter(|w| w[1] != w[0] + 1).map(|w| w[1]))
             .map(|k| k as f64 * stride as f64 / 44_100.0).collect();
-        assert!(starts.len() <= 4, "a few runs: {starts:?}");
-        assert!((2.5..3.2).contains(&starts[1]), "then from just ahead of the playhead: {starts:?}");
-        assert_eq!(*starts.last().unwrap(), 0.0, "and the top last: {starts:?}");
+        assert_eq!(starts.len(), 2, "two runs: {starts:?}");
+        assert_eq!(starts[1], 0.0, "then the top: {starts:?}");
         let _ = t;
-        assert!(ran.len() <= 128 + 3 * 3, "about one pass plus each run's run-in ({} chunks)", ran.len());
+        assert!(ran.len() <= 118 + 2 * 2, "one pass plus each run's run-in ({} chunks)", ran.len());
         assert_eq!(job.progress.load(Ordering::Relaxed), 1000);
         for s in 0..3 {
             let worst = (0..track.len()).map(|i| (got[s][i] as i32 - classic[s][i] as i32).abs()).max().unwrap();
             assert!(worst <= 2, "stem {s} differs from the classic split by {worst}");
         }
+    }
+
+    /// A still playhead (paused) and chunk times that vary: the look-ahead
+    /// wobbles, but the split doesn't give way to that; about one pass of
+    /// chunks, not a run restarted every few chunks.
+    #[test]
+    fn a_still_playhead_and_uneven_chunks_dont_restart_runs() {
+        struct Uneven { inner: Fake, n: usize }
+        impl Separator for Uneven {
+            fn segment(&self) -> usize { self.inner.seg }
+            fn run(&mut self, mix: &[f32], out: &mut [f32]) -> Result<()> {
+                self.n += 1;
+                // 0 ms and 300 ms in turn: the look-ahead moves by ~0.45 s.
+                if self.n % 2 == 0 { std::thread::sleep(std::time::Duration::from_millis(300)); }
+                self.inner.run(mix, out)
+            }
+        }
+        let sr = 48_000;
+        let track = tone(sr as usize * 20, sr);
+        let classic = Geometry::new(sr, track.len() / 2, 40_000).chunks;
+        let ph = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(sr as u64 * 2));
+        let job = Job { playhead: Some(ph), on_chunk: Some(record), ..Default::default() };
+        RAN.with(|r| r.borrow_mut().clear());
+        let (_, t) = split(&track, sr, &mut Uneven { inner: Fake { seg: 40_000, calls: 0 }, n: 0 }, &job).unwrap();
+        let runs = 1 + RAN.with(|r| r.borrow().windows(2).filter(|w| w[1] != w[0] + 1).count());
+        // At most a run-in chunk or two per run beyond one pass.
+        assert!(runs <= 3 && t.chunks <= classic + 2 * runs, "{} chunks in {runs} runs for a {classic}-chunk track", t.chunks);
     }
 
     /// A hot cue during a split: the run stops and the next starts ahead of

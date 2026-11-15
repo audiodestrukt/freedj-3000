@@ -27,8 +27,12 @@ track saves the load.
 - Model frames map exactly onto deck frames: input windows and the output
   converter start on multiples of 147 model / 160 deck frames (48 kHz).
 - The untimed look-ahead is 4 s; once a chunk is timed it's 1.5 × the
-  chunk time + 1 s. The first run may give way after one chunk to fill the
-  gap the 4 s skipped.
+  chunk time + 1 s. A run gives way only when the playhead jumps (further
+  than playing at 4x could take it) or overtakes a run that began ahead of
+  it; while the playhead stays put the next run aims where the last did.
+  Before (2026-11-15 morning) a run gave way whenever the re-measured
+  look-ahead moved, which with a paused deck restarted runs over and over:
+  38 chunks for a 31-chunk track. Now 32, paused or playing.
 - Model release: 10 s after STEMS closes with no split running, on a
   thread of its own; at once on an iOS memory warning
   (`UIApplicationDidReceiveMemoryWarningNotification`, counted in
