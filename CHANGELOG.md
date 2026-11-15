@@ -14,6 +14,19 @@ All notable changes to this project will be documented in this file.
   prepared stick never waits on its stems index. A mark can appear a moment
   after its row.
 
+### Added
+- iOS: the log is written to `opendeck-log.txt` in the OpenDeck folder (Files
+  app → OpenDeck DJ), the previous launch's beside it, capped at 4 MB.
+  Before, it went to stderr, which nothing reads without Xcode attached.
+
+### Fixed
+- iOS: sound no longer stops with the ring/silent switch.  The app now
+  uses the Playback audio session, as a player must, and picks it up again
+  after a call or Siri.
+- iOS: the screen is held awake only while a track plays or loads, or for
+  five minutes after the last touch, instead of for as long as the app is
+  open (an idle iPad stayed lit, hot, and draining).
+
 ## [0.3.23] — 2026-11-14
 
 ### Added
