@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Stems can split with no ONNX Runtime at all: `opendeck-demucs` runs
+  Meta's HTDemucs in plain Rust from its own weights (build with
+  `separate-native`, point `OPENDECK_SEPARATE_MODEL` at
+  `htdemucs.safetensors` from `tools/demucs/export_htdemucs.py`). It
+  matches PyTorch more closely than the ONNX export (100-123 dB against
+  80-86) and on a Raspberry Pi 5 splits a 7.8 s chunk in 7.5 s, where ONNX
+  Runtime takes 15.3. Still short of keeping up with playback on the Pi;
+  `OPENDECK_DEMUCS_F16=1` runs the transformer in half precision (6.85 s,
+  57-68 dB against PyTorch).
+
 ### Fixed
 - Tempo `+` / `−` keys, and a controller's `tempo_nudge` buttons, went the
   wrong way: `+` slowed the deck by 1 % and `−` sped it up, since the tempo
