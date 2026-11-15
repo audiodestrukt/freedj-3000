@@ -11,6 +11,9 @@
 //! - [`Session::ask_info`] is for the highlighted rows: it returns at once,
 //!   and the [`DbInfo`] arrives a frame or two later ([`Session::answers`]),
 //!   as BROWSE's S marks do (`stems::StemMarks`).
+//! - [`Session::ask_list`] is for the right-hand pane: what the highlighted
+//!   row opens (a BPM's ranges, a genre's artists, a playlist's tracks), in
+//!   the background too ([`Session::lists`]).  It goes ahead of the lookups.
 //!
 //! One session, not two: a player drops a session when another opens from
 //! the same player number (seen on a CDJ-3000: the first then reads EOF), so
@@ -61,9 +64,13 @@ impl InfoSource for Client {
 /// whether it is finished (false: failed, and would like one retry).
 type CallFn<C> = Box<dyn FnMut(std::result::Result<&mut C, &anyhow::Error>, Slot, bool) -> bool + Send>;
 
+/// A list for the right-hand pane, asked under a ticket of the caller's.
+pub type ListFn<C> = Box<dyn FnMut(&mut C, Slot) -> Result<Vec<MenuItem>> + Send>;
+
 enum Job<C> {
     Call(CallFn<C>),
     Info { key: InfoKey, verbose: bool },
+    List { ticket: u64, f: ListFn<C> },
 }
 
 pub struct Session<C: InfoSource = Client> {
@@ -71,6 +78,7 @@ pub struct Session<C: InfoSource = Client> {
     pub slot: Slot,
     jobs:     mpsc::Sender<Job<C>>,
     answers:  mpsc::Receiver<(InfoKey, Option<DbInfo>)>,
+    lists:    mpsc::Receiver<(u64, Result<Vec<MenuItem>>)>,
 }
 
 impl<C: InfoSource> Session<C> {
@@ -81,10 +89,11 @@ impl<C: InfoSource> Session<C> {
         let client = connect()?;
         let (jobs, rx) = mpsc::channel();
         let (answer, answers) = mpsc::channel();
+        let (listed, lists) = mpsc::channel();
         std::thread::Builder::new().name("dbserver-session".into()).spawn(move || {
-            Worker { ip, slot, client: Some(client), connect: Box::new(connect), answer }.run(rx);
+            Worker { ip, slot, client: Some(client), connect: Box::new(connect), answer, listed }.run(rx);
         })?;
-        Ok(Session { ip, slot, jobs, answers })
+        Ok(Session { ip, slot, jobs, answers, lists })
     }
 
     /// Run a request on the session and wait for its answer.  It goes ahead
@@ -116,6 +125,17 @@ impl<C: InfoSource> Session<C> {
     pub fn answers(&self) -> impl Iterator<Item = (InfoKey, Option<DbInfo>)> + '_ {
         self.answers.try_iter()
     }
+
+    /// List something in the background (no retry: a pane can ask again).
+    /// The rows come through [`lists`](Self::lists) under `ticket`.
+    pub fn ask_list(&self, ticket: u64, f: impl FnMut(&mut C, Slot) -> Result<Vec<MenuItem>> + Send + 'static) -> bool {
+        self.jobs.send(Job::List { ticket, f: Box::new(f) }).is_ok()
+    }
+
+    /// The lists finished since the last call.  Never blocks.
+    pub fn lists(&self) -> impl Iterator<Item = (u64, Result<Vec<MenuItem>>)> + '_ {
+        self.lists.try_iter()
+    }
 }
 
 /// A background lookup, one request per step, so a menu request never waits
@@ -134,23 +154,31 @@ struct Worker<C> {
     client:  Option<C>,
     connect: Box<dyn FnMut() -> Result<C> + Send>,
     answer:  mpsc::Sender<(InfoKey, Option<DbInfo>)>,
+    listed:  mpsc::Sender<(u64, Result<Vec<MenuItem>>)>,
 }
 
 impl<C: InfoSource> Worker<C> {
     fn run(mut self, rx: mpsc::Receiver<Job<C>>) {
         let mut calls: VecDeque<CallFn<C>> = VecDeque::new();
+        let mut lists: VecDeque<(u64, ListFn<C>)> = VecDeque::new();
         let mut infos: VecDeque<InfoTask> = VecDeque::new();
         loop {
             // Everything asked so far, without waiting: menus jump the queue.
             loop {
                 match rx.try_recv() {
-                    Ok(j) => Self::queue(j, &mut calls, &mut infos),
+                    Ok(j) => Self::queue(j, &mut calls, &mut lists, &mut infos),
                     Err(mpsc::TryRecvError::Empty) => break,
                     // The browser closed the session (another source, or quit).
                     Err(mpsc::TryRecvError::Disconnected) => return,
                 }
             }
             if let Some(job) = calls.pop_front() { self.run_call(job); continue; }
+            if let Some((ticket, mut f)) = lists.pop_front() {
+                let slot = self.slot;
+                let r = match self.client.as_mut() { Some(c) => f(c, slot), None => Err(anyhow::anyhow!("no session")) };
+                let _ = self.listed.send((ticket, r));
+                continue;
+            }
             if let Some(mut t) = infos.pop_front() {
                 if self.info_step(&mut t) {
                     let InfoTask { key, meta, info, .. } = t;
@@ -161,15 +189,16 @@ impl<C: InfoSource> Worker<C> {
                 continue;
             }
             match rx.recv() {
-                Ok(j) => Self::queue(j, &mut calls, &mut infos),
+                Ok(j) => Self::queue(j, &mut calls, &mut lists, &mut infos),
                 Err(_) => return,
             }
         }
     }
 
-    fn queue(j: Job<C>, calls: &mut VecDeque<CallFn<C>>, infos: &mut VecDeque<InfoTask>) {
+    fn queue(j: Job<C>, calls: &mut VecDeque<CallFn<C>>, lists: &mut VecDeque<(u64, ListFn<C>)>, infos: &mut VecDeque<InfoTask>) {
         match j {
             Job::Call(f) => calls.push_back(f),
+            Job::List { ticket, f } => lists.push_back((ticket, f)),
             Job::Info { key, verbose } => infos.push_back(InfoTask { key, verbose, step: 0, meta: None, info: DbInfo::default() }),
         }
     }
@@ -364,6 +393,26 @@ mod tests {
         // At most the request in flight, then its own: two round trips, not 31.
         assert!(waited < Duration::from_millis(150), "the menu waited {waited:?}");
         assert_eq!(wait_answers(&f.session, 10).len(), 10, "the lookups still finish");
+    }
+
+    #[test]
+    fn a_list_comes_back_under_its_ticket_ahead_of_queued_lookups() {
+        let f = fake(25);
+        for id in 1..=10 { f.session.ask_info(key(id), false); }
+        std::thread::sleep(Duration::from_millis(10));
+        let t0 = Instant::now();
+        assert!(f.session.ask_list(42, |c, s| c.metadata(s, 7)));
+        assert!(t0.elapsed() < Duration::from_millis(20), "ask_list waited");
+        let mut got = None;
+        while got.is_none() && t0.elapsed() < Duration::from_secs(5) {
+            got = f.session.lists().next();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let (ticket, rows) = got.expect("a list");
+        assert_eq!(ticket, 42);
+        assert_eq!(rows.unwrap()[0].id, 7);
+        // Behind the request in flight only, not the 30 queued.
+        assert!(t0.elapsed() < Duration::from_millis(150), "the list waited {:?}", t0.elapsed());
     }
 
     #[test]

@@ -201,7 +201,7 @@ enum Loc {
 /// lists it, and the requests that open one of its entries (Beat Link's /
 /// dysentery's tables).  The argument after the sort order is the picked
 /// entry's id; -1 means "all" where a request takes two.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Cat { Genre, Bpm, Rating, Year, Label, Color, Time, History, Key, OrigArtist, Remixer }
 
 impl Cat {
@@ -270,6 +270,69 @@ impl Cat {
             Cat::Key        => (0x1214, vec![at(0), at(1)]),
             Cat::OrigArtist => (0x1502, vec![at(0), at(1)]),
             Cat::Remixer    => (0x1802, vec![at(0), at(1)]),
+        }
+    }
+}
+
+/// What a highlighted linked-player row opens, for the right-hand pane:
+/// a category's next level (a BPM's ranges, a range's tracks, a genre's
+/// artists), a playlist folder, a playlist, an artist's or album's tracks,
+/// a FOLDER tree level.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Peek { Cat(Cat, Vec<u32>), Folder(u32), Playlist(u32), Artist(u32), Album(u32), Tree(u32) }
+
+/// The pane's heading and rows (is a folder, name).
+type PeekRows = (&'static str, Vec<(bool, String)>);
+
+impl Peek {
+    fn of(loc: &Loc) -> Option<Peek> {
+        Some(match loc {
+            Loc::DbCat(c, ids) => Peek::Cat(*c, ids.clone()),
+            Loc::DbFolder(id)   => Peek::Folder(*id),
+            Loc::DbPlaylist(id) => Peek::Playlist(*id),
+            Loc::DbArtist(id)   => Peek::Artist(*id),
+            Loc::DbAlbum(id)    => Peek::Album(*id),
+            Loc::DbTree(id)     => Peek::Tree(*id),
+            _ => return None,
+        })
+    }
+
+    /// Whether it lists tracks (else the names of the next level).
+    fn lists_tracks(&self) -> bool {
+        match self {
+            Peek::Cat(c, ids) => ids.len() >= c.depth(),
+            Peek::Playlist(_) | Peek::Artist(_) | Peek::Album(_) => true,
+            Peek::Folder(_) | Peek::Tree(_) => false,
+        }
+    }
+
+    /// The request, as the level itself asks it when opened (`rebuild`).
+    fn request(&self) -> impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>> + Send + 'static {
+        let p = self.clone();
+        move |c: &mut DbClient, s: Slot| match &p {
+            Peek::Cat(cat, ids) if ids.len() >= cat.depth() => { let (k, a) = cat.tracks_request(ids); c.browse(k, s, &a) }
+            Peek::Cat(cat, ids) => { let (k, a) = cat.names_request(ids); c.browse(k, s, &a) }
+            Peek::Folder(id)   => c.playlist(s, *id, true),
+            Peek::Playlist(id) => c.playlist(s, *id, false),
+            Peek::Artist(id)   => c.tracks_for_artist(s, *id),
+            Peek::Album(id)    => c.tracks_for_album(s, *id),
+            Peek::Tree(id)     => c.browse(opendeck_dbserver::kind::FOLDER_MENU, s, &[*id, 0]),
+        }
+    }
+
+    /// The pane's rows from the player's reply, named as the level names them.
+    fn rows(&self, items: Vec<MenuItem>) -> PeekRows {
+        if self.lists_tracks() {
+            return ("TRACK", items.into_iter().filter(|i| i.type_name() == "track").map(|i| (false, i.label)).collect());
+        }
+        match self {
+            Peek::Cat(cat, ids) => (cat.label(), items.iter().map(|i| (true, cat_row_name(*cat, ids.len(), i))).collect()),
+            Peek::Folder(_) => ("PLAYLIST", items.into_iter().map(|i| (true, i.label)).collect()),
+            _ => ("FOLDER", items.into_iter().filter_map(|i| match i.type_name() {
+                "folder" => Some((true, i.label)),
+                "track"  => Some((false, i.label)),
+                _ => None,
+            }).collect()),
         }
     }
 }
@@ -378,6 +441,11 @@ pub struct Browser {
     meta_cache: std::collections::HashMap<InfoKey, Option<DbInfo>>,
     /// Lookups asked of the session and not answered yet.
     meta_asked: std::collections::HashSet<InfoKey>,
+    /// The right-hand pane for a highlighted linked row: what it opens, by
+    /// row, and the one list asked and not answered yet (its ticket).
+    peeks:      std::collections::HashMap<Peek, PeekRows>,
+    peek_asked: Option<(u64, Peek)>,
+    peek_ticket: u64,
     link:      Arc<LinkState>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
@@ -460,6 +528,9 @@ impl Browser {
             db_cats: Vec::new(),
             meta_cache: Default::default(),
             meta_asked: Default::default(),
+            peeks: Default::default(),
+            peek_asked: None,
+            peek_ticket: 0,
             link,
             preview: Default::default(),
             home: start.clone(),
@@ -515,6 +586,23 @@ impl Browser {
             self.meta_asked.remove(&k);
             self.meta_cache.insert(k, info);
         }
+        // The right-hand pane: what the highlighted row opens, one list at
+        // a time (scrolling fast asks only for where the highlight stops).
+        for (ticket, r) in db.lists() {
+            let Some((t, peek)) = self.peek_asked.take() else { continue };
+            if t != ticket { self.peek_asked = Some((t, peek)); continue; }
+            let rows = match r {
+                Ok(items) => peek.rows(items),
+                Err(e) => { log::info!("LINK pane {peek:?}: {e:#}"); (if peek.lists_tracks() { "TRACK" } else { "" }, Vec::new()) }
+            };
+            self.peeks.insert(peek, rows);
+        }
+        if self.peek_asked.is_none() {
+            if let Some(peek) = self.selected_peek().filter(|p| !self.peeks.contains_key(p)) {
+                self.peek_ticket += 1;
+                if db.ask_list(self.peek_ticket, peek.request()) { self.peek_asked = Some((self.peek_ticket, peek)); }
+            }
+        }
         // The highlighted row first, then its neighbours, so the table's
         // previews and second rows fill in around it.
         let n = self.entries.len();
@@ -533,7 +621,22 @@ impl Browser {
 
     /// Lookups still under way (the app keeps drawing at full rate so their
     /// answers show as they land).
-    pub fn db_pending(&self) -> bool { !self.meta_asked.is_empty() }
+    pub fn db_pending(&self) -> bool { !self.meta_asked.is_empty() || self.peek_asked.is_some() }
+
+    fn selected_peek(&self) -> Option<Peek> {
+        match self.selected_entry() {
+            Some(Entry { kind: EntryKind::Descend(loc), .. }) => Peek::of(loc),
+            _ => None,
+        }
+    }
+
+    /// The right-hand pane for a highlighted linked-player row: the heading
+    /// and rows of what it opens (empty until the player answers).  `None`
+    /// for other rows.
+    pub fn db_peek(&self) -> Option<PeekRows> {
+        let p = self.selected_peek()?;
+        Some(self.peeks.get(&p).cloned().unwrap_or_else(|| (if p.lists_tracks() { "TRACK" } else { "" }, Vec::new())))
+    }
 
     /// The tags (title, artist, album, key, BPM, cover) fetched for a
     /// dbserver track, if any.
@@ -989,6 +1092,8 @@ impl Browser {
         // The old session (if any) closes first: one session per player number.
         self.db = None;
         self.meta_asked.clear();
+        self.peeks.clear();
+        self.peek_asked = None;
         let session = DbSession::open(ip, slot, move || DbClient::discover(ip, device))?;
         log::info!("LINK {ip}: dbserver session open ({slot:?})");
         self.db = Some(session);
@@ -1672,6 +1777,33 @@ mod tests {
         // A label, when the player sends one, wins.
         assert_eq!(cat_row_name(Cat::Bpm, 1, &row(0, 2, "\u{b1}2")), "\u{b1}2");
         assert_eq!(cat_row_name(Cat::Genre, 0, &row(0x0006, 4, "Techno")), "Techno");
+    }
+
+    /// The right-hand pane shows what the highlighted row opens: a BPM's
+    /// ranges, a range's tracks, a genre's artists, a playlist folder's
+    /// playlists, named as the level itself names them.
+    #[test]
+    fn the_pane_lists_what_a_highlighted_linked_row_opens() {
+        let row = |t: u32, id: u32, label: &str| opendeck_dbserver::MenuItem {
+            parent_id: 0, id, label: label.into(), label2: String::new(), item_type: t, flags: 0,
+            artwork_id: 0, position: 0, key: String::new(), bpm_x100: 0 };
+        // BPM 128 highlighted: its ranges.
+        let p = Peek::of(&Loc::DbCat(Cat::Bpm, vec![12800])).unwrap();
+        assert!(!p.lists_tracks());
+        assert_eq!(p.rows(vec![row(0, 0, ""), row(0, 1, "")]), ("BPM", vec![(true, "\u{b1}0".to_string()), (true, "\u{b1}1".to_string())]));
+        // ±1 highlighted: the tracks, typed rows included, anything else left out.
+        let p = Peek::of(&Loc::DbCat(Cat::Bpm, vec![12800, 1])).unwrap();
+        assert!(p.lists_tracks());
+        assert_eq!(p.rows(vec![row(0x0704, 9, "Song"), row(0x000d, 12800, "")]), ("TRACK", vec![(false, "Song".to_string())]));
+        // A genre: its artists.
+        let p = Peek::of(&Loc::DbCat(Cat::Genre, vec![4])).unwrap();
+        assert_eq!(p.rows(vec![row(0x0007, 2, "Artist")]).1, vec![(true, "Artist".to_string())]);
+        // A playlist folder: its playlists; the FOLDER tree: folders and tracks.
+        assert_eq!(Peek::of(&Loc::DbFolder(3)).unwrap().rows(vec![row(0x0008, 5, "Set")]), ("PLAYLIST", vec![(true, "Set".to_string())]));
+        assert_eq!(Peek::of(&Loc::DbTree(1)).unwrap().rows(vec![row(0x0001, 2, "Dir"), row(0x0004, 3, "Song")]).1,
+                   vec![(true, "Dir".to_string()), (false, "Song".to_string())]);
+        // Rows that open nothing on the player have no pane.
+        assert!(Peek::of(&Loc::Link).is_none());
     }
 
     // A rekordbox stick appears as a USB row, its playlist tree opens from

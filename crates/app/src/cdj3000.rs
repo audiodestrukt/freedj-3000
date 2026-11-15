@@ -1845,6 +1845,15 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     ui.painter().line_segment([Pos2::new(right.min.x - 1.0 * u, right.min.y), Pos2::new(right.min.x - 1.0 * u, right.max.y)], Stroke::new(2.0 * u, PANE_HEAD));
     match b.selected_entry() {
         Some(e) if !e.is_dir => draw_browse_info(ui, b, e, sc, right, u, out),
+        _ if b.db_peek().is_some() => {
+            // A linked player's row: what it opens (a BPM's ranges, a
+            // range's tracks, a genre's artists, a playlist's tracks).
+            let (head, items) = b.db_peek().unwrap();
+            let rows: Vec<Row> = items.iter().map(|(d, n)| Row {
+                icon: if *d { RowIcon::List } else { RowIcon::Track }, text: n, value: None, tagged: false, played: false, stems: false,
+            }).collect();
+            draw_list(ui, right, head, &rows, usize::MAX, "", u, None);
+        }
         _ if b.rb_preview().is_some() => {
             // A rekordbox name: an artist's albums, else its tracks.
             let (head, items) = b.rb_preview().unwrap();
