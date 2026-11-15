@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Changed
+- Loading from a linked player: the track starts decoding while it still
+  downloads, so the deck is playable after the first seconds instead of after
+  the whole file (a 65 MB AIFF took about 13 s over Wi-Fi before).  A format
+  that needs the end of the file first (some MP3s) still waits for the
+  download.
 - Prepared stems on a stick with OverCue's `index-v2` (OverCue Desktop
   2.2.40 and later) are found by the track's rekordbox ID with one small
   read, as OverCue's player finds them, instead of reading the whole

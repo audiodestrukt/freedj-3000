@@ -2396,7 +2396,7 @@ impl DeckApp {
                 }
             };
             log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
-            prep.complete(Fetched { name, path: rel_path, audio, grid, t0 }, tx)
+            prep.complete(Fetched { name, path: rel_path, audio: AudioSrc::Bytes(audio), grid, t0 }, tx)
         })
     }
 
@@ -2441,10 +2441,22 @@ impl DeckApp {
                 .unwrap_or_else(|| utf16(want));
             let root = nfs.mount(&export)?;
             let (fh, size) = nfs.lookup_path(&root, &path)?;
-            let audio = nfs.read_file(&fh, size)?;
-            log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
+            // The download runs on its own thread while the decoder reads the
+            // front of the file as it arrives: the deck is playable after the
+            // first seconds, not after the whole file.
+            let t_read = Instant::now();
+            let (reader, feed) = opendeck_decode::growing::growing(size as u64);
+            std::thread::Builder::new().name("nfs-read".into()).spawn(move || {
+                match nfs.read_file_with(&fh, size, |b| feed.push(b)) {
+                    Ok(_) => {
+                        let rs = t_read.elapsed().as_secs_f64().max(1e-3);
+                        log::info!("LINK {ip}: read {size} bytes in {:.1} s ({:.2} MB/s); {:.0} ms since the load began", rs, size as f64 / 1e6 / rs, t0.elapsed().as_secs_f64() * 1e3);
+                    }
+                    Err(e) => { log::info!("LINK {ip}: read stopped: {e:#}"); feed.fail(format!("{e:#}")); }
+                }
+            })?;
             let name = if title.is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { title };
-            prep.complete(Fetched { name, path, audio, grid: FetchedGrid::Beats(beats), t0 }, tx)
+            prep.complete(Fetched { name, path, audio: AudioSrc::Stream(reader), grid: FetchedGrid::Beats(beats), t0 }, tx)
         })
     }
 
@@ -3685,7 +3697,10 @@ impl CueLooks {
 }
 
 /// A track fetched over the network by a background thread, ready to decode.
-struct Fetched { name: String, path: String, audio: Vec<u8>, grid: FetchedGrid, t0: Instant }
+/// The fetched audio: all of it, or a file still downloading that the decoder
+/// reads as it arrives.
+enum AudioSrc { Bytes(Vec<u8>), Stream(opendeck_decode::growing::Growing) }
+struct Fetched { name: String, path: String, audio: AudioSrc, grid: FetchedGrid, t0: Instant }
 /// `Anlz`: the `.DAT`, and the `.EXT` beside it when there is one (cue
 /// colours and comments).
 enum FetchedGrid { None, Anlz(Vec<u8>, Option<Vec<u8>>), Beats(Vec<opendeck_dbserver::GridBeat>) }
@@ -3758,8 +3773,11 @@ const AUTO_CUE_MAX_SECS: f64 = 60.0;
 impl Prep {
     /// Decode fetched bytes and stream them in (loader thread).
     fn complete(self, f: Fetched, tx: &LoadTx) -> Result<()> {
-        let dec = opendeck_decode::SymphoniaDecoder::open_bytes(f.audio, f.path.rsplit('.').next())
-            .context("failed to open in-memory audio")?;
+        let ext = f.path.rsplit('.').next();
+        let dec = match f.audio {
+            AudioSrc::Bytes(b) => opendeck_decode::SymphoniaDecoder::open_bytes(b, ext),
+            AudioSrc::Stream(r) => opendeck_decode::SymphoniaDecoder::open_growing(r, ext),
+        }.context("failed to open the fetched audio")?;
         let ch = self.deck_ch;
         let grid_cue = match f.grid {
             FetchedGrid::None => None,

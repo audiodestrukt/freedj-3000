@@ -2,6 +2,7 @@ use opendeck_types::{DecodeError, Decoder, TrackInfo};
 use rtrb::{Producer, RingBuffer};
 use std::path::Path;
 
+pub mod growing;
 pub mod symphonia_decoder;
 pub use symphonia_decoder::{SymphoniaDecoder, TrackTags};
 
