@@ -115,9 +115,11 @@ impl Entry {
     }
 }
 
-/// What a linked player's library knows about one track: its metadata and
-/// the cover bytes (JPEG / PNG) when it has one.
-struct DbInfo { meta: opendeck_dbserver::TrackMeta, art: Option<Vec<u8>>, wave: Option<Arc<Vec<(u8, u8)>>>, bands: Option<Arc<Vec<[u8; 3]>>> }
+use crate::dbsession::{DbInfo, InfoKey, Session as DbSession};
+
+/// Lookups (metadata, cover, previews) queued on the session at once: few,
+/// so a new highlight's row is next rather than behind the old neighbours.
+const INFO_IN_FLIGHT: usize = 2;
 
 #[derive(Clone)]
 enum EntryKind {
@@ -341,9 +343,9 @@ pub struct Browser {
     pub selected: usize,
     rb:        Option<Arc<RbExport>>,
     rb_source: Option<RbSource>,
-    /// Open dbserver session to a peer: its address, the client, and the slot
-    /// we browse (USB on a player, Collection on rekordbox).
-    db:        Option<(Ipv4Addr, DbClient, Slot)>,
+    /// Open dbserver session to a peer (its address and the slot we browse:
+    /// USB on a player, Collection on rekordbox), on its own thread.
+    db:        Option<DbSession>,
     /// Removable media seen at the last scan (USB rows at the top level).
     media:     Vec<Mount>,
     media_at:  Option<Instant>,
@@ -355,7 +357,9 @@ pub struct Browser {
     db_cats:   Vec<Entry>,
     /// Library metadata of tracks shown in a dbserver list, fetched as each
     /// is highlighted (a list row carries only title and artist).
-    meta_cache: std::collections::HashMap<(Ipv4Addr, u8, u32), Option<DbInfo>>,
+    meta_cache: std::collections::HashMap<InfoKey, Option<DbInfo>>,
+    /// Lookups asked of the session and not answered yet.
+    meta_asked: std::collections::HashSet<InfoKey>,
     link:      Arc<LinkState>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
@@ -437,6 +441,7 @@ impl Browser {
             db_label: String::new(),
             db_cats: Vec::new(),
             meta_cache: Default::default(),
+            meta_asked: Default::default(),
             link,
             preview: Default::default(),
             home: start.clone(),
@@ -481,59 +486,36 @@ impl Browser {
     }
     pub fn selected_entry(&self) -> Option<&Entry> { self.entries.get(self.selected) }
 
-    /// Fetch the highlighted dbserver track's library metadata once (title,
-    /// artist, album, key, BPM, year) for the INFO pane.  Call each frame;
-    /// it asks the player only when the highlight lands on a new track.
+    /// Look up the highlighted dbserver track's library metadata once (title,
+    /// artist, album, key, BPM, year, cover, previews) for the INFO pane and
+    /// the table.  Call each frame; it never waits on the network: the
+    /// session's worker asks the player, and the answer is taken here a
+    /// frame or two later.
     pub fn prefetch_meta(&mut self) {
-        // The highlighted row first, then one neighbour per frame, so the
-        // table's previews and second rows fill in around it.
+        let Some(db) = self.db.as_ref() else { return };
+        for (k, info) in db.answers() {
+            self.meta_asked.remove(&k);
+            self.meta_cache.insert(k, info);
+        }
+        // The highlighted row first, then its neighbours, so the table's
+        // previews and second rows fill in around it.
         let n = self.entries.len();
         let order = std::iter::once(self.selected)
             .chain((1..=10usize).flat_map(|d| [self.selected + d, self.selected.wrapping_sub(d)]))
             .filter(|&i| i < n);
-        let todo = order.into_iter().find(|&i| {
-            matches!(&self.entries[i].kind, EntryKind::Track(l @ Load::Db { .. }) if Self::meta_key(l).is_some_and(|k| !self.meta_cache.contains_key(&k)))
-        });
-        let Some(i) = todo else { return };
-        let Some(Entry { kind: EntryKind::Track(Load::Db { ip, id, .. }), .. }) = self.entries.get(i) else { return };
-        let Some((cur, _, slot)) = self.db.as_ref() else { return };
-        if cur != ip { return; }
-        let key = (*ip, *slot as u8, *id);
-        let id = *id;
-        let verbose = i == self.selected;
-        let info = self.db_call(|c, s| {
-            let rows = c.metadata(s, id)?;
-            if verbose {
-                // What the player sent, once per track: shows which rows a
-                // player leaves out (key and year come up empty on some).
-                for r in &rows { log::info!("LINK metadata {id}: type 0x{:04x} id {} {:?} {:?}", r.item_type, r.id, r.label, r.label2); }
-            }
-            let meta = opendeck_dbserver::TrackMeta::from_rows(&rows);
-            let art = if meta.artwork_id != 0 { c.artwork(s, meta.artwork_id).ok().filter(|b| !b.is_empty()) } else { None };
-            let wave = match c.waveform_preview(s, id) {
-                Ok(b) => {
-                    if verbose { log::info!("LINK preview {id}: {} bytes", b.len()); }
-                    // 400 columns, one byte each: height in the low 5 bits,
-                    // whiteness in the top 3.  Some replies carry a header.
-                    let d = if b.len() > 400 { &b[b.len() - 400..] } else { &b[..] };
-                    Some(Arc::new(d.iter().map(|&v| (v & 0x1f, v >> 5)).collect::<Vec<_>>())).filter(|w| w.iter().any(|&(h, _)| h > 0))
-                }
-                Err(e) => { log::info!("LINK preview {id}: {e:#}"); None }
-            };
-            // CDJ-3000 3-band preview (.2EX PWV6: 1,200 columns of low, mid, high).
-            let bands = match c.anlz_tag(s, id, b"PWV6", b"2EX") {
-                Ok(b) => {
-                    if verbose { log::info!("LINK preview3 {id}: {} bytes", b.len()); }
-                    let d = if b.len() % 3 != 0 { &b[b.len() - b.len() / 3 * 3..] } else { &b[..] };
-                    let d = if d.len() > 3600 { &d[d.len() - 3600..] } else { d };
-                    Some(Arc::new(d.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect::<Vec<_>>())).filter(|w| w.iter().any(|c| c.iter().any(|&v| v > 0)))
-                }
-                Err(e) => { if verbose { log::info!("LINK preview3 {id}: {e:#}"); } None }
-            };
-            Ok(DbInfo { meta, art, wave, bands })
-        }).and_then(|r| r.map_err(|e| log::info!("LINK metadata {id}: {e:#}")).ok());
-        self.meta_cache.insert(key, info);
+        for i in order {
+            if self.meta_asked.len() >= INFO_IN_FLIGHT { break; }
+            let EntryKind::Track(l @ Load::Db { ip, .. }) = &self.entries[i].kind else { continue };
+            if *ip != db.ip { continue; }
+            let Some(k) = Self::meta_key(l) else { continue };
+            if k.1 != db.slot as u8 || self.meta_cache.contains_key(&k) || self.meta_asked.contains(&k) { continue; }
+            if db.ask_info(k, i == self.selected) { self.meta_asked.insert(k); }
+        }
     }
+
+    /// Lookups still under way (the app keeps drawing at full rate so their
+    /// answers show as they land).
+    pub fn db_pending(&self) -> bool { !self.meta_asked.is_empty() }
 
     /// The tags (title, artist, album, key, BPM, cover) fetched for a
     /// dbserver track, if any.
@@ -608,7 +590,7 @@ impl Browser {
     pub fn source_badge(&self) -> Option<(u8, u8)> {
         let in_link = self.stack.iter().any(|l| matches!(l, Loc::DbRoot | Loc::RbRoot | Loc::DbFolder(_) | Loc::DbCat(..) | Loc::DbAllTracks | Loc::DbTree(_)));
         let (ip, slot) = match (&self.db, &self.rb_source) {
-            (Some((ip, _, slot)), _) if in_link && self.stack.iter().any(|l| matches!(l, Loc::DbRoot)) => (*ip, *slot as u8),
+            (Some(DbSession { ip, slot, .. }), _) if in_link && self.stack.iter().any(|l| matches!(l, Loc::DbRoot)) => (*ip, *slot as u8),
             (_, Some(RbSource::Link(ip))) if in_link => (*ip, 3),
             _ => return None,
         };
@@ -713,12 +695,12 @@ impl Browser {
             Some(Loc::RbHistoryList(id)) => self.rb_track_entries(|e| e.history_tracks(id)),
             Some(Loc::DbRoot)         => self.db_root_entries(),
             Some(Loc::DbFolder(id))   => self.db_folder_entries(id),
-            Some(Loc::DbPlaylist(id)) => self.db_track_entries(|c, s| c.playlist(s, id, false)),
+            Some(Loc::DbPlaylist(id)) => self.db_track_entries(move |c, s| c.playlist(s, id, false)),
             Some(Loc::DbAllTracks)    => self.db_track_entries(|c, s| c.all_tracks(s, 0)),
             Some(Loc::DbArtists)      => self.db_name_entries(|c, s| c.artists(s), Loc::DbArtist),
-            Some(Loc::DbArtist(id))   => self.db_track_entries(|c, s| c.tracks_for_artist(s, id)),
+            Some(Loc::DbArtist(id))   => self.db_track_entries(move |c, s| c.tracks_for_artist(s, id)),
             Some(Loc::DbAlbums)       => self.db_name_entries(|c, s| c.albums(s), Loc::DbAlbum),
-            Some(Loc::DbAlbum(id))    => self.db_track_entries(|c, s| c.tracks_for_album(s, id)),
+            Some(Loc::DbAlbum(id))    => self.db_track_entries(move |c, s| c.tracks_for_album(s, id)),
             Some(Loc::DbFilenames)    => self.db_track_entries(|c, s| c.filenames(s)),
             Some(Loc::DbCat(c, ids))  => self.db_cat_entries(c, ids),
             Some(Loc::DbTree(id))     => self.db_tree_entries(id),
@@ -866,10 +848,11 @@ impl Browser {
     fn db_cat_entries(&mut self, cat: Cat, picked: Vec<u32>) -> Vec<Entry> {
         if picked.len() >= cat.depth() {
             let (kind, ids) = cat.tracks_request(&picked);
-            return self.db_track_entries(|c, s| c.browse(kind, s, &ids));
+            return self.db_track_entries(move |c, s| c.browse(kind, s, &ids));
         }
         let (kind, ids) = cat.names_request(&picked);
-        let Some(r) = self.db_call(|c, s| c.browse(kind, s, &ids)) else { return Vec::new() };
+        let req = ids.clone();
+        let Some(r) = self.db_call(move |c, s| c.browse(kind, s, &req)) else { return Vec::new() };
         match r {
             Ok(items) => items.into_iter().map(|i| {
                 let mut next = picked.clone();
@@ -886,8 +869,8 @@ impl Browser {
     /// FOLDER: one level of the player's folder tree, folders then the
     /// tracks in them.
     fn db_tree_entries(&mut self, folder: u32) -> Vec<Entry> {
-        let Some(r) = self.db_call(|c, s| c.browse(opendeck_dbserver::kind::FOLDER_MENU, s, &[folder, 0])) else { return Vec::new() };
-        let Some((ip, _, slot)) = self.db.as_ref() else { return Vec::new() };
+        let Some(r) = self.db_call(move |c, s| c.browse(opendeck_dbserver::kind::FOLDER_MENU, s, &[folder, 0])) else { return Vec::new() };
+        let Some(DbSession { ip, slot, .. }) = self.db.as_ref() else { return Vec::new() };
         let (ip, slot) = (*ip, *slot);
         match r {
             Ok(items) => items.into_iter().filter_map(|i| match i.type_name() {
@@ -903,7 +886,7 @@ impl Browser {
     }
 
     /// A list of names (artists, albums) that each open as a track list.
-    fn db_name_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>, loc: fn(u32) -> Loc) -> Vec<Entry> {
+    fn db_name_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>> + Send + 'static, loc: fn(u32) -> Loc) -> Vec<Entry> {
         let Some(r) = self.db_call(fetch) else { return Vec::new() };
         match r {
             Ok(items) => items.into_iter().map(|i| Entry {
@@ -922,7 +905,7 @@ impl Browser {
             out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None, key: None, art: None,
                              kind: EntryKind::Descend(Loc::DbAllTracks) });
         }
-        match self.db_call(|c, slot| c.playlist(slot, folder, true)).unwrap_or_else(|| Ok(Vec::new())) {
+        match self.db_call(move |c, slot| c.playlist(slot, folder, true)).unwrap_or_else(|| Ok(Vec::new())) {
             Ok(items) => for i in items {
                 let is_folder = i.type_name() == "folder";
                 out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None, key: None, art: None,
@@ -934,9 +917,9 @@ impl Browser {
     }
 
     /// A track list: a playlist, a category's tracks, or the whole collection.
-    fn db_track_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>) -> Vec<Entry> {
+    fn db_track_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>> + Send + 'static) -> Vec<Entry> {
         let Some(r) = self.db_call(fetch) else { return Vec::new() };
-        let Some((ip, _, slot)) = self.db.as_ref() else { return Vec::new() };
+        let Some(DbSession { ip, slot, .. }) = self.db.as_ref() else { return Vec::new() };
         let (ip, slot) = (*ip, *slot);
         match r {
             Ok(items) => {
@@ -954,37 +937,26 @@ impl Browser {
         }
     }
 
-    /// Run a request on the open dbserver session. A player drops a session
-    /// when another opens from the same player number (seen on a CDJ-3000:
-    /// the first then reads EOF), so on an error reconnect once and retry.
-    /// `None` when no session is open.
-    fn db_call<T>(&mut self, mut f: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<T>) -> Option<anyhow::Result<T>> {
-        let (ip, c, slot) = self.db.as_mut()?;
-        let (ip, slot) = (*ip, *slot);
-        match f(c, slot) {
-            Ok(v) => Some(Ok(v)),
-            Err(e) => {
-                log::info!("LINK {ip}: request failed ({e:#}); reconnecting");
-                self.db = None;
-                if let Err(e) = self.connect_db(ip, slot) { return Some(Err(e)); }
-                let (_, c, slot) = self.db.as_mut()?;
-                Some(f(c, *slot))
-            }
-        }
+    /// Run a request on the open dbserver session and wait for it (a menu,
+    /// on a key press).  It goes ahead of the session's background lookups;
+    /// on an error the session reconnects once and retries (see
+    /// [`crate::dbsession`]).  `None` when no session is open.
+    fn db_call<T: Send + 'static>(&mut self, f: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<T> + Send + 'static) -> Option<anyhow::Result<T>> {
+        Some(self.db.as_ref()?.call(f))
     }
 
     /// For a LOAD from a linked player: the track's file path and beat-grid
     /// blob, asked on the browser's own session when it is open to that
     /// player and slot. Opening a second session would cost the browser its
-    /// own (see `db_call`). `None` when no such session is open.
+    /// own (see [`crate::dbsession`]). `None` when no such session is open.
     pub fn db_track_file(&mut self, ip: Ipv4Addr, slot: Slot, id: u32) -> Option<anyhow::Result<DbTrackFile>> {
-        if !matches!(&self.db, Some((cur, _, s)) if *cur == ip && *s == slot) { return None; }
-        let path = match self.db_call(|c, s| c.file_path(s, id))? {
+        if !matches!(&self.db, Some(d) if d.ip == ip && d.slot == slot) { return None; }
+        let path = match self.db_call(move |c, s| c.file_path(s, id))? {
             Ok(p) => p,
             Err(e) => return Some(Err(e)),
         };
-        let grid = self.db_call(|c, s| c.beat_grid(s, id)).unwrap_or_else(|| Err(anyhow::anyhow!("session closed")));
-        // The highlight already fetched it; no extra round trip on the UI thread.
+        let grid = self.db_call(move |c, s| c.beat_grid(s, id)).unwrap_or_else(|| Err(anyhow::anyhow!("session closed")));
+        // The highlight already fetched it; no extra round trip.
         let meta = self.meta_cache.get(&(ip, slot as u8, id)).and_then(|i| i.as_ref()).map(|i| i.meta.clone());
         Some(Ok((path, grid, meta)))
     }
@@ -992,12 +964,15 @@ impl Browser {
     /// Open a dbserver session to a peer (a player's USB slot, or rekordbox's
     /// collection).
     fn connect_db(&mut self, ip: Ipv4Addr, slot: Slot) -> anyhow::Result<()> {
-        if matches!(&self.db, Some((cur, _, s)) if *cur == ip && *s == slot) { return Ok(()); }
+        if matches!(&self.db, Some(d) if d.ip == ip && d.slot == slot) { return Ok(()); }
         // Servers answer requests from a real player number (1–4).
         let device = if (1..=4).contains(&self.link.player()) { self.link.player() } else { 1 };
-        let c = DbClient::discover(ip, device)?;
+        // The old session (if any) closes first: one session per player number.
+        self.db = None;
+        self.meta_asked.clear();
+        let session = DbSession::open(ip, slot, move || DbClient::discover(ip, device))?;
         log::info!("LINK {ip}: dbserver session open ({slot:?})");
-        self.db = Some((ip, c, slot));
+        self.db = Some(session);
         Ok(())
     }
 
@@ -1148,7 +1123,7 @@ impl Browser {
         if self.db.is_some() && self.stack.iter().any(|l| matches!(l, Loc::DbRoot | Loc::DbFolder(_) | Loc::DbCat(..) | Loc::DbAllTracks)) {
             if q.chars().count() < 2 { return Vec::new(); }
             let text = self.search_query.clone();
-            return self.db_track_entries(|c, s| c.search(s, &text));
+            return self.db_track_entries(move |c, s| c.search(s, &text));
         }
         let Some(dir) = self.stack.iter().rev().find_map(|l| match l { Loc::Fs(p) => Some(p.clone()), _ => None }) else { return Vec::new() };
         let mut idx = self.fs_index.borrow_mut();

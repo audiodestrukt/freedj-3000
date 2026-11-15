@@ -9,6 +9,7 @@
 
 mod audio;
 mod browser;
+mod dbsession;
 pub mod chrome;
 mod cpumeter;
 mod grids;
@@ -3652,6 +3653,7 @@ impl DeckApp {
             || self.loading.is_some()
             || self.transport.preview
             || egui_animating
+            || self.browser.db_pending()
             || frame_start.duration_since(self.last_input) < Duration::from_secs(1);
         // Hold the screen awake only while the deck is in use: playing, loading,
         // or touched in the last AWAKE_IDLE.  An idle deck on the desk then lets
