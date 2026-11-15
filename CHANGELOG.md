@@ -27,6 +27,38 @@ All notable changes to this project will be documented in this file.
   split gives way only when the playhead really jumps or overtakes it, and
   aims each new run where the last one did while the playhead stays put: 32
   chunks, 67 s, paused or playing.
+- Loading from a linked player: a file the player's library names but its
+  NFS export does not resolve by that exact name (a LOOKUP "…" failed, status
+  2) is looked up again in the folder's listing ignoring case, and on every
+  export the player advertises; each miss is logged with what the folder
+  holds.  A load that still fails says so on the screen.
+- BROWSE on a linked player: the INFO pane's calendar row shows the date
+  added when the library has no year for the track.
+- BROWSE on a linked player: FOLDER opens the player's folder tree (folders,
+  then the tracks in them) and SEARCH opens the search screen on the
+  player's own search; both were listed but did nothing.
+- SOURCE on a linked player's USB or SD: the pane shows the stick's songs,
+  playlists, date, total and free space as the player reports them (only
+  local folders showed them; a linked stick read 0 and 0).
+- BROWSE on a linked player: the INFO pane shows the track's cover, and the
+  log lists the metadata rows the player sends (key and year come up empty
+  when it leaves them out).  Loading a track no longer asks the player for
+  its metadata a second time, and the playback screen says LOADING while a
+  track is fetched (it only said so in BROWSE, which LOAD leaves).
+- TAG TRACK / REMOVE on the playback screen (also INFO and PERFORM) tags, or
+  untags, the track on the deck, as on the CDJ-3000.  It only worked in BROWSE.
+- Browsing a CDJ-3000 over LINK: every category it lists now opens (GENRE,
+  BPM, RATING, YEAR, LABEL, COLOR, TIME, HISTORY, KEY, ORIGINAL ARTIST,
+  REMIXER, as well as TRACK, PLAYLIST, ARTIST, ALBUM, FILENAME), with the
+  drill-downs the player's own screen uses.  Track rows typed "title and
+  artist" (0x0704) and the other 0x??04 forms were dropped, so playlists and
+  track lists came up empty; they are tracks now.
+- BROWSE on a linked player: the INFO pane shows the highlighted track's
+  album, BPM, key and year from the player's library, and SEARCH uses the
+  player's own search (two letters or more).
+- A track loaded from a linked player takes its title, artist, album, key,
+  BPM and year from the player's library when the file's own tags lack them,
+  instead of showing the file name.
 
 ### Added
 - Stems from the playhead. A track split on the device starts just ahead of
@@ -52,6 +84,29 @@ All notable changes to this project will be documented in this file.
   is first, the cue or the playhead, then the rest; a jump to a stretch not
   read yet is read next.
 - Dev script: `seek=<seconds>` needle-searches the loaded track.
+- CDJ-3000 screen, BROWSE on a linked player: the categories (ARTIST, ALBUM,
+  TRACK, KEY, PLAYLIST, HISTORY, …) sit in the left column as on the unit and
+  open on the first; SEARCH is its own key and FOLDER is left out.  Track
+  lists are the unit's table: a PREVIEW column with the blue or 3-band/RGB
+  waveform (as MENU → WAVEFORM COLOR) and the cover, the track, BPM and key
+  as the player lists them.  The tab strip above it has PREVIEW (on/off),
+  A A A (three text sizes) and INFO (the track's artist, album, length, BPM,
+  key, date added, stars, comment and cover beside the list, with LOAD); the
+  key beside BPM adds a second column, ARTIST or ALBUM, or switches it off.
+- PLAY LIST opens the playlists of the stick being browsed (a linked
+  player's, or a local rekordbox stick) in the table layout with no category
+  column, and lights instead of BROWSE.  With nothing loaded it does nothing
+  but say so.
+- BROWSE lists nothing after launch until a source is chosen (SOURCE, USB,
+  PLAY LIST), as a unit with nothing loaded does, instead of the app's own
+  folder.
+- The source tile at the top left (BROWSE, SEARCH, TAG LIST, UTILITY and the
+  playback screen) shows what the track or list is on: FOLDER with its icon
+  for a local folder, USB, or LINK with the stick's colour label and the
+  player number in the corner (SOURCE tints its rows the same way).
+- Text too long for its field (titles, list rows, the INFO pane, the playback
+  title) scrolls through it like an LED sign, pauses at the end and starts
+  again; only the highlighted row of a list scrolls.
 
 ### Changed
 - Splitting stems with ONNX Runtime (Linux) takes 1.45 GB instead of
@@ -76,6 +131,10 @@ All notable changes to this project will be documented in this file.
 - BROWSE's "S" marks are looked up in the background: scrolling a big
   prepared stick never waits on its stems index. A mark can appear a moment
   after its row.
+- BROWSE on a linked player no longer stalls a frame on the network: the
+  highlighted tracks' metadata, cover and previews are asked on the
+  dbserver session's own thread and fill in a frame or two later; opening
+  a category goes ahead of them.
 
 ### Added
 - iOS: the log is written to `opendeck-log.txt` in the OpenDeck folder (Files
