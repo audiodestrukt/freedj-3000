@@ -14,6 +14,9 @@ fn dir() -> PathBuf {
     })
 }
 
+/// The bar: 95 dB, or `OPENDECK_DEMUCS_MIN_DB` (for reduced-precision runs).
+fn min_db() -> f64 { std::env::var("OPENDECK_DEMUCS_MIN_DB").ok().and_then(|v| v.parse().ok()).unwrap_or(95.0) }
+
 /// Agreement in dB: energy of the reference over energy of the difference.
 fn agreement(want: &[f32], got: &[f32]) -> f64 {
     let (mut s, mut e) = (0f64, 0f64);
@@ -48,8 +51,8 @@ fn matches_pytorch_layer_by_layer() {
         let r = s * 2 * SEGMENT..(s + 1) * 2 * SEGMENT;
         let a = agreement(&stems[r.clone()], &out[r]);
         println!("{name:8} {a:6.1} dB vs PyTorch");
-        // 102-123 dB when written (ONNX Runtime's export: 80-86, 56 on vocals).
-        assert!(a > 95.0, "{name}: {a:.1} dB");
+        // 100-123 dB in fp32 (ONNX Runtime's export: 80-86, 56 on vocals).
+        assert!(a > min_db(), "{name}: {a:.1} dB");
     }
-    assert!(worst > 95.0, "a stage drifted to {worst:.1} dB");
+    assert!(worst > min_db(), "a stage drifted to {worst:.1} dB");
 }

@@ -29,8 +29,14 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 /// The rate the model was trained at.
 pub const MODEL_SR: u32 = 44_100;
-/// Demucs's default chunk overlap.
+/// Demucs's default chunk overlap; `OPENDECK_SEPARATE_OVERLAP` (0.05-0.5)
+/// overrides it, to measure what less overlap costs.
 const OVERLAP: f64 = 0.25;
+
+fn overlap() -> f64 {
+    std::env::var("OPENDECK_SEPARATE_OVERLAP").ok().and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| (0.05..=0.5).contains(v)).unwrap_or(OVERLAP)
+}
 
 /// A separation model.
 pub trait Separator {
@@ -183,7 +189,7 @@ impl Geometry {
         let g = gcd(deck_sr as usize, MODEL_SR as usize);
         let (dq, mq) = (deck_sr as usize / g, MODEL_SR as usize / g);
         let len = (frames as u64 * mq as u64 / dq as u64) as usize;
-        let stride = (((1.0 - OVERLAP) * seg as f64) as usize).max(1);
+        let stride = (((1.0 - overlap()) * seg as f64) as usize).max(1);
         Geometry { deck_sr, frames, len, seg, stride, chunks: len.div_ceil(stride).max(1), dq, mq }
     }
     fn to_model(&self, deck: usize) -> usize { (deck as u64 * self.mq as u64 / self.dq as u64) as usize }
@@ -494,6 +500,50 @@ pub fn mem_available_mb() -> Option<u64> {
     Some(kb / 1024)
 }
 
+/// HTDemucs in plain Rust (`opendeck-demucs`, cargo feature
+/// `separate-native`): Meta's weights from `OPENDECK_SEPARATE_MODEL`
+/// (`htdemucs.safetensors`), no ONNX Runtime. The same input and output as
+/// the other separators.
+#[cfg(feature = "separate-native")]
+pub mod native {
+    use super::Separator;
+    use anyhow::{anyhow, Result};
+    use std::sync::Mutex;
+
+    pub struct Native(opendeck_demucs::HtDemucs);
+    static MODEL: Mutex<Option<Native>> = Mutex::new(None);
+
+    fn path() -> Option<std::path::PathBuf> {
+        std::env::var_os("OPENDECK_SEPARATE_MODEL").map(std::path::PathBuf::from)
+            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "safetensors"))
+    }
+
+    pub fn present() -> bool { path().is_some() }
+
+    pub fn with<R>(f: impl FnOnce(&mut Native) -> Result<R>) -> Result<(R, f64)> {
+        let mut g = MODEL.lock().unwrap_or_else(|e| e.into_inner());
+        let mut load_s = 0.0;
+        if g.is_none() {
+            let t = std::time::Instant::now();
+            let p = path().ok_or_else(|| anyhow!("OPENDECK_SEPARATE_MODEL is not a .safetensors file"))?;
+            *g = Some(Native(opendeck_demucs::HtDemucs::load(&p)?));
+            load_s = t.elapsed().as_secs_f64();
+            log::info!("stems: native HTDemucs, {} threads, loaded in {load_s:.1} s", rayon_threads());
+        }
+        Ok((f(g.as_mut().unwrap())?, load_s))
+    }
+
+    fn rayon_threads() -> usize { std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1) }
+
+    impl Separator for Native {
+        fn segment(&self) -> usize { opendeck_demucs::SEGMENT }
+        fn run(&mut self, mix: &[f32], out: &mut [f32]) -> Result<()> {
+            self.0.run(mix, out);
+            Ok(())
+        }
+    }
+}
+
 /// HTDemucs through ONNX Runtime, on the desktop (cargo feature
 /// `separate-onnx`).  The model file is `OPENDECK_SEPARATE_MODEL`
 /// (`htdemucs.onnx`); the runtime is the system's `libonnxruntime`, loaded
@@ -560,8 +610,9 @@ pub mod onnx {
     }
 }
 
-/// The platform's model: Core ML on iOS, ONNX Runtime on a desktop built
-/// with `separate-onnx`, none elsewhere.
+/// The platform's model: Core ML on iOS; elsewhere `opendeck-demucs` when
+/// built with `separate-native` and given a `.safetensors` model, else ONNX
+/// Runtime with `separate-onnx`; none otherwise.
 pub mod model {
     #[allow(unused_imports)]
     use super::Separator;
@@ -569,6 +620,7 @@ pub mod model {
 
     pub fn present() -> bool {
         #[cfg(target_os = "ios")] { return super::coreml::present(); }
+        #[cfg(all(not(target_os = "ios"), feature = "separate-native"))] { if super::native::present() { return true } }
         #[cfg(all(not(target_os = "ios"), feature = "separate-onnx"))] { return super::onnx::present(); }
         #[allow(unreachable_code)] false
     }
@@ -578,6 +630,7 @@ pub mod model {
     #[allow(unused_variables)]
     pub fn with<R>(f: impl FnOnce(&mut dyn Separator) -> Result<R>) -> Result<(R, f64)> {
         #[cfg(target_os = "ios")] { return super::coreml::with(|m| f(m)); }
+        #[cfg(all(not(target_os = "ios"), feature = "separate-native"))] { if super::native::present() { return super::native::with(|m| f(m)) } }
         #[cfg(all(not(target_os = "ios"), feature = "separate-onnx"))] { return super::onnx::with(|m| f(m)); }
         #[allow(unreachable_code)] Err(anyhow::anyhow!("no separation model on this platform"))
     }
@@ -882,9 +935,9 @@ mod tests {
 }
 
 /// Split a real track with the real model and write the stems as WAVs:
-///   OPENDECK_SEPARATE_MODEL=…/htdemucs.onnx SPLIT_IN=track.mp3 SPLIT_OUT=dir \
+///   OPENDECK_SEPARATE_MODEL=…/htdemucs.onnx (or .safetensors with separate-native) SPLIT_IN=track.mp3 SPLIT_OUT=dir \
 ///   cargo test --release -p opendeck-app --features separate-onnx split_a_real_track -- --ignored --nocapture
-#[cfg(all(test, feature = "separate-onnx"))]
+#[cfg(all(test, any(feature = "separate-onnx", feature = "separate-native")))]
 mod real {
     use super::*;
     use opendeck_types::Decoder;

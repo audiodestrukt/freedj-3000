@@ -25,7 +25,13 @@ const PAR_MIN: usize = 1 << 22;
 
 /// A weight matrix `m × k`, packed: panel `p` holds rows `p*MR..p*MR+MR`
 /// as `[k][MR]` (zero rows past `m`).
-pub struct Packed { pub m: usize, pub k: usize, d: Vec<f32> }
+pub struct Packed {
+    pub m: usize, pub k: usize, d: Vec<f32>,
+    /// Emulate fp16 (OPENDECK_DEMUCS_F16SIM).
+    f16: bool,
+    /// The same panels in fp16, for the NEON fp16 kernel (OPENDECK_DEMUCS_F16).
+    h: Option<Vec<u16>>,
+}
 
 impl Packed {
     /// Pack `A[i][kk] = f(i, kk)`.
@@ -40,8 +46,63 @@ impl Packed {
                 }
             }
         }
-        Self { m, k, d }
+        let p = Self { m, k, d, f16: false, h: None };
+        // OPENDECK_DEMUCS_F16ALL: emulate fp16 for every product (study only).
+        if std::env::var_os("OPENDECK_DEMUCS_F16ALL").is_some() { p.half() } else { p }
     }
+
+    /// Mark this product to run in half precision. With
+    /// `OPENDECK_DEMUCS_F16SIM=1` that is emulated exactly on any CPU:
+    /// operands rounded to f16, the accumulator rounded after every
+    /// multiply-add (as the A76's fp16 `fmla`), flushed into f32 every
+    /// `F16_RUN` steps. Without it, a no-op.
+    pub fn half(mut self) -> Self {
+        if f16_sim() {
+            self.f16 = true;
+            for v in &mut self.d { *v = half::f16::from_f32(*v).to_f32() }
+        } else if cfg!(target_arch = "aarch64") && f16_on() {
+            self.h = Some(self.d.iter().map(|v| half::f16::from_f32(*v).to_bits()).collect());
+        }
+        self
+    }
+}
+
+/// Multiply-adds an fp16 accumulator takes before it is added into f32.
+/// 32 measured 57.8-68 dB against PyTorch with the transformer in fp16
+/// (64: 44-63, 16: ~70).
+pub const F16_STEPS: usize = 32;
+
+pub fn f16_run() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("OPENDECK_DEMUCS_F16RUN").ok().and_then(|v| v.parse().ok()).unwrap_or(F16_STEPS))
+}
+
+/// Real fp16 arithmetic for the products marked [`Packed::half`]
+/// (`OPENDECK_DEMUCS_F16=1`; aarch64 only).
+pub fn f16_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("OPENDECK_DEMUCS_F16").is_ok_and(|v| v == "1"))
+}
+
+pub fn f16_sim() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("OPENDECK_DEMUCS_F16SIM").is_some())
+}
+
+/// The emulated fp16 kernel (see [`Packed::half`]).
+unsafe fn kernel_f16_sim(kc: usize, a: *const f32, b: *const f32, out: &mut [f32; MR * NR]) {
+    let r16 = |x: f32| half::f16::from_f32(x).to_f32();
+    let run = f16_run();
+    let mut acc = [0f32; MR * NR];
+    let mut c = [0f32; MR * NR];
+    for p in 0..kc {
+        let ar = std::slice::from_raw_parts(a.add(p * MR), MR);
+        let br = std::slice::from_raw_parts(b.add(p * NR), NR);
+        for r in 0..MR { for j in 0..NR { c[r * NR + j] = r16(ar[r].mul_add(br[j], c[r * NR + j])) } }
+        if (p + 1) % run == 0 { for (x, y) in acc.iter_mut().zip(c.iter_mut()) { *x += *y; *y = 0.0 } }
+    }
+    for (x, y) in acc.iter_mut().zip(&c) { *x += y }
+    *out = acc;
 }
 
 /// B as a view: row `r` at `b[base + row_off[r]]`, columns `cs` apart.
@@ -75,10 +136,10 @@ fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool, set:
     let strips = n.div_ceil(NC);
     let panels = a.m.div_ceil(MR);
     if !threads || a.m * a.k * n < PAR_MIN {
-        let mut buf = vec![0f32; KC * NC.div_ceil(NR) * NR];
+        let mut buf = bufs();
         for s in 0..strips {
             // SAFETY: bounds checked above.
-            unsafe { strip(a, b, s * NC, (n - s * NC).min(NC), 0, panels, c.as_mut_ptr(), o, &mut buf, set) }
+            unsafe { strip_any(a, b, s * NC, (n - s * NC).min(NC), 0, panels, c.as_mut_ptr(), o, &mut buf, set) }
         }
         return;
     }
@@ -87,14 +148,99 @@ fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool, set:
     let parts = want.div_ceil(strips).clamp(1, panels);
     let per = panels.div_ceil(parts);
     let cp = c.as_mut_ptr() as usize;
-    (0..strips * parts).into_par_iter().for_each_init(|| vec![0f32; KC * NC.div_ceil(NR) * NR], |buf, task| {
+    (0..strips * parts).into_par_iter().for_each_init(bufs, |buf, task| {
         let (s, q) = (task / parts, task % parts);
         let (p0, p1) = (q * per, ((q + 1) * per).min(panels));
         if p0 >= p1 { return }
         // SAFETY: bounds checked above; this task writes only rows of panels
         // [p0, p1) in columns [s*NC, s*NC+NC) of C, which no other task touches.
-        unsafe { strip(a, b, s * NC, (n - s * NC).min(NC), p0, p1, cp as *mut f32, o, buf, set) }
+        unsafe { strip_any(a, b, s * NC, (n - s * NC).min(NC), p0, p1, cp as *mut f32, o, buf, set) }
     });
+}
+
+/// Packing buffers for one task: f32 for the f32 kernel, u16 for fp16.
+fn bufs() -> (Vec<f32>, Vec<u16>) { (vec![0f32; KC * NC.div_ceil(NR) * NR], Vec::new()) }
+
+#[allow(clippy::too_many_arguments)]
+unsafe fn strip_any(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize, c: *mut f32, o: Out,
+                    buf: &mut (Vec<f32>, Vec<u16>), set: bool) {
+    #[cfg(target_arch = "aarch64")]
+    if let Some(h) = &a.h { return strip16(a, h, b, j0, nc, p0, p1, c, o, &mut buf.1, set) }
+    strip(a, b, j0, nc, p0, p1, c, o, &mut buf.0, set)
+}
+
+/// Columns of one fp16 tile.
+#[cfg(target_arch = "aarch64")]
+const NR16: usize = 24;
+
+/// f32 → fp16 bits, rounded to nearest even (`fcvt`).
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn h16(x: f32) -> u16 {
+    let r: u32;
+    std::arch::asm!("fcvt {t:h}, {x:s}", "umov {r:w}, {t:v}.h[0]", x = in(vreg) x, t = out(vreg) _, r = out(reg) r,
+                    options(pure, nomem, nostack));
+    r as u16
+}
+
+/// [`strip`] in fp16: B's strip converted to fp16 as it is packed, the
+/// 8x24 kernel run [`F16_STEPS`] at a time into an f32 tile.
+#[cfg(target_arch = "aarch64")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn strip16(a: &Packed, h: &[u16], b: View, j0: usize, nc: usize, p0: usize, p1: usize, c: *mut f32, o: Out,
+                  buf: &mut Vec<u16>, set: bool) {
+    let tiles = nc.div_ceil(NR16);
+    buf.resize(KC * tiles * NR16, 0);
+    let mut tile = [0f32; MR * NR16];
+    let mut k0 = 0;
+    while k0 < a.k {
+        let kc = (a.k - k0).min(KC);
+        for t in 0..tiles {
+            let dst = &mut buf[t * kc * NR16..(t + 1) * kc * NR16];
+            let jn = (nc - t * NR16).min(NR16);
+            if b.cs < TRANSPOSED {
+                for kk in 0..kc {
+                    let src = b.base + b.row_off[k0 + kk] + (j0 + t * NR16) * b.cs;
+                    let row = &mut dst[kk * NR16..(kk + 1) * NR16];
+                    for j in 0..jn { row[j] = h16(*b.b.get_unchecked(src + j * b.cs)) }
+                    for v in &mut row[jn..] { *v = 0 }
+                }
+            } else {
+                for j in 0..NR16 {
+                    if j < jn {
+                        let col = b.base + (j0 + t * NR16 + j) * b.cs;
+                        for kk in 0..kc { dst[kk * NR16 + j] = h16(*b.b.get_unchecked(col + b.row_off[k0 + kk])) }
+                    } else {
+                        for kk in 0..kc { dst[kk * NR16 + j] = 0 }
+                    }
+                }
+            }
+        }
+        for p in p0..p1 {
+            let ap = h.as_ptr().add((p * a.k + k0) * MR);
+            let mr = (a.m - p * MR).min(MR);
+            for t in 0..tiles {
+                tile.fill(0.0);
+                let bp = buf.as_ptr().add(t * kc * NR16);
+                let mut s0 = 0;
+                while s0 < kc {
+                    let n = (kc - s0).min(F16_STEPS);
+                    kernel16(n, ap.add(s0 * MR), bp.add(s0 * NR16), tile.as_mut_ptr());
+                    s0 += n;
+                }
+                let jn = (nc - t * NR16).min(NR16);
+                let base = c.add(o.off + p * MR * o.rs + (j0 + t * NR16) * o.cs);
+                if set && k0 == 0 {
+                    for r in 0..mr { let row = base.add(r * o.rs); for j in 0..jn { *row.add(j * o.cs) = tile[r * NR16 + j] } }
+                } else if o.rs < o.cs {
+                    for j in 0..jn { let col = base.add(j * o.cs); for r in 0..mr { *col.add(r * o.rs) += tile[r * NR16 + j] } }
+                } else {
+                    for r in 0..mr { let row = base.add(r * o.rs); for j in 0..jn { *row.add(j * o.cs) += tile[r * NR16 + j] } }
+                }
+            }
+        }
+        k0 += kc;
+    }
 }
 
 /// One column strip `[j0, j0+nc)`: for each KC block, pack B's strip, then
@@ -138,11 +284,13 @@ unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize,
                 }
             }
         }
+        if a.f16 { for v in &mut buf[..tiles * kc * NR] { *v = half::f16::from_f32(*v).to_f32() } }
         for p in p0..p1 {
             let ap = a.d.as_ptr().add((p * a.k + k0) * MR);
             let mr = (a.m - p * MR).min(MR);
             for t in 0..tiles {
-                kernel(kc, ap, buf.as_ptr().add(t * kc * NR), &mut tile);
+                if a.f16 { kernel_f16_sim(kc, ap, buf.as_ptr().add(t * kc * NR), &mut tile) }
+                else { kernel(kc, ap, buf.as_ptr().add(t * kc * NR), &mut tile) }
                 let jn = (nc - t * NR).min(NR);
                 let base = c.add(o.off + p * MR * o.rs + (j0 + t * NR) * o.cs);
                 if set && k0 == 0 {
@@ -228,4 +376,217 @@ mod tests {
             }}
         }
     }
+}
+
+/// fp16 kernel: `n` steps of an 8x24 tile in half precision (24 `.8h`
+/// accumulators, lane-indexed `fmla`), then widened and added into the f32
+/// tile `out` (`[8][24]`). The caller keeps `n` to [`F16_STEPS`] so the
+/// fp16 sums stay short.
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+unsafe fn kernel16(n: usize, a: *const u16, b: *const u16, out: *mut f32) {
+    std::arch::asm!(
+        ".arch_extension fp16",
+        "movi v0.16b, #0",
+        "movi v1.16b, #0",
+        "movi v2.16b, #0",
+        "movi v3.16b, #0",
+        "movi v4.16b, #0",
+        "movi v5.16b, #0",
+        "movi v6.16b, #0",
+        "movi v7.16b, #0",
+        "movi v8.16b, #0",
+        "movi v9.16b, #0",
+        "movi v10.16b, #0",
+        "movi v11.16b, #0",
+        "movi v12.16b, #0",
+        "movi v13.16b, #0",
+        "movi v14.16b, #0",
+        "movi v16.16b, #0",
+        "movi v17.16b, #0",
+        "movi v18.16b, #0",
+        "movi v19.16b, #0",
+        "movi v20.16b, #0",
+        "movi v21.16b, #0",
+        "movi v22.16b, #0",
+        "movi v23.16b, #0",
+        "movi v24.16b, #0",
+        "2:",
+        "ldr q15, [{a}], #16",
+        "ldp q25, q26, [{b}], #32",
+        "ldr q27, [{b}], #16",
+        "fmla v0.8h, v25.8h, v15.h[0]",
+        "fmla v1.8h, v26.8h, v15.h[0]",
+        "fmla v2.8h, v27.8h, v15.h[0]",
+        "fmla v3.8h, v25.8h, v15.h[1]",
+        "fmla v4.8h, v26.8h, v15.h[1]",
+        "fmla v5.8h, v27.8h, v15.h[1]",
+        "fmla v6.8h, v25.8h, v15.h[2]",
+        "fmla v7.8h, v26.8h, v15.h[2]",
+        "fmla v8.8h, v27.8h, v15.h[2]",
+        "fmla v9.8h, v25.8h, v15.h[3]",
+        "fmla v10.8h, v26.8h, v15.h[3]",
+        "fmla v11.8h, v27.8h, v15.h[3]",
+        "fmla v12.8h, v25.8h, v15.h[4]",
+        "fmla v13.8h, v26.8h, v15.h[4]",
+        "fmla v14.8h, v27.8h, v15.h[4]",
+        "fmla v16.8h, v25.8h, v15.h[5]",
+        "fmla v17.8h, v26.8h, v15.h[5]",
+        "fmla v18.8h, v27.8h, v15.h[5]",
+        "fmla v19.8h, v25.8h, v15.h[6]",
+        "fmla v20.8h, v26.8h, v15.h[6]",
+        "fmla v21.8h, v27.8h, v15.h[6]",
+        "fmla v22.8h, v25.8h, v15.h[7]",
+        "fmla v23.8h, v26.8h, v15.h[7]",
+        "fmla v24.8h, v27.8h, v15.h[7]",
+        "subs {n}, {n}, #1",
+        "b.ne 2b",
+        "fcvtl v28.4s, v0.4h",
+        "fcvtl2 v29.4s, v0.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v1.4h",
+        "fcvtl2 v29.4s, v1.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v2.4h",
+        "fcvtl2 v29.4s, v2.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v3.4h",
+        "fcvtl2 v29.4s, v3.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v4.4h",
+        "fcvtl2 v29.4s, v4.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v5.4h",
+        "fcvtl2 v29.4s, v5.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v6.4h",
+        "fcvtl2 v29.4s, v6.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v7.4h",
+        "fcvtl2 v29.4s, v7.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v8.4h",
+        "fcvtl2 v29.4s, v8.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v9.4h",
+        "fcvtl2 v29.4s, v9.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v10.4h",
+        "fcvtl2 v29.4s, v10.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v11.4h",
+        "fcvtl2 v29.4s, v11.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v12.4h",
+        "fcvtl2 v29.4s, v12.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v13.4h",
+        "fcvtl2 v29.4s, v13.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v14.4h",
+        "fcvtl2 v29.4s, v14.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v16.4h",
+        "fcvtl2 v29.4s, v16.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v17.4h",
+        "fcvtl2 v29.4s, v17.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v18.4h",
+        "fcvtl2 v29.4s, v18.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v19.4h",
+        "fcvtl2 v29.4s, v19.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v20.4h",
+        "fcvtl2 v29.4s, v20.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v21.4h",
+        "fcvtl2 v29.4s, v21.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v22.4h",
+        "fcvtl2 v29.4s, v22.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v23.4h",
+        "fcvtl2 v29.4s, v23.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        "fcvtl v28.4s, v24.4h",
+        "fcvtl2 v29.4s, v24.8h",
+        "ldp q30, q31, [{o}]",
+        "fadd v30.4s, v30.4s, v28.4s",
+        "fadd v31.4s, v31.4s, v29.4s",
+        "stp q30, q31, [{o}], #32",
+        a = inout(reg) a => _, b = inout(reg) b => _, n = inout(reg) n => _, o = inout(reg) out => _,
+        out("v0") _, out("v1") _, out("v2") _, out("v3") _, out("v4") _, out("v5") _, out("v6") _, out("v7") _, out("v8") _, out("v9") _, out("v10") _, out("v11") _, out("v12") _, out("v13") _, out("v14") _, out("v16") _, out("v17") _, out("v18") _, out("v19") _, out("v20") _, out("v21") _, out("v22") _, out("v23") _, out("v24") _, out("v15") _, out("v25") _, out("v26") _, out("v27") _, out("v28") _, out("v29") _, out("v30") _, out("v31") _,
+        options(nostack),
+    );
 }

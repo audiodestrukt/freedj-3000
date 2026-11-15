@@ -235,6 +235,7 @@ compares each stage with a PyTorch run on a real chunk: the stems agree at
 | vectorisable exp/erf, threaded norms and GLU | 2.3 s | 10.2 s |
 | own matrix multiply, weights packed at load (`gemm.rs`) | 5.2 s* | 7.9 s |
 | no zeroing/clones, fused degree-5 exp | 5.2 s* | 7.6 s |
+| transformer in fp16 (`OPENDECK_DEMUCS_F16=1`) | — | 6.85 s |
 
 \* the desktop runs the portable kernel; only aarch64 has the NEON one.
 
@@ -253,3 +254,29 @@ bandwidth. fp32 on this Pi looks to bottom out near 5 s a chunk (1.2x real
 time); 2x needs less work, not just faster kernels: fp16 or int8
 arithmetic in the transformer (the cores have `asimdhp` and `asimddp`),
 less chunk overlap, or a smaller model.
+
+### Less overlap, lower precision (2026-11-15)
+
+Whole track (techno.wav, 44.1 kHz) through `opendeck-demucs` against Meta's
+own `demucs` output (25 % overlap): at 25 % overlap 52.3 dB harmonics,
+33.8 dB vocals, as ONNX Runtime; at **10 % overlap 24.0 and 5.1 dB**. The
+chunk edges are where HTDemucs is weak, and the overlap is what hides
+them, so it stays at 25 % (`OPENDECK_SEPARATE_OVERLAP` overrides it, for
+measuring).
+
+fp16 emulated exactly on the desktop (`OPENDECK_DEMUCS_F16SIM=1`: operands
+rounded, the accumulator rounded every multiply-add, flushed into f32 every
+`OPENDECK_DEMUCS_F16RUN` steps), stems against PyTorch:
+
+| fp16 in | flush every | drums | bass | other | vocals |
+|---|---|---|---|---|---|
+| transformer | 64 | 63.0 | 62.1 | 56.7 | 44.3 |
+| transformer | 32 | 68.0 | 65.9 | 62.3 | 57.8 |
+| everything | 32 | 51.3 | 60.4 | 44.7 | 42.5 |
+
+The NEON kernel (`kernel16`: an 8x24 tile in 24 `.8h` accumulators,
+lane-indexed `fmla`, widened into f32 every 32 steps) gives the same
+57-68.5 dB on the Pi. It makes the transformer's linears 1.45x faster, but
+attention barely moves (390 → 338 ms a frequency layer): its products are
+only 64 deep and P must be converted to fp16 as it is packed. 7.54 → 6.85 s
+a chunk. Off by default (`OPENDECK_DEMUCS_F16=1`).

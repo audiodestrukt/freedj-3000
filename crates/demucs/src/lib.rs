@@ -56,6 +56,7 @@ pub type Tap<'a> = &'a mut dyn FnMut(&str, &[usize], &[f32]);
 struct Lin { w: Vec<f32>, b: Vec<f32>, p: Vec<Packed> }
 
 impl Lin {
+    fn half(mut self) -> Self { self.p = self.p.into_iter().map(Packed::half).collect(); self }
     /// Pack `w` as a row-major `(m, k)` matrix.
     fn rows(mut self, m: usize, k: usize) -> Self {
         self.p = vec![Packed::new(m, k, |i, kk| self.w[i * k + kk])];
@@ -143,9 +144,9 @@ fn dconv(t: &mut Tensors, p: &str, c: usize) -> Result<Vec<DLayer>> {
 fn attn(t: &mut Tensors, p: &str) -> Result<Attn> {
     let w = t.take(&format!("{p}.in_proj_weight"), &[3 * DIM, DIM])?;
     Ok(Attn {
-        in_p: (0..3).map(|part| Packed::new(DIM, DIM, |i, c| w[(part * DIM + i) * DIM + c])).collect(),
+        in_p: (0..3).map(|part| Packed::new(DIM, DIM, |i, c| w[(part * DIM + i) * DIM + c]).half()).collect(),
         in_b: t.take(&format!("{p}.in_proj_bias"), &[3 * DIM])?,
-        out: lin(t, &format!("{p}.out_proj"), &[DIM, DIM])?.rows(DIM, DIM),
+        out: lin(t, &format!("{p}.out_proj"), &[DIM, DIM])?.rows(DIM, DIM).half(),
     })
 }
 
@@ -153,8 +154,8 @@ fn layer(t: &mut Tensors, p: &str, cross: bool) -> Result<Layer> {
     Ok(Layer {
         cross,
         attn: attn(t, &format!("{p}.{}", if cross { "cross_attn" } else { "self_attn" }))?,
-        lin1: lin(t, &format!("{p}.linear1"), &[4 * DIM, DIM])?.rows(4 * DIM, DIM),
-        lin2: lin(t, &format!("{p}.linear2"), &[DIM, 4 * DIM])?.rows(DIM, 4 * DIM),
+        lin1: lin(t, &format!("{p}.linear1"), &[4 * DIM, DIM])?.rows(4 * DIM, DIM).half(),
+        lin2: lin(t, &format!("{p}.linear2"), &[DIM, 4 * DIM])?.rows(DIM, 4 * DIM).half(),
         norm1: norm(t, &format!("{p}.norm1"), DIM)?, norm2: norm(t, &format!("{p}.norm2"), DIM)?,
         norm3: if cross { Some(norm(t, &format!("{p}.norm3"), DIM)?) } else { None },
         norm_out: norm(t, &format!("{p}.norm_out"), DIM)?,
@@ -437,8 +438,8 @@ fn mha(a: &Attn, q: &[f32], n: usize, kv: &[f32], m: usize) -> Vec<f32> {
     let hd = DIM / HEADS;
     let scale = 1.0 / (hd as f32).sqrt();
     let heads: Vec<(Packed, Packed)> = (0..HEADS).into_par_iter().map(|h| (
-        Packed::new(m, hd, |j, d| kk[j * DIM + h * hd + d] * scale),
-        Packed::new(hd, m, |d, j| vv[j * DIM + h * hd + d]),
+        Packed::new(m, hd, |j, d| kk[j * DIM + h * hd + d] * scale).half(),
+        Packed::new(hd, m, |d, j| vv[j * DIM + h * hd + d]).half(),
     )).collect();
     lap.lap("pack kv");
     let qrows: Vec<usize> = (0..hd).collect();
