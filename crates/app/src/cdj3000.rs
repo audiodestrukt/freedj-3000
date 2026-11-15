@@ -734,16 +734,27 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
 /// past a white line at its playhead.  The scale is this deck's tempo, so
 /// when the other track is at the same tempo and in phase its beats line up
 /// with this deck's grid on the main waveform, and when it is not they drift.
+/// How wide one beat at `bpm` is across `wave_w` at the main waveform's zoom
+/// (`cols` analysis columns across it).
+fn zoom_beat_px(wave_w: f32, cols: f32, sample_rate: u32, bpm: f32) -> f32 {
+    let sr = if sample_rate > 0 { sample_rate } else { 44_100 } as f32;
+    wave_w / cols.max(1.0) * sr * 60.0 / (bpm * opendeck_analysis::waveform::HOP_SIZE as f32)
+}
+
 /// The looped span's shade, as the main waveform's (renderer `loop_bg`, CDJ style).
 const REMOTE_LOOP_BG: Color32 = Color32::from_rgb(72, 52, 10);
 
 fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
     let p = ui.painter().with_clip_rect(r);
     // The same zoom as the main waveform: its columns across its width set how
-    // wide a beat of this deck's grid is; with no grid, the phase meter's width.
-    let beat_px = match snap.beat_grid.filter(|g| g.bpm > 0.0) {
-        Some(g) => wave_w / snap.cols_visible.max(1.0) * snap.sample_rate as f32 * 60.0
-                   / (g.bpm as f32 * opendeck_analysis::waveform::HOP_SIZE as f32),
+    // wide a beat is, of this deck's grid, or with no track loaded of the
+    // other player's tempo (so zooming works before anything is loaded);
+    // with neither, the phase meter's width.
+    let tempo = snap.beat_grid.filter(|g| g.bpm > 0.0).map(|g| g.bpm as f32)
+        .or_else(|| snap.remote_wave.as_ref().map(|w| w.bpm * w.pitch).filter(|b| *b > 0.0))
+        .or_else(|| (snap.beat2_bpm > 0.0).then_some(snap.beat2_bpm));
+    let beat_px = match tempo {
+        Some(bpm) => zoom_beat_px(wave_w, snap.cols_visible, snap.sample_rate, bpm),
         None => 73.0 * u,
     };
     let cx = r.center().x;
@@ -864,6 +875,17 @@ fn ahead_x(w: Rect, cols_ahead: f64, cols: f64) -> f32 {
 #[cfg(test)]
 mod helper_tests {
     use super::*;
+
+    /// The WAVEFORM view zooms with the main waveform, also with no track
+    /// loaded (a beat of the other player's tempo then): fewer columns
+    /// across, wider beats; a faster tempo, narrower ones.
+    #[test]
+    fn the_waveform_view_zooms_without_a_track() {
+        let w = zoom_beat_px(1000.0, 400.0, 44_100, 128.0);
+        assert!((zoom_beat_px(1000.0, 200.0, 44_100, 128.0) - 2.0 * w).abs() < 1e-3, "zoomed in: twice as wide");
+        assert!((zoom_beat_px(1000.0, 400.0, 44_100, 256.0) - w / 2.0).abs() < 1e-3, "twice the tempo: half as wide");
+        assert_eq!(zoom_beat_px(1000.0, 400.0, 0, 128.0), w, "no track: 44.1 kHz assumed");
+    }
 
     /// The 16 / 32 marks: 16 and 32 beats right of the centred playhead,
     /// 32 twice as far as 16, wherever the playhead is (they are computed

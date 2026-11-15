@@ -1647,6 +1647,9 @@ impl DeckApp {
                     }
                     // In MENU the selector's press steps the highlighted setting.
                     ScreenMode::Menu => self.cycle_setting(settings::MENU[self.menu_cursor].0),
+                    // On a CDJ-3000 the press does nothing on the playback
+                    // screen (BROWSE is its own key).
+                    ScreenMode::Playback if self.settings.skin == settings::Skin::Cdj3000 => {}
                     _ => {
                         self.screen_mode = ScreenMode::Browse;
                         self.browser.refresh();
