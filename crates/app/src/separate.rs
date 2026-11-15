@@ -841,7 +841,9 @@ mod real {
     #[ignore]
     fn split_a_real_track() {
         let (Some(inp), Some(out)) = (std::env::var_os("SPLIT_IN"), std::env::var_os("SPLIT_OUT")) else { panic!("set SPLIT_IN and SPLIT_OUT") };
-        let sr = 48_000;
+        // The deck rate (SPLIT_SR, default 48 kHz); 44100 skips both
+        // conversions, to compare against Demucs's own output.
+        let sr: u32 = std::env::var("SPLIT_SR").ok().and_then(|s| s.parse().ok()).unwrap_or(48_000);
         let mut d = opendeck_decode::symphonia_decoder::SymphoniaDecoder::open(std::path::Path::new(&inp)).unwrap();
         let ch = d.channels() as usize;
         assert_eq!(ch, 2);

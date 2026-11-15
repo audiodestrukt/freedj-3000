@@ -97,6 +97,32 @@ is a different separator, so this measures agreement, not quality):
 
 Quality is a listening call.
 
+### Against Meta's own HTDemucs (2026-11-15)
+
+The same 44.1 kHz WAV of techno.mp3 (5:13) through Demucs 4.0.1
+(`-n htdemucs --shifts 0 --overlap 0.25 --float32`) and through ours
+(`SPLIT_SR=44100`, ONNX, folding off), sample-aligned:
+
+| Stem | Agreement | Note |
+|---|---|---|
+| drums | 55.3 dB (60.3 dB unclipped frames) | Demucs's CLI rescales a stem that would pass 0.99 (`--clip-mode rescale`; here ×1/1.2236); undone before comparing |
+| harmonics | 52.3 dB | |
+| vocal | 33.8 dB | a flat −72 dBFS floor; this track has almost no vocal, so the ratio is small |
+
+One 7.8 s chunk straight through both models: ONNX vs PyTorch 80–86 dB
+(drums, bass, other), 56 dB (vocals). So the ONNX export and our chunking,
+crossfade and normalisation reproduce the reference model; what's left is
+about −70 dBFS of arithmetic difference.
+
+Two things to know when comparing:
+
+- **Same input or nothing.** HTDemucs is not shift-invariant: decoding the
+  MP3 with and without the encoder delay (1,105 samples) moves every chunk
+  boundary and alone drops agreement to 11–25 dB.
+- **Our stems clip.** A stem can be louder than its mix (drums peak 1.21
+  here, the mix 1.0); the bank stores 16-bit and clamps: 532 drum samples
+  and 18 harmonics samples clipped on this track. Not fixed yet.
+
 ## Platforms
 
 - **iPad / iPhone:** Core ML on the GPU (the converter reports the Neural
