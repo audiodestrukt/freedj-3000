@@ -1264,6 +1264,95 @@ impl StatusRx {
     }
 }
 
+/// A master that has sent no status for [`MASTER_GONE_MS`] is forgotten.
+/// Status comes every 200 ms from any deck, paused or not.  Without this,
+/// two decks that both went quiet (iOS reclaimed their sockets; the other
+/// side slept) each kept asking the other for a handoff that never came,
+/// and MASTER could not be set on either.  A synced deck whose master
+/// vanishes promotes itself, so the synced group keeps a tempo reference.
+const MASTER_GONE_MS: u64 = 5000;
+
+fn forget_silent_master(link: &LinkState, now_ms: u64, send_full: bool) {
+    let cur = link.master_player.load(Ordering::Relaxed) as u8;
+    let seen = link.master_seen_ms.load(Ordering::Relaxed);
+    if cur != 0 && cur != link.player() && seen > 0 && now_ms.saturating_sub(seen) > MASTER_GONE_MS {
+        log::info!("ProDJ Link: master player {cur} silent for {}s — forgetting it", MASTER_GONE_MS / 1000);
+        link.master_player.store(0, Ordering::Relaxed);
+        link.yielded_from.store(0, Ordering::Relaxed);
+        if link.sync.load(Ordering::Relaxed) && send_full {
+            link.take_master("our master vanished while we were synced");
+        }
+    }
+}
+
+/// MASTER pressed: the sender's side of the handoff.
+///
+/// With no master on the network for two seconds, take the role.  With one,
+/// send it the 0x26 takeover request and WAIT for the handshake: the master
+/// replies 0x27 (agreed, `yielded_from`) and then names us in its status's
+/// Mh byte, and only then do we assert master (see [`StatusRx`] and
+/// [`BeatRx`]).  A real CDJ only takes master after the current one agrees;
+/// asserting early leaves a rogue second master the decks ignore.  Requests
+/// repeat about once a second until the master agrees, then stop, as Beat
+/// Link does.
+struct Handoff {
+    /// When MASTER was pressed: the current master's status may not have
+    /// been heard yet (status every ~200 ms), so wait before concluding
+    /// there is none.
+    want_since:   Option<Instant>,
+    last_request: Instant,
+}
+
+impl Default for Handoff {
+    fn default() -> Self { Handoff { want_since: None, last_request: Instant::now() - Duration::from_secs(5) } }
+}
+
+impl Handoff {
+    fn tick(&mut self, link: &LinkState, now: Instant, send_full: bool, player: u8) -> Option<Reply> {
+        if !(send_full && link.want_master.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed)) {
+            self.want_since = None;
+            return None;
+        }
+        let since = *self.want_since.get_or_insert(now);
+        let cur = link.master_player.load(Ordering::Relaxed) as u8;
+        match (cur, link.peer_ip(cur)) {
+            (0, _) if now.duration_since(since) >= Duration::from_secs(2) => {
+                link.take_master("no master on the network");
+                self.want_since = None;
+                None
+            }
+            (0, _) => None,
+            (p, Some(ip)) => {
+                if link.yielded_from.load(Ordering::Relaxed) == 0
+                    && now.duration_since(self.last_request) >= Duration::from_millis(1000) {
+                    log::info!("ProDJ Link: requesting master from player {p} at {ip}");
+                    self.last_request = now;
+                    return Some((ProDjLink::new(player).build_master_request(), SocketAddr::from((ip, PORT_BEAT))));
+                }
+                None
+            }
+            (p, None) => {
+                if now.duration_since(self.last_request) >= Duration::from_millis(500) {
+                    log::warn!("ProDJ Link: master is player {p} but its address is unknown yet");
+                    self.last_request = now;
+                }
+                None
+            }
+        }
+    }
+}
+
+/// Our status to every peer, each in its generation's form: a CDJ-3000's
+/// long status (with the loop) to all but older players, which get `short`.
+fn status_replies(link: &LinkState, short: &[u8], long: &[u8]) -> Vec<Reply> {
+    let peers: Vec<(u8, Ipv4Addr)> = link.peers.lock().map(|p| p.iter().map(|(k, v)| (*k, *v)).collect()).unwrap_or_default();
+    let names = link.peer_names.lock().map(|n| n.clone()).unwrap_or_default();
+    peers.into_iter().map(|(pl, ip)| {
+        let name = names.get(&pl).map(String::as_str).unwrap_or("");
+        ((if wants_cdj3000_status(name) { long } else { short }).to_vec(), SocketAddr::from((ip, PORT_STATUS)))
+    }).collect()
+}
+
 // ── Sender ────────────────────────────────────────────────────────────────────
 
 /// How long AUTO listens for keep-alives before choosing (players send one
@@ -1397,12 +1486,11 @@ impl ProDjSender {
                 let mut last_announce = Instant::now() - Duration::from_secs(5);
                 let mut last_media_query = Instant::now() - Duration::from_secs(5);
                 let mut last_status   = Instant::now() - Duration::from_secs(5);
-                let mut last_request  = Instant::now() - Duration::from_secs(5);
                 let mut last_abs      = Instant::now() - Duration::from_secs(5);
                 // When MASTER is pressed we may not have heard the current
                 // master's status yet (it arrives every ~200 ms, announces
                 // every 1.5 s).  Wait before concluding nobody is master.
-                let mut want_since: Option<Instant> = None;
+                let mut handoff = Handoff::default();
                 let mut counter: u32  = 0;
                 let mut last_sent = Instant::now();
                 // Audible-position estimate.  The decoder cursor advances a
@@ -1610,72 +1698,11 @@ impl ProDjSender {
                     }
 
                     // ── A master that fell silent is forgotten ───────────────
-                    // Status comes every 200 ms from any deck, paused or not.
-                    // Without this, two decks that both went quiet (iOS
-                    // reclaimed their sockets; the other side slept) each
-                    // kept asking the other for a handoff that never came,
-                    // and MASTER could not be set on either.
-                    {
-                        const MASTER_GONE_MS: u64 = 5000;
-                        let cur = link.master_player.load(Ordering::Relaxed) as u8;
-                        let seen = link.master_seen_ms.load(Ordering::Relaxed);
-                        if cur != 0 && cur != link.player() && seen > 0 && link.now_ms().saturating_sub(seen) > MASTER_GONE_MS {
-                            log::info!("ProDJ Link: master player {cur} silent for {}s — forgetting it", MASTER_GONE_MS / 1000);
-                            link.master_player.store(0, Ordering::Relaxed);
-                            link.yielded_from.store(0, Ordering::Relaxed);
-                            // A synced player whose master vanishes promotes
-                            // itself, so the synced group keeps a tempo
-                            // reference (per the Pro DJ Link analysis; to be
-                            // confirmed against the XDJ-1000MK2).
-                            if link.sync.load(Ordering::Relaxed) && send_full {
-                                link.take_master("our master vanished while we were synced");
-                            }
-                        }
-                    }
+                    forget_silent_master(&link, link.now_ms(), send_full);
 
                     // ── Master handoff ───────────────────────────────────────
-                    if send_full && link.want_master.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed) {
-                        let since = *want_since.get_or_insert(now);
-                        let cur = link.master_player.load(Ordering::Relaxed) as u8;
-                        match (cur, link.peer_ip(cur)) {
-                            (0, _) if now.duration_since(since) >= Duration::from_secs(2) => {
-                                // Nobody has claimed master in two seconds: take it.
-                                link.take_master("no master on the network");
-                                want_since = None;
-                            }
-                            (0, _) => {}
-                            (p, Some(ip)) => {
-                                // Send the 0x26 takeover request and WAIT for the
-                                // handshake: the master replies 0x27 and sets Mh
-                                // (handoff) = us in its status, at which point we
-                                // assert master (see listen_status handing_to_us /
-                                // listen_beat 0x27 handler).  Do NOT assert now —
-                                // a real CDJ only takes master after the current
-                                // master agrees, per the DJ Link spec.  Re-request
-                                // ~1/s until the handoff completes or the user
-                                // cancels; if the master never agrees we simply
-                                // don't take it (better than a rogue second
-                                // master the deck ignores).
-                                // Re-request until the master agrees (0x27,
-                                // sets yielded_from); after that, stop and wait
-                                // for it to name us in Mh — like Beat Link, which
-                                // sends the request once and waits.
-                                if link.yielded_from.load(Ordering::Relaxed) == 0
-                                    && now.duration_since(last_request) >= Duration::from_millis(1000) {
-                                    log::info!("ProDJ Link: requesting master from player {p} at {ip}");
-                                    let _ = sock.send_to(&me.build_master_request(), (ip, PORT_BEAT));
-                                    last_request = now;
-                                }
-                            }
-                            (p, None) if now.duration_since(last_request) >= Duration::from_millis(500) => {
-                                log::warn!("ProDJ Link: master is player {p} but its address is unknown yet");
-                                last_request = now;
-                            }
-                            _ => {}
-                        }
-                    } else {
-                        want_since = None;
-                    }
+                    let req = handoff.tick(&link, now, send_full, player);
+                    send_replies(Some(&sock), req.into_iter().collect());
 
                     // ── SYNC follow ──────────────────────────────────────────
                     let sync = link.sync.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed);
@@ -1762,17 +1789,11 @@ impl ProDjSender {
                         let active_loop = active_loop(&st, cur_grid.as_ref());
                         let pkt = me.build_status(&fields);
                         let long = me.build_status_cdj3000(&fields, active_loop);
-                        let peers: Vec<(u8, Ipv4Addr)> = link.peers.lock().map(|p| p.iter().map(|(k, v)| (*k, *v)).collect()).unwrap_or_default();
-                        let names = link.peer_names.lock().map(|n| n.clone()).unwrap_or_default();
+                        let out = status_replies(&link, &pkt, &long);
                         if flags_changed {
-                            log::info!("ProDJ tx: status master={} sync={} → {} peer(s)", fields.master, fields.sync, peers.len());
+                            log::info!("ProDJ tx: status master={} sync={} → {} peer(s)", fields.master, fields.sync, out.len());
                         }
-                        // Each device the status of its generation: a CDJ-3000's
-                        // (with the loop) to all but older players.
-                        for (pl, ip) in peers {
-                            let name = names.get(&pl).map(String::as_str).unwrap_or("");
-                            let _ = sock.send_to(if wants_cdj3000_status(name) { &long } else { &pkt }, (ip, PORT_STATUS));
-                        }
+                        send_replies(Some(&sock), out);
                         last_status = now;
                     }
 
@@ -2759,5 +2780,150 @@ mod listener_tests {
         assert_eq!(to, vec![from(XDJ, PORT_ANNOUNCE), from(Ipv4Addr::new(192, 168, 1, 255), PORT_ANNOUNCE)]);
         assert!(r.iter().all(|(p, _)| ProDjLink::parse_defense(p) == Some(ME)));
         assert!(link.peers.lock().unwrap().is_empty(), "a claim is not an announce");
+    }
+}
+
+/// The sender's master rules: MASTER pressed, a silent master, and where
+/// our status goes.
+#[cfg(test)]
+mod sender_tests {
+    use super::*;
+
+    const ME: u8 = 3;
+    const CDJ: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 20);
+    const XDJ: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 30);
+    fn pressed() -> Arc<LinkState> {
+        let link = LinkState::new(ME);
+        link.want_master.store(true, Ordering::Relaxed);
+        link
+    }
+    fn peer(link: &LinkState, n: u8, ip: Ipv4Addr, name: &str) {
+        link.peers.lock().unwrap().insert(n, ip);
+        link.peer_names.lock().unwrap().insert(n, name.into());
+    }
+
+    #[test]
+    fn with_no_master_heard_for_two_seconds_master_is_taken() {
+        let link = pressed();
+        let mut h = Handoff::default();
+        let t0 = Instant::now();
+        assert!(h.tick(&link, t0, true, ME).is_none());
+        assert!(h.tick(&link, t0 + Duration::from_millis(1900), true, ME).is_none());
+        assert!(!link.master.load(Ordering::Relaxed), "the master's status may not have come yet");
+        h.tick(&link, t0 + Duration::from_millis(2000), true, ME);
+        assert!(link.master.load(Ordering::Relaxed));
+        assert!(!link.want_master.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn with_a_master_we_ask_once_a_second_until_it_agrees_and_never_just_take_it() {
+        let link = pressed();
+        link.master_player.store(2, Ordering::Relaxed);
+        peer(&link, 2, CDJ, "CDJ-3000");
+        let mut h = Handoff::default();
+        let t0 = Instant::now();
+        let ask = h.tick(&link, t0, true, ME).expect("a takeover request");
+        assert_eq!(ask.1, SocketAddr::from((CDJ, PORT_BEAT)));
+        assert_eq!(ProDjLink::parse_master_request(&ask.0), Some(ME));
+        assert!(h.tick(&link, t0 + Duration::from_millis(500), true, ME).is_none(), "not before a second");
+        assert!(h.tick(&link, t0 + Duration::from_millis(1000), true, ME).is_some(), "asked again");
+        link.yielded_from.store(2, Ordering::Relaxed);
+        assert!(h.tick(&link, t0 + Duration::from_millis(5000), true, ME).is_none(), "it agreed: wait for Mh");
+        assert!(!link.master.load(Ordering::Relaxed), "never asserted without the handoff, however long");
+    }
+
+    #[test]
+    fn a_master_whose_address_is_unknown_is_not_asked_or_overridden() {
+        let link = pressed();
+        link.master_player.store(2, Ordering::Relaxed);
+        let mut h = Handoff::default();
+        let t0 = Instant::now();
+        for ms in [0, 600, 2500, 6000] {
+            assert!(h.tick(&link, t0 + Duration::from_millis(ms), true, ME).is_none());
+        }
+        assert!(!link.master.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_receive_only_deck_never_takes_master() {
+        let link = pressed();
+        let mut h = Handoff::default();
+        let t0 = Instant::now();
+        h.tick(&link, t0, false, ME);
+        h.tick(&link, t0 + Duration::from_secs(3), false, ME);
+        assert!(!link.master.load(Ordering::Relaxed), "send_full off (no master on the LAN from test runs)");
+    }
+
+    #[test]
+    fn letting_go_of_master_restarts_the_wait() {
+        let link = pressed();
+        let mut h = Handoff::default();
+        let t0 = Instant::now();
+        h.tick(&link, t0, true, ME);
+        link.want_master.store(false, Ordering::Relaxed);
+        h.tick(&link, t0 + Duration::from_millis(1500), true, ME);
+        link.want_master.store(true, Ordering::Relaxed);
+        h.tick(&link, t0 + Duration::from_millis(2100), true, ME);
+        h.tick(&link, t0 + Duration::from_millis(4000), true, ME);
+        assert!(!link.master.load(Ordering::Relaxed), "the two seconds count from the new press");
+        h.tick(&link, t0 + Duration::from_millis(4100), true, ME);
+        assert!(link.master.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_master_silent_for_five_seconds_is_forgotten() {
+        let link = LinkState::new(ME);
+        link.master_player.store(2, Ordering::Relaxed);
+        link.yielded_from.store(2, Ordering::Relaxed);
+        link.master_seen_ms.store(1_000, Ordering::Relaxed);
+        forget_silent_master(&link, 6_000, true);
+        assert_eq!(link.master_player.load(Ordering::Relaxed), 2, "5 s is not yet silent");
+        forget_silent_master(&link, 6_001, true);
+        assert_eq!(link.master_player.load(Ordering::Relaxed), 0);
+        assert_eq!(link.yielded_from.load(Ordering::Relaxed), 0, "a stale agreement goes with it");
+        assert!(!link.master.load(Ordering::Relaxed), "not synced: no promotion");
+    }
+
+    #[test]
+    fn a_synced_deck_whose_master_vanishes_becomes_master() {
+        let link = LinkState::new(ME);
+        link.sync.store(true, Ordering::Relaxed);
+        link.master_player.store(2, Ordering::Relaxed);
+        link.master_seen_ms.store(1_000, Ordering::Relaxed);
+        link.largest_sync.store(7, Ordering::Relaxed);
+        forget_silent_master(&link, 9_000, true);
+        assert!(link.master.load(Ordering::Relaxed));
+        assert_eq!(link.our_sync.load(Ordering::Relaxed), 8);
+
+        // Receive-only: forget, but never promote.
+        let quiet = LinkState::new(ME);
+        quiet.sync.store(true, Ordering::Relaxed);
+        quiet.master_player.store(2, Ordering::Relaxed);
+        quiet.master_seen_ms.store(1_000, Ordering::Relaxed);
+        forget_silent_master(&quiet, 9_000, false);
+        assert_eq!(quiet.master_player.load(Ordering::Relaxed), 0);
+        assert!(!quiet.master.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_master_never_heard_is_not_timed_out() {
+        let link = LinkState::new(ME);
+        link.master_player.store(2, Ordering::Relaxed);
+        forget_silent_master(&link, 60_000, true);
+        assert_eq!(link.master_player.load(Ordering::Relaxed), 2, "seen_ms 0 = no status yet, not silence");
+    }
+
+    #[test]
+    fn status_goes_to_each_peer_in_its_generations_form() {
+        let link = LinkState::new(ME);
+        peer(&link, 1, XDJ, "XDJ-1000MK2");
+        peer(&link, 2, CDJ, "CDJ-3000");
+        let mut out = status_replies(&link, b"short", b"long");
+        out.sort_by_key(|r| r.1);
+        assert_eq!(out, vec![
+            (b"long".to_vec(), SocketAddr::from((CDJ, PORT_STATUS))),
+            (b"short".to_vec(), SocketAddr::from((XDJ, PORT_STATUS))),
+        ]);
+        assert!(status_replies(&LinkState::new(ME), b"s", b"l").is_empty(), "nobody to tell");
     }
 }
