@@ -23,6 +23,7 @@ pub mod media;
 pub mod pgz;
 pub mod synth;
 pub mod v2;
+pub mod writer;
 
 pub use index::{Entry, Index, Namespace};
 pub use media::{DirMedia, Media};

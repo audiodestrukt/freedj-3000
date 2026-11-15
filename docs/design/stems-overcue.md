@@ -169,7 +169,7 @@ published atomically.
 | 2 ✓ | Engine | A `StemBank` behind an `ArcSwap` in `AudioHandle`, with three atomic gains, the stem mix in `read_block`, original/stems crossfade, the page bitmap, and the same source for scrub. A loader stage after `Prepared` fills pages and runs the alignment check. Tests: sum of stems at gain 1 ≈ original; a mute ramp has no click; loop wrap; seek; scrub | M |
 | 3 ✓ | UI | **CDJ skin:** STEMS tab and panel as on the unit (TOGGLE/VOLUME, FULL MIX, DRUMS/VOCAL/HARMONICS, grey while loading, blue underline when changed), stem-tinted waveform, S badge in BROWSE. **XDJ skin:** no screen element, per the screen-fidelity rule; stems go on the faceplate/CONTROLS side. **Controllers:** `stem_mute`/`stem_level` actions in `controllers.toml` (DJ2Go preset, I2C). Gains reset to full mix on every load | M |
 | 4 ✓ | LINK | Built 2026-11-15 (`stems::load_link`, `NfsMedia`, `Nfs::read_range`): after a dbserver or NFS load from a player's USB/SD, the track is looked up by its ID in the peer's index-v2 (else `index.json` by path, up to 32 MiB) and the bank is read page by page over NFS from the top, every hash checked; `source_sha256` is not checked (it would mean reading the track twice), the alignment check still refuses other files. Measured against the emulated CDJ-3000 (fw 3.22) with Dan's stick: lookup 2–5 ms, first 4 s of stems in 0.40 s, a 2:27 bank in 6.5 s; one role reads at ~91x real time. Planned: on a dbserver/NFS load, look the track ID up in the peer's `CDJMODS/index-v2` (or `index.json` by path), then fetch pages over NFS ahead of the playhead in priority order. A lost page means the original plays there. Works with any player whose stick was prepared, stock or modded, because we only read files | M |
-| 5 | Serve | freedj's media server exports `CDJMODS/` when the stick it serves has one, so OverCue players can load stems from freedj. Open question: how an OverCue player decides "the media owner runs OverCue". Testing it needs an OverCue player (see the questions below) | S–?|
+| 5 | Serve (tested 2026-11-15, see below) | freedj's media server exports `CDJMODS/` when the stick it serves has one, so OverCue players can load stems from freedj. Open question: how an OverCue player decides "the media owner runs OverCue". Testing it needs an OverCue player (see the questions below) | S–?|
 | 6 | Make stems (optional) | Separation in the desktop media server (HTDemucs via ONNX, offline), writing the same format so the output stays interchangeable. Covers non-rekordbox libraries (lookup by `file_path`). Ties into analysis scope (#46) and the sampler-deck vision | L |
 
 Phases 1–3 make a usable feature for local sticks. Phase 4 is the one that
@@ -361,3 +361,31 @@ no bold face yet.
 - OverCue's other features (Gate Cue, Smart Cue, Fader Start, phrase
   indicators). They're on their own TODO lines in
   `docs/TODO-cdj-3000.md`, independent of stems.
+
+## OverCue and a source that doesn't run OverCue (tested 2026-11-15)
+
+Rig: OverCue 0.14.6 as a launch-only mod on cdj3k-emu slot 2 (CDJ-3000 fw
+3.22) on the private bridge; OpenDeck on the same bridge with `--link-send`
+serving a copy of Dan's prepared stick (six tracks, `CDJMODS`, `PIONEER`).
+We watched only OpenDeck's own NFS and dbserver logs.
+
+- **Browse: OverCue reads the owner's index over plain NFS.** Listing
+  OpenDeck's TRACK menu, it looked up `CDJMODS/index-v2/current`, the
+  generation folder and bucket `.IDX` files: the bounded lookup, keyed by
+  the owner's dbserver track ID. With the copied index (keyed by the
+  stick's rekordbox IDs) only the row whose OpenDeck ID collided with a
+  prepared ID (1) got an "S", and the wrong bank; after re-keying the
+  index to OpenDeck's IDs (`opendeck_stems::writer`, `examples/reindex`)
+  the prepared tracks were marked "S".
+- **Load: OverCue does not read the bank from it.** Loading a marked track
+  from OpenDeck played the audio (NFS reads of the file only) and left the
+  STEMS tab grey; over the load and 20 s of play it looked up no file
+  under `CDJMODS/stems/`. That matches the manual's "the player that owns
+  the media must run OverCue": the check is not at the file level (it
+  reads the index), it decides whether to load the bank.
+- So phase 5 serves stems to other OpenDecks (which read any player's
+  `CDJMODS` over LINK), but not to OverCue players unless OverCue accepts
+  sources that serve the open format without running OverCue. That is a
+  question for them (their README invites compatibility reports); we do
+  not probe their channel.
+
