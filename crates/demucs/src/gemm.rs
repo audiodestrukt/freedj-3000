@@ -126,8 +126,28 @@ pub fn gemm1(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out) { run(a, b, n
 /// need not be zeroed first.
 pub fn gemm1_set(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out) { run(a, b, n, c, o, false, true) }
 
+/// `C (rows of panels [p_lo, p_hi)) += A[those rows][k_lo..k_hi] · B`, on the
+/// calling thread: a tile of a bigger product (attention's key tiles).
+#[allow(clippy::too_many_arguments)]
+pub fn gemm1_part(a: &Packed, panels: std::ops::Range<usize>, ks: std::ops::Range<usize>, b: View, n: usize,
+                  c: &mut [f32], o: Out, set: bool) {
+    assert!(panels.end <= a.m.div_ceil(MR) && ks.end <= a.k && b.row_off.len() == ks.len());
+    if n == 0 || panels.is_empty() { return }
+    let rows = (a.m - panels.start * MR).min(panels.len() * MR);
+    let max_row = b.row_off.iter().max().copied().unwrap_or(0);
+    assert!(b.base + max_row + (n - 1) * b.cs < b.b.len(), "B view out of bounds");
+    assert!(o.off + (rows - 1) * o.rs + (n - 1) * o.cs < c.len(), "C view out of bounds");
+    let sub = Sub { prow0: panels.start, k_lo: ks.start, k_hi: ks.end };
+    let mut buf = bufs();
+    for s in 0..n.div_ceil(NC) {
+        // SAFETY: bounds checked above.
+        unsafe { strip_any(a, b, s * NC, (n - s * NC).min(NC), panels.start, panels.end, sub, c.as_mut_ptr(), o, &mut buf, set) }
+    }
+}
+
 fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool, set: bool) {
     assert_eq!(b.row_off.len(), a.k, "B has {} rows, A has {} columns", b.row_off.len(), a.k);
+    let sub = Sub { prow0: 0, k_lo: 0, k_hi: a.k };
     if n == 0 || a.m == 0 { return }
     // Bounds: the last element each view can reach.
     let max_row = b.row_off.iter().max().copied().unwrap_or(0);
@@ -139,7 +159,7 @@ fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool, set:
         let mut buf = bufs();
         for s in 0..strips {
             // SAFETY: bounds checked above.
-            unsafe { strip_any(a, b, s * NC, (n - s * NC).min(NC), 0, panels, c.as_mut_ptr(), o, &mut buf, set) }
+            unsafe { strip_any(a, b, s * NC, (n - s * NC).min(NC), 0, panels, sub, c.as_mut_ptr(), o, &mut buf, set) }
         }
         return;
     }
@@ -154,7 +174,7 @@ fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool, set:
         if p0 >= p1 { return }
         // SAFETY: bounds checked above; this task writes only rows of panels
         // [p0, p1) in columns [s*NC, s*NC+NC) of C, which no other task touches.
-        unsafe { strip_any(a, b, s * NC, (n - s * NC).min(NC), p0, p1, cp as *mut f32, o, buf, set) }
+        unsafe { strip_any(a, b, s * NC, (n - s * NC).min(NC), p0, p1, sub, cp as *mut f32, o, buf, set) }
     });
 }
 
@@ -162,12 +182,17 @@ fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool, set:
 fn bufs() -> (Vec<f32>, Vec<u16>) { (vec![0f32; KC * NC.div_ceil(NR) * NR], Vec::new()) }
 
 #[allow(clippy::too_many_arguments)]
-unsafe fn strip_any(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize, c: *mut f32, o: Out,
+unsafe fn strip_any(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize, sub: Sub, c: *mut f32, o: Out,
                     buf: &mut (Vec<f32>, Vec<u16>), set: bool) {
     #[cfg(target_arch = "aarch64")]
-    if let Some(h) = &a.h { return strip16(a, h, b, j0, nc, p0, p1, c, o, &mut buf.1, set) }
-    strip(a, b, j0, nc, p0, p1, c, o, &mut buf.0, set)
+    if let Some(h) = &a.h { return strip16(a, h, b, j0, nc, p0, p1, sub, c, o, &mut buf.1, set) }
+    strip(a, b, j0, nc, p0, p1, sub, c, o, &mut buf.0, set)
 }
+
+/// The part of A a product uses: rows from panel `prow0` (C's row 0) and
+/// depth `[k_lo, k_hi)` (B's row 0 is A's column `k_lo`).
+#[derive(Clone, Copy)]
+struct Sub { prow0: usize, k_lo: usize, k_hi: usize }
 
 /// Columns of one fp16 tile.
 #[cfg(target_arch = "aarch64")]
@@ -187,20 +212,20 @@ unsafe fn h16(x: f32) -> u16 {
 /// 8x24 kernel run [`F16_STEPS`] at a time into an f32 tile.
 #[cfg(target_arch = "aarch64")]
 #[allow(clippy::too_many_arguments)]
-unsafe fn strip16(a: &Packed, h: &[u16], b: View, j0: usize, nc: usize, p0: usize, p1: usize, c: *mut f32, o: Out,
+unsafe fn strip16(a: &Packed, h: &[u16], b: View, j0: usize, nc: usize, p0: usize, p1: usize, sub: Sub, c: *mut f32, o: Out,
                   buf: &mut Vec<u16>, set: bool) {
     let tiles = nc.div_ceil(NR16);
     buf.resize(KC * tiles * NR16, 0);
     let mut tile = [0f32; MR * NR16];
-    let mut k0 = 0;
-    while k0 < a.k {
-        let kc = (a.k - k0).min(KC);
+    let mut k0 = sub.k_lo;
+    while k0 < sub.k_hi {
+        let kc = (sub.k_hi - k0).min(KC);
         for t in 0..tiles {
             let dst = &mut buf[t * kc * NR16..(t + 1) * kc * NR16];
             let jn = (nc - t * NR16).min(NR16);
             if b.cs < TRANSPOSED {
                 for kk in 0..kc {
-                    let src = b.base + b.row_off[k0 + kk] + (j0 + t * NR16) * b.cs;
+                    let src = b.base + b.row_off[k0 - sub.k_lo + kk] + (j0 + t * NR16) * b.cs;
                     let row = &mut dst[kk * NR16..(kk + 1) * NR16];
                     for j in 0..jn { row[j] = h16(*b.b.get_unchecked(src + j * b.cs)) }
                     for v in &mut row[jn..] { *v = 0 }
@@ -209,7 +234,7 @@ unsafe fn strip16(a: &Packed, h: &[u16], b: View, j0: usize, nc: usize, p0: usiz
                 for j in 0..NR16 {
                     if j < jn {
                         let col = b.base + (j0 + t * NR16 + j) * b.cs;
-                        for kk in 0..kc { dst[kk * NR16 + j] = h16(*b.b.get_unchecked(col + b.row_off[k0 + kk])) }
+                        for kk in 0..kc { dst[kk * NR16 + j] = h16(*b.b.get_unchecked(col + b.row_off[k0 - sub.k_lo + kk])) }
                     } else {
                         for kk in 0..kc { dst[kk * NR16 + j] = 0 }
                     }
@@ -229,7 +254,7 @@ unsafe fn strip16(a: &Packed, h: &[u16], b: View, j0: usize, nc: usize, p0: usiz
                     s0 += n;
                 }
                 let jn = (nc - t * NR16).min(NR16);
-                let base = c.add(o.off + p * MR * o.rs + (j0 + t * NR16) * o.cs);
+                let base = c.add(o.off + (p - sub.prow0) * MR * o.rs + (j0 + t * NR16) * o.cs);
                 if set && k0 == 0 {
                     for r in 0..mr { let row = base.add(r * o.rs); for j in 0..jn { *row.add(j * o.cs) = tile[r * NR16 + j] } }
                 } else if o.rs < o.cs {
@@ -246,12 +271,12 @@ unsafe fn strip16(a: &Packed, h: &[u16], b: View, j0: usize, nc: usize, p0: usiz
 /// One column strip `[j0, j0+nc)`: for each KC block, pack B's strip, then
 /// run every A panel over it.
 #[allow(clippy::too_many_arguments)]
-unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize, c: *mut f32, o: Out, buf: &mut [f32], set: bool) {
+unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize, sub: Sub, c: *mut f32, o: Out, buf: &mut [f32], set: bool) {
     let tiles = nc.div_ceil(NR);
     let mut tile = [0f32; MR * NR];
-    let mut k0 = 0;
-    while k0 < a.k {
-        let kc = (a.k - k0).min(KC);
+    let mut k0 = sub.k_lo;
+    while k0 < sub.k_hi {
+        let kc = (sub.k_hi - k0).min(KC);
         // Pack B[k0..k0+kc][j0..j0+nc] as [tile][kk][NR], zero past nc.
         for t in 0..tiles {
             let dst = &mut buf[t * kc * NR..(t + 1) * kc * NR];
@@ -259,7 +284,7 @@ unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize,
             if b.cs < TRANSPOSED {
                 // Rows of B are runs in memory: copy each row's slice.
                 for kk in 0..kc {
-                    let src = b.base + b.row_off[k0 + kk] + (j0 + t * NR) * b.cs;
+                    let src = b.base + b.row_off[k0 - sub.k_lo + kk] + (j0 + t * NR) * b.cs;
                     let row = &mut dst[kk * NR..(kk + 1) * NR];
                     if b.cs == 1 && jn == NR {
                         // A fixed length: three vector moves, not a memcpy call.
@@ -277,7 +302,7 @@ unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize,
                 for j in 0..NR {
                     if j < jn {
                         let col = b.base + (j0 + t * NR + j) * b.cs;
-                        for kk in 0..kc { dst[kk * NR + j] = *b.b.get_unchecked(col + b.row_off[k0 + kk]) }
+                        for kk in 0..kc { dst[kk * NR + j] = *b.b.get_unchecked(col + b.row_off[k0 - sub.k_lo + kk]) }
                     } else {
                         for kk in 0..kc { dst[kk * NR + j] = 0.0 }
                     }
@@ -292,7 +317,7 @@ unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize,
                 if a.f16 { kernel_f16_sim(kc, ap, buf.as_ptr().add(t * kc * NR), &mut tile) }
                 else { kernel(kc, ap, buf.as_ptr().add(t * kc * NR), &mut tile) }
                 let jn = (nc - t * NR).min(NR);
-                let base = c.add(o.off + p * MR * o.rs + (j0 + t * NR) * o.cs);
+                let base = c.add(o.off + (p - sub.prow0) * MR * o.rs + (j0 + t * NR) * o.cs);
                 if set && k0 == 0 {
                     // First pass of an overwrite: store, don't add.
                     for r in 0..mr { let row = base.add(r * o.rs); for j in 0..jn { *row.add(j * o.cs) = tile[r * NR + j] } }
@@ -354,6 +379,26 @@ unsafe fn kernel(kc: usize, a: *const f32, b: *const f32, out: &mut [f32; MR * N
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A tile of a product (some of A's rows, some of its depth) against the
+    /// same slice of a plain product.
+    #[test]
+    fn a_part_matches_the_same_slice() {
+        let (m, k, n) = (37, 300, 29);
+        let a: Vec<f32> = (0..m * k).map(|i| ((i * 31 % 89) as f32 - 44.0) * 0.01).collect();
+        let b: Vec<f32> = (0..k * n).map(|i| ((i * 17 % 83) as f32 - 41.0) * 0.02).collect();
+        let pa = Packed::new(m, k, |i, kk| a[i * k + kk]);
+        let (panels, ks) = (1..4, 40..290);
+        let rows: Vec<usize> = ks.clone().map(|r| r * n).collect();
+        let mut c = vec![0f32; 24 * n];
+        gemm1_part(&pa, panels.clone(), ks.clone(), View { b: &b, base: 0, row_off: &rows, cs: 1 }, n, &mut c,
+                   Out { off: 0, rs: n, cs: 1 }, true);
+        for i in 0..24 { for j in 0..n {
+            let ai = panels.start * MR + i;
+            let want: f32 = ks.clone().map(|kk| a[ai * k + kk] * b[kk * n + j]).sum();
+            assert!((want - c[i * n + j]).abs() < 1e-3, "{i},{j}: {} vs {want}", c[i * n + j]);
+        }}
+    }
 
     /// Against a plain triple loop, at awkward sizes (edges in every dimension,
     /// several KC passes, many strips) with strided B and transposed C.

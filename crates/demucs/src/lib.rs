@@ -415,16 +415,18 @@ fn tokens_times(a: &Packed, x: &[f32], n: usize, din: usize, y: &mut [f32], dout
     gemm::gemm(a, View { b: x, base: 0, row_off: &rows, cs: din }, n, y, Out { off: 0, rs: 1, cs: dout });
 }
 
-/// Queries per attention block: a block's scores are `BLOCK × m`.
+/// Queries per attention block, and keys per tile within it.
 const BLOCK: usize = 128;
+const TK: usize = 256;
 
 /// Multi-head attention: queries from `q (n, DIM)`, keys/values from `kv (m, DIM)`.
 ///
-/// Each head's K and Vᵀ are packed once, as the fixed operand, then blocks
-/// of queries run in parallel, all heads each: `Sᵀ = K·Qᵀ` (keys × queries,
-/// stored as is), softmax down each query's column, `Oᵀ = Vᵀ·Pᵀ`, which
-/// reads Sᵀ row by row. A block only packs its own queries and
-/// probabilities, and its scores never exceed `m × BLOCK`.
+/// Each head's K and Vᵀ are packed once per layer. Blocks of queries run in
+/// parallel, all heads each, and walk the keys in tiles of [`TK`] with an
+/// online softmax (flash attention): `Sᵀ = K_tile·Qᵀ` (keys × queries), the
+/// tile folded into each query's running max and sum, `Oᵀ += Vᵀ_tile·Pᵀ`
+/// after scaling what is there. A task's working set (one K tile, one Vᵀ
+/// tile, the scores, Oᵀ) stays inside the A76's 512 KB L2.
 fn mha(a: &Attn, q: &[f32], n: usize, kv: &[f32], m: usize) -> Vec<f32> {
     let proj = |x: &[f32], rows: usize, part: usize| {
         let mut y = vec![0f32; rows * DIM];
@@ -447,16 +449,30 @@ fn mha(a: &Attn, q: &[f32], n: usize, kv: &[f32], m: usize) -> Vec<f32> {
     o.par_chunks_mut(BLOCK * DIM).enumerate().for_each(|(blk, ob)| {
         let rows = ob.len() / DIM;
         let r0 = blk * BLOCK;
-        let mut s = vec![0f32; m * rows];
-        let prows: Vec<usize> = (0..m).map(|j| j * rows).collect();
+        let mut s = vec![0f32; TK * rows];
+        let mut ot = vec![0f32; hd * rows];
+        let (mut mx, mut l, mut alpha) = (vec![0f32; rows], vec![0f32; rows], vec![0f32; rows]);
+        let prows: Vec<usize> = (0..TK).map(|j| j * rows).collect();
         for (h, (kp, vp)) in heads.iter().enumerate() {
-            // Sᵀ (m × rows) = K_h · Q_blkᵀ.
-            gemm::gemm1_set(kp, View { b: &qq, base: r0 * DIM + h * hd, row_off: &qrows, cs: DIM }, rows, &mut s,
-                        Out { off: 0, rs: rows, cs: 1 });
-            ops::softmax_cols(&mut s, rows);
-            // Oᵀ (hd × rows) = V_hᵀ · Pᵀ, stored into this block's rows of O.
-            gemm::gemm1_set(vp, View { b: &s, base: 0, row_off: &prows, cs: 1 }, rows, ob,
-                        Out { off: h * hd, rs: 1, cs: DIM });
+            mx.fill(f32::NEG_INFINITY);
+            l.fill(0.0);
+            ot.fill(0.0);
+            for k0 in (0..m).step_by(TK) {
+                let nk = (m - k0).min(TK);
+                // Sᵀ tile (nk × rows) = K[k0..k0+nk] · Q_blkᵀ.
+                gemm::gemm1_part(kp, k0 / gemm::MR..(k0 + nk).div_ceil(gemm::MR), 0..hd,
+                                 View { b: &qq, base: r0 * DIM + h * hd, row_off: &qrows, cs: DIM }, rows,
+                                 &mut s, Out { off: 0, rs: rows, cs: 1 }, true);
+                let st = &mut s[..nk * rows];
+                ops::softmax_tile(st, rows, &mut mx, &mut l, &mut alpha);
+                for row in ot.chunks_exact_mut(rows) { for (v, a) in row.iter_mut().zip(&alpha) { *v *= a } }
+                // Oᵀ (hd × rows) += Vᵀ[.., k0..k0+nk] · Pᵀ.
+                gemm::gemm1_part(vp, 0..hd / gemm::MR, k0..k0 + nk, View { b: st, base: 0, row_off: &prows[..nk], cs: 1 },
+                                 rows, &mut ot, Out { off: 0, rs: rows, cs: 1 }, false);
+            }
+            for (d, row) in ot.chunks_exact(rows).enumerate() {
+                for r in 0..rows { ob[r * DIM + h * hd + d] = row[r] / l[r] }
+            }
         }
     });
     lap.lap("attention");
