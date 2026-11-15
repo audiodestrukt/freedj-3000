@@ -1807,6 +1807,7 @@ impl DeckApp {
             Event::Ui(UiEvent::BrowseFont) => self.browser.cycle_font(),
             Event::Ui(UiEvent::BrowsePreview) => self.browser.toggle_previews(),
             Event::Ui(UiEvent::BrowseInfo) => if self.screen_mode == ScreenMode::Browse { self.browser.toggle_info() },
+            Event::Ui(UiEvent::BrowseRow(i)) => self.browser.pick_row(i),
             Event::Ui(UiEvent::BrowseCategory(i)) => {
                 self.browser.open_rb_category(i);
                 self.screen_mode = ScreenMode::Browse;

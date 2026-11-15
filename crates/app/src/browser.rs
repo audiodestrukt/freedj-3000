@@ -446,6 +446,10 @@ pub struct Browser {
     peeks:      std::collections::HashMap<Peek, PeekRows>,
     peek_asked: Option<(u64, Peek)>,
     peek_ticket: u64,
+    /// The highlight is in the category column on the left (BACK from a
+    /// category's top level): the wheel steps through the categories, each
+    /// opening as it is reached, and pressing it goes back into the list.
+    cat_focus:  bool,
     link:      Arc<LinkState>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
@@ -531,6 +535,7 @@ impl Browser {
             peeks: Default::default(),
             peek_asked: None,
             peek_ticket: 0,
+            cat_focus: false,
             link,
             preview: Default::default(),
             home: start.clone(),
@@ -695,7 +700,7 @@ impl Browser {
         }
     }
 
-    pub fn refresh(&mut self) { self.playlist_only = false; self.rebuild(); }
+    pub fn refresh(&mut self) { self.playlist_only = false; self.cat_focus = false; self.rebuild(); }
     /// BPM and key the player lists for a linked track, once fetched.
     pub fn db_bpm_key(&self, l: &Load) -> (Option<f32>, Option<String>) {
         match Self::meta_key(l).and_then(|k| self.meta_cache.get(&k)).and_then(|i| i.as_ref()) {
@@ -1217,6 +1222,7 @@ impl Browser {
     /// SEARCH: start (or restart) a search from where the browser is.
     pub fn begin_search(&mut self) {
         self.playlist_only = false;
+        self.cat_focus = false;
         if !self.in_search() { self.stack.push(Loc::Search); }
         self.search_query.clear();
         self.selected = 0;
@@ -1289,6 +1295,7 @@ impl Browser {
     /// Open the `i`th rekordbox category from anywhere inside the source.
     pub fn open_rb_category(&mut self, i: usize) {
         self.playlist_only = false;
+        self.cat_focus = false;
         let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot | Loc::DbRoot)) else { return };
         self.stack.truncate(r + 1);
         self.names.truncate(r + 1);
@@ -1339,13 +1346,44 @@ impl Browser {
         Ok(())
     }
 
+    /// A category's top level, with the category column beside it.
+    fn at_category_top(&self) -> bool {
+        if self.playlist_only { return false; }
+        let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot | Loc::DbRoot)) else { return false };
+        self.stack.len() == r + 2 && self.rb_categories().is_some_and(|(_, open)| open.is_some())
+    }
+
+    /// The highlight is in the category column (see `cat_focus`).
+    pub fn cat_focus(&self) -> bool { self.cat_focus }
+
+    /// A row of the list picked by touch: the highlight goes there (out of
+    /// the category column, if it was there).
+    pub fn pick_row(&mut self, i: usize) {
+        self.cat_focus = false;
+        if i < self.entries.len() { self.selected = i; }
+    }
+
     pub fn move_selection(&mut self, delta: i32) {
+        if self.cat_focus {
+            // Through the categories, each opening as the highlight reaches it.
+            let Some((names, Some(open))) = self.rb_categories() else { return };
+            let to = (open as i32 + delta).clamp(0, names.len() as i32 - 1) as usize;
+            if to != open { self.open_rb_category(to); }
+            self.cat_focus = true;
+            return;
+        }
         if self.entries.is_empty() { return; }
         let last = self.entries.len() as i32 - 1;
         self.selected = (self.selected as i32 + delta).clamp(0, last) as usize;
     }
 
     pub fn enter(&mut self) -> Enter {
+        // From the category column back into the list, on its first row.
+        if self.cat_focus {
+            self.cat_focus = false;
+            self.selected = 0;
+            return Enter::Folder;
+        }
         let Some(sel) = self.entries.get(self.selected) else { return Enter::Nothing };
         let (sel_name, kind) = (sel.name.clone(), sel.kind.clone());
         match kind {
@@ -1450,6 +1488,7 @@ impl Browser {
     /// a LINK source would not connect.
     pub fn open_source(&mut self, i: usize) -> bool {
         self.idle = false;
+        self.cat_focus = false;
         self.playlist_only = false;
         let rows = self.sources();
         let Some(row) = rows.get(i) else { return false };
@@ -1506,6 +1545,7 @@ impl Browser {
         let is_root = |l: &Loc| matches!(l, Loc::RbRoot | Loc::DbRoot);
         let keep = (self.stack.clone(), self.names.clone(), self.selected, self.idle, self.entries.clone(), self.playlist_only);
         self.idle = false;
+        self.cat_focus = false;
         // Not inside a source: a linked player's session still open is the
         // one the last track came from.
         if !self.stack.iter().any(is_root) {
@@ -1735,6 +1775,14 @@ impl Browser {
 
     pub fn back(&mut self) {
         if self.playlist_only && matches!(self.stack.last(), Some(Loc::DbFolder(0) | Loc::RbTree(0))) { return; }
+        // A source's categories are as far back as BACK goes, as on the unit:
+        // from a category's top level (ALBUM's albums) it moves the highlight
+        // into the category column, and there it does nothing.  The folders
+        // and the other sources are reached through FOLDER and SOURCE, not by
+        // backing out of the stick.
+        if self.cat_focus { return; }
+        if self.at_category_top() { self.cat_focus = true; return; }
+        if matches!(self.stack.last(), Some(Loc::DbRoot | Loc::RbRoot)) { return; }
         if self.stack.len() > 1 {
             self.stack.pop();
             let came_from = self.names.pop().unwrap_or_default();
@@ -1897,14 +1945,15 @@ mod tests {
         for hidden in ["PIONEER", "CDJMODS", "System Volume Information"] {
             assert!(!names.contains(&hidden), "{hidden} hidden: {names:?}");
         }
+        // BACK from FOLDER's top level: the highlight goes to the category
+        // column (not out of the stick).
         b.back();
-        assert_eq!(b.title(), "REKORDBOX");
+        assert!(b.cat_focus());
         // The demo export has no playlists, but PLAYLIST is listed anyway (a
         // CDJ-3000 always shows it); TRACK lists both tracks.
-        assert!(b.entries().iter().any(|e| e.name == "PLAYLIST"));
-        let tr = b.entries().iter().position(|e| e.name.starts_with("TRACK")).expect("TRACK category");
-        b.selected = tr;
-        assert!(matches!(b.enter(), Enter::Folder));
+        let cats = b.rb_categories().unwrap().0;
+        assert!(cats.iter().any(|c| c == "PLAYLIST"));
+        b.open_rb_category(cats.iter().position(|c| c.starts_with("TRACK")).expect("TRACK category"));
         assert_eq!(b.title(), "TRACK");
         let names: Vec<&str> = b.entries().iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["Demo Track 1", "Demo Track 2"]);
@@ -2174,6 +2223,51 @@ mod tests {
         assert_eq!(b.title(), "REKORDBOX", "stays on the categories");
     }
 
+    /// BACK climbs to a category's top level, then moves the highlight into
+    /// the category column, and there does nothing more, as on the unit: from
+    /// ALBUM it does not back out of the stick (FOLDER and SOURCE lead
+    /// there).  In the column the wheel opens each category it reaches, and
+    /// pressing it goes back into the list.
+    #[test]
+    fn back_moves_into_the_category_column_and_no_further() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/rekordcrate/data/complete_export/demo_tracks");
+        let mut b = Browser::new(&root, crate::prodj::LinkState::new(1));
+        b.selected = b.entries().iter().position(|e| e.name == "rekordbox").expect("rekordbox row");
+        b.enter();
+        b.open_rb_category(1);
+        assert_eq!(b.title(), "ALBUM");
+        b.enter();
+        assert_ne!(b.title(), "ALBUM", "into an album");
+        b.back();
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ALBUM", false), "out of the album");
+        b.back();
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ALBUM", true), "the highlight in the column, ALBUM still open");
+        assert_eq!(b.rb_categories().unwrap().1, Some(1));
+        b.back();
+        b.back();
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ALBUM", true), "BACK goes no further");
+        // The wheel walks the column, opening each category.
+        b.move_selection(1);
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("TRACK", true));
+        b.move_selection(-2);
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ARTIST", true));
+        b.move_selection(-1);
+        assert_eq!(b.title(), "ARTIST", "the top of the column");
+        // Pressing it: back into the list, on its first row.
+        assert!(matches!(b.enter(), Enter::Folder));
+        assert_eq!((b.title().as_str(), b.cat_focus(), b.selected), ("ARTIST", false, 0));
+        b.move_selection(1);
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ARTIST", false), "the wheel is the list's again");
+        // A tapped row takes the highlight back too (TRACK: two rows).
+        b.back();
+        assert!(b.cat_focus());
+        b.move_selection(2);
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("TRACK", true));
+        b.pick_row(1);
+        assert_eq!((b.cat_focus(), b.selected), (false, 1));
+    }
+
     /// A stick inserted while browsing the home folder does not take the
     /// USB / BROWSE key over; each source keeps its own place, and a saved
     /// position (by names) puts a fresh browser back on the same row.
@@ -2202,9 +2296,8 @@ mod tests {
         let usb = b.sources().iter().position(|r| r.kind == SourceKind::Usb && r.path.as_deref() == Some(stick.as_path())).unwrap();
         assert!(b.open_source(usb));
         assert_eq!(b.title(), "ARTIST", "a rekordbox stick opens on ARTIST, as a CDJ");
-        b.back();
-        b.selected = b.entries().iter().position(|e| e.name.starts_with("TRACK")).unwrap();
-        assert!(matches!(b.enter(), Enter::Folder));
+        let cats = b.rb_categories().unwrap().0;
+        b.open_rb_category(cats.iter().position(|c| c.starts_with("TRACK")).unwrap());
         b.selected = 1;
         assert_eq!(b.title(), "TRACK");
         assert!(b.open_source(0));

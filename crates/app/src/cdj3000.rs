@@ -1503,6 +1503,13 @@ fn draw_categories(ui: &Ui, lay: &Layout, cats: &[&str], u: f32) {
 /// `selected` in view. Tapping a row selects it; tapping the selected row
 /// loads it (the rotary's press).
 fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, empty: &str, u: f32, out: Option<&mut Vec<Event>>) {
+    draw_list_lit(ui, pane, head, rows, selected, true, empty, u, out)
+}
+
+/// As [`draw_list`]; `lit` false keeps the list where `selected` puts it but
+/// draws no highlight (the category column has it), and a tapped row takes
+/// the highlight back into the list.
+fn draw_list_lit(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, lit: bool, empty: &str, u: f32, out: Option<&mut Vec<Event>>) {
     let p = ui.painter();
     let hb = Rect::from_min_size(pane.min, Vec2::new(pane.width(), 60.0 * u));
     p.rect_filled(hb, 0.0, PANE_HEAD);
@@ -1515,12 +1522,13 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
         let rr = Rect::from_min_size(Pos2::new(pane.min.x, y), Vec2::new(pane.width(), ROW_H * u));
         if rr.max.y > pane.max.y + 1.0 { break; }
         let i = first + k;
-        let sel = i == selected && i < rows.len();
+        let sel = lit && i == selected && i < rows.len();
         p.rect_filled(rr, 0.0, if sel { KEY_LIT } else if k % 2 == 0 { ROW_GREY } else { BG });
         let Some(row) = rows.get(i) else { continue };
         if let Some(out) = out.as_deref_mut() {
             if tap(ui, rr, &format!("cdj-row-{head}-{i}")).0 {
-                if sel { out.push(Event::Deck(ControlEvent::Load)); }
+                if !lit { out.push(Event::Ui(UiEvent::BrowseRow(i))); }
+                else if sel { out.push(Event::Deck(ControlEvent::Load)); }
                 else { out.push(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: i as i32 - selected as i32 })); }
             }
         }
@@ -1839,7 +1847,7 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         },
     };
     let left = Rect::from_min_max(Pos2::new(sc.min.x + lx * u, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 730.0 * u, sc.min.y + 628.0 * u));
-    draw_list(ui, left, &head, &rows, b.selected, "— empty —", u, Some(out));
+    draw_list_lit(ui, left, &head, &rows, b.selected, !b.cat_focus(), "— empty —", u, Some(out));
     let right = Rect::from_min_max(Pos2::new(sc.min.x + 732.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(right, 0.0, BG);
     ui.painter().line_segment([Pos2::new(right.min.x - 1.0 * u, right.min.y), Pos2::new(right.min.x - 1.0 * u, right.max.y)], Stroke::new(2.0 * u, PANE_HEAD));
@@ -2151,7 +2159,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
             rules(false);
             continue;
         };
-        let lit = i == sel;
+        let lit = i == sel && !b.cat_focus();
         let stripe = if k % 2 == 0 { Color32::from_rgb(40, 40, 40) } else { BG };
         p.rect_filled(Rect::from_min_max(at(left, y), at(pv, y + ROW_H)), 0.0, stripe);
         draw_row_preview(ui, b, e, sc.min.x + left * u, sc.min.y + y * u, u, b.previews_on());
@@ -2159,7 +2167,8 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
         let cy = sc.min.y + (y + ROW_H / 2.0) * u;
         let title = Rect::from_min_max(at(tr, y), at(1079.0, y + ROW_H));
         if tap(ui, title, &format!("cdj-trk-{i}")).0 {
-            out.push(Event::Deck(if lit { ControlEvent::Load } else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - sel as i32 } }));
+            out.push(if b.cat_focus() { Event::Ui(UiEvent::BrowseRow(i)) }
+                     else { Event::Deck(if lit { ControlEvent::Load } else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - sel as i32 } }) });
         }
         track_icon(ui, Pos2::new(sc.min.x + (tr + 23.0) * u, cy), r.stems, u);
         let tcol = if r.played { PLAYED } else { TEXT };
