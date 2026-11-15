@@ -1417,7 +1417,7 @@ struct Tile { kind: crate::browser::SourceTile, badge: Option<(u8, u8)> }
 
 /// The source tile at the top left: tinted with the stick's colour label, its
 /// player number in the corner.
-fn draw_source_tile(ui: &Ui, snap: &DeckSnapshot, s: Rect, t: Tile, u: f32) {
+fn draw_source_tile(ui: &Ui, _snap: &DeckSnapshot, s: Rect, t: Tile, u: f32) {
     use crate::browser::SourceTile as K;
     let badge = t.badge;
     let p = ui.painter();
