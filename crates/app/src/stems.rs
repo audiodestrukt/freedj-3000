@@ -252,7 +252,11 @@ impl Mixer {
         // written stretch.  The stems take over again once the pages a
         // block ahead are written.
         let span: usize = ranges.iter().map(|r| r.len()).sum();
-        let written = bank.complete() || ranges.iter().all(|r| bank.range_ready(r.start..r.end + span));
+        // Empty ranges are placeholders (the audio thread always passes two;
+        // the second is only used when a loop wraps): checking one as
+        // `0..span` asked whether page 0 was written, which a split from the
+        // playhead does last, so the stems never played until it finished.
+        let written = bank.complete() || ranges.iter().filter(|r| !r.is_empty()).all(|r| bank.range_ready(r.start..r.end + span));
         let m_target = if !written || target.iter().all(|g| *g >= 1.0) { 0.0 } else { 1.0 };
         if self.m == 0.0 && m_target == 0.0 { self.g = target; return false; }
         let frames: usize = ranges.iter().map(|r| r.len() / 2).sum();
@@ -1027,6 +1031,13 @@ mod tests {
         assert!(out.iter().all(|s| (s - 0.25).abs() < 0.001), "the stems on ready pages");
         assert!(m.mix(&x, Some(&bank), [0.0, 1.0, 1.0], &[6 * PAGE - blk..6 * PAGE], &mut out));
         assert!((out[blk - 1] - 0.5).abs() < 0.001 && out.windows(2).all(|w| (w[0] - w[1]).abs() < 0.001), "ramps out before page 6");
+        // The audio thread's shape: the block plus an empty second range
+        // (used only when a loop wraps).  Page 0 is not written (a split
+        // that started mid-track): the stems still play on pages 4-5.
+        let mut m2 = Mixer::default();
+        m2.mix(&x, Some(&bank), [0.0, 0.0, 0.0], &[4 * PAGE..4 * PAGE + blk, 0..0], &mut out);
+        assert!(m2.mix(&x, Some(&bank), [0.0, 0.0, 0.0], &[4 * PAGE + blk..5 * PAGE, 0..0], &mut out), "stems on ready pages");
+        assert!(out.iter().all(|s| s.abs() < 0.001), "every stem muted: silence, not the original");
         // A writer stopped halfway into page 0: forgotten, then written whole.
         let (d, v, h) = stems(PAGE / 2);
         bank.write(0, [&d, &v, &h]);

@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- Stems from a split still in progress play again. Since the split started
+  from the playhead (0.3.24), the STEMS keys moved but the deck kept playing
+  the original until the whole split was done: the mixer also checked an
+  empty placeholder range, which asked whether the start of the track was
+  split, and a split from the playhead does that last.
+
 ### Added
 - Stems from the playhead. A track split on the device starts just ahead of
   where it is playing, not at the top, and follows a hot cue or needle jump
