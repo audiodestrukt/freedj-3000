@@ -1,4 +1,4 @@
-STEMS: split any track into drums, vocals and the rest, right on your iPad. Open the STEMS panel and the track starts splitting; the first time, the app fetches its separation model by itself (about 290 MB, once). Stems play while the track is still being split, and the model no longer stays in memory after a split. Stems prepared on a USB stick with OverCue now play within a fraction of a second of loading.
+STEMS: split any track into drums, vocals and the rest, right on your iPad. Open the STEMS panel and the track starts splitting just ahead of where it is playing, and follows you to a hot cue or a needle jump; the first time, the app fetches its separation model by itself (about 290 MB, once). Each stretch plays as stems as soon as it is split. Stems prepared on a USB stick with OverCue play within a fraction of a second of loading, and so do stems on another player's USB or SD over Pro DJ Link, marked S in BROWSE.
 
 KEY SHIFT: move the track up or down a semitone at a time without touching the tempo, with RESET to go back. The KEY readouts show the new key.
 
@@ -8,4 +8,6 @@ WAVEFORM COLOR: BLUE, RGB or 3BAND in MENU, with 3BAND by default.
 
 PRO DJ LINK: CDJ-3000s and lighting or timecode tools get the deck's exact play position many times a second, its loops, its hot and memory cues, and each track's key in their browse lists.
 
-FIXES: rekordbox tracks with cue points kept their beat grid and cues (they could lose both), and hot cues land on the right pads. SLIP works with hot cues and scratching. Loop keys act the moment they are pressed. TEMPO RANGE no longer moves the tempo. The phase meter no longer jumps a beat. Touch keys no longer miss quick taps. 32-bit FLAC plays, and AIFF titles are clean.
+LINK LOADING: a track from another player starts playing after its first seconds have arrived instead of after the whole file.
+
+FIXES: sound no longer stops with the ring/silent switch, and an idle iPad no longer stays lit. rekordbox tracks with cue points kept their beat grid and cues (they could lose both), and hot cues land on the right pads. SLIP works with hot cues and scratching. Loop keys act the moment they are pressed. TEMPO RANGE no longer moves the tempo. The phase meter no longer jumps a beat. Touch keys no longer miss quick taps. 32-bit FLAC plays, and AIFF titles are clean.
