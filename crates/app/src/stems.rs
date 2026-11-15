@@ -216,30 +216,126 @@ pub fn find_stick(file: &Path) -> Option<(PathBuf, String)> {
     None
 }
 
+/// What a prepared stick needs to find one track's stems, kept per stick.
+///
+/// With `index-v2` (OverCue Desktop 2.2.40 and later) a track is found by
+/// its rekordbox ID with one small bucket read, as OverCue's player does;
+/// the IDs come from the stick's `export.pdb`, read once.  `index.json` is
+/// read (once) only for a stick without index-v2, or a file the export
+/// doesn't list.  It can be up to 256 MiB, so it is never read on the
+/// UI thread (see [`StemMarks`]).
+struct Stick {
+    /// Modification times of `index.json` and `index-v2/current` when read:
+    /// a stick prepared again is read again.
+    stamp: (Option<std::time::SystemTime>, Option<std::time::SystemTime>),
+    v2: bool,
+    ids: HashMap<String, u32>,
+    index: OnceLock<Option<Arc<oc::Index>>>,
+}
+
+static STICKS: std::sync::Mutex<Option<HashMap<PathBuf, Arc<Stick>>>> = std::sync::Mutex::new(None);
+
+fn stick_stamp(root: &Path) -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
+    let m = |p: &str| std::fs::metadata(root.join(p)).and_then(|m| m.modified()).ok();
+    (m("CDJMODS/index.json"), m("CDJMODS/index-v2/current"))
+}
+
+fn stick(root: &Path) -> Arc<Stick> {
+    let stamp = stick_stamp(root);
+    let mut all = STICKS.lock().unwrap_or_else(|e| e.into_inner());
+    let all = all.get_or_insert_with(HashMap::new);
+    if let Some(s) = all.get(root).filter(|s| s.stamp == stamp) { return Arc::clone(s); }
+    let v2 = match oc::v2::current(&mut oc::DirMedia::new(root)) {
+        Ok(c) => c.is_some(),
+        Err(e) => { log::warn!("stems: {}: {e:#}", root.display()); false }
+    };
+    let ids = if !v2 { HashMap::new() } else {
+        match opendeck_rekordbox::read_export(root) {
+            Ok(exp) => exp.tracks.iter().map(|t| (t.rel_path.clone(), t.id)).collect(),
+            Err(e) => { log::info!("stems: {} has index-v2 but no readable export.pdb ({e:#}); using index.json", root.display()); HashMap::new() }
+        }
+    };
+    let s = Arc::new(Stick { stamp, v2, ids, index: OnceLock::new() });
+    all.insert(root.to_path_buf(), Arc::clone(&s));
+    s
+}
+
+/// Forget every stick (one came or went).
+fn forget_sticks() { *STICKS.lock().unwrap_or_else(|e| e.into_inner()) = None; }
+
+/// The stems entry for the file at `rel` ("/Contents/…") on the stick at
+/// `root`.  `Ok(None)`: no stems for it.  Blocking file reads: keep it off
+/// the UI thread.
+pub fn entry_for(root: &Path, rel: &str) -> Result<Option<oc::Entry>> {
+    let s = stick(root);
+    let mut media = oc::DirMedia::new(root);
+    if s.v2 {
+        if let Some(&id) = s.ids.get(rel) {
+            // A damaged index-v2 fails closed (no stems), as the spec asks.
+            return oc::v2::lookup(&mut media, oc::index::Namespace::DeviceLibrary, id);
+        }
+    }
+    let index = s.index.get_or_init(|| match oc::Index::read(&mut media) {
+        Ok(i) => i.map(Arc::new),
+        Err(e) => { log::warn!("stems: {}: index.json: {e:#}", root.display()); None }
+    });
+    match index {
+        Some(i) => Ok(i.by_path(rel)?.cloned()),
+        None => Ok(None),
+    }
+}
+
 /// Which local files have prepared stems, for the "S" mark in BROWSE lists
-/// (as OverCue marks them on the unit).  Each stick's `CDJMODS/index.json`
-/// is read once; each file is looked up once.
+/// (as OverCue marks them on the unit).  The lookups run on a worker
+/// thread: the first ask for a file answers "no" and queues it, and the
+/// mark appears on a later frame once the answer is in.  The list's
+/// drawing never waits on a stick (OverCue lets `index.json` reach
+/// 256 MiB).
 #[derive(Default)]
 pub struct StemMarks {
-    sticks: HashMap<PathBuf, Option<oc::Index>>,
-    files:  HashMap<PathBuf, bool>,
+    files: HashMap<PathBuf, bool>,
+    asked: std::collections::HashSet<PathBuf>,
+    worker: Option<(std::sync::mpsc::Sender<PathBuf>, std::sync::mpsc::Receiver<(PathBuf, bool)>)>,
 }
 
 impl StemMarks {
+    /// Known to have stems.  Never blocks: an unknown file is looked up in
+    /// the background and reads `false` until the answer arrives.
     pub fn has_stems(&mut self, file: &Path) -> bool {
+        self.take_answers();
         if let Some(v) = self.files.get(file) { return *v; }
-        let v = find_stick(file).is_some_and(|(root, rel)| {
-            let index = self.sticks.entry(root.clone()).or_insert_with(|| {
-                oc::Index::read(&mut oc::DirMedia::new(&root)).ok().flatten()
-            });
-            index.as_ref().is_some_and(|i| i.by_path(&rel).ok().flatten().is_some())
-        });
-        self.files.insert(file.to_path_buf(), v);
-        v
+        if self.asked.insert(file.to_path_buf()) {
+            let (tx, _) = self.worker.get_or_insert_with(spawn_marks_worker);
+            if tx.send(file.to_path_buf()).is_err() { self.worker = None; self.asked.remove(file); }
+        }
+        false
     }
 
-    /// A stick came or went: read the indexes again.
-    pub fn clear(&mut self) { self.sticks.clear(); self.files.clear(); }
+    fn take_answers(&mut self) {
+        if let Some((_, rx)) = &self.worker {
+            while let Ok((p, v)) = rx.try_recv() { self.files.insert(p, v); }
+        }
+    }
+
+    /// A stick came or went: look everything up again.
+    pub fn clear(&mut self) {
+        self.files.clear();
+        self.asked.clear();
+        self.worker = None;  // the old worker's answers are dropped with it
+        forget_sticks();
+    }
+}
+
+fn spawn_marks_worker() -> (std::sync::mpsc::Sender<PathBuf>, std::sync::mpsc::Receiver<(PathBuf, bool)>) {
+    let (tx, jobs) = std::sync::mpsc::channel::<PathBuf>();
+    let (answer, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new().name("stem-marks".into()).spawn(move || {
+        for file in jobs {
+            let v = find_stick(&file).is_some_and(|(root, rel)| entry_for(&root, &rel).ok().flatten().is_some());
+            if answer.send((file, v)).is_err() { break; }
+        }
+    });
+    (tx, rx)
 }
 
 /// Build the bank for a local file just loaded as `track` (interleaved,
@@ -249,8 +345,7 @@ impl StemMarks {
 pub fn load_local(file: &Path, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize, job: Option<&crate::separate::Job>) -> Result<Option<Arc<StemBank>>> {
     let Some((root, rel)) = find_stick(file) else { return Ok(None) };
     let mut media = oc::DirMedia::new(&root);
-    let Some(index) = oc::Index::read(&mut media)? else { return Ok(None) };
-    let Some(entry) = index.by_path(&rel)?.cloned() else { return Ok(None) };
+    let Some(entry) = entry_for(&root, &rel)? else { return Ok(None) };
     if let Some(want) = entry.source_sha256 {
         let got = sha256_file(file)?;
         ensure!(got == want, "{rel}: the stems were prepared from a different version of this file; prepare them again");
@@ -709,6 +804,78 @@ mod tests {
         assert!(align(&deck, &full, sr).is_err(), "a different track is refused");
     }
 
+    /// The "S" mark for `file`, once the background lookup has answered.
+    fn mark(marks: &mut StemMarks, file: &Path) -> bool {
+        let t0 = std::time::Instant::now();
+        loop {
+            let v = marks.has_stems(file);
+            marks.take_answers();
+            if v || marks.files.contains_key(file) { return marks.files.get(file).copied().unwrap_or(v); }
+            assert!(t0.elapsed() < std::time::Duration::from_secs(10), "no answer for {}", file.display());
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+    }
+
+    /// Prepared stems on a rekordbox stick with index-v2: a track is found
+    /// by its export.pdb ID in index-v2, without reading index.json (here
+    /// made unreadable to prove it); a track without stems is not marked.
+    /// The first S-mark ask never blocks the list: it answers at once.
+    #[test]
+    fn index_v2_finds_stems_by_rekordbox_id_without_index_json() {
+        index_v2_case();
+    }
+
+    /// A real OverCue stick (`OPENDECK_REAL_STICK=<mount>`): every track
+    /// index.json lists is found through index-v2 (by its export.pdb ID)
+    /// with the same bank.
+    #[test]
+    fn real_stick_index_v2_agrees_with_index_json() {
+        let Some(root) = std::env::var_os("OPENDECK_REAL_STICK") else { return };
+        let root = PathBuf::from(root);
+        let s = stick(&root);
+        assert!(s.v2, "the stick has index-v2");
+        let index = oc::Index::read(&mut oc::DirMedia::new(&root)).unwrap().unwrap();
+        let mut n = 0;
+        for e in index.device.values() {
+            let path = e.file_path.as_deref().unwrap();
+            assert!(s.ids.contains_key(path), "{path} in export.pdb");
+            let t = std::time::Instant::now();
+            let got = entry_for(&root, path).unwrap().expect("found");
+            assert_eq!(got.bundle, e.bundle, "{path}");
+            eprintln!("{path}: {} via index-v2 in {:.1} ms", got.bundle, t.elapsed().as_secs_f64() * 1e3);
+            n += 1;
+        }
+        assert!(n > 0);
+    }
+
+    fn index_v2_case() {
+        let d = tempfile::tempdir().unwrap();
+        crate::media::tests::copy_tree(&crate::media::tests::demo_export(), d.path());
+        let exp = opendeck_rekordbox::read_export(d.path()).unwrap();
+        let (with, without) = (&exp.tracks[0], &exp.tracks[1]);
+        let frames = 96_000 * 2;
+        let stems: Vec<Vec<i16>> = (1..=3).map(|s| sig(s, frames, 96_000.0).iter().map(|v| v / 3).collect()).collect();
+        let mut roles = BTreeMap::new();
+        for (r, s) in ROLES.iter().zip(&stems) { roles.insert(*r, s.clone()); }
+        roles.insert(Role::FullMix, sum(&stems));
+        write_stick(d.path(), &[SynthTrack { id: with.id, onelibrary_id: None, file_path: with.rel_path.clone(), source: b"orig".to_vec(), roles }],
+                    SynthCodec::Flac96, Some(4)).unwrap();
+        let other = without.path_on(d.path());
+        std::fs::create_dir_all(other.parent().unwrap()).unwrap();
+        std::fs::write(&other, b"plain").unwrap();
+        std::fs::write(d.path().join("CDJMODS/index.json"), b"not json").unwrap();
+
+        let file = with.path_on(d.path());
+        let (root, rel) = find_stick(&file).unwrap();
+        assert!(entry_for(&root, &rel).unwrap().is_some(), "found through index-v2");
+        let mut marks = StemMarks::default();
+        let t = std::time::Instant::now();
+        assert!(!marks.has_stems(&file), "the first ask answers at once, before the lookup");
+        assert!(t.elapsed() < std::time::Duration::from_millis(50));
+        assert!(mark(&mut marks, &file));
+        assert!(!mark(&mut marks, &other), "listed in the export, no stems");
+    }
+
     /// A stick prepared at 96 kHz; the deck decodes the original at 48 kHz
     /// a little late (an MP3 delay).  The bank must line up with the deck.
     #[test]
@@ -751,9 +918,9 @@ mod tests {
         std::fs::write(&plain, b"x").unwrap();
         let elsewhere = tempfile::NamedTempFile::new().unwrap();
         let mut marks = StemMarks::default();
-        assert!(marks.has_stems(&file));
-        assert!(!marks.has_stems(&plain));
-        assert!(!marks.has_stems(elsewhere.path()));
+        assert!(mark(&mut marks, &file));
+        assert!(!mark(&mut marks, &plain));
+        assert!(!mark(&mut marks, elsewhere.path()));
         assert!(marks.has_stems(&file), "cached answer");
         // A changed original (re-exported) is refused.
         std::fs::write(&file, b"another version").unwrap();

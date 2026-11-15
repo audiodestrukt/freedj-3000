@@ -215,7 +215,10 @@ What the tests cover:
 - **Loading:** `start_stems` runs after each local LOAD on a `stems-load`
   thread.
   1. `find_stick` finds the nearest `CDJMODS/index.json` above the file.
-  2. The track is looked up by path; a mismatched `source_sha256` is
+  2. The track is looked up (`stems::entry_for`): on a stick with
+     `index-v2`, by its `export.pdb` ID with one bucket read, as OverCue's
+     player does; otherwise, or for a file the export doesn't list, by path
+     in `index.json` (read once per stick). A mismatched `source_sha256` is
      refused.
   3. Each role is read with every hash checked, then converted to the deck
      rate: the decimator at 96 → 48 kHz, rubato otherwise.
@@ -312,9 +315,11 @@ full track.
 
 **"S" in BROWSE** (built 2026-11-13). With STEMS on, the CDJ skin's lists
 and track tables mark a local track with prepared stems with a small "S"
-low on the left of its ♪. `stems::StemMarks` reads each stick's
-`index.json` once and caches the answer per file; a stick coming or going
-clears it. The unit also draws a stock "H" above the S; freedj doesn't
+low on the left of its ♪. `stems::StemMarks` asks a worker thread (`entry_for`,
+as loading uses) and caches the answer per file; drawing never waits on a
+stick, since OverCue now lets `index.json` grow to 256 MiB. The first draw
+of a row has no mark, and the mark appears a frame or two later. A stick
+coming or going clears it. The unit also draws a stock "H" above the S; freedj doesn't
 draw it yet.
 
 **Panel faces** (built 2026-11-13). The panel takes OverCue's own key

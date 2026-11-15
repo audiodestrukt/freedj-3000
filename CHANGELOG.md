@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Changed
+- Prepared stems on a stick with OverCue's `index-v2` (OverCue Desktop
+  2.2.40 and later) are found by the track's rekordbox ID with one small
+  read, as OverCue's player finds them, instead of reading the whole
+  `index.json`. OverCue now lets that file grow to 256 MiB. Sticks without
+  index-v2 work as before.
+- BROWSE's "S" marks are looked up in the background: scrolling a big
+  prepared stick never waits on its stems index. A mark can appear a moment
+  after its row.
+
 ## [0.3.23] — 2026-11-14
 
 ### Added

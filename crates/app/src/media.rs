@@ -200,7 +200,7 @@ pub(crate) mod tests {
         (root, stick)
     }
 
-    fn copy_tree(from: &Path, to: &Path) {
+    pub(crate) fn copy_tree(from: &Path, to: &Path) {
         std::fs::create_dir_all(to).unwrap();
         for ent in std::fs::read_dir(from).unwrap().flatten() {
             let (src, dst) = (ent.path(), to.join(ent.file_name()));
