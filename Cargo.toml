@@ -16,6 +16,7 @@ members = [
     "crates/dbserver",
     "crates/mediaserver",
     "crates/stems",
+    "crates/demucs",
     "crates/ui",
     "crates/app",
 ]

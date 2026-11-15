@@ -1,0 +1,13 @@
+[package]
+name        = "opendeck-demucs"
+description = "HTDemucs stem separation in plain Rust: Meta's weights, no ONNX Runtime or PyTorch"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow         = { workspace = true }
+matrixmultiply = "0.3"
+realfft        = "3"
+libm           = "0.2"
+serde_json     = "1"

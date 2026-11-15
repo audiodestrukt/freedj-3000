@@ -196,3 +196,34 @@ the first chunk and reads `opendeck-stems.conf` in the OpenDeck folder
   peak of a successful iPad split (0.3.13+, CPU + GPU) is not recorded yet
   and should replace it. (The 548 → 5219 MB run sometimes quoted is Linux,
   ONNX Runtime on the CPU, not the iPad.)
+
+## A Raspberry Pi 5: our own runtime (`opendeck-demucs`)
+
+Measured 2026-11-15 on a 4 GB Pi 5 (64-bit Pi OS, no cooler, so throttled to
+1.5 GHz at 85-89 °C for most runs). Target: split at 2x real time, i.e. one
+chunk (5.85 s of new audio at 25 % overlap) in under 2.9 s.
+
+| Route | Per chunk | Notes |
+|---|---|---|
+| ONNX Runtime 1.23, fp32 | 13.5 s | whole track 0.4x real time, peak 1.6 GB |
+| ONNX Runtime, int8 MatMul | 12.7 s | only 6 % faster; agreement with fp32 falls to 26-38 dB |
+| ONNX Runtime, int8 MatMul + Conv | — | slower on the desktop and broken (1 dB on vocals) |
+| PyTorch 2.15 | 14.5 s | 18 GFLOPS; 20 % of its time is `copy_` |
+| V3D GPU (Vulkan, ncnn) | — | 20-50x *slower* than the CPU on real CNNs (squeezenet 313 vs 7 ms) |
+
+HTDemucs is **335 GFLOP per chunk** (transformer linears 127, convolutions
+123, attention 85). The Pi's four A76 cores do fp32 matrix multiplies at
+66-99 GFLOPS (PyTorch's sgemm) and ncnn reaches about that on whole CNNs, so
+the runtimes, not the chip, are the limit: ONNX Runtime gets ~30 GFLOPS. At
+90 GFLOPS a chunk takes ~3.7 s, about 1.6x real time (1.9x at 10 % overlap);
+fp16 arithmetic in the transformer is the next lever after that.
+
+`crates/demucs` is HTDemucs written out by hand in Rust from Meta's weights
+(`tools/demucs/export_htdemucs.py` writes `htdemucs.safetensors`). The
+frequency branch is kept as (freq, channel, time), which makes every
+convolution, along time or along frequency, a strided matrix multiply over
+the tensor in place: no im2col, no layout copies. `tests/reference.rs`
+compares each stage with a PyTorch run on a real chunk: the stems agree at
+102-123 dB (ONNX Runtime's export: 80-86, 56 on vocals). First version is
+single-threaded: 11.2 s a chunk on the desktop (ONNX Runtime, 4 threads:
+3.0 s). Next: threads, a fused attention, then the Pi.
