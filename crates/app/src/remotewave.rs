@@ -58,10 +58,7 @@ pub fn fetch_wave(c: &mut DbClient, slot: Slot, id: u32) -> anyhow::Result<WaveD
         .and_then(|b| anlz_entries(&b, 3).map(|d| d.chunks_exact(3).map(|e| [e[0], e[1], e[2]]).collect::<Vec<_>>()))
         .unwrap_or_default();
     let rgb = c.anlz_tag(slot, id, b"PWV5", b"EXT").ok()
-        .and_then(|b| anlz_entries(&b, 2).map(|d| d.chunks_exact(2).map(|e| {
-            let v = u16::from_be_bytes([e[0], e[1]]);
-            [(v >> 13 & 7) as u8, (v >> 10 & 7) as u8, (v >> 7 & 7) as u8, (v >> 2 & 31) as u8]
-        }).collect::<Vec<_>>()))
+        .and_then(|b| anlz_entries(&b, 2).map(|d| d.chunks_exact(2).map(|e| pwv5_entry(u16::from_be_bytes([e[0], e[1]]))).collect::<Vec<_>>()))
         .unwrap_or_default();
     log::info!("remote waveform {id}: {} bytes, {} beats, {} band entries, {} colour entries", bytes.len(), beats.len(), bands.len(), rgb.len());
     Ok(WaveData { bytes, beats, bands, rgb })
@@ -149,6 +146,12 @@ impl Remote {
     }
 }
 
+/// One PWV5 colour-detail entry (big-endian u16): red, green, blue (3 bits
+/// each, from the top) and height (5 bits), the low 2 bits unused.
+fn pwv5_entry(v: u16) -> [u8; 4] {
+    [(v >> 13 & 7) as u8, (v >> 10 & 7) as u8, (v >> 7 & 7) as u8, (v >> 2 & 31) as u8]
+}
+
 /// The entries of an ANLZ tag section as the player sends it: a 4-byte
 /// prefix, the tag name, the header length, the section length, the entry
 /// size and the entry count, then the entries.
@@ -159,4 +162,78 @@ fn anlz_entries(b: &[u8], entry: usize) -> Option<&[u8]> {
     if size != entry { return None; }
     let data = b.get(4 + head..)?;
     Some(&data[..data.len().min(count * entry)])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A tag reply as a player sends it: 4 bytes before the tag, the tag
+    /// name, header length, section length, entry size, entry count, then
+    /// the entries after the header.
+    fn reply(head: u32, entry: u32, entries: &[u8]) -> Vec<u8> {
+        let count = entries.len() as u32 / entry;
+        let mut b = vec![0u8; 4];
+        b.extend_from_slice(b"PWV7");
+        b.extend_from_slice(&head.to_be_bytes());
+        b.extend_from_slice(&(head + entries.len() as u32).to_be_bytes());
+        b.extend_from_slice(&entry.to_be_bytes());
+        b.extend_from_slice(&count.to_be_bytes());
+        b.resize(4 + head as usize, 0);
+        b.extend_from_slice(entries);
+        b
+    }
+
+    #[test]
+    fn tag_entries_start_after_the_header_and_stop_at_the_count() {
+        let e = [1, 2, 3, 4, 5, 6];
+        assert_eq!(anlz_entries(&reply(24, 3, &e), 3), Some(&e[..]));
+        // A longer header (the CDJ-3000's PWV7 has one) is skipped by its length.
+        assert_eq!(anlz_entries(&reply(32, 3, &e), 3), Some(&e[..]));
+        // Trailing bytes past the count are not entries.
+        let mut b = reply(24, 3, &e);
+        b.extend_from_slice(&[9, 9]);
+        assert_eq!(anlz_entries(&b, 3), Some(&e[..]));
+        // The wrong entry size (a PWV5 read as PWV7) or a short reply: none.
+        assert_eq!(anlz_entries(&reply(24, 2, &[1, 2]), 3), None);
+        assert_eq!(anlz_entries(&[0u8; 20], 3), None);
+    }
+
+    #[test]
+    fn pwv5_entries_unpack_colour_and_height() {
+        // red 7, green 0, blue 5, height 31
+        assert_eq!(pwv5_entry(0b111_000_101_11111_00), [7, 0, 5, 31]);
+        assert_eq!(pwv5_entry(0), [0, 0, 0, 0]);
+        assert_eq!(pwv5_entry(0b000_111_000_00001_11), [0, 7, 0, 1], "the low 2 bits are not height");
+    }
+
+    #[test]
+    fn status_slots_map_to_dbserver_slots() {
+        assert_eq!(track_slot(1), Slot::Cd);
+        assert_eq!(track_slot(2), Slot::Sd);
+        assert_eq!(track_slot(3), Slot::Usb);
+        assert_eq!(track_slot(4), Slot::Collection);
+    }
+
+    /// The other player's playhead as drawn: it runs on at the pitch between
+    /// packets, eases toward a packet that is a little off (Wi-Fi bursts),
+    /// and jumps to one that is far off (a cue, a loop, a needle search).
+    #[test]
+    fn the_playhead_runs_on_eases_and_jumps() {
+        let r = Remote::default();
+        assert_eq!(r.smooth_playhead(2, 10.0, 1.0, true), 10.0, "the first packet is taken as is");
+        std::thread::sleep(Duration::from_millis(50));
+        let a = r.smooth_playhead(2, 10.0, 1.0, true);
+        assert!(a > 10.0 && a < 10.05, "ran on toward the stale packet, not stuck on it: {a}");
+        // Paused: a packet 0.2 s off is eased toward, not jumped to.
+        let r = Remote::default();
+        r.smooth_playhead(2, 10.0, 1.0, false);
+        std::thread::sleep(Duration::from_millis(20));
+        let b = r.smooth_playhead(2, 10.2, 1.0, false);
+        assert!(b > 10.0 && b < 10.2, "eased: {b}");
+        // Far off: jumps.
+        assert_eq!(r.smooth_playhead(2, 42.0, 1.0, false), 42.0);
+        // Another player: starts over at its packet.
+        assert_eq!(r.smooth_playhead(3, 5.0, 1.0, true), 5.0);
+    }
 }
