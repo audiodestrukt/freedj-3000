@@ -331,7 +331,9 @@ All notable changes to this project will be documented in this file.
   database (its detail waveform, and its 3-band or RGB colour detail, as
   MENU → WAVEFORM COLOR), follows our zoom, and its playhead is smoothed
   against Wi-Fi packet bursts.  Before the track's waveform arrives, a grid
-  from the player's live beats shows the phase.
+  from the player's live beats shows the phase.  The other player's active
+  loop is shaded amber, as our own is on the main waveform, and the zoom
+  works with no track loaded on this deck.
 - CDJ-3000 INFO screen: a tab per player on the network (playing, master
   and loaded marks), showing the selected player's track: title, artist,
   album, key, BPM, length, cover and the stick's colour and player number.
@@ -374,6 +376,8 @@ All notable changes to this project will be documented in this file.
   sticks alike.
 - MASTER pressed while this deck is master gives the role up, as on the
   unit (it did nothing); nobody is master until a player takes it.
+- CDJ-3000 screen: pressing the browse encoder on the playback screen does
+  nothing, as on the unit (it opened BROWSE, which has its own key).
 - binrw 0.15 for the rekordbox export reader, and explicit `f32` literals
   where Rust is phasing out the fallback (a future hard error).
 
