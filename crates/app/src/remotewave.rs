@@ -2,6 +2,11 @@
 //! that player's database once per track on a worker thread: the detail
 //! waveform (the phase-meter slot's WAVEFORM view) and the track's metadata
 //! with its cover (the INFO screen's player tabs).
+//!
+//! When BROWSE has a dbserver session open to that player, the requests go
+//! through it (`dbsession::Handle`): a CDJ-3000 drops the first of two
+//! sessions from one player number, so a session of our own would cost
+//! BROWSE its.  Otherwise a short session of its own is opened per fetch.
 
 use opendeck_dbserver::{Client as DbClient, Slot, TrackMeta};
 use opendeck_link::prodj::TrackRef;
@@ -70,8 +75,9 @@ pub fn fetch_info(c: &mut DbClient, slot: Slot, id: u32) -> anyhow::Result<InfoD
 
 impl<T: Send + Sync + 'static> RemoteCache<T> {
     /// The thing for the track `t` on the player at `ip`, if it has arrived;
-    /// asks for it on a worker thread otherwise.
-    pub fn get(&self, ip: Ipv4Addr, our_player: u8, t: TrackRef,
+    /// asks for it on a worker thread otherwise, on `shared` (BROWSE's
+    /// session) when that is open to the same player.
+    pub fn get(&self, ip: Ipv4Addr, our_player: u8, t: TrackRef, shared: Option<crate::dbsession::Handle>,
                fetch: fn(&mut DbClient, Slot, u32) -> anyhow::Result<T>) -> Option<Arc<T>> {
         if t.id == 0 { return None; }
         let key = (t.player, t.slot, t.id);
@@ -83,9 +89,14 @@ impl<T: Send + Sync + 'static> RemoteCache<T> {
         let me = self.clone();
         let spawned = std::thread::Builder::new().name("remote-fetch".into()).spawn(move || {
             let r = (|| -> anyhow::Result<T> {
+                let slot = track_slot(t.slot);
+                // Each request names its slot, so BROWSE's session (open on
+                // some slot of that player) serves this track's too.
+                if let Some(h) = shared.filter(|h| h.ip == ip) {
+                    return h.call(move |c, _| fetch(c, slot, t.id));
+                }
                 let device = if (1..=4).contains(&our_player) { our_player } else { 1 };
                 let mut c = DbClient::discover(ip, device)?;
-                let slot = match t.slot { 1 => Slot::Cd, 2 => Slot::Sd, 4 | 5 => Slot::Collection, _ => Slot::Usb };
                 fetch(&mut c, slot, t.id)
             })();
             if let Ok(mut s) = me.0.lock() {
@@ -103,6 +114,11 @@ impl<T: Send + Sync + 'static> RemoteCache<T> {
         if spawned.is_err() { if let Ok(mut s) = self.0.lock() { s.busy = false; } }
         None
     }
+}
+
+/// The dbserver slot of a status packet's track slot byte.
+fn track_slot(b: u8) -> Slot {
+    match b { 1 => Slot::Cd, 2 => Slot::Sd, 4 | 5 => Slot::Collection, _ => Slot::Usb }
 }
 
 /// The fetchers the screen's other-player views share.

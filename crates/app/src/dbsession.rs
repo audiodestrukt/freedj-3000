@@ -71,6 +71,8 @@ enum Job<C> {
     Call(CallFn<C>),
     Info { key: InfoKey, verbose: bool },
     List { ticket: u64, f: ListFn<C> },
+    /// The session was dropped: stop, even while handles are still around.
+    Close,
 }
 
 pub struct Session<C: InfoSource = Client> {
@@ -100,15 +102,21 @@ impl<C: InfoSource> Session<C> {
     /// of queued [`ask_info`](Self::ask_info) work.  On an error the worker
     /// reconnects once and retries.  It waits on the network: never call it
     /// on the UI thread (use [`ask_list`](Self::ask_list), or a
-    /// [`caller`](Self::caller) on another thread).
+    /// [`caller`](Self::caller) / [`handle`](Self::handle) on another thread).
     pub fn call<T: Send + 'static>(&self, f: impl FnMut(&mut C, Slot) -> Result<T> + Send + 'static) -> Result<T> {
-        self.caller().call(f)
+        call_on(&self.jobs, f)
     }
 
     /// A handle that runs requests on this session from another thread (a
     /// loader), so a load from the player BROWSE has open uses its session
     /// instead of opening a second one.
     pub fn caller(&self) -> Caller<C> { Caller { jobs: self.jobs.clone() } }
+
+    /// A handle for other threads to run requests on this session (the
+    /// other players' waveform and INFO fetches): a second session from our
+    /// player number would cost this one.  It stops working when the
+    /// session closes.
+    pub fn handle(&self) -> Handle<C> { Handle { ip: self.ip, jobs: self.jobs.clone() } }
 
     /// Look a track up in the background (metadata, cover, previews); the
     /// answer comes through [`answers`](Self::answers), `None` if the player
@@ -139,20 +147,46 @@ pub struct Caller<C: InfoSource = Client> { jobs: mpsc::Sender<Job<C>> }
 
 impl<C: InfoSource> Caller<C> {
     /// As [`Session::call`]: waits for the answer, so not on the UI thread.
-    pub fn call<T: Send + 'static>(&self, mut f: impl FnMut(&mut C, Slot) -> Result<T> + Send + 'static) -> Result<T> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        let job: CallFn<C> = Box::new(move |c, slot, last| {
-            let r = match c {
-                Ok(c) => f(c, slot),
-                Err(e) => Err(anyhow::anyhow!("dbserver session lost: {e:#}")),
-            };
-            if r.is_err() && !last { return false; }
-            let _ = tx.send(r);
-            true
-        });
-        self.jobs.send(Job::Call(job)).map_err(|_| anyhow::anyhow!("dbserver session closed"))?;
-        rx.recv().map_err(|_| anyhow::anyhow!("dbserver session closed"))?
+    pub fn call<T: Send + 'static>(&self, f: impl FnMut(&mut C, Slot) -> Result<T> + Send + 'static) -> Result<T> {
+        call_on(&self.jobs, f)
     }
+}
+
+impl<C: InfoSource> Drop for Session<C> {
+    fn drop(&mut self) { let _ = self.jobs.send(Job::Close); }
+}
+
+/// Another thread's way onto a [`Session`] (see [`Session::handle`]).
+pub struct Handle<C: InfoSource = Client> {
+    /// The player the session is open to.
+    pub ip: Ipv4Addr,
+    jobs:   mpsc::Sender<Job<C>>,
+}
+
+impl<C: InfoSource> Clone for Handle<C> {
+    fn clone(&self) -> Self { Handle { ip: self.ip, jobs: self.jobs.clone() } }
+}
+
+impl<C: InfoSource> Handle<C> {
+    /// As [`Session::call`]: waits for the answer, ahead of the lookups.
+    pub fn call<T: Send + 'static>(&self, f: impl FnMut(&mut C, Slot) -> Result<T> + Send + 'static) -> Result<T> {
+        call_on(&self.jobs, f)
+    }
+}
+
+fn call_on<C: InfoSource, T: Send + 'static>(jobs: &mpsc::Sender<Job<C>>, mut f: impl FnMut(&mut C, Slot) -> Result<T> + Send + 'static) -> Result<T> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    let job: CallFn<C> = Box::new(move |c, slot, last| {
+        let r = match c {
+            Ok(c) => f(c, slot),
+            Err(e) => Err(anyhow::anyhow!("dbserver session lost: {e:#}")),
+        };
+        if r.is_err() && !last { return false; }
+        let _ = tx.send(r);
+        true
+    });
+    jobs.send(Job::Call(job)).map_err(|_| anyhow::anyhow!("dbserver session closed"))?;
+    rx.recv().map_err(|_| anyhow::anyhow!("dbserver session closed"))?
 }
 
 /// A background lookup, one request per step, so a menu request never waits
@@ -183,6 +217,7 @@ impl<C: InfoSource> Worker<C> {
             // Everything asked so far, without waiting: menus jump the queue.
             loop {
                 match rx.try_recv() {
+                    Ok(Job::Close) => return,
                     Ok(j) => Self::queue(j, &mut calls, &mut lists, &mut infos),
                     Err(mpsc::TryRecvError::Empty) => break,
                     // The browser closed the session (another source, or quit).
@@ -212,8 +247,8 @@ impl<C: InfoSource> Worker<C> {
                 continue;
             }
             match rx.recv() {
+                Ok(Job::Close) | Err(_) => return,
                 Ok(j) => Self::queue(j, &mut calls, &mut lists, &mut infos),
-                Err(_) => return,
             }
         }
     }
@@ -222,6 +257,7 @@ impl<C: InfoSource> Worker<C> {
         match j {
             Job::Call(f) => calls.push_back(f),
             Job::List { ticket, f } => lists.push_back((ticket, f)),
+            Job::Close => {}
             Job::Info { key, verbose } => infos.push_back(InfoTask { key, verbose, step: 0, meta: None, info: DbInfo::default() }),
         }
     }
@@ -467,6 +503,22 @@ mod tests {
         assert_eq!(rows.unwrap()[0].id, 7);
         // Behind the request in flight only, not the 30 queued.
         assert!(t0.elapsed() < Duration::from_millis(150), "the list waited {:?}", t0.elapsed());
+    }
+
+    /// Another thread's requests go through the one session (no second
+    /// connection), and fail cleanly once it is closed.
+    #[test]
+    fn a_handle_runs_requests_on_the_same_session() {
+        let f = fake(0);
+        let h = f.session.handle();
+        assert_eq!(h.ip, Ipv4Addr::LOCALHOST);
+        let r = std::thread::spawn({ let h = h.clone(); move || h.call(|c, s| c.metadata(s, 5)) }).join().unwrap();
+        assert_eq!(r.unwrap()[0].id, 5);
+        assert_eq!(f.connects.load(Ordering::SeqCst), 1, "no second connection");
+        let Fake { session, .. } = f;
+        drop(session);
+        std::thread::sleep(Duration::from_millis(20));
+        assert!(h.call(|c, s| c.metadata(s, 6)).is_err(), "closed with its session");
     }
 
     #[test]

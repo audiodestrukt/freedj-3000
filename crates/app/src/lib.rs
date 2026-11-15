@@ -3318,7 +3318,8 @@ impl DeckApp {
     /// player's (fetched from its database while the meter slot shows
     /// WAVEFORM, positioned from its Absolute Position packets).
     fn fill_waves<'a>(snap: &mut snapshot::DeckSnapshot<'a>, wave: &'a opendeck_analysis::waveform::WaveformCache,
-                      link: &prodj::LinkState, remote: &remotewave::Remote, ctx: &egui::Context, other: u32, info_open: bool) {
+                      link: &prodj::LinkState, remote: &remotewave::Remote, db: Option<dbsession::Handle>,
+                      ctx: &egui::Context, other: u32, info_open: bool) {
         snap.local_wave = Some(wave);
         // INFO's tabs: who is on the network, and what the selected one has loaded.
         if info_open {
@@ -3332,7 +3333,7 @@ impl DeckApp {
             snap.info_player = sel;
             if sel != snap.player {
                 if let (Some(st), Some(ip)) = (statuses.get(&sel), link.peers.lock().ok().and_then(|m| m.get(&sel).copied())) {
-                    if let Some(d) = remote.infos.get(ip, link.player(), st.track, remotewave::fetch_info) {
+                    if let Some(d) = remote.infos.get(ip, link.player(), st.track, db.clone(), remotewave::fetch_info) {
                         let m = &d.meta;
                         let color = link.media(st.track.player).into_iter().find(|x| x.slot == st.track.slot).map_or(0, |x| x.color);
                         let length_s = link.positions.lock().ok().and_then(|p| p.get(&sel).map(|(a, _)| a.track_len_s)).filter(|l| *l > 0);
@@ -3355,7 +3356,7 @@ impl DeckApp {
         let p = other as u8;
         let Some(st) = link.peer_status.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
         let Some(ip) = link.peers.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
-        let Some(data) = remote.waves.get(ip, link.player(), st.track, remotewave::fetch_wave) else { return };
+        let Some(data) = remote.waves.get(ip, link.player(), st.track, db, remotewave::fetch_wave) else { return };
         let Some(bpm) = st.bpm.filter(|b| *b > 0.0) else { return };
         let Some((pos, at)) = link.positions.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
         // Between packets (about 30 ms apart) the playhead runs on at the pitch.
@@ -3698,7 +3699,7 @@ impl DeckApp {
         }
         snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
-        Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote, &self.egui_ctx, beat2_player, self.screen_mode == ScreenMode::Info);
+        Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote, self.browser.db_handle(), &self.egui_ctx, beat2_player, self.screen_mode == ScreenMode::Info);
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = self.stems_view();
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
@@ -3963,7 +3964,7 @@ impl DeckApp {
         }
         snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
-        Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote, &self.egui_ctx, beat2_player, self.screen_mode == ScreenMode::Info);
+        Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote, self.browser.db_handle(), &self.egui_ctx, beat2_player, self.screen_mode == ScreenMode::Info);
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = stems_view;
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
