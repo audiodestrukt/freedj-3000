@@ -151,6 +151,25 @@ pub fn softmax_rows(x: &mut [f32], m: usize) {
     }
 }
 
+/// Softmax down each column of `(m, cols)` in place (the attention scores
+/// kept keys × queries). Every pass runs along a row, across all columns,
+/// so it vectorises.
+pub fn softmax_cols(x: &mut [f32], cols: usize) {
+    let mut max = vec![f32::NEG_INFINITY; cols];
+    for row in x.chunks_exact(cols) { for (m, v) in max.iter_mut().zip(row) { *m = m.max(*v) } }
+    let mut sum = vec![0f32; cols];
+    for row in x.chunks_exact_mut(cols) {
+        // Below e^-80 a weight is under 1e-34 of the column's largest: 0, not a subnormal.
+        for ((v, m), s) in row.iter_mut().zip(&max).zip(sum.iter_mut()) {
+            let d = *v - m;
+            *v = if d < -80.0 { 0.0 } else { exp(d) };
+            *s += *v;
+        }
+    }
+    for s in sum.iter_mut() { *s = 1.0 / *s }
+    for row in x.chunks_exact_mut(cols) { for (v, s) in row.iter_mut().zip(&sum) { *v *= s } }
+}
+
 /// Mean and unbiased standard deviation (torch's `x.std()`), as f32.
 pub fn mean_std(x: &[f32]) -> (f32, f32) {
     let n = x.len() as f64;

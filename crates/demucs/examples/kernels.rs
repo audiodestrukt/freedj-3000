@@ -25,6 +25,14 @@ fn main() {
                             ("conv 48x384x336", 48, 384, 336)] {
         println!("{name:22} 1 thread {:5.1}  all {:5.1} GFLOPS", gflops(m, k, n, false), gflops(m, k, n, true));
     }
+    for (name, m, k, n) in [("ffn W·Xt 2048x512x2688", 2048, 512, 2688), ("qkv 512x512x2688", 512, 512, 2688),
+                            ("conv 48x384x336", 48, 384, 336), ("conv 768x3456x336", 768, 3456, 336)] {
+        let mut f = opendeck_demucs::bench::packed(m, k, n);
+        f();
+        let t = Instant::now();
+        for _ in 0..3 { f() }
+        println!("packed {name:22} {:5.1} GFLOPS", 6.0 * (m * k * n) as f64 / t.elapsed().as_secs_f64() / 1e9);
+    }
     let mut s: Vec<f32> = (0..2688 * 2688).map(|i| ((i * 7919) % 1000) as f32 * 0.01).collect();
     let t = Instant::now();
     opendeck_demucs::bench::softmax(&mut s, 2688);

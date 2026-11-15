@@ -13,12 +13,13 @@
 //! over the tensor in place; the time branch is `(channel, time)`; the
 //! transformer works on `(token, channel)`.
 
+mod gemm;
 mod ops;
 pub mod spec;
 mod st;
 
 use anyhow::Result;
-use ops::{gemm, pgemm, M};
+use gemm::{Out, Packed, View};
 use rayon::prelude::*;
 use realfft::num_complex::Complex32;
 use realfft::RealFftPlanner;
@@ -37,7 +38,24 @@ const HEADS: usize = 8;
 /// for comparing against a reference run.
 pub type Tap<'a> = &'a mut dyn FnMut(&str, &[usize], &[f32]);
 
-struct Lin { w: Vec<f32>, b: Vec<f32> }
+/// A layer's weights: `w` as loaded, packed into `p` (one per tap for
+/// transposed convs) and then dropped; `b` the bias.
+struct Lin { w: Vec<f32>, b: Vec<f32>, p: Vec<Packed> }
+
+impl Lin {
+    /// Pack `w` as a row-major `(m, k)` matrix.
+    fn rows(mut self, m: usize, k: usize) -> Self {
+        self.p = vec![Packed::new(m, k, |i, kk| self.w[i * k + kk])];
+        self.w = Vec::new();
+        self
+    }
+    /// Pack with `A[i][kk] = f(w, i, kk)`, `taps` times (tap index first).
+    fn taps(mut self, taps: usize, m: usize, k: usize, f: impl Fn(&[f32], usize, usize, usize) -> f32) -> Self {
+        self.p = (0..taps).map(|tap| Packed::new(m, k, |i, kk| f(&self.w, tap, i, kk))).collect();
+        self.w = Vec::new();
+        self
+    }
+}
 struct Norm { w: Vec<f32>, b: Vec<f32> }
 
 /// One DConv residual layer: conv k3 (dilated) → GN → GELU → conv 1x1 → GN → GLU → scale.
@@ -46,7 +64,7 @@ struct DLayer { c1: Lin, n1: Norm, c2: Lin, n2: Norm, scale: Vec<f32>, dil: usiz
 struct Enc { cin: usize, cout: usize, conv: Lin, rewrite: Lin, dconv: Vec<DLayer> }
 struct Dec { cin: usize, cout: usize, last: bool, conv_tr: Lin, rewrite: Lin, dconv: Vec<DLayer> }
 
-struct Attn { in_w: Vec<f32>, in_b: Vec<f32>, out: Lin }
+struct Attn { in_p: Vec<Packed>, in_b: Vec<f32>, out: Lin }
 struct Layer {
     cross: bool, attn: Attn, lin1: Lin, lin2: Lin,
     norm1: Norm, norm2: Norm, norm3: Option<Norm>, norm_out: Norm, g1: Vec<f32>, g2: Vec<f32>,
@@ -63,10 +81,10 @@ pub struct HtDemucs {
 // ---------------------------------------------------------------- loading
 
 fn lin(t: &mut Tensors, p: &str, w: &[usize]) -> Result<Lin> {
-    Ok(Lin { w: t.take(&format!("{p}.weight"), w)?, b: t.take(&format!("{p}.bias"), &[w[0]])? })
+    Ok(Lin { w: t.take(&format!("{p}.weight"), w)?, b: t.take(&format!("{p}.bias"), &[w[0]])?, p: vec![] })
 }
 fn lin_tr(t: &mut Tensors, p: &str, w: &[usize]) -> Result<Lin> {
-    Ok(Lin { w: t.take(&format!("{p}.weight"), w)?, b: t.take(&format!("{p}.bias"), &[w[1]])? })
+    Ok(Lin { w: t.take(&format!("{p}.weight"), w)?, b: t.take(&format!("{p}.bias"), &[w[1]])?, p: vec![] })
 }
 fn norm(t: &mut Tensors, p: &str, c: usize) -> Result<Norm> {
     Ok(Norm { w: t.take(&format!("{p}.weight"), &[c])?, b: t.take(&format!("{p}.bias"), &[c])? })
@@ -102,18 +120,19 @@ fn dconv(t: &mut Tensors, p: &str, c: usize) -> Result<Vec<DLayer>> {
     (0..2).map(|d| {
         let q = format!("{p}.dconv.layers.{d}");
         Ok(DLayer {
-            c1: lin(t, &format!("{q}.0"), &[h, c, 3])?, n1: norm(t, &format!("{q}.1"), h)?,
-            c2: lin(t, &format!("{q}.3"), &[2 * c, h, 1])?, n2: norm(t, &format!("{q}.4"), 2 * c)?,
+            c1: lin(t, &format!("{q}.0"), &[h, c, 3])?.rows(h, 3 * c), n1: norm(t, &format!("{q}.1"), h)?,
+            c2: lin(t, &format!("{q}.3"), &[2 * c, h, 1])?.rows(2 * c, h), n2: norm(t, &format!("{q}.4"), 2 * c)?,
             scale: t.take(&format!("{q}.6.scale"), &[c])?, dil: 1 << d, hidden: h,
         })
     }).collect()
 }
 
 fn attn(t: &mut Tensors, p: &str) -> Result<Attn> {
+    let w = t.take(&format!("{p}.in_proj_weight"), &[3 * DIM, DIM])?;
     Ok(Attn {
-        in_w: t.take(&format!("{p}.in_proj_weight"), &[3 * DIM, DIM])?,
+        in_p: (0..3).map(|part| Packed::new(DIM, DIM, |i, c| w[(part * DIM + i) * DIM + c])).collect(),
         in_b: t.take(&format!("{p}.in_proj_bias"), &[3 * DIM])?,
-        out: lin(t, &format!("{p}.out_proj"), &[DIM, DIM])?,
+        out: lin(t, &format!("{p}.out_proj"), &[DIM, DIM])?.rows(DIM, DIM),
     })
 }
 
@@ -121,8 +140,8 @@ fn layer(t: &mut Tensors, p: &str, cross: bool) -> Result<Layer> {
     Ok(Layer {
         cross,
         attn: attn(t, &format!("{p}.{}", if cross { "cross_attn" } else { "self_attn" }))?,
-        lin1: lin(t, &format!("{p}.linear1"), &[4 * DIM, DIM])?,
-        lin2: lin(t, &format!("{p}.linear2"), &[DIM, 4 * DIM])?,
+        lin1: lin(t, &format!("{p}.linear1"), &[4 * DIM, DIM])?.rows(4 * DIM, DIM),
+        lin2: lin(t, &format!("{p}.linear2"), &[DIM, 4 * DIM])?.rows(DIM, 4 * DIM),
         norm1: norm(t, &format!("{p}.norm1"), DIM)?, norm2: norm(t, &format!("{p}.norm2"), DIM)?,
         norm3: if cross { Some(norm(t, &format!("{p}.norm3"), DIM)?) } else { None },
         norm_out: norm(t, &format!("{p}.norm_out"), DIM)?,
@@ -142,10 +161,11 @@ impl HtDemucs {
             let cout = 48 << i;
             let mut conv = lin(t, &format!("encoder.{i}.conv"), &[cout, cin_z, 8, 1])?;
             conv.w = freq_kernel(&conv.w, cout, cin_z, 8);
-            let rewrite = lin(t, &format!("encoder.{i}.rewrite"), &[2 * cout, cout, 1, 1])?;
+            let conv = conv.rows(cout, 8 * cin_z);
+            let rewrite = lin(t, &format!("encoder.{i}.rewrite"), &[2 * cout, cout, 1, 1])?.rows(2 * cout, cout);
             enc.push(Enc { cin: cin_z, cout, conv, rewrite, dconv: dconv(t, &format!("encoder.{i}"), cout)? });
-            let conv = lin(t, &format!("tencoder.{i}.conv"), &[cout, cin, 8])?;
-            let rewrite = lin(t, &format!("tencoder.{i}.rewrite"), &[2 * cout, cout, 1])?;
+            let conv = lin(t, &format!("tencoder.{i}.conv"), &[cout, cin, 8])?.rows(cout, 8 * cin);
+            let rewrite = lin(t, &format!("tencoder.{i}.rewrite"), &[2 * cout, cout, 1])?.rows(2 * cout, cout);
             tenc.push(Enc { cin, cout, conv, rewrite, dconv: dconv(t, &format!("tencoder.{i}"), cout)? });
         }
         for i in 0..DEPTH {
@@ -155,18 +175,23 @@ impl HtDemucs {
             let (cout_z, cout) = if last { (16, 8) } else { (cin / 2, cin / 2) };
             let mut conv_tr = lin_tr(t, &format!("decoder.{i}.conv_tr"), &[cin, cout_z, 8, 1])?;
             conv_tr.w = freq_kernel_tr(&conv_tr.w, cin, cout_z, 8);
+            let conv_tr = conv_tr.taps(8, cout_z, cin, |w, k, co, ci| w[(k * cout_z + co) * cin + ci]);
             let mut rewrite = lin(t, &format!("decoder.{i}.rewrite"), &[2 * cin, cin, 3, 3])?;
             rewrite.w = kernel_3x3(&rewrite.w, 2 * cin, cin);
+            // Column (dt·3 + df)·cin + ci of the (dt, cout, df, cin) layout.
+            let co2 = 2 * cin;
+            let rewrite = rewrite.taps(1, co2, 9 * cin, |w, _, co, r| w[((r / (3 * cin)) * co2 + co) * 3 * cin + r % (3 * cin)]);
             dec.push(Dec { cin, cout: cout_z, last, conv_tr, rewrite, dconv: dconv(t, &format!("decoder.{i}"), cin)? });
-            let conv_tr = lin_tr(t, &format!("tdecoder.{i}.conv_tr"), &[cin, cout, 8])?;
-            let rewrite = lin(t, &format!("tdecoder.{i}.rewrite"), &[2 * cin, cin, 3])?;
+            let conv_tr = lin_tr(t, &format!("tdecoder.{i}.conv_tr"), &[cin, cout, 8])?
+                .taps(8, cout, cin, |w, k, co, ci| w[(ci * cout + co) * 8 + k]);
+            let rewrite = lin(t, &format!("tdecoder.{i}.rewrite"), &[2 * cin, cin, 3])?.rows(2 * cin, 3 * cin);
             tdec.push(Dec { cin, cout, last, conv_tr, rewrite, dconv: dconv(t, &format!("tdecoder.{i}"), cin)? });
         }
         let freq_emb = t.take("freq_emb.embedding.weight", &[512, 48])?;
-        let up = lin(t, "channel_upsampler", &[DIM, 384, 1])?;
-        let down = lin(t, "channel_downsampler", &[384, DIM, 1])?;
-        let up_t = lin(t, "channel_upsampler_t", &[DIM, 384, 1])?;
-        let down_t = lin(t, "channel_downsampler_t", &[384, DIM, 1])?;
+        let up = lin(t, "channel_upsampler", &[DIM, 384, 1])?.rows(DIM, 384);
+        let down = lin(t, "channel_downsampler", &[384, DIM, 1])?.rows(384, DIM);
+        let up_t = lin(t, "channel_upsampler_t", &[DIM, 384, 1])?.rows(DIM, 384);
+        let down_t = lin(t, "channel_downsampler_t", &[384, DIM, 1])?.rows(384, DIM);
         let norm_in = norm(t, "crosstransformer.norm_in", DIM)?;
         let norm_in_t = norm(t, "crosstransformer.norm_in_t", DIM)?;
         let mut layers = vec![];
@@ -182,7 +207,7 @@ impl HtDemucs {
 
 // ------------------------------------------------------------ convolutions
 
-/// Conv1d over `(cin, t)`: weight `(cout, cin, k)`, stride, padding, dilation.
+/// Conv1d over `(cin, t)`: weight packed `(cout, cin·k)`, stride, padding, dilation.
 #[allow(clippy::too_many_arguments)]
 fn conv1d(x: &[f32], cin: usize, t: usize, l: &Lin, cout: usize, k: usize, stride: usize, pad: usize, dil: usize) -> (Vec<f32>, usize) {
     let tp = t + 2 * pad;
@@ -195,57 +220,56 @@ fn conv1d(x: &[f32], cin: usize, t: usize, l: &Lin, cout: usize, k: usize, strid
         (&padded[..], tp)
     };
     let mut out = vec![0f32; cout * tout];
-    for co in 0..cout { out[co * tout..(co + 1) * tout].fill(l.b[co]) }
-    for kk in 0..k {
-        pgemm(cout, cin, tout, 1.0, M::new(&l.w, kk, cin * k, k), M::new(xp, kk * dil, rs, stride),
-              1.0, &mut out, 0, tout, 1);
-    }
+    fill_bias(&mut out, &l.b, tout);
+    let rows: Vec<usize> = (0..cin * k).map(|r| (r / k) * rs + (r % k) * dil).collect();
+    gemm::gemm(&l.p[0], View { b: xp, base: 0, row_off: &rows, cs: stride }, tout, &mut out, Out { off: 0, rs: tout, cs: 1 });
     (out, tout)
 }
 
-/// ConvTranspose1d over `(cin, t)`: weight `(cin, cout, k)`, then the
-/// `[pad, pad+len)` window.
+/// ConvTranspose1d over `(cin, t)`: one packed `(cout, cin)` weight per tap,
+/// then the `[pad, pad+len)` window.
 #[allow(clippy::too_many_arguments)]
 fn conv_tr1d(x: &[f32], cin: usize, t: usize, l: &Lin, cout: usize, k: usize, stride: usize, pad: usize, len: usize) -> Vec<f32> {
     let full = (t - 1) * stride + k;
     let mut out = vec![0f32; cout * full];
-    for co in 0..cout { out[co * full..(co + 1) * full].fill(l.b[co]) }
+    fill_bias(&mut out, &l.b, full);
+    let rows: Vec<usize> = (0..cin).map(|c| c * t).collect();
     for kk in 0..k {
-        pgemm(cout, cin, t, 1.0, M::new(&l.w, kk, k, cout * k), M::new(x, 0, t, 1),
-              1.0, &mut out, kk, full, stride);
+        gemm::gemm(&l.p[kk], View { b: x, base: 0, row_off: &rows, cs: 1 }, t, &mut out, Out { off: kk, rs: full, cs: stride });
     }
     let mut r = vec![0f32; cout * len];
     for co in 0..cout { r[co * len..(co + 1) * len].copy_from_slice(&out[co * full + pad..co * full + pad + len]) }
     r
 }
 
-/// Fill each `(c, t)` band of a `(f, c, t)` buffer with the bias.
+/// Fill each row (length `t`) of a `(c, t)` block with that channel's bias.
 fn fill_bias(band: &mut [f32], b: &[f32], t: usize) {
-    for (co, row) in band.chunks_exact_mut(t).enumerate() { row.fill(b[co]) }
+    for (co, row) in band.chunks_exact_mut(t).enumerate() { row.fill(b[co % b.len()]) }
 }
 
 /// Conv along frequency of `(f, cin, t)`: kernel 8 stride 4 pad 2, weight
-/// reordered `(cout, 8, cin)`. One matrix multiply per output band.
+/// packed `(cout, 8·cin)`. One product per output band.
 fn conv_freq(x: &[f32], f: usize, cin: usize, t: usize, l: &Lin, cout: usize) -> (Vec<f32>, usize) {
     let (k, s, p) = (8, 4, 2);
     let fout = (f + 2 * p - k) / s + 1;
     let mut xp = vec![0f32; (f + 2 * p) * cin * t];
     xp[p * cin * t..(p + f) * cin * t].copy_from_slice(&x[..f * cin * t]);
+    let rows: Vec<usize> = (0..k * cin).map(|r| r * t).collect();
     let mut out = vec![0f32; fout * cout * t];
     out.par_chunks_mut(cout * t).enumerate().for_each(|(fo, band)| {
         fill_bias(band, &l.b, t);
-        gemm(cout, k * cin, t, 1.0, M::new(&l.w, 0, k * cin, 1), M::new(&xp, fo * s * cin * t, t, 1),
-             1.0, band, 0, t, 1);
+        gemm::gemm1(&l.p[0], View { b: &xp, base: fo * s * cin * t, row_off: &rows, cs: 1 }, t, band, Out { off: 0, rs: t, cs: 1 });
     });
     (out, fout)
 }
 
 /// ConvTranspose along frequency of `(f, cin, t)`: kernel 8 stride 4, then
-/// trim 2 bands each side → `(4f, cout, t)`. Weight reordered `(8, cout, cin)`.
+/// trim 2 bands each side → `(4f, cout, t)`. One packed `(cout, cin)` per tap.
 /// Computed per output band: band `o` (untrimmed `o+2`) gets tap `o+2-4i`
 /// of input bands `i = (o+2)/4` and the one before.
 fn conv_tr_freq(x: &[f32], f: usize, cin: usize, t: usize, l: &Lin, cout: usize) -> Vec<f32> {
     let (k, s, p) = (8, 4, 2);
+    let rows: Vec<usize> = (0..cin).map(|c| c * t).collect();
     let mut out = vec![0f32; f * s * cout * t];
     out.par_chunks_mut(cout * t).enumerate().for_each(|(o, band)| {
         fill_bias(band, &l.b, t);
@@ -254,8 +278,7 @@ fn conv_tr_freq(x: &[f32], f: usize, cin: usize, t: usize, l: &Lin, cout: usize)
             if i >= f { continue }
             let tap = full - i * s;
             if tap >= k { continue }
-            gemm(cout, cin, t, 1.0, M::new(&l.w, tap * cout * cin, cin, 1), M::new(x, i * cin * t, t, 1),
-                 1.0, band, 0, t, 1);
+            gemm::gemm1(&l.p[tap], View { b: x, base: i * cin * t, row_off: &rows, cs: 1 }, t, band, Out { off: 0, rs: t, cs: 1 });
         }
     });
     out
@@ -263,27 +286,27 @@ fn conv_tr_freq(x: &[f32], f: usize, cin: usize, t: usize, l: &Lin, cout: usize)
 
 /// 1x1 conv on every band of `(f, cin, t)`.
 fn conv1x1_freq(x: &[f32], f: usize, cin: usize, t: usize, l: &Lin, cout: usize) -> Vec<f32> {
+    let rows: Vec<usize> = (0..cin).map(|c| c * t).collect();
     let mut out = vec![0f32; f * cout * t];
     out.par_chunks_mut(cout * t).enumerate().for_each(|(ff, band)| {
         fill_bias(band, &l.b, t);
-        gemm(cout, cin, t, 1.0, M::new(&l.w, 0, cin, 1), M::new(x, ff * cin * t, t, 1), 1.0, band, 0, t, 1);
+        gemm::gemm1(&l.p[0], View { b: x, base: ff * cin * t, row_off: &rows, cs: 1 }, t, band, Out { off: 0, rs: t, cs: 1 });
     });
     out
 }
 
-/// 3x3 conv (pad 1) over (freq, time) of `(f, cin, t)`; weight `(dt, cout, df, cin)`.
+/// 3x3 conv (pad 1) over (freq, time) of `(f, cin, t)`; weight packed
+/// `(cout, 9·cin)`, column `(dt·3 + df)·cin + ci`.
 fn conv3x3_freq(x: &[f32], f: usize, cin: usize, t: usize, l: &Lin, cout: usize) -> Vec<f32> {
     let tp = t + 2;
     let mut xp = vec![0f32; (f + 2) * cin * tp];
     xp[cin * tp..(f + 1) * cin * tp].par_chunks_mut(tp).zip(x.par_chunks(t))
         .for_each(|(d, s)| d[1..1 + t].copy_from_slice(s));
+    let rows: Vec<usize> = (0..9 * cin).map(|r| (r % (3 * cin)) * tp + r / (3 * cin)).collect();
     let mut out = vec![0f32; f * cout * t];
     out.par_chunks_mut(cout * t).enumerate().for_each(|(ff, band)| {
         fill_bias(band, &l.b, t);
-        for dt in 0..3 {
-            gemm(cout, 3 * cin, t, 1.0, M::new(&l.w, dt * cout * 3 * cin, 3 * cin, 1),
-                 M::new(&xp, ff * cin * tp + dt, tp, 1), 1.0, band, 0, t, 1);
-        }
+        gemm::gemm1(&l.p[0], View { b: &xp, base: ff * cin * tp, row_off: &rows, cs: 1 }, t, band, Out { off: 0, rs: t, cs: 1 });
     });
     out
 }
@@ -367,35 +390,57 @@ fn dec_time(d: &Dec, x: &mut [f32], skip: &[f32], t: usize, len: usize) -> Vec<f
 fn linear(x: &[f32], n: usize, l: &Lin, din: usize, dout: usize) -> Vec<f32> {
     let mut y = vec![0f32; n * dout];
     for r in y.chunks_exact_mut(dout) { r.copy_from_slice(&l.b[..dout]) }
-    pgemm(n, din, dout, 1.0, M::new(x, 0, din, 1), M::new(&l.w, 0, 1, din), 1.0, &mut y, 0, dout, 1);
+    tokens_times(&l.p[0], x, n, din, &mut y, dout);
     y
+}
+
+/// `y (n, dout) += x (n, din) · Aᵀ` for a packed `A (dout, din)`: computed as
+/// `yᵀ = A·xᵀ`, reading x and writing y in place through strides.
+fn tokens_times(a: &Packed, x: &[f32], n: usize, din: usize, y: &mut [f32], dout: usize) {
+    let rows: Vec<usize> = (0..din).collect();
+    gemm::gemm(a, View { b: x, base: 0, row_off: &rows, cs: din }, n, y, Out { off: 0, rs: 1, cs: dout });
 }
 
 /// Queries per attention block: a block's scores are `BLOCK × m`.
 const BLOCK: usize = 128;
 
 /// Multi-head attention: queries from `q (n, DIM)`, keys/values from `kv (m, DIM)`.
-/// Runs in blocks of queries (all heads each), so the scores never exceed
-/// `BLOCK × m` per thread.
+///
+/// Each head's K and Vᵀ are packed once, as the fixed operand, then blocks
+/// of queries run in parallel, all heads each: `Sᵀ = K·Qᵀ` (keys × queries,
+/// stored as is), softmax down each query's column, `Oᵀ = Vᵀ·Pᵀ`, which
+/// reads Sᵀ row by row. A block only packs its own queries and
+/// probabilities, and its scores never exceed `m × BLOCK`.
 fn mha(a: &Attn, q: &[f32], n: usize, kv: &[f32], m: usize) -> Vec<f32> {
     let proj = |x: &[f32], rows: usize, part: usize| {
         let mut y = vec![0f32; rows * DIM];
         for r in y.chunks_exact_mut(DIM) { r.copy_from_slice(&a.in_b[part * DIM..(part + 1) * DIM]) }
-        pgemm(rows, DIM, DIM, 1.0, M::new(x, 0, DIM, 1), M::new(&a.in_w, part * DIM * DIM, 1, DIM), 1.0, &mut y, 0, DIM, 1);
+        tokens_times(&a.in_p[part], x, rows, DIM, &mut y, DIM);
         y
     };
     let (qq, kk, vv) = (proj(q, n, 0), proj(kv, m, 1), proj(kv, m, 2));
     let hd = DIM / HEADS;
     let scale = 1.0 / (hd as f32).sqrt();
+    let heads: Vec<(Packed, Packed)> = (0..HEADS).into_par_iter().map(|h| (
+        Packed::new(m, hd, |j, d| kk[j * DIM + h * hd + d] * scale),
+        Packed::new(hd, m, |d, j| vv[j * DIM + h * hd + d]),
+    )).collect();
+    let qrows: Vec<usize> = (0..hd).collect();
     let mut o = vec![0f32; n * DIM];
     o.par_chunks_mut(BLOCK * DIM).enumerate().for_each(|(blk, ob)| {
         let rows = ob.len() / DIM;
         let r0 = blk * BLOCK;
-        let mut s = vec![0f32; rows * m];
-        for h in 0..HEADS {
-            gemm(rows, hd, m, scale, M::new(&qq, r0 * DIM + h * hd, DIM, 1), M::new(&kk, h * hd, 1, DIM), 0.0, &mut s, 0, m, 1);
-            ops::softmax_rows(&mut s, m);
-            gemm(rows, m, hd, 1.0, M::new(&s, 0, m, 1), M::new(&vv, h * hd, DIM, 1), 0.0, ob, h * hd, DIM, 1);
+        let mut s = vec![0f32; m * rows];
+        let prows: Vec<usize> = (0..m).map(|j| j * rows).collect();
+        for (h, (kp, vp)) in heads.iter().enumerate() {
+            s.fill(0.0);
+            // Sᵀ (m × rows) = K_h · Q_blkᵀ.
+            gemm::gemm1(kp, View { b: &qq, base: r0 * DIM + h * hd, row_off: &qrows, cs: DIM }, rows, &mut s,
+                        Out { off: 0, rs: rows, cs: 1 });
+            ops::softmax_cols(&mut s, rows);
+            // Oᵀ (hd × rows) = V_hᵀ · Pᵀ, stored into this block's rows of O.
+            gemm::gemm1(vp, View { b: &s, base: 0, row_off: &prows, cs: 1 }, rows, ob,
+                        Out { off: h * hd, rs: 1, cs: DIM });
         }
     });
     linear(&o, n, &a.out, DIM, DIM)
@@ -524,14 +569,16 @@ impl HtDemucs {
         // Transformer: tokens (t*f + f_idx, DIM) for the spectrogram branch.
         let (n, m) = (f * t, tl);
         let mut tok = vec![0f32; n * DIM];
+        let rows: Vec<usize> = (0..384).map(|c| c * t).collect();
         for ff in 0..f {
-            pgemm(t, 384, DIM, 1.0, M::new(&x, ff * 384 * t, 1, t), M::new(&self.up.w, 0, 1, 384),
-                 0.0, &mut tok, ff * DIM, f * DIM, 1);
+            gemm::gemm(&self.up.p[0], View { b: &x, base: ff * 384 * t, row_off: &rows, cs: 1 }, t, &mut tok,
+                       Out { off: ff * DIM, rs: 1, cs: f * DIM });
         }
         for r in tok.chunks_exact_mut(DIM) { for i in 0..DIM { r[i] += self.up.b[i] } }
         let mut tok_t = vec![0f32; m * DIM];
         for r in tok_t.chunks_exact_mut(DIM) { r.copy_from_slice(&self.up_t.b) }
-        pgemm(m, 384, DIM, 1.0, M::new(&xt, 0, 1, m), M::new(&self.up_t.w, 0, 1, 384), 1.0, &mut tok_t, 0, DIM, 1);
+        let rows: Vec<usize> = (0..384).map(|c| c * m).collect();
+        gemm::gemm(&self.up_t.p[0], View { b: &xt, base: 0, row_off: &rows, cs: 1 }, m, &mut tok_t, Out { off: 0, rs: 1, cs: DIM });
         emit("up_t", &[DIM, m], &|| { let mut r = vec![0f32; DIM * m]; for p in 0..m { for c in 0..DIM { r[c * m + p] = tok_t[p * DIM + c] } } r });
         let mut h = vec![0f32; n * DIM];
         ops::layer_norm(&tok, DIM, &self.norm_in.w, &self.norm_in.b, &mut h);
@@ -554,14 +601,15 @@ impl HtDemucs {
             emit(&format!("tft{i}"), &[m, DIM], &|| tok_t.clone());
         }
         let mut x = vec![0f32; f * 384 * t];
+        let dims: Vec<usize> = (0..DIM).collect();
         for ff in 0..f {
             for co in 0..384 { x[(ff * 384 + co) * t..(ff * 384 + co + 1) * t].fill(self.down.b[co]) }
-            pgemm(384, DIM, t, 1.0, M::new(&self.down.w, 0, DIM, 1), M::new(&tok, ff * DIM, 1, f * DIM),
-                 1.0, &mut x, ff * 384 * t, t, 1);
+            gemm::gemm(&self.down.p[0], View { b: &tok, base: ff * DIM, row_off: &dims, cs: f * DIM }, t, &mut x,
+                       Out { off: ff * 384 * t, rs: t, cs: 1 });
         }
         let mut xt = vec![0f32; 384 * m];
         for co in 0..384 { xt[co * m..(co + 1) * m].fill(self.down_t.b[co]) }
-        pgemm(384, DIM, m, 1.0, M::new(&self.down_t.w, 0, DIM, 1), M::new(&tok_t, 0, 1, DIM), 1.0, &mut xt, 0, m, 1);
+        gemm::gemm(&self.down_t.p[0], View { b: &tok_t, base: 0, row_off: &dims, cs: DIM }, m, &mut xt, Out { off: 0, rs: m, cs: 1 });
         emit("down_t", &[384, m], &|| xt.clone());
 
         // Decoders.
@@ -606,4 +654,13 @@ pub mod bench {
         ops::pgemm(m, k, n, 1.0, M::new(a, 0, k, 1), M::new(b, 0, n, 1), 0.0, c, 0, n, 1)
     }
     pub fn softmax(x: &mut [f32], m: usize) { ops::softmax_rows(x, m) }
+    /// `C (m×n) = A·B` through the packed multiply (A packed outside the timing).
+    pub fn packed(m: usize, k: usize, n: usize) -> impl FnMut() {
+        let a = super::gemm::Packed::new(m, k, |i, kk| ((i + kk) % 7) as f32 * 0.1);
+        let b = vec![0.25f32; k * n];
+        let rows: Vec<usize> = (0..k).map(|r| r * n).collect();
+        let mut c = vec![0f32; m * n];
+        move || super::gemm::gemm(&a, super::gemm::View { b: &b, base: 0, row_off: &rows, cs: 1 }, n, &mut c,
+                                  super::gemm::Out { off: 0, rs: n, cs: 1 })
+    }
 }
