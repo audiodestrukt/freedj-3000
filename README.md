@@ -73,8 +73,9 @@ In short:
     the rest streams in.
   - rekordbox USB sticks browse by rekordbox's categories, with their grids
     and cues.
-  - Stems prepared with OverCue play with per-stem levels. Splitting on the
-    device is experimental.
+  - Stems prepared with OverCue play with per-stem levels, from a local
+    stick or another player's USB or SD over LINK. Splitting on the device
+    is experimental.
 - **Analysis:** BPM and beat grid, key and phrases, for tracks rekordbox has
   not analysed (BPM matches rekordbox's on 222 of 226 test tracks).
 - **Screens:** the CDJ-3000 screen and faceplate (the default; the iPhone

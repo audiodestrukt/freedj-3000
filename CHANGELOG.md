@@ -15,6 +15,13 @@ All notable changes to this project will be documented in this file.
 - The stem model stays loaded while the STEMS panel is open, so the next
   track's split starts without loading it again; it is let go 10 s after the
   panel closes.
+- Stems from another player over LINK. A track loaded from a player's USB or
+  SD plays the stems prepared for it on that stick, read over the network as
+  a local stick is read: found by its rekordbox ID in OverCue's index-v2,
+  every page checked. Any player works, stock or running OverCue, since
+  only files are read. Against an emulated CDJ-3000 a 2:27 track had its
+  first stems in 0.4 s and the whole bank in 6.5 s. A LINK track without
+  prepared stems can be split on the device like a local one.
 - Dev script: `seek=<seconds>` needle-searches the loaded track.
 
 ### Changed

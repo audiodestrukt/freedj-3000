@@ -2674,7 +2674,11 @@ impl DeckApp {
     fn start_stems_job(&mut self, track: &Arc<Vec<f32>>, ch: usize, split: bool) {
         self.stop_stems();
         self.stems_split_tried = split;
-        if !self.settings.stems || std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") || !self.path.is_file() { return; }
+        if !self.settings.stems || std::env::var("OPENDECK_STEMS").is_ok_and(|v| v == "0") { return; }
+        // A local file, or a track from a linked player's USB / SD (its
+        // stems are read over NFS); a rekordbox laptop's collection has none.
+        let link = self.link_stick();
+        if !self.path.is_file() && link.is_none() { return; }
         if split {
             // First use: fetch the stem model (iOS) in the background; the
             // split waits for it.
@@ -2689,13 +2693,35 @@ impl DeckApp {
         if split { self.stems_model_held = true; }
         let j = Arc::clone(&job);
         let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
-            let got = match stems::load_local(&path, &track, sr, ch, Some(&j)) {
+            let found = match &link {
+                // A player that went away or media without stems: none
+                // prepared; the device can still split the track.
+                Some(l) => stems::load_link(l, &track, sr, ch, Some(&j)).or_else(|e| {
+                    log::info!("stems: {}: {e:#}", l.ip);
+                    if split { Ok(None) } else { Err(e) }
+                }),
+                None => stems::load_local(&path, &track, sr, ch, Some(&j)),
+            };
+            let got = match found {
                 Ok(None) if ch == 2 && split => split_on_device(&path, &track, sr, &j),
                 r => r,
             };
             let _ = tx.send(got);
         });
         if spawned.is_ok() { self.stems_rx = Some(rx); self.stems_job = Some(job); }
+    }
+
+    /// Where the loaded track's stems would be when it came from a linked
+    /// player's USB or SD: that player, export, path and rekordbox ID.
+    fn link_stick(&self) -> Option<stems::LinkStick> {
+        let rel = self.path.to_string_lossy().into_owned();
+        match self.loaded.as_ref()? {
+            browser::Load::Db { ip, id, rekordbox: false, sd, .. } =>
+                Some(stems::LinkStick { ip: *ip, export: if *sd { "/B/" } else { "/C/" }, rel, id: Some(*id) }),
+            browser::Load::Link { ip, id, .. } =>
+                Some(stems::LinkStick { ip: *ip, export: "/C/", rel, id: (*id > 0).then_some(*id) }),
+            _ => None,
+        }
     }
 
     /// Drop the stems job for the old track; a split in progress stops at

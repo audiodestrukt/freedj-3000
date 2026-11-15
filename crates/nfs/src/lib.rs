@@ -221,6 +221,27 @@ impl Nfs {
         Ok((fh, size))
     }
 
+    /// Like [`lookup_path`](Self::lookup_path), but `Ok(None)` when a
+    /// component does not exist (NFSERR_NOENT) rather than an error.
+    pub fn lookup_path_opt(&mut self, root: &Fh, path: &str) -> Result<Option<(Fh, u32)>> {
+        let mut fh = *root;
+        let mut size = 0;
+        for comp in path.split('/').filter(|c| !c.is_empty()) {
+            let mut a = Vec::new();
+            a.extend_from_slice(&fh);
+            xdr_opaque(&mut a, &wide(comp));
+            let r = self.call(PROG_NFS, 2, 4, self.nfs_port, &a)?;
+            match be32(&r, 0) {
+                0 => {}
+                2 => return Ok(None),
+                st => bail!("LOOKUP {comp:?} failed (status {st})"),
+            }
+            fh.copy_from_slice(&r[4..36]);
+            size = be32(&r, 36 + 20);
+        }
+        Ok(Some((fh, size)))
+    }
+
     /// Resolve a `/`-separated path from a root handle.
     pub fn lookup_path(&mut self, root: &Fh, path: &str) -> Result<(Fh, u32)> {
         let mut fh = *root;
@@ -261,10 +282,25 @@ impl Nfs {
 
     /// Like [`read_file`](Self::read_file), handing `on_bytes` the file's
     /// bytes in order as the front of it completes; it returns false to stop.
-    pub fn read_file_with(&mut self, fh: &Fh, size: u32, mut on_bytes: impl FnMut(&[u8]) -> bool) -> Result<Vec<u8>> {
+    pub fn read_file_with(&mut self, fh: &Fh, size: u32, on_bytes: impl FnMut(&[u8]) -> bool) -> Result<Vec<u8>> {
+        self.read_range_with(fh, 0, size, false, on_bytes)
+    }
+
+    /// `len` bytes from `start`, pipelined as [`read_file`](Self::read_file)
+    /// reads a whole file: one stretch of a big file (a page of a stems
+    /// role) without reading the rest.  A short file is an error.
+    pub fn read_range(&mut self, fh: &Fh, start: u32, len: u32) -> Result<Vec<u8>> {
+        self.read_range_with(fh, start, len, true, |_| true)
+    }
+
+    /// `exact`: a reply shorter than asked (the file ends early) is an
+    /// error; otherwise the rest stays zero, as whole-file reads always did.
+    fn read_range_with(&mut self, fh: &Fh, start: u32, size: u32, exact: bool, mut on_bytes: impl FnMut(&[u8]) -> bool) -> Result<Vec<u8>> {
         const CHUNK: u32 = 8192;
         let mut out = vec![0u8; size as usize];
         if size == 0 { return Ok(out); }
+        start.checked_add(size).ok_or_else(|| anyhow!("READ past 4 GiB"))?;
+        let mut short = false;
         let nblocks = ((size + CHUNK - 1) / CHUNK) as usize;
         let dst = SocketAddrV4::new(*self.server.ip(), self.nfs_port);
         // Outstanding requests: xid → (block index, time sent, retries)
@@ -279,8 +315,9 @@ impl Nfs {
         let send = |me: &mut Self, block: usize, inflight: &mut std::collections::HashMap<u32, (usize, std::time::Instant, u32)>, retries: u32| -> Result<()> {
             me.xid = me.xid.wrapping_add(1);
             let xid = me.xid;
-            let off = block as u32 * CHUNK;
-            let want = CHUNK.min(size - off);
+            let rel = block as u32 * CHUNK;
+            let off = start + rel;
+            let want = CHUNK.min(size - rel);
             let mut msg = Vec::with_capacity(84);
             msg.extend_from_slice(&xid.to_be_bytes());
             msg.extend_from_slice(&0u32.to_be_bytes());
@@ -319,6 +356,7 @@ impl Nfs {
                         let start = off + 4 + 68 + 4;
                         let at = block * CHUNK as usize;
                         let take = dlen.min(out.len() - at);
+                        if take < (CHUNK as usize).min(out.len() - at) { short = true; }
                         out[at..at + take].copy_from_slice(&r[start..start + take]);
                         if !got[block] { got[block] = true; done += 1; }
                         if got[contig.min(nblocks - 1)] && contig < nblocks {
@@ -346,6 +384,7 @@ impl Nfs {
         })();
         self.sock.set_read_timeout(old_timeout)?;
         result?;
+        if short && exact { bail!("READ: short read in {start}+{size} (file shorter?)"); }
         Ok(out)
     }
 

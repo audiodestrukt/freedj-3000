@@ -443,6 +443,89 @@ pub fn load_local(file: &Path, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize, j
     build(&mut media, &entry, track, deck_sr, ch, job).with_context(|| rel.clone()).map(Some)
 }
 
+// ── Stems on a linked player's media ─────────────────────────────────────────
+
+/// Where a track loaded over LINK lives: the player, its export (`/C/` USB,
+/// `/B/` SD), the track's path on that media, and its rekordbox ID when the
+/// load knew it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkStick { pub ip: std::net::Ipv4Addr, pub export: &'static str, pub rel: String, pub id: Option<u32> }
+
+/// A linked player's media over NFS, as the stems reader wants it: the same
+/// page tables, hashes and checks as a local stick, each page an offset read
+/// (32 reads in flight) rather than the whole file.
+pub struct NfsMedia { nfs: opendeck_nfs::Nfs, root: opendeck_nfs::Fh, files: HashMap<String, Option<(opendeck_nfs::Fh, u32)>> }
+
+impl NfsMedia {
+    /// Connect to `ip` (portmap on 111, else 50111) and mount `export`.
+    pub fn connect(ip: std::net::Ipv4Addr, export: &str) -> Result<NfsMedia> {
+        NfsMedia::mount(opendeck_nfs::Nfs::connect_any(ip)?, export)
+    }
+
+    fn mount(mut nfs: opendeck_nfs::Nfs, export: &str) -> Result<NfsMedia> {
+        let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
+        let exports = nfs.exports()?;
+        let want = utf16(export);
+        let e = exports.iter().find(|e| **e == want).or_else(|| exports.first()).cloned().unwrap_or(want);
+        let root = nfs.mount(&e)?;
+        Ok(NfsMedia { nfs, root, files: HashMap::new() })
+    }
+
+    fn file(&mut self, path: &str) -> Result<Option<(opendeck_nfs::Fh, u32)>> {
+        oc::media::components(path)?;
+        if let Some(f) = self.files.get(path) { return Ok(*f); }
+        let f = self.nfs.lookup_path_opt(&self.root, path)?;
+        self.files.insert(path.to_string(), f);
+        Ok(f)
+    }
+}
+
+impl oc::Media for NfsMedia {
+    fn size(&mut self, path: &str) -> Result<Option<u64>> { Ok(self.file(path)?.map(|(_, n)| n as u64)) }
+    fn read_at(&mut self, path: &str, offset: u64, len: usize) -> Result<Vec<u8>> {
+        let (fh, size) = self.file(path)?.with_context(|| format!("{path}: not found"))?;
+        ensure!(offset + len as u64 <= size as u64, "{path}: {offset}+{len} past its {size} bytes");
+        self.nfs.read_range(&fh, offset as u32, len as u32)
+    }
+}
+
+/// `index.json` read whole over LINK only up to this size; a bigger one
+/// (OverCue allows 256 MiB) needs index-v2 and the track's ID.
+const LINK_INDEX_MAX: u64 = 32 * 1024 * 1024;
+
+/// The stems entry for a track on linked media: by rekordbox ID through
+/// index-v2 when the stick has it, else by path in `index.json`.
+pub fn link_entry(media: &mut dyn oc::Media, rel: &str, id: Option<u32>) -> Result<Option<oc::Entry>> {
+    if let Some(id) = id {
+        if oc::v2::current(media)?.is_some() {
+            return oc::v2::lookup(media, oc::index::Namespace::DeviceLibrary, id);
+        }
+    }
+    match media.read_all("/CDJMODS/index.json", LINK_INDEX_MAX)? {
+        Some(bytes) => Ok(oc::Index::parse(&bytes)?.by_path(rel)?.cloned()),
+        None => Ok(None),
+    }
+}
+
+/// Build the bank for a track loaded from a linked player (`Ok(None)`: its
+/// media has no stems for it), reading the stick over NFS page by page as
+/// a local one is read.  Works with any player whose media was prepared,
+/// stock or modded: only files are read.  `source_sha256` is not checked
+/// (that would mean reading the track a second time); the alignment check
+/// still refuses stems made from a different file.
+pub fn load_link(stick: &LinkStick, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize, job: Option<&crate::separate::Job>) -> Result<Option<Arc<StemBank>>> {
+    let mut media = NfsMedia::connect(stick.ip, stick.export)?;
+    load_from(&mut media, stick, track, deck_sr, ch, job)
+}
+
+fn load_from(media: &mut dyn oc::Media, stick: &LinkStick, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize, job: Option<&crate::separate::Job>) -> Result<Option<Arc<StemBank>>> {
+    let t0 = std::time::Instant::now();
+    let rel = if stick.rel.starts_with('/') { stick.rel.clone() } else { format!("/{}", stick.rel) };
+    let Some(entry) = link_entry(media, &rel, stick.id)? else { return Ok(None) };
+    log::info!("stems: {} has stems for {rel} on {} (found in {:.0} ms)", stick.ip, stick.export, t0.elapsed().as_secs_f64() * 1e3);
+    build(media, &entry, track, deck_sr, ch, job).with_context(|| format!("{} {rel}", stick.ip)).map(Some)
+}
+
 /// Seconds of stems each step of a paged load reads, converts and appends.
 const PAGED_STEP_SECS: usize = 4;
 /// Source frames read either side of a step, so the rate converter has the
@@ -1058,6 +1141,75 @@ mod tests {
         assert!(load_local(&file, &track, 48_000, 2, None).is_err());
         // A file not on a prepared stick has no stems.
         assert!(load_local(elsewhere.path(), &track, 48_000, 2, None).unwrap().is_none());
+    }
+
+    /// Stems on a linked player's media, read over NFS (our own server on
+    /// loopback standing in for the player): found by rekordbox ID through
+    /// index-v2 or by path through index.json, and the bank is the one the
+    /// same stick gives read locally.
+    #[test]
+    fn stems_load_over_link_from_a_players_media() {
+        let (sr96, frames96) = (96_000.0, 96_000 * 6);
+        let stems: Vec<Vec<i16>> = (1..=3).map(|s| sig(s, frames96, sr96).iter().map(|v| v / 3).collect()).collect();
+        let full = sum(&stems);
+        let d = tempfile::tempdir().unwrap();
+        let mut roles = BTreeMap::new();
+        for (r, s) in ROLES.iter().zip(&stems) { roles.insert(*r, s.clone()); }
+        roles.insert(Role::FullMix, full.clone());
+        let path = "/Contents/Artist/Track.mp3";
+        write_stick(d.path(), &[SynthTrack { id: 7, onelibrary_id: None, file_path: path.into(), source: b"orig".to_vec(), roles }],
+                    SynthCodec::Flac96, Some(3)).unwrap();
+        let full48 = oc::decimate::decimate2(&full);
+        let mut deck = vec![0f32; 200];
+        deck.extend(full48.iter().map(|v| *v as f32 / 32768.0));
+        let track = Arc::new(deck);
+        let local = load_local(&d.path().join("Contents/Artist/Track.mp3"), &track, 48_000, 2, None).unwrap().unwrap();
+
+        let srv = opendeck_nfs::server::NfsServer::start(opendeck_nfs::server::Tree::scan(d.path()).unwrap(), "/C/", 0, 0).unwrap();
+        let media = || NfsMedia::mount(opendeck_nfs::Nfs::connect_at(std::net::Ipv4Addr::LOCALHOST, srv.portmap).unwrap(), "/C/").unwrap();
+        let stick = |id: Option<u32>| LinkStick { ip: std::net::Ipv4Addr::LOCALHOST, export: "/C/", rel: path.trim_start_matches('/').into(), id };
+        for id in [Some(7), None] {
+            let bank = load_from(&mut media(), &stick(id), &track, 48_000, 2, None).unwrap().expect("stems over LINK");
+            assert_eq!(bank.offset_frames, local.offset_frames, "{id:?}");
+            assert!(bank.complete());
+            for s in 0..3 { assert!(bank.stem(s) == local.stem(s), "stem {s} over LINK = local ({id:?})"); }
+        }
+        assert!(load_from(&mut media(), &stick(Some(8)), &track, 48_000, 2, None).unwrap().is_none(), "another ID: none");
+        // A page range read is exactly those bytes.
+        let mut m = media();
+        let idx = std::fs::read(d.path().join("CDJMODS/index.json")).unwrap();
+        assert_eq!(oc::Media::read_at(&mut m, "/CDJMODS/index.json", 10, 100).unwrap(), idx[10..110]);
+        assert!(oc::Media::read_at(&mut m, "/CDJMODS/index.json", idx.len() as u64 - 5, 10).is_err(), "past the end");
+        assert_eq!(oc::Media::size(&mut m, "/CDJMODS/missing.json").unwrap(), None);
+    }
+
+    /// A real player with a prepared stick (`OPENDECK_TEST_LINK_STEMS=<ip>`,
+    /// e.g. the emulated CDJ-3000 on its private bridge): every track
+    /// index.json lists is found over NFS through index-v2 by ID with the
+    /// same bank, and one role reads page by page; prints the times.
+    #[test]
+    fn real_player_stems_over_link() {
+        let Ok(ip) = std::env::var("OPENDECK_TEST_LINK_STEMS") else { return };
+        let ip: std::net::Ipv4Addr = ip.parse().unwrap();
+        let t = std::time::Instant::now();
+        let mut m = NfsMedia::connect(ip, "/C/").unwrap();
+        let index = oc::Index::parse(&oc::Media::read_all(&mut m, "/CDJMODS/index.json", LINK_INDEX_MAX).unwrap().expect("a prepared stick")).unwrap();
+        eprintln!("index.json over NFS: {} tracks, {:.0} ms", index.device.len(), t.elapsed().as_secs_f64() * 1e3);
+        for (id, e) in &index.device {
+            let t = std::time::Instant::now();
+            let got = link_entry(&mut m, e.file_path.as_deref().unwrap(), Some(*id)).unwrap().expect("found by ID");
+            assert_eq!(got.bundle, e.bundle);
+            eprintln!("  [{id}] {} via index-v2: {:.1} ms", got.bundle, t.elapsed().as_secs_f64() * 1e3);
+        }
+        let e = index.device.values().next().unwrap();
+        let t = std::time::Instant::now();
+        let r = oc::RoleReader::open(&mut m, e, Role::Drums).unwrap();
+        let mut bytes = 0usize;
+        let n = (r.frames() * 4).div_ceil(e.page_bytes as usize);
+        for i in 0..n { bytes += r.page(&mut m, i).unwrap().len() * 2; }
+        let s = t.elapsed().as_secs_f64();
+        eprintln!("drums of [{}]: {n} pages, {:.1} MB PCM in {s:.2}s = {:.0}x real time", e.bundle, bytes as f64 / 1e6,
+                  r.frames() as f64 / e.sample_rate as f64 / s);
     }
 
     /// A stick bank read page by page is the bank a whole read gives: at
