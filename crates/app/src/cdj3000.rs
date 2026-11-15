@@ -734,6 +734,9 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
 /// past a white line at its playhead.  The scale is this deck's tempo, so
 /// when the other track is at the same tempo and in phase its beats line up
 /// with this deck's grid on the main waveform, and when it is not they drift.
+/// The looped span's shade, as the main waveform's (renderer `loop_bg`, CDJ style).
+const REMOTE_LOOP_BG: Color32 = Color32::from_rgb(72, 52, 10);
+
 fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
     let p = ui.painter().with_clip_rect(r);
     // The same zoom as the main waveform: its columns across its width set how
@@ -755,6 +758,14 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
         let bytes = &w.data.bytes;
         let n = bytes.len();
         let first = head * 150.0;
+        // Its active loop: the looped span shaded amber behind the waveform,
+        // as the main waveform shades ours (the unit draws no in/out lines).
+        if let Some((a, b)) = w.active_loop {
+            let (xa, xb) = (cx + (a as f32 - head) * per_sec, cx + (b as f32 - head) * per_sec);
+            if xb > r.min.x && xa < r.max.x {
+                p.rect_filled(Rect::from_min_max(Pos2::new(xa.max(r.min.x), r.min.y), Pos2::new(xb.min(r.max.x), r.max.y)), 0.0, REMOTE_LOOP_BG);
+            }
+        }
         let mode = WAVE_MODE.load(std::sync::atomic::Ordering::Relaxed);
         let bands = &w.data.bands;
         let rgb = &w.data.rgb;

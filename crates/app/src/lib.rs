@@ -3360,6 +3360,7 @@ impl DeckApp {
         snap.remote_wave = Some(snapshot::RemoteWaveView {
             data, bpm, pitch: pos.pitch.max(0.1),
             playhead_s: remote.smooth_playhead(p, pos.playhead_ms as f64 / 1000.0 + run, pos.pitch as f64, st.playing),
+            active_loop: st.active_loop.filter(|l| l.end_ms > l.start_ms).map(|l| (l.start_ms / 1000.0, l.end_ms / 1000.0)),
         });
     }
 

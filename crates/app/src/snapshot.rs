@@ -269,6 +269,9 @@ pub struct RemoteWaveView {
     pub playhead_s: f64,
     /// Its pitch (1.0 = +0%): media seconds per second.
     pub pitch: f32,
+    /// The loop it reports as active (CDJ-3000 status), start and end in
+    /// its track's seconds.
+    pub active_loop: Option<(f64, f64)>,
 }
 
 impl DeckSnapshot<'_> {
