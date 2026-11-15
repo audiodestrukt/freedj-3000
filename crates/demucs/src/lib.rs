@@ -34,6 +34,19 @@ const DEPTH: usize = 4;
 const DIM: usize = 512;
 const HEADS: usize = 8;
 
+/// `OPENDECK_DEMUCS_PROF=1` prints the time of each step inside the
+/// transformer layers to stderr.
+struct Lap(Option<std::time::Instant>);
+impl Lap {
+    fn new() -> Self {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        Self(ON.get_or_init(|| std::env::var_os("OPENDECK_DEMUCS_PROF").is_some()).then(std::time::Instant::now))
+    }
+    fn lap(&mut self, what: &str) {
+        if let Some(t) = self.0.as_mut() { eprintln!("  {what:10} {:7.1} ms", t.elapsed().as_secs_f64() * 1e3); *t = std::time::Instant::now() }
+    }
+}
+
 /// Called with each stage's output in PyTorch's layout (batch dim dropped),
 /// for comparing against a reference run.
 pub type Tap<'a> = &'a mut dyn FnMut(&str, &[usize], &[f32]);
@@ -418,13 +431,16 @@ fn mha(a: &Attn, q: &[f32], n: usize, kv: &[f32], m: usize) -> Vec<f32> {
         tokens_times(&a.in_p[part], x, rows, DIM, &mut y, DIM);
         y
     };
+    let mut lap = Lap::new();
     let (qq, kk, vv) = (proj(q, n, 0), proj(kv, m, 1), proj(kv, m, 2));
+    lap.lap("qkv");
     let hd = DIM / HEADS;
     let scale = 1.0 / (hd as f32).sqrt();
     let heads: Vec<(Packed, Packed)> = (0..HEADS).into_par_iter().map(|h| (
         Packed::new(m, hd, |j, d| kk[j * DIM + h * hd + d] * scale),
         Packed::new(hd, m, |d, j| vv[j * DIM + h * hd + d]),
     )).collect();
+    lap.lap("pack kv");
     let qrows: Vec<usize> = (0..hd).collect();
     let mut o = vec![0f32; n * DIM];
     o.par_chunks_mut(BLOCK * DIM).enumerate().for_each(|(blk, ob)| {
@@ -433,21 +449,24 @@ fn mha(a: &Attn, q: &[f32], n: usize, kv: &[f32], m: usize) -> Vec<f32> {
         let mut s = vec![0f32; m * rows];
         let prows: Vec<usize> = (0..m).map(|j| j * rows).collect();
         for (h, (kp, vp)) in heads.iter().enumerate() {
-            s.fill(0.0);
             // Sᵀ (m × rows) = K_h · Q_blkᵀ.
-            gemm::gemm1(kp, View { b: &qq, base: r0 * DIM + h * hd, row_off: &qrows, cs: DIM }, rows, &mut s,
+            gemm::gemm1_set(kp, View { b: &qq, base: r0 * DIM + h * hd, row_off: &qrows, cs: DIM }, rows, &mut s,
                         Out { off: 0, rs: rows, cs: 1 });
             ops::softmax_cols(&mut s, rows);
             // Oᵀ (hd × rows) = V_hᵀ · Pᵀ, stored into this block's rows of O.
-            gemm::gemm1(vp, View { b: &s, base: 0, row_off: &prows, cs: 1 }, rows, ob,
+            gemm::gemm1_set(vp, View { b: &s, base: 0, row_off: &prows, cs: 1 }, rows, ob,
                         Out { off: h * hd, rs: 1, cs: DIM });
         }
     });
-    linear(&o, n, &a.out, DIM, DIM)
+    lap.lap("attention");
+    let r = linear(&o, n, &a.out, DIM, DIM);
+    lap.lap("out proj");
+    r
 }
 
 /// One transformer layer (norm first, layer scale, GroupNorm out), in place.
 fn tlayer(l: &Layer, x: &mut [f32], n: usize, kv: Option<(&[f32], usize)>) {
+    let mut lap = Lap::new();
     let mut h = vec![0f32; n * DIM];
     ops::layer_norm(x, DIM, &l.norm1.w, &l.norm1.b, &mut h);
     let a = match kv {
@@ -461,15 +480,21 @@ fn tlayer(l: &Layer, x: &mut [f32], n: usize, kv: Option<(&[f32], usize)>) {
     for (row, ar) in x.chunks_exact_mut(DIM).zip(a.chunks_exact(DIM)) {
         for i in 0..DIM { row[i] += l.g1[i] * ar[i] }
     }
+    lap.lap("mha+res");
     let nf = if l.cross { l.norm3.as_ref().unwrap() } else { &l.norm2 };
     ops::layer_norm(x, DIM, &nf.w, &nf.b, &mut h);
+    lap.lap("norm");
     let mut f1 = linear(&h, n, &l.lin1, DIM, 4 * DIM);
+    lap.lap("linear1");
     ops::gelu_all(&mut f1);
+    lap.lap("gelu");
     let f2 = linear(&f1, n, &l.lin2, 4 * DIM, DIM);
+    lap.lap("linear2");
     for (row, fr) in x.chunks_exact_mut(DIM).zip(f2.chunks_exact(DIM)) {
         for i in 0..DIM { row[i] += l.g2[i] * fr[i] }
     }
     ops::group_norm1_tokens(x, DIM, &l.norm_out.w, &l.norm_out.b);
+    lap.lap("res+gn");
 }
 
 /// `create_2d_sin_embedding(DIM, fr, t1)` at token `t*fr + f`.
@@ -532,28 +557,28 @@ impl HtDemucs {
         let z: Vec<Vec<Complex32>> = (0..2).map(|c| spec::spec(&mix[c * len..(c + 1) * len], &mut planner)).collect();
         let (fq, t) = (spec::BINS, spec::frames(len));
         emit("spec", &[2, fq, t, 2], &|| z.iter().flat_map(|zc| zc.iter().flat_map(|v| [v.re, v.im])).collect());
-        let mut x = vec![0f32; fq * 4 * t];
+        let mut x0 = vec![0f32; fq * 4 * t];
         for f in 0..fq { for c in 0..2 { for tt in 0..t {
             let v = z[c][f * t + tt];
-            x[(f * 4 + 2 * c) * t + tt] = v.re;
-            x[(f * 4 + 2 * c + 1) * t + tt] = v.im;
+            x0[(f * 4 + 2 * c) * t + tt] = v.re;
+            x0[(f * 4 + 2 * c + 1) * t + tt] = v.im;
         }}}
-        let (mean, std) = ops::mean_std(&x);
-        for v in &mut x { *v = (*v - mean) / (1e-5 + std) }
+        let (mean, std) = ops::mean_std(&x0);
+        for v in &mut x0 { *v = (*v - mean) / (1e-5 + std) }
         let (meant, stdt) = ops::mean_std(mix);
-        let mut xt: Vec<f32> = mix.iter().map(|v| (v - meant) / (1e-5 + stdt)).collect();
+        let xt0: Vec<f32> = mix.iter().map(|v| (v - meant) / (1e-5 + stdt)).collect();
 
         // Encoders.
         let (mut f, mut tl) = (fq, len);
-        let (mut saved, mut saved_t, mut lens_t) = (vec![], vec![], vec![]);
+        let (mut saved, mut saved_t, mut lens_t): (Vec<Vec<f32>>, Vec<Vec<f32>>, Vec<usize>) = (vec![], vec![], vec![]);
         for i in 0..DEPTH {
             lens_t.push(tl);
-            let (y, to) = enc_time(&self.tenc[i], &xt, tl);
-            xt = y; tl = to;
-            emit(&format!("tenc{i}"), &[self.tenc[i].cout, tl], &|| xt.clone());
-            saved_t.push(xt.clone());
-            let (y, fo) = enc_freq(&self.enc[i], &x, f, t);
-            x = y; f = fo;
+            let (y, to) = enc_time(&self.tenc[i], saved_t.last().unwrap_or(&xt0), tl);
+            tl = to;
+            emit(&format!("tenc{i}"), &[self.tenc[i].cout, tl], &|| y.clone());
+            saved_t.push(y);
+            let (mut x, fo) = enc_freq(&self.enc[i], saved.last().unwrap_or(&x0), f, t);
+            f = fo;
             let c = self.enc[i].cout;
             emit(&format!("enc{i}"), &[c, f, t], &|| fct_to_cft(&x, f, c, t));
             if i == 0 {
@@ -563,8 +588,10 @@ impl HtDemucs {
                     for v in &mut x[(ff * c + cc) * t..(ff * c + cc + 1) * t] { *v += e }
                 }}
             }
-            saved.push(x.clone());
+            saved.push(x);
         }
+        let xt = saved_t.last().unwrap();
+        let x = saved.last().unwrap();
 
         // Transformer: tokens (t*f + f_idx, DIM) for the spectrogram branch.
         let (n, m) = (f * t, tl);
@@ -654,6 +681,41 @@ pub mod bench {
         ops::pgemm(m, k, n, 1.0, M::new(a, 0, k, 1), M::new(b, 0, n, 1), 0.0, c, 0, n, 1)
     }
     pub fn softmax(x: &mut [f32], m: usize) { ops::softmax_rows(x, m) }
+    /// ns per element: exp over a slice; and softmax_cols' passes on (m, cols).
+    pub fn exp_and_softmax(m: usize, cols: usize) -> (f64, f64) {
+        let mut x: Vec<f32> = (0..m * cols).map(|i| ((i * 7919) % 1000) as f32 * -0.003).collect();
+        let t = std::time::Instant::now();
+        for _ in 0..3 { for v in x.iter_mut() { *v = ops::exp(*v) - 1.0 } }
+        let e = t.elapsed().as_secs_f64() / 3.0 / x.len() as f64 * 1e9;
+        let t = std::time::Instant::now();
+        for _ in 0..3 { ops::softmax_cols(&mut x, cols) }
+        (e, t.elapsed().as_secs_f64() / 3.0 / x.len() as f64 * 1e9)
+    }
+    /// One attention block on one thread (`rows` queries against `m` keys,
+    /// one head of 64): seconds for the scores, the softmax and P·V.
+    pub fn attention_block(rows: usize, m: usize) -> [f64; 3] {
+        use super::gemm::{gemm1_set, Out, Packed, View};
+        let hd = 64;
+        let kp = Packed::new(m, hd, |j, d| ((j * 7 + d) % 13) as f32 * 0.01);
+        let vp = Packed::new(hd, m, |d, j| ((j * 3 + d) % 11) as f32 * 0.01);
+        let q: Vec<f32> = (0..rows * super::DIM).map(|i| (i % 17) as f32 * 0.01).collect();
+        let qrows: Vec<usize> = (0..hd).collect();
+        let prows: Vec<usize> = (0..m).map(|j| j * rows).collect();
+        let mut s = vec![0f32; m * rows];
+        let mut o = vec![0f32; rows * super::DIM];
+        let mut t = [0f64; 3];
+        for rep in 0..4 {
+            let t0 = std::time::Instant::now();
+            gemm1_set(&kp, View { b: &q, base: 0, row_off: &qrows, cs: super::DIM }, rows, &mut s, Out { off: 0, rs: rows, cs: 1 });
+            let t1 = std::time::Instant::now();
+            ops::softmax_cols(&mut s, rows);
+            let t2 = std::time::Instant::now();
+            gemm1_set(&vp, View { b: &s, base: 0, row_off: &prows, cs: 1 }, rows, &mut o, Out { off: 0, rs: 1, cs: super::DIM });
+            let t3 = std::time::Instant::now();
+            if rep > 0 { t[0] += (t1 - t0).as_secs_f64(); t[1] += (t2 - t1).as_secs_f64(); t[2] += (t3 - t2).as_secs_f64() }
+        }
+        t.map(|v| v / 3.0)
+    }
     /// `C (m×n) = A·B` through the packed multiply (A packed outside the timing).
     pub fn packed(m: usize, k: usize, n: usize) -> impl FnMut() {
         let a = super::gemm::Packed::new(m, k, |i, kk| ((i + kk) % 7) as f32 * 0.1);

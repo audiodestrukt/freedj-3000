@@ -233,11 +233,23 @@ compares each stage with a PyTorch run on a real chunk: the stems agree at
 | softmax subnormals flushed | 4.9 s (1 thread) | — |
 | threads (rayon, disjoint output blocks) | 2.5 s | 11.4 s |
 | vectorisable exp/erf, threaded norms and GLU | 2.3 s | 10.2 s |
+| own matrix multiply, weights packed at load (`gemm.rs`) | 5.2 s* | 7.9 s |
+| no zeroing/clones, fused degree-5 exp | 5.2 s* | 7.6 s |
+
+\* the desktop runs the portable kernel; only aarch64 has the NEON one.
 
 On the Pi, `perf` puts 77 % of the time in `matrixmultiply`: 52 % in its
 NEON kernel, 24 % packing operands (weights are re-packed every call, and
 the strided time-branch convolutions re-pack each tap). Its kernel does
-32 GFLOPS on one core but ~16 per core with all four running. Next: our own
-matrix multiply with weights packed once at load, blocked for the A76's
-512 KB L2; then fp16 arithmetic (the cores have `asimdhp`, twice the fp32
-rate) where the reference test says it holds.
+32 GFLOPS on one core but ~16 per core with all four running. `gemm.rs` now packs
+every weight once at load; its 8x12 NEON kernel does 26-32 GFLOPS on one
+core and 80-97 on four on the transformer's shapes. Where the rest goes
+(`OPENDECK_DEMUCS_PROF=1`, `examples/kernels.rs`): the frequency
+self-attention layers take ~0.4 s each, of which the softmax's 330 M `exp`
+calls a chunk are a large part (2.5 ns each on one core); the time branch
+spends ~1.3 s on ~10 GFLOP, in elementwise passes over 86 k-sample tensors.
+With four cores running, each does about half its one-core rate: memory
+bandwidth. fp32 on this Pi looks to bottom out near 5 s a chunk (1.2x real
+time); 2x needs less work, not just faster kernels: fp16 or int8
+arithmetic in the transformer (the cores have `asimdhp` and `asimddp`),
+less chunk overlap, or a smaller model.

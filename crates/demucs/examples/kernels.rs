@@ -33,6 +33,16 @@ fn main() {
         for _ in 0..3 { f() }
         println!("packed {name:22} {:5.1} GFLOPS", 6.0 * (m * k * n) as f64 / t.elapsed().as_secs_f64() / 1e9);
     }
+    for cols in [128, 32] {
+        let (e, sm) = opendeck_demucs::bench::exp_and_softmax(2688, cols);
+        println!("exp {e:.2} ns/elem, softmax_cols (2688 x {cols}) {sm:.2} ns/elem");
+    }
+    for rows in [128, 64, 32, 24] {
+        let [a, b, c] = opendeck_demucs::bench::attention_block(rows, 2688);
+        let mm = 2.0 * rows as f64 * 2688.0 * 64.0 / 1e9;
+        println!("attention {rows:3} queries x 2688, 1 thread: scores {:5.1} GFLOPS  softmax {:.2} ns/elem  pv {:5.1} GFLOPS  total {:.1} us/query",
+                 mm / a, b * 1e9 / (rows as f64 * 2688.0), mm / c, (a + b + c) * 1e6 / rows as f64);
+    }
     let mut s: Vec<f32> = (0..2688 * 2688).map(|i| ((i * 7919) % 1000) as f32 * 0.01).collect();
     let t = Instant::now();
     opendeck_demucs::bench::softmax(&mut s, 2688);

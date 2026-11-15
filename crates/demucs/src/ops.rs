@@ -43,9 +43,14 @@ pub fn exp(x: f32) -> f32 {
     const ROUND: f32 = 12_582_912.0;                  // 1.5·2^23: x + ROUND - ROUND rounds to nearest
     let x = x.clamp(-87.0, 88.0);
     let n = (x * std::f32::consts::LOG2_E + ROUND) - ROUND;
-    let r = (x - n * 0.693_145_75) - n * 1.428_606_8e-6; // Cody-Waite ln 2
-    let p = 1.0 + r * (1.0 + r * (0.5 + r * (1.0 / 6.0 + r * (1.0 / 24.0 + r * (1.0 / 120.0 + r * (1.0 / 720.0 + r * (1.0 / 5040.0)))))));
-    p * f32::from_bits(((n as i32 + 127) as u32) << 23)
+    let r = n.mul_add(-1.428_606_8e-6, n.mul_add(-0.693_145_75, x)); // Cody-Waite ln 2
+    // Cephes expf's degree-5 polynomial, as fused multiply-adds (fmla).
+    let q = 1.987_569_1e-4f32.mul_add(r, 1.398_199_9e-3).mul_add(r, 8.333_452e-3).mul_add(r, 4.166_579_6e-2)
+        .mul_add(r, 1.666_666_5e-1).mul_add(r, 5.000_000_1e-1);
+    let p = q.mul_add(r * r, r) + 1.0;
+    // 2^n without a float→int cast (a saturating `as` stops the loop
+    // vectoriser): n + 127 + 2^23 holds n + 127 in its low mantissa bits.
+    p * f32::from_bits((n + 8_388_735.0).to_bits() << 23)
 }
 
 /// erf(x), absolute error < 1.5e-7 (Abramowitz & Stegun 7.1.26), branch-free.

@@ -54,14 +54,18 @@ pub struct Out { pub off: usize, pub rs: usize, pub cs: usize }
 
 /// `C += A·B` for the `n` columns of B. Splits the work across threads when
 /// the product is big enough; each task writes only its own block of C.
-pub fn gemm(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out) { run(a, b, n, c, o, true) }
+pub fn gemm(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out) { run(a, b, n, c, o, true, false) }
 
 /// [`gemm`] on the calling thread only: for products that are already one
 /// task of a parallel loop (a band, a block of queries), where splitting
 /// again would only pack the same B several times over.
-pub fn gemm1(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out) { run(a, b, n, c, o, false) }
+pub fn gemm1(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out) { run(a, b, n, c, o, false, false) }
 
-fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool) {
+/// [`gemm1`] that overwrites C (`C = A·B`) instead of adding to it, so C
+/// need not be zeroed first.
+pub fn gemm1_set(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out) { run(a, b, n, c, o, false, true) }
+
+fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool, set: bool) {
     assert_eq!(b.row_off.len(), a.k, "B has {} rows, A has {} columns", b.row_off.len(), a.k);
     if n == 0 || a.m == 0 { return }
     // Bounds: the last element each view can reach.
@@ -74,7 +78,7 @@ fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool) {
         let mut buf = vec![0f32; KC * NC.div_ceil(NR) * NR];
         for s in 0..strips {
             // SAFETY: bounds checked above.
-            unsafe { strip(a, b, s * NC, (n - s * NC).min(NC), 0, panels, c.as_mut_ptr(), o, &mut buf) }
+            unsafe { strip(a, b, s * NC, (n - s * NC).min(NC), 0, panels, c.as_mut_ptr(), o, &mut buf, set) }
         }
         return;
     }
@@ -89,14 +93,14 @@ fn run(a: &Packed, b: View, n: usize, c: &mut [f32], o: Out, threads: bool) {
         if p0 >= p1 { return }
         // SAFETY: bounds checked above; this task writes only rows of panels
         // [p0, p1) in columns [s*NC, s*NC+NC) of C, which no other task touches.
-        unsafe { strip(a, b, s * NC, (n - s * NC).min(NC), p0, p1, cp as *mut f32, o, buf) }
+        unsafe { strip(a, b, s * NC, (n - s * NC).min(NC), p0, p1, cp as *mut f32, o, buf, set) }
     });
 }
 
 /// One column strip `[j0, j0+nc)`: for each KC block, pack B's strip, then
 /// run every A panel over it.
 #[allow(clippy::too_many_arguments)]
-unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize, c: *mut f32, o: Out, buf: &mut [f32]) {
+unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize, c: *mut f32, o: Out, buf: &mut [f32], set: bool) {
     let tiles = nc.div_ceil(NR);
     let mut tile = [0f32; MR * NR];
     let mut k0 = 0;
@@ -111,7 +115,10 @@ unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize,
                 for kk in 0..kc {
                     let src = b.base + b.row_off[k0 + kk] + (j0 + t * NR) * b.cs;
                     let row = &mut dst[kk * NR..(kk + 1) * NR];
-                    if b.cs == 1 {
+                    if b.cs == 1 && jn == NR {
+                        // A fixed length: three vector moves, not a memcpy call.
+                        row.copy_from_slice(b.b.get_unchecked(src..src + NR));
+                    } else if b.cs == 1 {
                         row[..jn].copy_from_slice(b.b.get_unchecked(src..src + jn));
                     } else {
                         for j in 0..jn { row[j] = *b.b.get_unchecked(src + j * b.cs) }
@@ -138,7 +145,10 @@ unsafe fn strip(a: &Packed, b: View, j0: usize, nc: usize, p0: usize, p1: usize,
                 kernel(kc, ap, buf.as_ptr().add(t * kc * NR), &mut tile);
                 let jn = (nc - t * NR).min(NR);
                 let base = c.add(o.off + p * MR * o.rs + (j0 + t * NR) * o.cs);
-                if mr == MR && jn == NR && o.cs == 1 {
+                if set && k0 == 0 {
+                    // First pass of an overwrite: store, don't add.
+                    for r in 0..mr { let row = base.add(r * o.rs); for j in 0..jn { *row.add(j * o.cs) = tile[r * NR + j] } }
+                } else if mr == MR && jn == NR && o.cs == 1 {
                     // A whole tile into row-major C: fixed sizes, so it vectorises.
                     for r in 0..MR {
                         let row = std::slice::from_raw_parts_mut(base.add(r * o.rs), NR);
