@@ -260,9 +260,13 @@ impl MenuItem {
 }
 
 /// Ask a device which TCP port its database server listens on.
-pub fn query_db_port(ip: Ipv4Addr) -> Result<u16> {
-    let mut s = TcpStream::connect_timeout(&SocketAddrV4::new(ip, PORT_QUERY).into(), TIMEOUT)
-        .with_context(|| format!("dbserver: connect {ip}:{PORT_QUERY}"))?;
+pub fn query_db_port(ip: Ipv4Addr) -> Result<u16> { query_db_port_at(ip, PORT_QUERY) }
+
+/// [`query_db_port`] asking a port query service on `query_port` (a test
+/// server on a free port; players are always on [`PORT_QUERY`]).
+pub fn query_db_port_at(ip: Ipv4Addr, query_port: u16) -> Result<u16> {
+    let mut s = TcpStream::connect_timeout(&SocketAddrV4::new(ip, query_port).into(), TIMEOUT)
+        .with_context(|| format!("dbserver: connect {ip}:{query_port}"))?;
     s.set_read_timeout(Some(TIMEOUT))?;
     let mut q = vec![0, 0, 0, 0x0f];
     q.extend_from_slice(b"RemoteDBServer\0");
@@ -309,7 +313,12 @@ impl Client {
 
     /// Connect via the port query on 12523.
     pub fn discover(ip: Ipv4Addr, device: u8) -> Result<Client> {
-        let port = query_db_port(ip)?;
+        Self::discover_at(ip, PORT_QUERY, device)
+    }
+
+    /// [`discover`](Self::discover) through a port query on `query_port`.
+    pub fn discover_at(ip: Ipv4Addr, query_port: u16, device: u8) -> Result<Client> {
+        let port = query_db_port_at(ip, query_port)?;
         Self::connect(ip, port, device)
     }
 

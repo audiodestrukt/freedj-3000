@@ -637,6 +637,25 @@ struct PanelHeld {
     from: f64,
 }
 
+/// The ports a LINK load reaches a peer on: the dbserver port query and,
+/// when set, one portmapper (else a player's 111, then rekordbox's 50111).
+#[derive(Clone, Copy, Debug)]
+struct LinkPorts { query: u16, portmap: Option<u16> }
+
+impl Default for LinkPorts {
+    fn default() -> Self { LinkPorts { query: opendeck_dbserver::PORT_QUERY, portmap: None } }
+}
+
+impl LinkPorts {
+    fn nfs(&self, ip: std::net::Ipv4Addr, rekordbox: bool) -> Result<opendeck_nfs::Nfs> {
+        match self.portmap {
+            Some(p) => opendeck_nfs::Nfs::connect_at(ip, p),
+            None if rekordbox => opendeck_nfs::Nfs::connect_at(ip, opendeck_nfs::PORTMAP_REKORDBOX),
+            None => opendeck_nfs::Nfs::connect_any(ip),
+        }
+    }
+}
+
 struct DeckApp {
     // Provided before event loop starts.
     path:         PathBuf,
@@ -722,6 +741,9 @@ struct DeckApp {
     /// A network load in progress: the fetch thread's result channel and the
     /// name being loaded.  The deck keeps running until the bytes arrive.
     fetch_rx:          Option<mpsc::Receiver<LoadMsg>>,
+    /// Where a LINK load finds a peer's services (players: always the
+    /// standard ports; tests: loopback servers on free ports).
+    link_ports:        LinkPorts,
     /// The stems job for the loaded track (see `stems.rs`).
     stems_rx:          Option<mpsc::Receiver<Result<Option<Arc<stems::StemBank>>>>>,
     /// The loaded track has no prepared stems and the stem model is still
@@ -1107,6 +1129,7 @@ impl DeckApp {
             event_rx,
             indicators,
             fetch_rx: None,
+            link_ports: LinkPorts::default(),
             stems_rx: None,
             stems_await_model: false,
             stems_no_memory: false,
@@ -2392,9 +2415,10 @@ impl DeckApp {
         let (rel_path, analyze_rel) = (rel_path.to_string(), analyze_rel.to_string());
         let name = rel_path.rsplit('/').next().unwrap_or(&rel_path).to_string();
         let prep = self.prep();
+        let ports = self.link_ports;
         self.start_fetch(name.clone(), move |tx| {
             let t0 = Instant::now();
-            let mut nfs = opendeck_nfs::Nfs::connect_any(ip)?;
+            let mut nfs = ports.nfs(ip, false)?;
             let root = nfs.mount_usb()?;
             let (fh, size) = nfs.lookup_path(&root, &rel_path)?;
             let audio = nfs.read_file(&fh, size)?;
@@ -2428,12 +2452,13 @@ impl DeckApp {
         // which left BROWSE on a dead session (only ALL TRACKS) and could
         // cut a download short when BROWSE reconnected.
         let known = self.browser.db_track_file(ip, slot, id);
+        let ports = self.link_ports;
         self.start_fetch(title.clone(), move |tx| {
             let t0 = Instant::now();
             let (path, grid) = match known {
                 Some(r) => r?,
                 None => {
-                    let mut db = Client::discover(ip, device)?;
+                    let mut db = Client::discover_at(ip, ports.query, device)?;
                     (db.file_path(slot, id)?, db.beat_grid(slot, id))
                 }
             };
@@ -2443,8 +2468,7 @@ impl DeckApp {
                 Err(e) => { log::info!("LINK {ip} beat grid {id}: {e:#}"); Vec::new() }
             };
             log::info!("LINK {ip}: track {id} at {path:?}, {} grid beats ({:.0} ms)", beats.len(), t0.elapsed().as_secs_f64() * 1e3);
-            let mut nfs = if rekordbox { opendeck_nfs::Nfs::connect_at(ip, opendeck_nfs::PORTMAP_REKORDBOX)? }
-                          else         { opendeck_nfs::Nfs::connect_any(ip)? };
+            let mut nfs = ports.nfs(ip, rekordbox)?;
             // A player exports its USB as "/C/" and its SD as "/B/"; rekordbox
             // exports "/".  Take the slot's export when listed, else the first.
             let want = if rekordbox { "/" } else if sd { "/B/" } else { "/C/" };
@@ -5278,5 +5302,113 @@ mod deck_tests {
             let want = if d.settings.tempo_range >= 0.99 { 50.0 } else { d.settings.tempo_range * 50.0 };
             assert!((pct - want).abs() < 0.01, "tempo follows the range: {pct}% on {}", d.settings.tempo_range);
         }
+    }
+}
+
+/// Loading a track from another player over LINK, end to end on loopback:
+/// a dbserver answering the path and beat grid, an NFS export with the
+/// file, and the deck asking them as it asks a CDJ, through the real loader.
+#[cfg(test)]
+mod link_load_tests {
+    use super::deck_harness::*;
+    use super::*;
+    use opendeck_protocol::ControlEvent as C;
+    use std::net::Ipv4Addr;
+
+    struct Peer {
+        _dir: tempfile::TempDir,
+        ports: LinkPorts,
+        id:   u32,
+        path: String,
+    }
+
+    /// A player with one 6 s track in /Contents/, its grid analysed at
+    /// 125 BPM (a beat every 480 ms): not what a fresh analysis of the
+    /// file would find, so a deck showing 125 used the player's grid.
+    fn peer() -> Peer {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Contents")).unwrap();
+        super::stream_load_tests::wav(&dir.path().join("Contents/click.wav"), 44_100, 6.0, 0.0);
+        let scanned = opendeck_mediaserver::scan(dir.path(), "TEST").unwrap();
+        let (id, path) = {
+            let mut lib = scanned.library.write().unwrap();
+            let t = &mut lib.tracks[0];
+            t.title = "Click".into();
+            t.beats = (0..12u32).map(|i| ((i % 4 + 1) as u8, 125.0, i * 480)).collect();
+            (t.id, t.path.clone())
+        };
+        let nfs = opendeck_nfs::server::NfsServer::start(scanned.tree, "/C/", 0, 0).unwrap();
+        let db = opendeck_dbserver::server::Server::start_at(scanned.library, Arc::new(|| 2), 0, 0).unwrap();
+        Peer { _dir: dir, ports: LinkPorts { query: db.query_port, portmap: Some(nfs.portmap) }, id, path }
+    }
+
+    /// Poll the loader until it is done (or 10 s).
+    fn finish(d: &mut DeckApp) {
+        let t0 = Instant::now();
+        while d.fetch_rx.is_some() && t0.elapsed() < Duration::from_secs(10) {
+            d.poll_fetch();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(d.fetch_rx.is_none(), "the load finished");
+    }
+
+    #[test]
+    fn a_track_from_a_players_usb_loads_with_its_grid_and_plays() {
+        let p = peer();
+        let mut d = deck(2.0);
+        d.link_ports = p.ports;
+        d.load_track_db(Ipv4Addr::LOCALHOST, p.id, "Click", false, false).unwrap();
+        finish(&mut d);
+        assert_eq!(d.path, std::path::PathBuf::from(&p.path), "the player's path for the track");
+        assert!(d.audio.complete.load(Ordering::Relaxed), "the whole file came over NFS");
+        let secs = d.audio.len() as f64 / (SR as f64 * 2.0);
+        assert!((secs - 6.0).abs() < 0.05, "6 s at the deck's rate: {secs:.2}");
+        let g = d.beat_grid.as_ref().expect("the player's grid, not a fresh analysis");
+        assert!((g.bpm - 125.0).abs() < 0.01, "{}", g.bpm);
+
+        let cue = d.at();
+        d.send(C::PlayPause);
+        d.run(0.3);
+        assert!(d.at() > cue + 0.1, "it plays: {cue:.2}s → {:.2}s", d.at());
+    }
+
+    #[test]
+    fn a_track_by_path_loads_over_nfs_alone() {
+        let p = peer();
+        let mut d = deck(2.0);
+        d.link_ports = p.ports;
+        d.load_track_link(Ipv4Addr::LOCALHOST, &p.path, "").unwrap();
+        finish(&mut d);
+        assert_eq!(d.path, std::path::PathBuf::from(&p.path));
+        let secs = d.audio.len() as f64 / (SR as f64 * 2.0);
+        assert!((secs - 6.0).abs() < 0.05, "{secs:.2}");
+    }
+
+    #[test]
+    fn a_track_the_player_does_not_have_leaves_the_deck_as_it_was() {
+        let p = peer();
+        let mut d = deck(2.0);
+        let before = (d.path.clone(), d.audio.len());
+        d.link_ports = p.ports;
+        d.load_track_db(Ipv4Addr::LOCALHOST, p.id + 99, "Missing", false, false).unwrap();
+        finish(&mut d);
+        assert!(d.loading.is_none(), "LOADING cleared");
+        assert_eq!((d.path.clone(), d.audio.len()), before, "the loaded track stays");
+    }
+
+    #[test]
+    fn a_player_that_is_not_there_fails_the_load_without_hanging() {
+        let mut d = deck(2.0);
+        let before = d.path.clone();
+        // Nothing listens on these: the port query is refused at once and
+        // the deck keeps its track.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        d.link_ports = LinkPorts { query: free, portmap: Some(free) };
+        let t0 = Instant::now();
+        d.load_track_db(Ipv4Addr::LOCALHOST, 1, "Gone", false, false).unwrap();
+        finish(&mut d);
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert!(d.loading.is_none());
+        assert_eq!(d.path, before);
     }
 }

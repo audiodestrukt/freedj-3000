@@ -109,7 +109,7 @@ impl Library {
 /// Our player number as the server reports it (it can change after start).
 pub type DeviceNumber = Arc<dyn Fn() -> u8 + Send + Sync>;
 
-pub struct Server { pub db_port: u16, pub device: u8 }
+pub struct Server { pub db_port: u16, pub device: u8, pub query_port: u16 }
 
 fn s(v: &str) -> Field { Field::Str(v.to_string()) }
 fn u(v: u32) -> Field { Field::U32(v) }
@@ -675,6 +675,12 @@ impl Server {
     /// should ask 12523 for it, and rekordbox and the players do; some tools
     /// go straight to 1051, so we sit there whenever it is free.
     pub fn start_live(lib: SharedLibrary, device: DeviceNumber, db_port: u16) -> Result<Server> {
+        Self::start_at(lib, device, db_port, crate::PORT_QUERY)
+    }
+
+    /// As `start_live` with the port query on `query_port` (0 = any free
+    /// port): for tests, beside a deck that already holds 12523.
+    pub fn start_at(lib: SharedLibrary, device: DeviceNumber, db_port: u16, query_port: u16) -> Result<Server> {
         let bind = |p: u16| TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, p));
         let db = if db_port == 0 {
             bind(crate::DB_PORT).or_else(|e| {
@@ -683,8 +689,9 @@ impl Server {
             })
         } else { bind(db_port) }.context("bind dbserver")?;
         let db_port = db.local_addr()?.port();
-        let pq = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, crate::PORT_QUERY)).context("bind 12523")?;
-        log::info!("dbserver: port query on 12523, database on {db_port}, {} tracks", lib.read().unwrap().tracks.len());
+        let pq = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, query_port)).with_context(|| format!("bind {query_port}"))?;
+        let query_port = pq.local_addr()?.port();
+        log::info!("dbserver: port query on {query_port}, database on {db_port}, {} tracks", lib.read().unwrap().tracks.len());
         thread::Builder::new().name("dbserver-portquery".into()).spawn(move || {
             for c in pq.incoming().flatten() {
                 let mut c = c;
@@ -702,7 +709,7 @@ impl Server {
                 thread::spawn(move || { if let Err(e) = serve_client(lib, device, c) { log::warn!("dbserver client: {e:#}"); } });
             }
         })?;
-        Ok(Server { db_port, device: now })
+        Ok(Server { db_port, device: now, query_port })
     }
 }
 
