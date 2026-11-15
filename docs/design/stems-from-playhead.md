@@ -30,7 +30,10 @@ track saves the load.
   chunk time + 1 s. The first run may give way after one chunk to fill the
   gap the 4 s skipped.
 - Model release: 10 s after STEMS closes with no split running, on a
-  thread of its own. A memory-warning release on iOS is not done yet.
+  thread of its own; at once on an iOS memory warning
+  (`UIApplicationDidReceiveMemoryWarningNotification`, counted in
+  `ios/freedj/main.m`) when no split is running. A warning during a split
+  is only logged to `opendeck-stems-test.txt` with the memory figures.
 - Prepared stick banks still fill from the top (0.15 s to audible); reading
   them cue-first is not done yet.
 

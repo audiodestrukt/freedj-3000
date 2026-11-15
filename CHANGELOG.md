@@ -14,7 +14,9 @@ All notable changes to this project will be documented in this file.
   with a short crossfade at the edges.
 - The stem model stays loaded while the STEMS panel is open, so the next
   track's split starts without loading it again; it is let go 10 s after the
-  panel closes.
+  panel closes, or at once when iOS warns that memory is short and no split
+  is running. A warning during a split is written to the stems test log
+  with the memory in use.
 - Stems from another player over LINK. A track loaded from a player's USB or
   SD plays the stems prepared for it on that stick, read over the network as
   a local stick is read: found by its rekordbox ID in OverCue's index-v2,

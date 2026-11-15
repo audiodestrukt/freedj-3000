@@ -735,6 +735,8 @@ struct DeckApp {
     stems_model_held: bool,
     /// When the STEMS panel was last seen closed with the model held.
     stems_model_idle: Option<Instant>,
+    /// iOS memory warnings already acted on.
+    mem_warnings_seen: i32,
     /// MENU footer addresses and when they were looked up.
     ip_cache: (Option<Instant>, String),
     /// An on-device split in progress (progress, cancel), see `separate.rs`.
@@ -1111,6 +1113,7 @@ impl DeckApp {
             stems_split_tried: false,
             stems_model_held: false,
             stems_model_idle: None,
+            mem_warnings_seen: memory_warnings(),
             ip_cache: (None, String::new()),
             stems_job: None,
             stem_wave_key: None,
@@ -2785,6 +2788,22 @@ impl DeckApp {
     /// on a thread of its own, so the frame never waits on it.
     fn release_idle_model(&mut self) {
         const MODEL_IDLE: Duration = Duration::from_secs(10);
+        // iOS says memory is short: with no split running, let the model
+        // go now even with STEMS open (the next split loads it again);
+        // during a split, only note it in the stems log, with the memory.
+        let warnings = memory_warnings();
+        if warnings != self.mem_warnings_seen {
+            self.mem_warnings_seen = warnings;
+            let (used, left) = separate::model::memory_mb();
+            let busy = self.stems_rx.is_some();
+            split_trace(&format!("  memory warning ({}) | mem {used} MB, {left} MB left", if busy { "during a split" } else if self.stems_model_held { "model released" } else { "no model" }));
+            if self.stems_model_held && !busy {
+                self.stems_model_held = false;
+                self.stems_model_idle = None;
+                let _ = std::thread::Builder::new().name("stem-model-release".into()).spawn(separate::model::release);
+                return;
+            }
+        }
         if !self.stems_model_held { return; }
         if self.stems_wanted() || self.stems_rx.is_some() { self.stems_model_idle = None; return; }
         let since = *self.stems_model_idle.get_or_insert_with(Instant::now);
@@ -3707,6 +3726,13 @@ impl DeckApp {
 extern "C" {
     fn freedj_set_idle_timer_disabled(disabled: bool);
     fn freedj_is_phone() -> bool;
+    fn freedj_memory_warnings() -> i32;
+}
+
+/// iOS memory warnings so far (ios/freedj/main.m counts them); 0 elsewhere.
+fn memory_warnings() -> i32 {
+    #[cfg(target_os = "ios")] { return unsafe { freedj_memory_warnings() }; }
+    #[allow(unreachable_code)] 0
 }
 /// How long an idle deck (not playing, untouched) keeps the iPad awake.
 const AWAKE_IDLE: Duration = Duration::from_secs(300);

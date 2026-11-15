@@ -477,8 +477,22 @@ static void freedj_audio_session_setup(void) {
     }];
 }
 
+// ── Memory warnings ─────────────────────────────────────────────────────────
+// Counted here, read by the deck each frame: with no split running it lets
+// go of the stem model at once instead of waiting for STEMS to close.
+static _Atomic int32_t freedj_mem_warnings = 0;
+
+int32_t freedj_memory_warnings(void) { return freedj_mem_warnings; }
+
+static void freedj_memory_warning_setup(void) {
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:UIApplicationDidReceiveMemoryWarningNotification object:nil queue:nil
+                usingBlock:^(NSNotification *n) { (void)n; freedj_mem_warnings++; }];
+}
+
 int main(int argc, char *argv[]) {
     @autoreleasepool {
+        freedj_memory_warning_setup();
         freedj_audio_session_setup();
         freedj_ios_main();
     }
