@@ -283,3 +283,12 @@ lane-indexed `fmla`, widened into f32 every 32 steps) gives the same
 attention barely moves (390 → 338 ms a frequency layer): its products are
 only 64 deep and P must be converted to fp16 as it is packed. 7.54 → 6.85 s
 a chunk. Off by default (`OPENDECK_DEMUCS_F16=1`).
+
+### Default on the Pi: fp16 transformer (2026-11-15)
+
+Dan's call: launch at real time, distil for more later. `OPENDECK_DEMUCS_F16`
+is on by default on aarch64 (`=0` for all-f32); the aarch64 Pi build has
+`separate-native`. A whole track (techno.mp3, 5:13) through the app's own
+split code on the 4 GB Pi 5 with no cooler: 393 s, **0.8x real time**, peak
+1.2 GB, the CPU at 1.5 GHz and 89 °C nearly throughout. A cool chunk takes
+6.0 s against 5.85 s of new audio, so a cooler is what makes it keep up.

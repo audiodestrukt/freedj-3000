@@ -14,8 +14,12 @@ fn dir() -> PathBuf {
     })
 }
 
-/// The bar: 95 dB, or `OPENDECK_DEMUCS_MIN_DB` (for reduced-precision runs).
-fn min_db() -> f64 { std::env::var("OPENDECK_DEMUCS_MIN_DB").ok().and_then(|v| v.parse().ok()).unwrap_or(95.0) }
+/// The bar: 95 dB in f32; 50 dB with the fp16 transformer (58-67 dB when
+/// written, the ONNX export's vocals 56); `OPENDECK_DEMUCS_MIN_DB` overrides.
+fn min_db() -> f64 {
+    let default = if opendeck_demucs::half_precision() { 50.0 } else { 95.0 };
+    std::env::var("OPENDECK_DEMUCS_MIN_DB").ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
 
 /// Agreement in dB: energy of the reference over energy of the difference.
 fn agreement(want: &[f32], got: &[f32]) -> f64 {
@@ -45,7 +49,7 @@ fn matches_pytorch_layer_by_layer() {
         if name != "spec" { worst = worst.min(a) }
         last = std::time::Instant::now();
     }));
-    println!("one chunk in {:.2} s", t0.elapsed().as_secs_f64());
+    println!("one chunk in {:.2} s ({})", t0.elapsed().as_secs_f64(), if opendeck_demucs::half_precision() { "fp16 transformer" } else { "f32" });
     let (_, stems) = reference.get("stems").unwrap();
     for (s, name) in opendeck_demucs::SOURCES.iter().enumerate() {
         let r = s * 2 * SEGMENT..(s + 1) * 2 * SEGMENT;

@@ -27,6 +27,10 @@ use std::path::Path;
 
 pub use st::Tensors;
 
+/// Whether the transformer runs in half precision here (the default on
+/// aarch64; see `OPENDECK_DEMUCS_F16`).
+pub fn half_precision() -> bool { gemm::f16_on() || gemm::f16_sim() }
+
 /// Samples per chunk: the model's training segment, 7.8 s at 44.1 kHz.
 pub const SEGMENT: usize = 343_980;
 pub const SOURCES: [&str; 4] = ["drums", "bass", "other", "vocals"];

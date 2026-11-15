@@ -3,7 +3,9 @@
 #
 #   build.sh [aarch64|armv6] [extra cargo args]
 # Both builds enable the SDL render backend (OPENDECK_RENDERER=sdl), the only
-# one the VideoCore IV boards can use; wgpu stays in for the Pi 4/5.
+# one the VideoCore IV boards can use; wgpu stays in for the Pi 4/5. The
+# aarch64 build also splits stems on the device (separate-native: HTDemucs
+# in plain Rust, OPENDECK_SEPARATE_MODEL=…/htdemucs.safetensors).
 #     aarch64  64-bit Pi OS (Pi 3/4/5, Zero 2 W)        — default
 #     armv6    32-bit Pi OS on a Pi Zero W / Pi 1; needs target/pi-sysroot
 #              from sysroot-from-pi.sh first
@@ -15,8 +17,10 @@ set -euo pipefail
 cd "$(dirname "$0")/../../.."
 arch=${1:-aarch64}; [ $# -gt 0 ] && shift
 case "$arch" in
-  aarch64) IMG=opendeck-cross-aarch64; DF=Dockerfile;       TARGET=aarch64-unknown-linux-gnu; STRIP=aarch64-linux-gnu-strip ;;
+  aarch64) IMG=opendeck-cross-aarch64; DF=Dockerfile;       TARGET=aarch64-unknown-linux-gnu; STRIP=aarch64-linux-gnu-strip
+           FEATURES=renderer-sdl,separate-native ;;
   armv6)   IMG=opendeck-cross-armv6;   DF=Dockerfile.armv6; TARGET=arm-unknown-linux-gnueabihf; STRIP=arm-linux-gnueabihf-strip
+           FEATURES=renderer-sdl
            [ -d target/pi-sysroot/usr/lib ] || { echo "no target/pi-sysroot — run deploy/pi/cross/sysroot-from-pi.sh <pi-host> first" >&2; exit 1; } ;;
   *) echo "unknown arch $arch (aarch64|armv6)" >&2; exit 2 ;;
 esac
@@ -27,6 +31,6 @@ run() { docker run --rm -u "$(id -u):$(id -g)" -e HOME=/tmp \
           -v "$PWD":/work \
           -v "$HOME/.cargo/registry":/cargo-home/registry -v "$HOME/.cargo/git":/cargo-home/git \
           "$IMG" "$@"; }
-run cargo build --release -p opendeck-app --features renderer-sdl --target "$TARGET" "$@"
+run cargo build --release -p opendeck-app --features "$FEATURES" --target "$TARGET" "$@"
 run "$STRIP" -o "target/$TARGET/release/opendeck-stripped" "target/$TARGET/release/opendeck"
 ls -la "target/$TARGET/release/opendeck" "target/$TARGET/release/opendeck-stripped"

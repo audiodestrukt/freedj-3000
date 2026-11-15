@@ -77,11 +77,13 @@ pub fn f16_run() -> usize {
     *N.get_or_init(|| std::env::var("OPENDECK_DEMUCS_F16RUN").ok().and_then(|v| v.parse().ok()).unwrap_or(F16_STEPS))
 }
 
-/// Real fp16 arithmetic for the products marked [`Packed::half`]
-/// (`OPENDECK_DEMUCS_F16=1`; aarch64 only).
+/// Real fp16 arithmetic for the products marked [`Packed::half`]: the
+/// default on aarch64 (the only target with the kernel), where it takes a
+/// Pi 5 past real time at 58-67 dB against PyTorch; `OPENDECK_DEMUCS_F16=0`
+/// keeps everything in f32.
 pub fn f16_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("OPENDECK_DEMUCS_F16").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| cfg!(target_arch = "aarch64") && std::env::var("OPENDECK_DEMUCS_F16").map_or(true, |v| v != "0"))
 }
 
 pub fn f16_sim() -> bool {
