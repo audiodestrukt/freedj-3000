@@ -800,6 +800,9 @@ impl Browser {
             Some(Err(e)) => { log::info!("LINK: no category menu ({e:#}); showing playlists"); return self.db_folder_entries(0); }
         };
         for i in &items { log::info!("LINK category: {:?} item_type 0x{:x} id {} → {}", i.label, i.item_type, i.id, db_category(i)); }
+        // FOLDER and SEARCH stay off the list: SEARCH is its own key, and the
+        // categories cover what FOLDER would show.
+        let items: Vec<_> = items.into_iter().filter(|i| !matches!(db_category(i), "root-folder" | "root-search")).collect();
         let rows: Vec<Entry> = items.into_iter().map(|i| {
             let kind = match db_category(&i) {
                 "root-track"    => EntryKind::Descend(Loc::DbAllTracks),

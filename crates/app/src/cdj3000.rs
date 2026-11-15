@@ -2014,11 +2014,14 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
             if cur { ui.painter().line_segment([Pos2::new(r.min.x, r.max.y + 3.0 * u), Pos2::new(r.max.x, r.max.y + 3.0 * u)], Stroke::new(2.0 * u, TEXT)); }
         }
         if tap(ui, at_, "cdj-trk-font").0 { out.push(Event::Ui(UiEvent::BrowseFont)); }
+        // No INFO pane in SEARCH (the keyboard takes the room).
         let it = Rect::from_min_max(at(1172.0, 8.0), at(1275.0, 84.0));
+        if bottom >= 628.0 {
         let ion = b.info_on();
         p.rect_filled(Rect::from_center_size(Pos2::new(it.min.x + 14.0 * u, it.center().y), Vec2::splat(24.0 * u)), 2.0, if ion { SEL_BLUE } else { Color32::from_rgb(70, 70, 70) });
         label(ui, Pos2::new(it.min.x + 66.0 * u, it.center().y), Align2::CENTER_CENTER, "INFO", 19.0, u, if ion { SEL_BLUE } else { TEXT });
         if tap(ui, it, "cdj-trk-info").0 { out.push(Event::Ui(UiEvent::BrowseInfo)); }
+        }
     }
     // The second-row key: a box with ⌃⌄, lit while a detail row shows.
     let sb = Rect::from_min_max(at(1011.0, 98.0), at(1069.0, 146.0));
