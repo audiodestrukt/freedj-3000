@@ -322,6 +322,22 @@ All notable changes to this project will be documented in this file.
   artists, a playlist folder's playlists, an artist's, album's or
   playlist's tracks, a FOLDER level.  It is listed in the background, so
   scrolling never waits on it.
+- CDJ-3000 screen, WAVEFORM view: tapping the phase meter switches its slot
+  to the other player's scrolling waveform, as on the unit.  It is drawn
+  thin above our own, with the other player's beat grid (red on the first
+  beat of each bar) moving with it past a line at its playhead, at this
+  deck's tempo: tracks in phase line their beats up with our grid, tracks
+  that are not drift.  The waveform is read from the other player's
+  database (its detail waveform, and its 3-band or RGB colour detail, as
+  MENU → WAVEFORM COLOR), follows our zoom, and its playhead is smoothed
+  against Wi-Fi packet bursts.  Before the track's waveform arrives, a grid
+  from the player's live beats shows the phase.
+- CDJ-3000 INFO screen: a tab per player on the network (playing, master
+  and loaded marks), showing the selected player's track: title, artist,
+  album, key, BPM, length, cover and the stick's colour and player number.
+  Tracks stay fetched as tabs switch.
+- CDJ-3000 screen: the meter slot reads MASTER PLAYER while this deck is
+  the tempo master.
 
 ### Changed
 - Splitting stems with ONNX Runtime (Linux) takes 1.45 GB instead of
@@ -356,6 +372,10 @@ All notable changes to this project will be documented in this file.
   goes back into the list.  It used to back out of the stick into the
   folders; FOLDER and SOURCE lead there.  Linked players and rekordbox
   sticks alike.
+- MASTER pressed while this deck is master gives the role up, as on the
+  unit (it did nothing); nobody is master until a player takes it.
+- binrw 0.15 for the rekordbox export reader, and explicit `f32` literals
+  where Rust is phasing out the fallback (a future hard error).
 
 ### Added
 - iOS: the log is written to `opendeck-log.txt` in the OpenDeck folder (Files
