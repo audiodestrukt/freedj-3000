@@ -350,7 +350,7 @@ impl Nfs {
     }
 
     /// Reads in flight at once for [`read_file`](Self::read_file).
-    pub const WINDOW: usize = 96;
+    pub const WINDOW: usize = 32;
 
     /// List a directory (one READDIR; large dirs may need cookie paging — TODO).
     pub fn readdir(&mut self, fh: &Fh) -> Result<Vec<DirEntry>> {
