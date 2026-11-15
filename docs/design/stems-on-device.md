@@ -72,6 +72,21 @@ that the stems come back sample-aligned with the deck's decode.
 ONNX Runtime's defaults (a growing arena and a whole-graph buffer plan)
 took the peak to 9 GB; both are off now, at the same speed.
 
+The rest of the peak is ONNX Runtime's constant folding, not the audio:
+it keeps about 3 GB of pre-computed tensors resident from the model's load.
+One 7.8 s chunk on 4 threads (warmed up, the same output to 1e-6):
+
+| Optimisation | Resident after load | Peak | Chunk |
+|---|---|---|---|
+| all (folding on) | 4,294 MB | 4,431 MB | 2.27 s |
+| all but ConstantFolding | 542 MB | 1,446 MB | 2.89 s |
+| none | 522 MB | 1,226 MB | 3.00 s |
+
+So folding is on only with at least 7 GB available
+(`separate::fold_constants`; `OPENDECK_SEPARATE_FOLD=1`/`0` overrides).
+A whole 5:13 track on 4 cores of the Linux machine, folded: 2.4× real
+time, peak 5.1 GB with the test's track buffers.
+
 Against OverCue's stems for the same tracks (OverCue as the reference; it
 is a different separator, so this measures agreement, not quality):
 
@@ -95,8 +110,10 @@ Quality is a listening call.
   use the GPU.
 - **Raspberry Pi 5:** possible but slow. Four Cortex-A76 cores are roughly
   a sixth to a tenth of the Linux test machine, so expect about real time
-  or slower (3–6 min for a 3.5-min track), and the ~5 GB peak needs the
-  8 GB Pi. Better as a "prepare this folder" job than on load. Not measured.
+  or slower (3–6 min for a 3.5-min track). Unfolded (above) the model
+  peaks at 1.45 GB, so the 4 GB Pi holds it; it needs a 64-bit OS
+  (ONNX Runtime ships aarch64, not armhf, and a 32-bit process cannot
+  address it anyway). Not measured on the Pi yet.
 - **Pi Zero, Android phones:** no.
 
 ## First iPad run (0.3.11, iPad Air 13")

@@ -468,6 +468,30 @@ pub mod coreml {
     }
 }
 
+/// Whether ONNX Runtime may fold HTDemucs's constants at load.  Folding
+/// makes a chunk about a quarter faster but keeps about 3 GB of
+/// pre-computed tensors resident: a 4-thread split peaks at 4.4 GB folded,
+/// 1.45 GB not (same output to 1e-6).  So fold only with room to spare: a
+/// 4 GB Raspberry Pi 5 cannot hold the folded model at all.
+/// `OPENDECK_SEPARATE_FOLD=1` / `0` overrides; else fold when at least
+/// [`FOLD_MIN_AVAILABLE_MB`] is available (unknown: don't).
+pub fn fold_constants(available_mb: Option<u64>, env: Option<&str>) -> bool {
+    match env.map(str::trim) {
+        Some("1") => true,
+        Some("0") => false,
+        _ => available_mb.is_some_and(|mb| mb >= FOLD_MIN_AVAILABLE_MB),
+    }
+}
+/// Folded peak (4.4 GB) plus the deck and the rest of the system.
+pub const FOLD_MIN_AVAILABLE_MB: u64 = 7_000;
+
+/// `MemAvailable` from `/proc/meminfo`, in MB (Linux; `None` elsewhere).
+pub fn mem_available_mb() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: u64 = s.lines().find_map(|l| l.strip_prefix("MemAvailable:"))?.trim().trim_end_matches("kB").trim().parse().ok()?;
+    Some(kb / 1024)
+}
+
 /// HTDemucs through ONNX Runtime, on the desktop (cargo feature
 /// `separate-onnx`).  The model file is `OPENDECK_SEPARATE_MODEL`
 /// (`htdemucs.onnx`); the runtime is the system's `libonnxruntime`, loaded
@@ -500,8 +524,14 @@ pub mod onnx {
             let lib = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "libonnxruntime.so.1.23".into());
             let env = ort::init_from(&lib).map_err(|e| anyhow!("{lib}: {e}"))?.build().map_err(|e| anyhow!("{e}"))?;
             let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
-            let session = ort::session::Session::builder(&env).map_err(|e| anyhow!("{e}"))?
-                .with_intra_threads(threads).map_err(|e| anyhow!("{e}"))?
+            let avail = super::mem_available_mb();
+            let fold = super::fold_constants(avail, std::env::var("OPENDECK_SEPARATE_FOLD").ok().as_deref());
+            log::info!("stems: ONNX model, {threads} threads, constant folding {} ({} MB available)",
+                       if fold { "on" } else { "off" }, avail.map_or("?".into(), |m| m.to_string()));
+            let mut b = ort::session::Session::builder(&env).map_err(|e| anyhow!("{e}"))?
+                .with_intra_threads(threads).map_err(|e| anyhow!("{e}"))?;
+            if !fold { b = b.with_disabled_optimizers("ConstantFolding").map_err(|e| anyhow!("{e}"))?; }
+            let session = b
                 // ONNX Runtime by default keeps a growing arena and a
                 // whole-graph buffer plan; both off, a 3.5-min split peaks
                 // at 4.9 GB instead of 9 GB, at the same speed.
@@ -777,6 +807,24 @@ mod tests {
         let job = Job::default();
         job.cancel.store(true, Ordering::Relaxed);
         assert!(split(&track, 44_100, &mut Fake { seg: 10_000, calls: 0 }, &job).is_err());
+    }
+
+    /// A 4 GB Pi 5 (~3.5 GB available) loads the model unfolded, at 1.45 GB;
+    /// a desktop with room folds for speed; the env var wins either way.
+    #[test]
+    fn constants_fold_only_with_room() {
+        assert!(!fold_constants(Some(3_538), None), "4 GB Pi 5");
+        assert!(!fold_constants(Some(6_500), None), "8 GB machine, little free");
+        assert!(fold_constants(Some(40_000), None), "desktop");
+        assert!(!fold_constants(None, None), "unknown memory: play safe");
+        assert!(fold_constants(Some(3_538), Some("1")));
+        assert!(!fold_constants(Some(40_000), Some("0")));
+        assert!(!fold_constants(Some(3_538), Some("yes")), "unrecognised value: by memory");
+    }
+
+    #[test]
+    fn reads_mem_available() {
+        if cfg!(target_os = "linux") { assert!(mem_available_mb().is_some_and(|m| m > 0)); }
     }
 }
 

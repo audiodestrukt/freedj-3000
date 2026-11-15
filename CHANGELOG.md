@@ -43,6 +43,12 @@ All notable changes to this project will be documented in this file.
 - Dev script: `seek=<seconds>` needle-searches the loaded track.
 
 ### Changed
+- Splitting stems with ONNX Runtime (Linux) takes 1.45 GB instead of
+  4.4 GB on a machine without room to spare (under 7 GB available, e.g. a
+  4 GB Raspberry Pi 5). ONNX Runtime's constant folding kept about 3 GB of
+  pre-computed tensors resident; it is now off there, for chunks about a
+  quarter slower and the same stems. A desktop with the memory still folds.
+  `OPENDECK_SEPARATE_FOLD=1` / `0` forces it either way.
 - Loading from a linked player: the track starts decoding while it still
   downloads, so the deck is playable after the first seconds instead of after
   the whole file (a 65 MB AIFF took about 13 s over Wi-Fi before).  A format
