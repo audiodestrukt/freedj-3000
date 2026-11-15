@@ -888,33 +888,40 @@ impl ClaimGuard {
     }
 }
 
-fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
-    let sock = bind_shared(PORT_ANNOUNCE)?;
-    log::info!("ProDJ Link: listening for announces on port {PORT_ANNOUNCE}");
-    // Defenses go back to the claimant's port 50000 from a socket of our own.
-    let defend_sock = UdpSocket::bind("0.0.0.0:0").ok();
-    let local_ips = if_addrs::get_if_addrs().map(|v| v.into_iter().filter_map(|i| match i.addr { if_addrs::IfAddr::V4(a) => Some(a.ip), _ => None }).collect()).unwrap_or_default();
-    let mut guard = ClaimGuard { defend_port: defend_sock.as_ref().and_then(|d| d.local_addr().ok()).map(|a| a.port()), local_ips, ..Default::default() };
-    spawn("prodj-rx-50000", PORT_ANNOUNCE, sock, move |data, addr| {
-        log::trace!("ProDJ rx :50000 {} bytes from {addr} — {:02X?}", data.len(), data);
-        diag_packet(50000, addr, data);
+/// A packet a listener sends back, and where to.
+pub(crate) type Reply = (Vec<u8>, SocketAddr);
+
+/// Send a listener's replies from `sock` (none when it could not be bound).
+fn send_replies(sock: Option<&UdpSocket>, replies: Vec<Reply>) {
+    if let Some(s) = sock {
+        for (pkt, to) in replies { let _ = s.send_to(&pkt, to); }
+    }
+}
+
+/// The 50000 listener's work, without the socket: claim defense, then the
+/// peer table.
+pub(crate) struct AnnounceRx {
+    pub link:  Arc<LinkState>,
+    pub guard: ClaimGuard,
+}
+
+impl AnnounceRx {
+    pub(crate) fn on_packet(&mut self, data: &[u8], addr: SocketAddr) -> Vec<Reply> {
+        let link = &self.link;
         let from = match addr { SocketAddr::V4(v) => Some((*v.ip(), v.port())), _ => None };
-        match guard.on_packet(&link, data, from) {
-            ClaimAction::Done => return,
+        match self.guard.on_packet(link, data, from) {
+            ClaimAction::Done => return Vec::new(),
             ClaimAction::Defend { number, to, ours } => {
                 // Unicast, as the players do, and broadcast too: on one
                 // machine several programs share port 50000 and a unicast
                 // reaches only one of them.  Others ignore a defense of a
                 // number they are not claiming.
-                if let Some(ds) = defend_sock.as_ref() {
-                    let pkt = ProDjLink::new(number).build_defense(number, ours);
-                    let _ = ds.send_to(&pkt, (to, PORT_ANNOUNCE));
-                    if let Some(b) = link.own_bcast.lock().ok().and_then(|g| *g) {
-                        let _ = ds.set_broadcast(true);
-                        let _ = ds.send_to(&pkt, (b, PORT_ANNOUNCE));
-                    }
+                let pkt = ProDjLink::new(number).build_defense(number, ours);
+                let mut out = vec![(pkt.clone(), SocketAddr::from((to, PORT_ANNOUNCE)))];
+                if let Some(b) = link.own_bcast.lock().ok().and_then(|g| *g) {
+                    out.push((pkt, SocketAddr::from((b, PORT_ANNOUNCE))));
                 }
-                return;
+                return out;
             }
             ClaimAction::Continue => {}
         }
@@ -931,6 +938,23 @@ fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
                 }
             }
         }
+        Vec::new()
+    }
+}
+
+fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
+    let sock = bind_shared(PORT_ANNOUNCE)?;
+    log::info!("ProDJ Link: listening for announces on port {PORT_ANNOUNCE}");
+    // Defenses go back to the claimant's port 50000 from a socket of our own.
+    let defend_sock = UdpSocket::bind("0.0.0.0:0").ok();
+    if let Some(d) = &defend_sock { let _ = d.set_broadcast(true); }
+    let local_ips = if_addrs::get_if_addrs().map(|v| v.into_iter().filter_map(|i| match i.addr { if_addrs::IfAddr::V4(a) => Some(a.ip), _ => None }).collect()).unwrap_or_default();
+    let guard = ClaimGuard { defend_port: defend_sock.as_ref().and_then(|d| d.local_addr().ok()).map(|a| a.port()), local_ips, ..Default::default() };
+    let mut rx = AnnounceRx { link, guard };
+    spawn("prodj-rx-50000", PORT_ANNOUNCE, sock, move |data, addr| {
+        log::trace!("ProDJ rx :50000 {} bytes from {addr} — {:02X?}", data.len(), data);
+        diag_packet(50000, addr, data);
+        send_replies(defend_sock.as_ref(), rx.on_packet(data, addr));
     })
 }
 
@@ -994,18 +1018,35 @@ fn listen_beat(
     let sock = bind_shared(PORT_BEAT)?;
     log::info!("ProDJ Link: listening for beats on port {PORT_BEAT}");
     let tx = UdpSocket::bind("0.0.0.0:0").ok()?;
-    let mut last_beat_at: HashMap<u8, Instant> = HashMap::new();
+    let mut rx = BeatRx { link, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, last_beat_at: HashMap::new() };
     spawn("prodj-rx-50001", PORT_BEAT, sock, move |data, addr| {
         log::debug!("ProDJ rx :50001 {} bytes from {addr} — {:02X?}", data.len(), data);
         diag_packet(50001, addr, data);
+        send_replies(Some(&tx), rx.on_packet(data, addr, Instant::now()));
+    })
+}
 
-        if note_position(&link, data, Instant::now()) { return; }
+/// The 50001 listener's work, without the socket.
+pub(crate) struct BeatRx {
+    pub link:         Arc<LinkState>,
+    pub beat2_bpm:    Arc<AtomicU32>,
+    pub beat2_anchor: Arc<AtomicU64>,
+    pub beat2_player: Arc<AtomicU32>,
+    pub beat2_bib:    Arc<AtomicU32>,
+    pub last_beat_at: HashMap<u8, Instant>,
+}
+
+impl BeatRx {
+    pub(crate) fn on_packet(&mut self, data: &[u8], addr: SocketAddr, now: Instant) -> Vec<Reply> {
+        let BeatRx { link, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, last_beat_at } = self;
+        let mut out = Vec::new();
+        if note_position(link, data, now) { return out; }
         if let Some(b) = ProDjLink::parse_beat(data) {
-            if b.player == link.player() { return; }           // our own broadcast
+            if b.player == link.player() { return out; }           // our own broadcast
             // An OpenDeck sends each beat by broadcast AND unicast (see the
             // sender); the second copy lands within a few ms.  A real beat is
             // never closer than 300 ms (200 BPM), so drop the twin.
-            if beat_is_twin(&mut last_beat_at, b.player, Instant::now()) { return; }
+            if beat_is_twin(last_beat_at, b.player, now) { return out; }
             let master = link.master_player.load(Ordering::Relaxed) as u8;
             // Effective tempo = track BPM × the sender's pitch.  The beat packet
             // carries them separately; use the product so a pitched master
@@ -1032,16 +1073,16 @@ fn listen_beat(
                 link.master_bpm.store(eff.to_bits(), Ordering::Relaxed);
                 link.master_beat_seq.fetch_add(1, Ordering::Relaxed);
             }
-            return;
+            return out;
         }
 
         if let Some(requester) = ProDjLink::parse_master_request(data) {
             if link.master.load(Ordering::Relaxed) {
                 log::info!("ProDJ Link: player {requester} asks for master — yielding");
                 link.handoff_to.store(requester as u32, Ordering::Relaxed);
-                let _ = tx.send_to(&ProDjLink::new(link.player()).build_master_response(true), (addr.ip(), PORT_BEAT));
+                out.push((ProDjLink::new(link.player()).build_master_response(true), SocketAddr::new(addr.ip(), PORT_BEAT)));
             }
-            return;
+            return out;
         }
         if let Some((from, yielded)) = ProDjLink::parse_master_response(data) {
             log::info!("ProDJ Link: player {from} {} master", if yielded { "yields" } else { "refuses" });
@@ -1055,10 +1096,10 @@ fn listen_beat(
                 link.yielded_from.store(from as u32, Ordering::Relaxed);
                 log::info!("ProDJ Link: player {from} agreed to yield; waiting for it to hand off (Mh)");
             }
-            return;
+            return out;
         }
         if let Some((from, target, cmd)) = ProDjLink::parse_sync_control(data) {
-            if target != link.player() { return; }
+            if target != link.player() { return out; }
             match cmd {
                 SYNC_ON  => { link.sync.store(true,  Ordering::Relaxed); log::info!("ProDJ Link: player {from} turned our SYNC on"); }
                 SYNC_OFF => { link.sync.store(false, Ordering::Relaxed); log::info!("ProDJ Link: player {from} turned our SYNC off"); }
@@ -1066,7 +1107,8 @@ fn listen_beat(
                 _ => log::info!("ProDJ Link: sync control {cmd:#x} from player {from}"),
             }
         }
-    })
+        out
+    }
 }
 
 /// 50002: status from peers → who is master, handoff progress; one log line
@@ -1086,24 +1128,37 @@ pub fn answer_media_query(link: &LinkState, data: &[u8]) -> Option<(Vec<u8>, Ipv
 fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<thread::JoinHandle<()>> {
     let sock = bind_shared(PORT_STATUS)?;
     log::info!("ProDJ Link: listening for status on port {PORT_STATUS}");
-    let mut last: HashMap<u8, Status> = HashMap::new();
     let reply_sock = UdpSocket::bind("0.0.0.0:0").ok();
+    let mut rx = StatusRx { link, beat2_player, last: HashMap::new() };
     spawn("prodj-rx-50002", PORT_STATUS, sock, move |data, addr| {
         log::trace!("ProDJ rx :50002 {} bytes from {addr} — {:02X?}", data.len(), data);
         diag_packet(50002, addr, data);
+        send_replies(reply_sock.as_ref(), rx.on_packet(data, addr));
+    })
+}
+
+/// The 50002 listener's work, without the socket.
+pub(crate) struct StatusRx {
+    pub link:         Arc<LinkState>,
+    pub beat2_player: Arc<AtomicU32>,
+    pub last:         HashMap<u8, Status>,
+}
+
+impl StatusRx {
+    pub(crate) fn on_packet(&mut self, data: &[u8], addr: SocketAddr) -> Vec<Reply> {
+        let StatusRx { link, beat2_player, last } = self;
+        let mut out = Vec::new();
         // Media query: a peer asks what is in one of our slots.  Answer when we
         // are serving (the media response names the library and its size).
         if ProDjLink::packet_type(data) == Some(PKT_MEDIA_QUERY) {
-            if let Some((resp, rip)) = answer_media_query(&link, data) {
+            if let Some((resp, rip)) = answer_media_query(link, data) {
                 // To the address inside the packet and, across a routed link
                 // where that is the peer's LAN address, to where the query
                 // came from — on the status port either way.
-                if let Some(s) = &reply_sock {
-                    let _ = s.send_to(&resp, (rip, PORT_STATUS));
-                    if let std::net::SocketAddr::V4(f) = addr { if *f.ip() != rip { let _ = s.send_to(&resp, (*f.ip(), PORT_STATUS)); } }
-                }
+                out.push((resp.clone(), SocketAddr::from((rip, PORT_STATUS))));
+                if let SocketAddr::V4(f) = addr { if *f.ip() != rip { out.push((resp, SocketAddr::from((*f.ip(), PORT_STATUS)))); } }
             }
-            return;
+            return out;
         }
         // Media response: a player answering our query about one of its slots.
         if let Some(info) = ProDjLink::parse_media_response(data) {
@@ -1114,10 +1169,10 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
                 }
                 m.insert(key, (info, Instant::now()));
             }
-            return;
+            return out;
         }
-        let Some(st) = ProDjLink::parse_status(data) else { return };
-        if st.player == link.player() { return; }
+        let Some(st) = ProDjLink::parse_status(data) else { return out };
+        if st.player == link.player() { return out; }
 
         let changed = last.get(&st.player).map_or(true, |p| {
             p.play != st.play || p.master != st.master || p.sync != st.sync
@@ -1176,7 +1231,7 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
                 link.take_master(&format!("player {} is handing off", st.player));
             }
             if cur != st.player { link.master_player.store(st.player as u32, Ordering::Relaxed); }
-            return;
+            return out;
         }
 
         if st.master && cur != st.player {
@@ -1205,7 +1260,8 @@ fn listen_status(link: Arc<LinkState>, beat2_player: Arc<AtomicU32>) -> Option<t
             link.master_player.store(0, Ordering::Relaxed);
             log::info!("ProDJ Link: player {} released master", st.player);
         }
-    })
+        out
+    }
 }
 
 // ── Sender ────────────────────────────────────────────────────────────────────
@@ -2418,5 +2474,290 @@ mod beat_clock_tests {
         for w in in_loop.windows(2) {
             assert!(w[1] == w[0] + 1 || (w[0] == 43 && w[1] == 40), "40 41 42 43 40 …: {in_loop:?}");
         }
+    }
+}
+
+/// The three Link listeners, fed packets as the players send them: master
+/// tracking and handoff, the beat clock SYNC follows, sync control, media
+/// queries, positions and the peer table.  The listeners' threads only add
+/// a socket around these handlers.
+#[cfg(test)]
+mod listener_tests {
+    use super::*;
+    use opendeck_link::prodj::TrackRef;
+
+    const ME: u8 = 3;
+    const CDJ: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 20);
+    const XDJ: Ipv4Addr = Ipv4Addr::new(192, 168, 1, 30);
+    fn from(ip: Ipv4Addr, port: u16) -> SocketAddr { SocketAddr::from((ip, port)) }
+
+    fn status_rx(link: &Arc<LinkState>) -> StatusRx {
+        StatusRx { link: Arc::clone(link), beat2_player: Arc::new(AtomicU32::new(0)), last: HashMap::new() }
+    }
+    fn beat_rx(link: &Arc<LinkState>) -> BeatRx {
+        BeatRx {
+            link: Arc::clone(link),
+            beat2_bpm: Arc::new(AtomicU32::new(0)), beat2_anchor: Arc::new(AtomicU64::new(0)),
+            beat2_player: Arc::new(AtomicU32::new(0)), beat2_bib: Arc::new(AtomicU32::new(0)),
+            last_beat_at: HashMap::new(),
+        }
+    }
+    /// A playing deck's status, with a track at `bpm` and `pitch`.
+    fn fields(master: bool, bpm: f32, pitch: f32, handoff_to: Option<u8>, sync_counter: u32) -> StatusFields {
+        StatusFields {
+            track: Some(TrackRef { player: 2, slot: 3, kind: 1, id: 7 }), serving: false,
+            playing: true, track_loaded: true, master, sync: false, on_air: true,
+            pitch, bpm: Some(bpm), beat: Some(17), beat_in_bar: Some(1),
+            handoff_to, counter: 1, sync_counter,
+        }
+    }
+    fn status(player: u8, f: StatusFields) -> Vec<u8> { ProDjLink::new(player).build_status(&f) }
+    fn beat(player: u8, bpm: f32, speed: f32) -> Vec<u8> {
+        let snap = EngineSnapshot {
+            position: 0, ghost_position: 0, speed, bpm: bpm * speed, beat_phase: 0.0, bar_phase: 0.0,
+            is_playing: true, slip_active: false, key_lock: false, deck_id: player, timestamp_ns: 0,
+        };
+        ProDjLink::new(player).build_beat(&snap, 2)
+    }
+    fn bpm_of(a: &AtomicU32) -> f32 { f32::from_bits(a.load(Ordering::Relaxed)) }
+
+    // ── Status (50002) ─────────────────────────────────────────────────────
+
+    #[test]
+    fn a_peer_claiming_master_is_tracked_with_its_pitched_tempo() {
+        let link = LinkState::new(ME);
+        let mut rx = status_rx(&link);
+        rx.on_packet(&status(2, fields(true, 128.0, 1.02, None, 5)), from(CDJ, PORT_STATUS));
+        assert_eq!(link.master_player.load(Ordering::Relaxed), 2);
+        assert!((bpm_of(&link.master_bpm) - 130.56).abs() < 0.01, "track BPM × pitch: {}", bpm_of(&link.master_bpm));
+        assert_eq!(link.largest_sync.load(Ordering::Relaxed), 5, "the largest sync counter on the network");
+        assert!(!link.master.load(Ordering::Relaxed), "seeing a master does not make us one");
+
+        rx.on_packet(&status(2, fields(false, 128.0, 1.02, None, 5)), from(CDJ, PORT_STATUS));
+        assert_eq!(link.master_player.load(Ordering::Relaxed), 0, "it released the role");
+    }
+
+    #[test]
+    fn our_own_status_is_ignored() {
+        let link = LinkState::new(ME);
+        let mut rx = status_rx(&link);
+        rx.on_packet(&status(ME, fields(true, 128.0, 1.0, None, 9)), from(CDJ, PORT_STATUS));
+        assert_eq!(link.master_player.load(Ordering::Relaxed), 0);
+        assert_eq!(link.largest_sync.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn the_master_naming_us_in_its_handoff_byte_hands_us_the_role() {
+        let link = LinkState::new(ME);
+        link.want_master.store(true, Ordering::Relaxed);
+        link.yielded_from.store(2, Ordering::Relaxed);
+        let mut rx = status_rx(&link);
+        rx.on_packet(&status(2, fields(true, 128.0, 1.0, None, 4)), from(CDJ, PORT_STATUS));
+        assert!(!link.master.load(Ordering::Relaxed), "an agreement to yield is not the handoff");
+
+        rx.on_packet(&status(2, fields(true, 128.0, 1.0, Some(ME), 4)), from(CDJ, PORT_STATUS));
+        assert!(link.master.load(Ordering::Relaxed), "Mh = us: take master");
+        assert_eq!(link.our_sync.load(Ordering::Relaxed), 5, "a sync counter above everything seen");
+        assert!(!link.want_master.load(Ordering::Relaxed) && link.yielded_from.load(Ordering::Relaxed) == 0, "the request is done");
+
+        // The old master keeps MASTER, with a higher counter, until it sees
+        // ours: that is not a claim against us (the abdication bug).
+        rx.on_packet(&status(2, fields(true, 128.0, 1.0, None, 9)), from(CDJ, PORT_STATUS));
+        assert!(link.master.load(Ordering::Relaxed), "the handshake decides mastery, not the counter");
+        rx.on_packet(&status(2, fields(false, 128.0, 1.0, None, 9)), from(CDJ, PORT_STATUS));
+        assert!(link.master.load(Ordering::Relaxed));
+        assert_eq!(link.master_player.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_peer_we_yielded_to_takes_the_role_from_us() {
+        let link = LinkState::new(ME);
+        link.master.store(true, Ordering::Relaxed);
+        let mut beats = beat_rx(&link);
+        let replies = beats.on_packet(&ProDjLink::new(2).build_master_request(), from(CDJ, 50111), Instant::now());
+        assert_eq!(link.handoff_to.load(Ordering::Relaxed), 2);
+        assert_eq!(replies.len(), 1);
+        assert_eq!(replies[0].1, from(CDJ, PORT_BEAT), "the answer goes to the requester's beat port");
+        assert_eq!(ProDjLink::parse_master_response(&replies[0].0), Some((ME, true)));
+
+        let mut rx = status_rx(&link);
+        rx.on_packet(&status(2, fields(true, 128.0, 1.0, None, 6)), from(CDJ, PORT_STATUS));
+        assert!(!link.master.load(Ordering::Relaxed), "handed over");
+        assert_eq!(link.handoff_to.load(Ordering::Relaxed), 0);
+        assert_eq!(link.master_player.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn the_phase_row_follows_the_first_deck_heard_and_its_play_state() {
+        let link = LinkState::new(ME);
+        let mut rx = status_rx(&link);
+        rx.on_packet(&status(2, fields(false, 128.0, 1.0, None, 0)), from(CDJ, PORT_STATUS));
+        let mut paused = fields(false, 124.0, 1.0, None, 0);
+        paused.playing = false;
+        rx.on_packet(&status(1, paused), from(XDJ, PORT_STATUS));
+        assert_eq!(rx.beat2_player.load(Ordering::Relaxed), 2, "the first deck that sent status");
+        assert!(link.beat2_playing.load(Ordering::Relaxed), "its PLAY, not the other deck's");
+        rx.on_packet(&status(2, paused), from(CDJ, PORT_STATUS));
+        assert!(!link.beat2_playing.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_media_query_is_answered_only_while_serving_and_for_our_number() {
+        let link = LinkState::new(ME);
+        let mut rx = status_rx(&link);
+        let ask = |target, slot| ProDjLink::new(2).build_media_query(CDJ, target, slot);
+        assert!(rx.on_packet(&ask(ME, 3), from(CDJ, PORT_STATUS)).is_empty(), "nothing served yet");
+
+        link.serve_tracks.store(42, Ordering::Relaxed);
+        assert!(rx.on_packet(&ask(1, 3), from(CDJ, PORT_STATUS)).is_empty(), "another player's slot");
+        assert!(rx.on_packet(&ask(ME, 2), from(CDJ, PORT_STATUS)).is_empty(), "our SD: we never report one");
+        let r = rx.on_packet(&ask(ME, 3), from(CDJ, PORT_STATUS));
+        assert_eq!(r.len(), 1, "same address inside and outside: one answer");
+        assert_eq!(r[0].1, from(CDJ, PORT_STATUS));
+        let info = ProDjLink::parse_media_response(&r[0].0).expect("a media response");
+        assert_eq!((info.player, info.tracks), (ME, 42));
+
+        // Across a routed link the packet names the peer's LAN address; the
+        // answer goes there and to where it came from.
+        let r = rx.on_packet(&ask(ME, 3), from(Ipv4Addr::new(100, 64, 0, 9), 50002));
+        let to: Vec<SocketAddr> = r.iter().map(|x| x.1).collect();
+        assert_eq!(to, vec![from(CDJ, PORT_STATUS), from(Ipv4Addr::new(100, 64, 0, 9), PORT_STATUS)]);
+    }
+
+    #[test]
+    fn a_players_media_answer_lists_its_stick() {
+        let link = LinkState::new(ME);
+        let mut rx = status_rx(&link);
+        let resp = ProDjLink::new(2).build_media_response(Ipv4Addr::new(192, 168, 1, 5), 3, "DAN USB", 226, 4, 32 << 30, 1 << 30);
+        assert!(rx.on_packet(&resp, from(CDJ, PORT_STATUS)).is_empty());
+        let media = link.media(2);
+        assert_eq!(media.len(), 1);
+        assert_eq!((media[0].slot, media[0].tracks, media[0].playlists), (3, 226, 4));
+        assert_eq!(media[0].name, "DAN USB");
+        assert!(link.media(1).is_empty());
+    }
+
+    // ── Beats (50001) ──────────────────────────────────────────────────────
+
+    #[test]
+    fn the_masters_beats_drive_the_sync_clock_at_its_pitched_tempo() {
+        let link = LinkState::new(ME);
+        link.master_player.store(2, Ordering::Relaxed);
+        let mut rx = beat_rx(&link);
+        let t0 = Instant::now();
+        rx.on_packet(&beat(2, 128.0, 1.02), from(CDJ, PORT_BEAT), t0);
+        assert!((bpm_of(&link.master_bpm) - 130.56).abs() < 0.02, "{}", bpm_of(&link.master_bpm));
+        assert_eq!(link.master_beat_seq.load(Ordering::Relaxed), 1);
+        assert_eq!(rx.beat2_player.load(Ordering::Relaxed), 2);
+        assert_eq!(rx.beat2_bib.load(Ordering::Relaxed), 2);
+
+        // Its unicast twin a few ms later is the same beat.
+        rx.on_packet(&beat(2, 128.0, 1.02), from(CDJ, PORT_BEAT), t0 + Duration::from_millis(4));
+        assert_eq!(link.master_beat_seq.load(Ordering::Relaxed), 1, "twin dropped");
+        rx.on_packet(&beat(2, 128.0, 1.02), from(CDJ, PORT_BEAT), t0 + Duration::from_millis(460));
+        assert_eq!(link.master_beat_seq.load(Ordering::Relaxed), 2, "the next beat counts");
+    }
+
+    #[test]
+    fn a_deck_that_is_not_master_does_not_move_the_sync_clock() {
+        let link = LinkState::new(ME);
+        link.master_player.store(2, Ordering::Relaxed);
+        let mut rx = beat_rx(&link);
+        rx.on_packet(&beat(1, 140.0, 1.0), from(XDJ, PORT_BEAT), Instant::now());
+        assert_eq!(link.master_beat_seq.load(Ordering::Relaxed), 0);
+        assert_eq!(bpm_of(&link.master_bpm), 0.0);
+        assert_eq!(rx.beat2_player.load(Ordering::Relaxed), 0, "the row shows the master");
+        rx.on_packet(&beat(ME, 140.0, 1.0), from(XDJ, PORT_BEAT), Instant::now());
+        assert_eq!(rx.beat2_player.load(Ordering::Relaxed), 0, "our own beat broadcast");
+
+        // With no master, the row follows whoever plays.
+        link.master_player.store(0, Ordering::Relaxed);
+        rx.on_packet(&beat(1, 140.0, 1.0), from(XDJ, PORT_BEAT), Instant::now() + Duration::from_secs(1));
+        assert_eq!(rx.beat2_player.load(Ordering::Relaxed), 1);
+        assert!((bpm_of(&rx.beat2_bpm) - 140.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_master_request_is_ignored_when_we_are_not_master() {
+        let link = LinkState::new(ME);
+        let mut rx = beat_rx(&link);
+        assert!(rx.on_packet(&ProDjLink::new(2).build_master_request(), from(CDJ, 50001), Instant::now()).is_empty());
+        assert_eq!(link.handoff_to.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn a_yield_is_recorded_only_while_we_asked_for_master() {
+        let link = LinkState::new(ME);
+        let mut rx = beat_rx(&link);
+        let yes = ProDjLink::new(2).build_master_response(true);
+        rx.on_packet(&yes, from(CDJ, PORT_BEAT), Instant::now());
+        assert_eq!(link.yielded_from.load(Ordering::Relaxed), 0, "we never asked");
+        link.want_master.store(true, Ordering::Relaxed);
+        rx.on_packet(&ProDjLink::new(2).build_master_response(false), from(CDJ, PORT_BEAT), Instant::now());
+        assert_eq!(link.yielded_from.load(Ordering::Relaxed), 0, "a refusal");
+        rx.on_packet(&yes, from(CDJ, PORT_BEAT), Instant::now());
+        assert_eq!(link.yielded_from.load(Ordering::Relaxed), 2);
+        assert!(!link.master.load(Ordering::Relaxed), "agreement is not the handoff: wait for Mh");
+    }
+
+    #[test]
+    fn another_player_can_turn_our_sync_on_and_off_and_make_us_master() {
+        let link = LinkState::new(ME);
+        let mut rx = beat_rx(&link);
+        let cmd = |target, c| ProDjLink::new(2).build_sync_control(target, c);
+        rx.on_packet(&cmd(1, SYNC_ON), from(CDJ, PORT_BEAT), Instant::now());
+        assert!(!link.sync.load(Ordering::Relaxed), "meant for player 1");
+        rx.on_packet(&cmd(ME, SYNC_ON), from(CDJ, PORT_BEAT), Instant::now());
+        assert!(link.sync.load(Ordering::Relaxed));
+        rx.on_packet(&cmd(ME, SYNC_OFF), from(CDJ, PORT_BEAT), Instant::now());
+        assert!(!link.sync.load(Ordering::Relaxed));
+        rx.on_packet(&cmd(ME, BECOME_MASTER), from(CDJ, PORT_BEAT), Instant::now());
+        assert!(link.want_master.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn a_cdj3000s_position_runs_forward_at_its_pitch() {
+        let link = LinkState::new(ME);
+        let mut rx = beat_rx(&link);
+        let t0 = Instant::now();
+        rx.on_packet(&ProDjLink::new(2).build_abs_position(180, 60_000, 200, Some(1305)), from(CDJ, PORT_BEAT), t0);
+        let at = |ms: u64, playing| link.playhead_ms(2, playing, t0 + Duration::from_millis(ms)).map(|p| p.round());
+        assert_eq!(at(0, true), Some(60_000.0));
+        assert_eq!(at(500, true), Some(60_510.0), "+2 %: 500 ms of wall clock is 510 ms of track");
+        assert_eq!(at(500, false), Some(60_000.0), "paused: held");
+        assert_eq!(at(1500, true), None, "stale after a second");
+        rx.on_packet(&ProDjLink::new(ME).build_abs_position(180, 1, 0, None), from(CDJ, PORT_BEAT), t0);
+        assert_eq!(link.playhead_ms(ME, true, t0), None, "our own position is not a peer's");
+    }
+
+    // ── Announces (50000) ──────────────────────────────────────────────────
+
+    #[test]
+    fn announces_fill_the_peer_table_at_the_address_they_came_from() {
+        let link = LinkState::new(ME);
+        let mut rx = AnnounceRx { link: Arc::clone(&link), guard: ClaimGuard::default() };
+        rx.on_packet(&ProDjLink::new(2).build_announce(CDJ, [0; 6]), from(CDJ, PORT_ANNOUNCE));
+        // Unicast across a routed link: the packet carries the LAN address.
+        let routed = Ipv4Addr::new(100, 64, 0, 9);
+        rx.on_packet(&ProDjLink::new(1).build_announce(XDJ, [0; 6]), from(routed, PORT_ANNOUNCE));
+        assert_eq!(link.peer_ip(2), Some(CDJ));
+        assert_eq!(link.peer_ip(1), Some(routed), "reach it where it came from");
+        assert_eq!(link.peer_player(CDJ), Some(2));
+        assert!(link.peers_summary().contains("2 freedj-3000 192.168.1.20"), "{}", link.peers_summary());
+        assert_eq!(link.opendeck_peers().len(), 2, "both announce as OpenDecks");
+    }
+
+    #[test]
+    fn a_claim_on_the_number_we_hold_is_defended_to_the_claimant_and_by_broadcast() {
+        let link = LinkState::new(ME);
+        link.claimed.store(true, Ordering::Relaxed);
+        *link.own_src.lock().unwrap() = Some((Ipv4Addr::new(192, 168, 1, 5), 40000));
+        *link.own_bcast.lock().unwrap() = Some(Ipv4Addr::new(192, 168, 1, 255));
+        let mut rx = AnnounceRx { link: Arc::clone(&link), guard: ClaimGuard::default() };
+        let r = rx.on_packet(&ProDjLink::new(ME).build_claim3(1, ME), from(XDJ, 50000));
+        let to: Vec<SocketAddr> = r.iter().map(|x| x.1).collect();
+        assert_eq!(to, vec![from(XDJ, PORT_ANNOUNCE), from(Ipv4Addr::new(192, 168, 1, 255), PORT_ANNOUNCE)]);
+        assert!(r.iter().all(|(p, _)| ProDjLink::parse_defense(p) == Some(ME)));
+        assert!(link.peers.lock().unwrap().is_empty(), "a claim is not an announce");
     }
 }

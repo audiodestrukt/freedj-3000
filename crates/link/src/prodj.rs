@@ -264,7 +264,7 @@ pub struct ProDjLink {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Beat {
     pub player:       u8,
-    /// Effective tempo, already including the sender's pitch.
+    /// The track's own tempo, unpitched: the effective tempo is `bpm * pitch`.
     pub bpm:          f32,
     /// Pitch multiplier, 1.0 = +0%.
     pub pitch:        f32,
