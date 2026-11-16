@@ -21,7 +21,7 @@ use crate::settings::{Setting, MENU};
 use crate::taglist::TagList;
 use crate::screen::{bars_to_next, cover, needle_touch, stem_touch, tap, wave_touch, STEM_NAMES};
 use crate::settings::Settings;
-use crate::snapshot::{DeckSnapshot, StemsState};
+use crate::snapshot::{DeckSnapshot, SplitMap, StemsState, StemsView};
 use egui::{Align2, Color32, FontId, Id, Pos2, Rect, Shape, Stroke, Ui, Vec2};
 
 /// The unit's screen: 1280×720.
@@ -893,38 +893,30 @@ fn stem_keys(lay: &Layout) -> StemKeys {
     }
 }
 
-/// The unit's checkered key face: 4-px squares from the key's top-left
-/// corner, dark first.  (dark, light) per state, measured on the unit.
-const CHECK_LIT: (Color32, Color32) = (Color32::from_rgb(0, 100, 165), Color32::from_rgb(0, 125, 225));
-const CHECK_OFF: (Color32, Color32) = (Color32::from_rgb(35, 35, 35), Color32::from_rgb(50, 50, 50));
+/// Stem key faces, flat: lit blue, off grey (the unit's 4-px checker,
+/// averaged: Dan found the checker busy, 2026-11-16). A lit key goes dim
+/// blue while the playhead is in audio not split yet, where it changes
+/// nothing until the stems arrive.
+const FACE_LIT: Color32 = Color32::from_rgb(0, 112, 195);
+const FACE_LIT_WAITING: Color32 = Color32::from_rgb(0, 58, 100);
+const FACE_OFF: Color32 = Color32::from_rgb(42, 42, 42);
 const EQ_TEXT: Color32 = Color32::from_rgb(125, 137, 145);
 
-/// Fill `area` (inside the key at `key`) with the checker counted from the
-/// key's corner, so a partial fill lines up with the rest of the key.  Too
-/// small to show 4-px squares, it is the flat average.
-fn checker(ui: &Ui, key: Rect, area: Rect, (dark, light): (Color32, Color32), u: f32) {
-    let p = ui.painter();
-    let area = area.intersect(key);
-    if area.width() <= 0.0 || area.height() <= 0.0 { return; }
-    let sq = 4.0 * u;
-    if sq < 2.0 {
-        let avg = |a: u8, b: u8| ((a as u16 + b as u16) / 2) as u8;
-        p.rect_filled(area, 0.0, Color32::from_rgb(avg(dark.r(), light.r()), avg(dark.g(), light.g()), avg(dark.b(), light.b())));
-        return;
-    }
-    p.rect_filled(area, 0.0, dark);
-    let mut mesh = egui::Mesh::default();
-    let (i0, j0) = (((area.min.x - key.min.x) / sq).floor() as i32, ((area.min.y - key.min.y) / sq).floor() as i32);
-    let (i1, j1) = (((area.max.x - key.min.x) / sq).ceil() as i32, ((area.max.y - key.min.y) / sq).ceil() as i32);
-    for j in j0..j1 {
-        for i in i0..i1 {
-            if (i + j) % 2 == 1 {
-                let q = Rect::from_min_size(key.min + Vec2::new(i as f32 * sq, j as f32 * sq), Vec2::splat(sq)).intersect(area);
-                if q.width() > 0.0 && q.height() > 0.0 { mesh.add_colored_rect(q, light); }
-            }
-        }
-    }
-    p.add(Shape::mesh(mesh));
+fn face(ui: &Ui, r: Rect, c: Color32) { ui.painter().rect_filled(r, 0.0, c); }
+
+/// The one status line across the stem keys, if any: how far a split has
+/// got, and whether the playhead is hearing stems or still the original.
+pub(crate) fn stems_status(v: &StemsView, here: bool) -> Option<String> {
+    Some(match v.state {
+        StemsState::Splitting(p) if here => format!("SPLITTING {p}%"),
+        StemsState::Splitting(p) => format!("ORIGINAL HERE · SPLITTING {p}%"),
+        StemsState::Loading => "LOADING".into(),
+        StemsState::Downloading(p) => format!("DOWNLOADING {p}%"),
+        StemsState::Preparing => "PREPARING".into(),
+        StemsState::NoMemory => "NEEDS MORE MEMORY".into(),
+        StemsState::None => "NO STEMS".into(),
+        _ => return None,
+    })
 }
 
 fn stems_volume_id() -> Id { Id::new("cdj3k-stems-volume") }
@@ -939,6 +931,9 @@ fn stems_volume_id() -> Id { Id::new("cdj3k-stems-volume") }
 /// Everything is grey and inert until the track's stems are ready.
 fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
     let ready = snap.stems.state.playable();
+    // Is the playhead hearing stems, or audio the split has not reached?
+    let here = snap.stems.split_at(snap.position as f64 / snap.total_samples.max(1) as f64);
+    let lit = if here { FACE_LIT } else { FACE_LIT_WAITING };
     let mut volume: bool = ctx.data(|d| d.get_temp(stems_volume_id())).unwrap_or(false);
     if !snap.stems.all_on_or_off() { volume = true; }
     let text_c = if ready { TEXT } else { DIM };
@@ -946,7 +941,7 @@ fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Lay
 
     // FULL MIX
     if tap(ui, k.full, "cdj-stems-full").0 && ready { out.push(Event::Ui(UiEvent::StemsFullMix)); }
-    checker(ui, k.full, k.full, CHECK_OFF, u);
+    face(ui, k.full, FACE_OFF);
     label(ui, Pos2::new(k.full.center().x, k.full.center().y - 12.0 * u), Align2::CENTER_CENTER, "FULL", 22.0, u, text_c);
     label(ui, Pos2::new(k.full.center().x, k.full.center().y + 12.0 * u), Align2::CENTER_CENTER, "MIX", 22.0, u, text_c);
 
@@ -957,7 +952,7 @@ fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Lay
         ctx.data_mut(|d| d.insert_temp(stems_volume_id(), !volume));
     }
     for (r, name, on) in [(k.toggle, "TOGGLE", !volume), (k.volume, "VOLUME", volume)] {
-        checker(ui, r, r, if on && ready { CHECK_LIT } else { CHECK_OFF }, u);
+        face(ui, r, if on && ready { FACE_LIT } else { FACE_OFF });
         let c = if !ready || (name == "TOGGLE" && !can_toggle) { DIM } else { TEXT };
         label(ui, r.center(), Align2::CENTER_CENTER, name, 21.0, u, c);
     }
@@ -969,23 +964,12 @@ fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Lay
             // TOGGLE takes taps only; a drag there changes nothing.
             if volume || gain == 0.0 || gain == 1.0 { out.push(Event::Ui(UiEvent::StemGain { stem: i, gain })); }
         }
-        checker(ui, r, r, CHECK_OFF, u);
+        face(ui, r, FACE_OFF);
         if ready && g > 0.0 {
             let fill = if volume { Rect::from_min_max(r.min, Pos2::new(r.min.x + r.width() * g, r.max.y)) } else { r };
-            checker(ui, r, fill, CHECK_LIT, u);
+            face(ui, fill, lit);
         }
-        label(ui, r.center(), Align2::CENTER_CENTER, *name, 22.0, u, text_c);
-        if snap.stems.state.fetch_note().is_some() { continue; }   // the band below says it once
-        let sub = match snap.stems.state {
-            StemsState::Loading => "LOADING".to_string(),
-            StemsState::Splitting(p) => format!("SPLITTING {p}%"),
-            StemsState::Downloading(p) => format!("DOWNLOADING {p}%"),
-            StemsState::Preparing => "PREPARING".to_string(),
-            StemsState::NoMemory => "NEEDS MORE MEMORY".to_string(),
-            StemsState::None => "NO STEMS".to_string(),
-            _ => String::new(),
-        };
-        if !sub.is_empty() { label(ui, Pos2::new(r.center().x, r.center().y + 24.0 * u), Align2::CENTER_CENTER, &sub, 15.0, u, DIM); }
+        label(ui, Pos2::new(r.center().x, r.center().y - 6.0 * u), Align2::CENTER_CENTER, *name, 22.0, u, if here { text_c } else { DIM });
     }
 
     // First use: one band across the stem keys says the model is being
@@ -998,10 +982,19 @@ fn draw_stems_panel(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Lay
             ui.painter().rect_filled(fill, 0.0, KEY_LIT);
         }
         label(ui, Pos2::new(band.center().x, band.center().y - 2.0 * u), Align2::CENTER_CENTER, note, 17.0, u, TEXT);
+    } else if let Some(status) = stems_status(&snap.stems, here) {
+        // Otherwise one line across the keys says how the split is going.
+        let band = Rect::from_min_max(Pos2::new(k.stems[0].min.x, k.stems[0].max.y - 26.0 * u), k.stems[2].max);
+        ui.painter().rect_filled(band, 0.0, Color32::from_rgba_unmultiplied(0, 0, 0, 170));
+        if let StemsState::Splitting(pc) = snap.stems.state {
+            let fill = Rect::from_min_size(Pos2::new(band.min.x, band.max.y - 3.0 * u), Vec2::new(band.width() * pc as f32 / 100.0, 3.0 * u));
+            ui.painter().rect_filled(fill, 0.0, FACE_LIT);
+        }
+        label(ui, Pos2::new(band.center().x, band.center().y - 1.0 * u), Align2::CENTER_CENTER, &status, 16.0, u, if here { TEXT } else { ORANGE });
     }
 
     // EQ: grey; Stems EQ comes from a mixer we do not support.
-    checker(ui, k.eq, k.eq, CHECK_OFF, u);
+    face(ui, k.eq, FACE_OFF);
     label(ui, k.eq.center(), Align2::CENTER_CENTER, "EQ", 22.0, u, EQ_TEXT);
 }
 
@@ -2226,6 +2219,17 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
         p.add(Shape::convex_polygon(vec![Pos2::new(x - 7.0 * u, f.min.y), Pos2::new(x + 7.0 * u, f.min.y), Pos2::new(x, f.max.y)],
                                     RED, Stroke::NONE));
     }
+    // While a track splits, the overview shows where its stems are: the
+    // parts not split yet are dimmed, and a blue line runs under the parts
+    // that are, so a jump can aim at audio the stem keys will work on.
+    if let StemsState::Splitting(_) = snap.stems.state {
+        let x = |bin: usize| ov.min.x + bin as f32 / SplitMap::BINS as f32 * ov.width();
+        p.rect_filled(Rect::from_min_max(Pos2::new(ov.min.x, ov.max.y - 3.0 * u), ov.max), 0.0, FACE_LIT);
+        for (a, b) in snap.stems.split.gaps() {
+            p.rect_filled(Rect::from_min_max(Pos2::new(x(a), ov.min.y), Pos2::new(x(b), ov.max.y)), 0.0, Color32::from_black_alpha(160));
+            p.rect_filled(Rect::from_min_max(Pos2::new(x(a), ov.max.y - 3.0 * u), Pos2::new(x(b), ov.max.y)), 0.0, Color32::from_rgb(25, 25, 25));
+        }
+    }
     if snap.total_samples > 0 {
         // The address bar: white where the track has played, red ahead.
         p.rect_filled(lay.address, 0.0, RED);
@@ -2372,7 +2376,7 @@ mod stems_panel_tests {
         click(&ctx, &snap, &lay, lay.stems_key.center());
         assert_eq!(panel(&ctx), Panel::None);
         // On and ready: it opens the panel, and a tap on DRUMS mutes them.
-        snap.stems = StemsView { state: StemsState::Ready, gains: [1.0; 3] };
+        snap.stems = StemsView::of(StemsState::Ready);
         click(&ctx, &snap, &lay, lay.stems_key.center());
         assert_eq!(panel(&ctx), Panel::Stems);
         let keys = stem_keys(&lay);
@@ -2386,5 +2390,39 @@ mod stems_panel_tests {
         // While loading, the stems are inert.
         snap.stems.state = StemsState::Loading;
         assert!(click(&ctx, &snap, &lay, drums).is_empty());
+    }
+
+    /// A track half split (its first half): the screen says whether the
+    /// playhead hears stems, and a tap in the unsplit half still counts.
+    #[test]
+    fn a_half_split_track_says_where_the_stems_are() {
+        let tags = opendeck_decode::TrackTags::default();
+        let lay = layout(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0)), true);
+        let ctx = egui::Context::default();
+        let mut snap = DeckSnapshot::test(&tags);
+        let mut split = SplitMap::EMPTY;
+        for i in 0..SplitMap::BINS / 2 { split.set(i) }
+        snap.stems = StemsView { state: StemsState::Splitting(50), gains: [1.0; 3], split };
+        snap.total_samples = 1_000_000;
+        assert_eq!(split.gaps(), vec![(SplitMap::BINS / 2, SplitMap::BINS)]);
+
+        // In the split half: the stems play, the band only counts.
+        snap.position = 250_000;
+        assert!(snap.stems.split_at(0.25));
+        assert_eq!(stems_status(&snap.stems, true).as_deref(), Some("SPLITTING 50%"));
+
+        // In the half not split yet: it says the original is playing ...
+        snap.position = 750_000;
+        assert!(!snap.stems.split_at(0.75));
+        assert_eq!(stems_status(&snap.stems, false).as_deref(), Some("ORIGINAL HERE · SPLITTING 50%"));
+        // ... and a tap on DRUMS still mutes them, for when the stems land.
+        click(&ctx, &snap, &lay, lay.stems_key.center());
+        assert_eq!(panel(&ctx), Panel::Stems);
+        let out = click(&ctx, &snap, &lay, stem_keys(&lay).stems[0].center());
+        assert!(matches!(out.as_slice(), [Event::Ui(UiEvent::StemGain { stem: 0, gain })] if *gain == 0.0), "{out:?}");
+
+        // Fully split: no status line at all, and the stems play everywhere.
+        snap.stems = StemsView::of(StemsState::Ready);
+        assert!(snap.stems.split_at(0.75) && stems_status(&snap.stems, true).is_none());
     }
 }

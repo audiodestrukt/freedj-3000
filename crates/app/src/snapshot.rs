@@ -63,13 +63,55 @@ impl StemsState {
     }
 }
 
-/// The stem controls' view: state plus drums / vocal / harmonics levels.
+/// Which parts of the track have stems, in [`SplitMap::BINS`] equal bins:
+/// a bin counts once every sample in it is split, so the screen never
+/// promises stems that are not there yet.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct StemsView { pub state: StemsState, pub gains: [f32; 3] }
+pub struct SplitMap(pub [u64; 4]);
 
-impl Default for StemsView { fn default() -> Self { StemsView { state: StemsState::Off, gains: [1.0; 3] } } }
+impl SplitMap {
+    pub const BINS: usize = 256;
+    /// Nothing split.
+    pub const EMPTY: SplitMap = SplitMap([0; 4]);
+    /// The whole track split (or prepared stems).
+    pub const FULL: SplitMap = SplitMap([u64::MAX; 4]);
+    pub fn get(&self, i: usize) -> bool { i < Self::BINS && (self.0[i / 64] >> (i % 64)) & 1 == 1 }
+    pub fn set(&mut self, i: usize) { if i < Self::BINS { self.0[i / 64] |= 1 << (i % 64) } }
+    /// The bin holding fraction `f` (0..1) of the track.
+    pub fn bin(f: f64) -> usize { ((f.clamp(0.0, 1.0) * Self::BINS as f64) as usize).min(Self::BINS - 1) }
+    /// Runs of bins not split yet, as `[start, end)` bin ranges.
+    pub fn gaps(&self) -> Vec<(usize, usize)> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < Self::BINS {
+            if self.get(i) { i += 1; continue }
+            let start = i;
+            while i < Self::BINS && !self.get(i) { i += 1 }
+            out.push((start, i));
+        }
+        out
+    }
+}
+
+/// The stem controls' view: state, drums / vocal / harmonics levels, and
+/// which parts of the track have stems.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StemsView { pub state: StemsState, pub gains: [f32; 3], pub split: SplitMap }
+
+impl Default for StemsView { fn default() -> Self { StemsView { state: StemsState::Off, gains: [1.0; 3], split: SplitMap::FULL } } }
 
 impl StemsView {
+    /// A view in `state` with every stem on and the whole track split.
+    pub fn of(state: StemsState) -> Self { StemsView { state, ..Default::default() } }
+    /// The stems play at fraction `f` of the track (the playhead there hears
+    /// them, not the original).
+    pub fn split_at(&self, f: f64) -> bool {
+        match self.state {
+            StemsState::Ready => true,
+            StemsState::Splitting(_) => self.split.get(SplitMap::bin(f)),
+            _ => false,
+        }
+    }
     /// Any stem off full: the panel's key shows its "changed" underline.
     pub fn changed(&self) -> bool { self.gains.iter().any(|g| *g < 1.0) }
     /// Every stem fully on or fully off (TOGGLE mode can show it).

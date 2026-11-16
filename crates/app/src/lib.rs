@@ -2558,7 +2558,9 @@ impl DeckApp {
         use snapshot::StemsState as S;
         let state = if !self.settings.stems { S::Off }
             else if let Some(b) = self.audio.stems.bank().filter(|b| b.is_for(&self.audio.current())) {
-                if b.complete() || b.prepared { S::Ready } else { S::Splitting(b.percent()) }
+                if b.complete() || b.prepared { S::Ready } else {
+                    return snapshot::StemsView { state: S::Splitting(b.percent()), gains: self.audio.stems.gains(), split: b.split_map() };
+                }
             }
             else if self.stems_rx.is_some() { S::Loading }
             else if self.stems_no_memory { S::NoMemory }
@@ -2571,7 +2573,7 @@ impl DeckApp {
                 }
             }
             else { S::None };
-        snapshot::StemsView { state, gains: self.audio.stems.gains() }
+        snapshot::StemsView { state, gains: self.audio.stems.gains(), split: snapshot::SplitMap::FULL }
     }
 
     /// Let go of anything a finger was holding when the phone page flips.

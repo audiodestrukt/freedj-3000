@@ -152,6 +152,18 @@ impl StemBank {
         let end = r.end.min(self.len());
         r.start >= end || (r.start / PAGE..=(end - 1) / PAGE).all(|p| self.page_ready(p))
     }
+    /// Which parts of the track have stems, for the screen: each of the
+    /// map's bins counts once all of it is written.
+    pub fn split_map(&self) -> crate::snapshot::SplitMap {
+        use crate::snapshot::SplitMap;
+        let (len, bins) = (self.len(), SplitMap::BINS);
+        let mut m = SplitMap::EMPTY;
+        for i in 0..bins {
+            if self.range_ready(i * len / bins..(i + 1) * len / bins) { m.set(i) }
+        }
+        m
+    }
+
     /// The first page from `p` on that is not ready, wrapping round to the
     /// start; `None` once every page is.
     pub fn first_unready_from(&self, p: usize) -> Option<usize> {
@@ -1032,6 +1044,20 @@ mod tests {
     /// Pages written out of order (a split that started mid-track): the
     /// stems play on ready pages only, ramping at the edges; a partial page
     /// a stopped writer left is forgotten and filled again whole.
+    /// The screen's map of a bank split in the middle: only the written
+    /// pages show as split, and the rest as the two gaps either side.
+    #[test]
+    fn the_split_map_marks_only_written_audio() {
+        let n = 8 * PAGE;
+        let bank = StemBank::filling(&Arc::new(vec![0.5f32; n]));
+        assert_eq!(bank.split_map(), crate::snapshot::SplitMap::EMPTY);
+        let block = vec![1000i16; 2 * PAGE];
+        bank.write(4 * PAGE, [&block, &block, &block]);         // pages 4 and 5 of 8
+        let m = bank.split_map();
+        assert_eq!(m.gaps(), vec![(0, 128), (192, 256)]);
+        assert!(!m.get(127) && m.get(128) && m.get(191) && !m.get(192));
+    }
+
     #[test]
     fn a_bank_written_out_of_order_plays_ready_pages_only() {
         let n = 8 * PAGE;

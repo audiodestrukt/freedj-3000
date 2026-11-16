@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- While a track splits, the CDJ-3000 screen shows where its stems are: the
+  overview dims the parts not split yet and runs a blue line under the
+  parts that are, so you can see where the stem keys will work before you
+  jump. The STEMS panel's keys are flat (no checker), one line across them
+  says how far the split has got, and when the playhead is in audio not
+  split yet it says ORIGINAL HERE in orange and the lit keys go dim; a tap
+  there still counts and takes effect when the stems arrive.
 - Stems can split with no ONNX Runtime at all: `opendeck-demucs` runs
   Meta's HTDemucs in plain Rust from its own weights (build with
   `separate-native`, point `OPENDECK_SEPARATE_MODEL` at
