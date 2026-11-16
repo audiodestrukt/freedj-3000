@@ -513,6 +513,28 @@ pub mod native {
     pub struct Native(opendeck_demucs::HtDemucs);
     static MODEL: Mutex<Option<Native>> = Mutex::new(None);
 
+    /// Niceness of the split's threads: a split keeps every core busy, and
+    /// the deck's audio must still get the CPU the moment it wants it (on a
+    /// Pi without real-time priority it otherwise starves: 2189 underruns
+    /// in one demo, 2026-11-15).
+    pub const SPLIT_NICE: i32 = 10;
+
+    /// The split's own thread pool, one thread per core, each at
+    /// [`SPLIT_NICE`], so the model's parallel work never runs at the deck's
+    /// priority.
+    pub fn pool() -> &'static rayon::ThreadPool {
+        static POOL: std::sync::OnceLock<rayon::ThreadPool> = std::sync::OnceLock::new();
+        POOL.get_or_init(|| rayon::ThreadPoolBuilder::new()
+            .thread_name(|i| format!("split-{i}"))
+            .start_handler(|_| {
+                // Linux nice values are per thread: 0 = this thread.
+                #[cfg(target_os = "linux")]
+                // SAFETY: setpriority has no memory effects.
+                unsafe { libc::setpriority(libc::PRIO_PROCESS, 0, SPLIT_NICE); }
+            })
+            .build().expect("split thread pool"))
+    }
+
     fn path() -> Option<std::path::PathBuf> {
         std::env::var_os("OPENDECK_SEPARATE_MODEL").map(std::path::PathBuf::from)
             .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "safetensors"))
@@ -538,8 +560,39 @@ pub mod native {
     impl Separator for Native {
         fn segment(&self) -> usize { opendeck_demucs::SEGMENT }
         fn run(&mut self, mix: &[f32], out: &mut [f32]) -> Result<()> {
-            self.0.run(mix, out);
+            let m = &self.0;
+            pool().install(|| m.run(mix, out));
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// A split's threads run below the deck's priority, so playback
+        /// keeps the CPU while every core splits.
+        #[cfg(target_os = "linux")]
+        #[test]
+        fn split_threads_yield_to_the_deck() {
+            let nice: Vec<i32> = super::pool().install(|| {
+                use rayon::prelude::*;
+                (0..64).into_par_iter().map(|_| unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) }).collect()
+            });
+            assert!(nice.iter().all(|&n| n == super::SPLIT_NICE), "{nice:?}");
+            // The caller (the deck's side) is untouched.
+            assert_eq!(unsafe { libc::getpriority(libc::PRIO_PROCESS, 0) }, 0);
+        }
+
+        /// With the Rust model, a 4 GB Pi (about 3.2 GB free) is allowed to
+        /// split; the iPad's 4.6 GB figure refused it.
+        #[test]
+        fn a_4gb_pi_has_room_to_split() {
+            let dir = tempfile::tempdir().unwrap();
+            let p = dir.path().join("htdemucs.safetensors");
+            std::fs::write(&p, b"x").unwrap();
+            std::env::set_var("OPENDECK_SEPARATE_MODEL", &p);
+            let need = super::super::model::split_needs_mb();
+            std::env::remove_var("OPENDECK_SEPARATE_MODEL");
+            assert!(need <= 2_000 && need < 3_200, "a split asks for {need} MB");
         }
     }
 }
@@ -648,6 +701,16 @@ pub mod model {
     /// guess from one failure, to be replaced with a measured peak.  (Linux,
     /// ONNX Runtime on the CPU, is different: 548 → 5219 MB.)
     pub const SPLIT_NEEDS_MB: u64 = 4_600;
+
+    /// `opendeck-demucs` peaks at 1.2 GB for a 5-minute track (Pi 5,
+    /// 2026-11-15), so it asks for 1.5 GB free, not the iPad's 4.6.
+    pub const NATIVE_SPLIT_NEEDS_MB: u64 = 1_500;
+
+    /// Memory the model that will run needs free before a split starts, MB.
+    pub fn split_needs_mb() -> u64 {
+        #[cfg(all(not(target_os = "ios"), feature = "separate-native"))] { if super::native::present() { return NATIVE_SPLIT_NEEDS_MB } }
+        #[allow(unreachable_code)] SPLIT_NEEDS_MB
+    }
 
     /// (process memory, memory left before the OS steps in), MB.
     pub fn memory_mb() -> (u64, u64) {

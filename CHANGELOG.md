@@ -19,6 +19,13 @@ All notable changes to this project will be documented in this file.
   (`deploy/pi/cross/build.sh`) now includes it.
 
 ### Fixed
+- A Raspberry Pi said NEEDS MORE MEMORY for every split: the check asked
+  for the 4.6 GB the iPad's Core ML model needs, where the Rust model
+  peaks at 1.2 GB. It now asks for what the model that will run needs
+  (1.5 GB for `separate-native`), so a 4 GB Pi splits.
+- A split no longer starves the deck's audio. Its threads run at nice 10
+  in their own pool, so playback gets the CPU first while every core
+  splits (on a Pi without real-time priority, one demo lost 2189 buffers).
 - Tempo `+` / `−` keys, and a controller's `tempo_nudge` buttons, went the
   wrong way: `+` slowed the deck by 1 % and `−` sped it up, since the tempo
   fader was turned round (down = faster) in August. They now move the tempo

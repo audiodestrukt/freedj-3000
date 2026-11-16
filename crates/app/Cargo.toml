@@ -29,6 +29,7 @@ opendeck-dbserver    = { path = "../dbserver" }
 opendeck-mediaserver = { path = "../mediaserver" }
 opendeck-stems       = { path = "../stems" }
 opendeck-demucs      = { path = "../demucs", optional = true }
+rayon                = { version = "1", optional = true }
 sha2                 = "0.10"   # stems: check the original against its prepared hash
 flate2               = "1"      # stems model: unzip the downloaded package as a stream
 opendeck-timestretch = { workspace = true }
@@ -67,7 +68,7 @@ separate-onnx = ["dep:ort"]
 # Split with opendeck-demucs, HTDemucs in plain Rust (no ONNX Runtime), when
 # OPENDECK_SEPARATE_MODEL names htdemucs.safetensors
 # (tools/demucs/export_htdemucs.py). Takes precedence over separate-onnx.
-separate-native = ["dep:opendeck-demucs"]
+separate-native = ["dep:opendeck-demucs", "dep:rayon"]
 
 [dependencies.ort]
 version = "=2.0.0-rc.15"

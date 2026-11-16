@@ -110,12 +110,13 @@ fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: 
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mem = || { let (used, left) = model::memory_mb(); format!("mem {used} MB, {left} MB left") };
     split_trace(&format!("{} {} | {name} | {secs:.0}s track | start | {}", utc_now(), model::device(), mem()));
-    // Refuse rather than be killed partway: the model needs ~4.7 GB above
-    // what the deck already uses (measured; see SPLIT_NEEDS_MB).
+    // Refuse rather than be killed partway: what the model needs above what
+    // the deck already uses (measured per model; see split_needs_mb).
     let (_, left) = model::memory_mb();
-    if left < model::SPLIT_NEEDS_MB {
-        split_trace(&format!("  not enough memory: {left} MB left, needs {} MB", model::SPLIT_NEEDS_MB));
-        return Err(separate::NotEnoughMemory { need_mb: model::SPLIT_NEEDS_MB, have_mb: left }.into());
+    let need = model::split_needs_mb();
+    if left < need {
+        split_trace(&format!("  not enough memory: {left} MB left, needs {need} MB"));
+        return Err(separate::NotEnoughMemory { need_mb: need, have_mb: left }.into());
     }
     let res = model::with(|m| {
         split_trace(&format!("  model ready on {} | {}", model::units(), mem()));
