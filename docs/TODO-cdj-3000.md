@@ -76,6 +76,23 @@ exceptions:
 | Waveform Divisions PHRASE on our own overview (phrase bands from our PSSI). Low priority: fw 3.22 offers the setting for no source we have seen | all | S |
 | ~~6 players on PRO DJ LINK~~ done: PLAYER No. AUTO and 1–6 | all | ✓ |
 
+## Waveform colours and LIGHT MODE (revisit, not now)
+
+LIGHT MODE shipped in `50d3866` as a first cut: every screen colour mirrors
+its lightness and keeps its hue (`crates/app/src/theme.rs`, the shader's
+`finish`, `waveform_cpu`'s `Palette::px`). Dan's verdict after seeing it on
+the desktop (2026-11-16): it works, but the waveform needs a proper pass.
+A black waveform core on white looks odd, and mirroring may be the wrong
+model for the waveform altogether.
+
+| Item | Who | Size |
+|---|---|---|
+| Look at a real CDJ-3000 side by side (and photos of the light-mode mods) and sample its waveform colours for BLUE / RGB / 3BAND in each mode. The 3BAND palette came from the manual's pictures, not from a unit | all | M |
+| Give LIGHT MODE its own waveform palette instead of mirroring the dark one: 3BAND's white highs mirror to black, BLUE's bright transients go near-black, and the amber mid comes out darker. Likely keep the bands' own colours (saturated blue / amber / a dark-but-not-black high) and only swap the ground, the grid ticks and the text | all | M |
+| Decide which parts of the screen should mirror at all. Keys, text and grounds read well mirrored; the waveforms, the overview and possibly the phase meter may want hand-picked colours | all | S |
+| Edge anti-aliasing: light mode has slope-aware AA (`cover` / `edge_widths`); dark mode keeps the unit's hard edges. Check against the real unit whether its edges are hard, and whether dark mode should get the AA too | all | S |
+| Keep the two backends in step: whatever palette lands goes in the shader and `waveform_cpu` together, `tools/render-parity.sh` (with `OPENDECK_LIGHT=1`) checks them | all | — |
+
 ## SYNC and grid (`docs/design/cdj-grid-adjust.md`)
 
 | Item | Who | Size |
