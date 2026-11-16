@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, WaveColor, DeckView, Stems, PerfLog }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, Light, WaveColor, DeckView, Stems, PerfLog }
 
 /// DECK VIEW is a desktop row: the iPad always shows the whole deck and the
 /// phone has its two pages.
@@ -20,6 +20,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
+    (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
     (Setting::DeckView,     "DECK VIEW"),
     (Setting::Stems,        "STEMS"),
@@ -32,6 +33,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
+    (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
     (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
@@ -119,6 +121,9 @@ pub struct Settings {
     /// or the screen alone.  Defaults to the whole deck on the Mac and
     /// Windows; `--faceplate` / `--screen-only` override it for one run.
     pub full_deck: bool,
+    /// LIGHT MODE: the screen on a white ground (`theme.rs`), as the
+    /// CDJ-3000 light-mode mods do.  Off by default.
+    pub light: bool,
     /// Waveform Color (both waveforms); the C key cycles it too.
     pub wave_color: WaveColor,
     /// Stems: a STEMS key and panel on the CDJ-3000 screen, a STEMS pad mode
@@ -149,7 +154,7 @@ const SEED: u8 = 4;
 impl Default for Settings {
     fn default() -> Self {
         Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000,
-               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, stems: true, seed: 0, phone: false }
+               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, light: false, stems: true, seed: 0, phone: false }
     }
 }
 
@@ -240,6 +245,7 @@ impl Settings {
             Setting::DeckView     => c.full_deck = !c.full_deck,
             Setting::WaveColor    => c.wave_color = step(&[WaveColor::Blue, WaveColor::Rgb, WaveColor::ThreeBand], c.wave_color, dir),
             Setting::Stems        => c.stems = !c.stems,
+            Setting::Light        => c.light = !c.light,
             Setting::PerfLog      => c.perf_log = !c.perf_log,
         }
         c
@@ -258,6 +264,7 @@ impl Settings {
             Setting::WaveColor    => format!("{}   (C)", self.wave_color.label()),
             Setting::DeckView     => if self.full_deck { "FULL DECK   (F)".into() } else { "SCREEN ONLY   (F)".into() },
             Setting::Stems        => if self.stems { "ON".into() } else { "OFF".into() },
+            Setting::Light        => if self.light { "ON".into() } else { "OFF".into() },
             Setting::PerfLog      => if self.perf_log { "ON   (Documents/opendeck-perf.log)".into() } else { "OFF".into() },
         }
     }
@@ -271,6 +278,21 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn light_mode_is_a_menu_row_off_by_default() {
+        let s = Settings::default();
+        assert!(!s.light);
+        assert!(MENU.iter().any(|(m, n)| *m == Setting::Light && *n == "LIGHT MODE"));
+        assert_eq!(s.value(Setting::Light), "OFF");
+        let on = s.cycled(Setting::Light, 1);
+        assert!(on.light && on.value(Setting::Light) == "ON");
+        assert!(!on.cycled(Setting::Light, -1).light);
+        let back: Settings = serde_json::from_str(&serde_json::to_string(&on).unwrap()).unwrap();
+        assert!(back.light, "saved with the other settings");
+        let old: Settings = serde_json::from_str(r#"{"quantize":true}"#).unwrap();
+        assert!(!old.light, "a file from before the row reads as off");
+    }
 
     #[test]
     fn stems_are_on_by_default_and_turn_off() {

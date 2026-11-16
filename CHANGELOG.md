@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- LIGHT MODE (MENU → LIGHT MODE, saved; `OPENDECK_LIGHT=1` for one run):
+  the screen on a white ground, like the CDJ-3000 light-mode mods. Every
+  colour keeps its hue and mirrors its lightness, so black turns white,
+  white text black, and the red playhead, blue keys and waveform bands stay
+  themselves; album art is left alone and the faceplate stays dark. Works
+  on both screens and both render backends. The waveform's edges are
+  anti-aliased in light mode, smoothed along the slope between columns, so
+  they don't stair-step against the white the way hard edges do (dark mode
+  is drawn exactly as before). It costs under 0.1 ms a frame.
 - While a track splits, the CDJ-3000 screen shows where its stems are: the
   overview dims the parts not split yet and runs a blue line under the
   parts that are, so you can see where the stem keys will work before you

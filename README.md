@@ -80,7 +80,7 @@ In short:
   not analysed (BPM matches rekordbox's on 222 of 226 test tracks).
 - **Screens:** the CDJ-3000 screen and faceplate (the default; the iPhone
   keeps the XDJ-1000MK2 layout) and the XDJ-1000MK2 screen. Waveform colour
-  is 3BAND, RGB or BLUE.
+  is 3BAND, RGB or BLUE, and LIGHT MODE puts either screen on a white ground.
 - **Pro DJ Link:**
   - **Sync:** SYNC, MASTER handoff both ways, and PLAYER No. AUTO.
   - **Media:** browse and load from other players and rekordbox, and serve
@@ -320,7 +320,8 @@ The keyboard stands in for the deck's buttons on a desktop.
 | `Q` / `Esc` | Quit (`Esc` closes an open screen first) |
 
 The deck's look is chosen in MENU → SCREEN, or at launch with
-`OPENDECK_SKIN=cdj3000` (or `xdj1000mk2`). The CDJ-3000 screen is the
+`OPENDECK_SKIN=cdj3000` (or `xdj1000mk2`); MENU → LIGHT MODE (or
+`OPENDECK_LIGHT=1`) puts it on a white ground. The CDJ-3000 screen is the
 default everywhere except on phones, which keep the XDJ-1000MK2 layout. The CDJ-3000 screen comes with
 its hardware buttons. On the Mac, Windows and the iPad it is the whole top
 panel (the default; `--screen-only` drops it on the desktop), every key where

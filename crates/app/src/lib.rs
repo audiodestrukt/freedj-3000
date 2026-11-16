@@ -33,6 +33,7 @@ mod separate;
 mod modelfetch;
 mod snapshot;
 mod taglist;
+mod theme;
 #[cfg(target_os = "android")]
 mod android;
 
@@ -3556,7 +3557,7 @@ impl DeckApp {
             let wave = if phone && self.phone_controls { none } else if perform { screen::perform_layout(screen_rect).wave } else { lay.wave };
             (wave, if phone && self.phone_controls { none } else { lay.overview })
         };
-        let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(over_rect), dim_played: self.remain_mode, cdj: lay3k.is_some() };
+        let vp   = renderer::Viewports { wave: px(wave_rect), overview: px(over_rect), dim_played: self.remain_mode, cdj: lay3k.is_some(), light: self.settings.light };
 
         // Build egui overlay.
         let mut raw = host.take_egui_input();
@@ -3607,6 +3608,13 @@ impl DeckApp {
             None => screen::draw(ctx, &snap, &lay, view, &self.tag_list, face_ref, phone_ref, chrome, &mut touch),
         });
         perf_accum("egui_run", _t_run.elapsed());
+        // LIGHT MODE: mirror the screen's lightness (the shader does the
+        // waveforms).  The phone's controls page has no LCD.
+        if self.settings.light && !(phone && self.phone_controls) {
+            let _t = Instant::now();
+            theme::lighten(&mut output.shapes, lay3k.as_ref().map_or(lay.screen, |l| l.screen));
+            perf_accum("lighten", _t.elapsed());
+        }
         drop(snap);
 
         // ── Idle pacing decision for the next frame ──────────────────────────
@@ -4514,6 +4522,8 @@ pub fn run(cfg: Config) -> Result<()> {
     // Dev / screenshots: OPENDECK_SKIN picks the skin for this run without
     // changing the saved choice (a MENU change still saves everything).
     if let Some(skin) = settings::Skin::from_env() { settings.skin = skin; }
+    // OPENDECK_LIGHT=1 / 0: LIGHT MODE for this run, likewise.
+    if let Ok(v) = std::env::var("OPENDECK_LIGHT") { settings.light = v == "1" || v.eq_ignore_ascii_case("on"); }
     // 0 = PLAYER No. AUTO: claim a free number on the network, 4 first,
     // then 5, 6, 3, 2, 1 (prodj::AUTO_ORDER).
     let player       = cfg.player.unwrap_or(settings.player);

@@ -529,7 +529,7 @@ impl SdlRenderer {
         // Playhead: the shader paints it over every column it covers.
         let cols = waveform_cpu::playhead_columns(p, px);
         if !cols.is_empty() {
-            let [r, g, b, _] = waveform_cpu::playhead_rgb(&self.lut);
+            let [r, g, b, _] = waveform_cpu::playhead_rgb(&self.lut, p);
             self.canvas.set_draw_color(Color::RGB(r, g, b));
             self.canvas.fill_rect(Rect::new(px.x + cols.start as i32, px.y, (cols.end - cols.start) as u32, h))
                 .map_err(|e| anyhow!("playhead: {e}"))?;

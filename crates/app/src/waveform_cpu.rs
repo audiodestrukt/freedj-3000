@@ -76,11 +76,14 @@ impl Default for Lut { fn default() -> Self { Self::new() } }
 struct Palette {
     ground: Rgba, playhead: Rgba, cue: Rgba, loop_line: Rgba, loop_bg: Rgba, loop_bg_cdj: Rgba, slip: Rgba,
     white: Rgba, silence: Rgba, band_low: Rgba, band_mid: Rgba, cyan: Rgba, strip_bg: Rgba, tick_hi: Rgba, down_hi: Rgba,
+    /// LIGHT MODE: pixels leave through `theme::flip_rgb`, bar edges blend.
+    light: bool,
 }
 
 impl Palette {
-    fn new(l: &Lut) -> Self {
+    fn new(l: &Lut, p: &WaveformParams) -> Self {
         Self {
+            light:     p.light > 0.5,
             ground:    l.rgb(3.0, 4.0, 6.0),          // matches screen.rs BG
             playhead:  l.rgb(232.0, 40.0, 40.0),      // red on the unit
             cue:       l.rgb(240.0, 138.0, 30.0),     // orange start-cue marker
@@ -122,6 +125,9 @@ struct Bar {
     h: [f32; 3],
     // RGB / BLUE: base colour in author units, scaled by the row's shade.
     base: [f32; 3],
+    // LIGHT MODE: each edge's width (low, mid, high, outline) in `dist`
+    // units, the shader's `edge_widths`; all 0 = hard edges.
+    fw: [f32; 4],
 }
 
 impl Bar {
@@ -140,7 +146,19 @@ impl Bar {
         } else {
             base = [c_in[0] * 255.0, c_in[1] * 255.0, c_in[2] * 255.0];
         }
-        Self { mode, amp, h, base }
+        Self { mode, amp, h, base, fw: [0.0; 4] }
+    }
+
+    /// The shader's `bar_edges`: 3 BAND's band bounds and the outline.
+    fn edges(&self) -> [f32; 4] {
+        if self.mode == 1 { [self.h[0], self.h[1], self.h[2], self.h[0].max(self.h[1]).max(self.h[2])] } else { [self.amp; 4] }
+    }
+
+    /// LIGHT MODE: edge widths from the bars a pixel either side.
+    fn with_widths(mut self, px: f32, left: &Bar, right: &Bar) -> Self {
+        let (l, r) = (left.edges(), right.edges());
+        for k in 0..4 { self.fw[k] = px + (r[k] - l[k]).abs() * 0.5; }
+        self
     }
 
     /// Colour at normalised distance `dist` from the centre line, or None
@@ -157,6 +175,24 @@ impl Bar {
         let shade = 1.0 - dist / (self.amp + 0.001) * 0.3;
         Some(l.rgb(self.base[0] * shade, self.base[1] * shade, self.base[2] * shade))
     }
+
+    /// LIGHT MODE's `at`: the colour and how much of the pixel the bar
+    /// covers, edges blended over `px` (one pixel in `dist` units), as the
+    /// shader's `bar_color` with `px` > 0.
+    fn at_aa(&self, l: &Lut, pal: &Palette, dist: f32) -> Option<(Rgba, f32)> {
+        let e = self.edges();
+        let cover = |k: usize| ((e[k] - dist) / self.fw[k] + 0.5).clamp(0.0, 1.0);
+        if self.mode == 1 {
+            let a = cover(3);
+            if a <= 0.0 { return None; }
+            let c = blend(pal.band_low, pal.band_mid, cover(1));
+            return Some((blend(c, pal.white, cover(2)), a));
+        }
+        let a = cover(3);
+        if a <= 0.0 { return None; }
+        let shade = 1.0 - dist.min(self.amp) / (self.amp + 0.001) * 0.3;
+        Some((l.rgb(self.base[0] * shade, self.base[1] * shade, self.base[2] * shade), a))
+    }
 }
 
 /// What a pixel column of the enlarged waveform is, before the rows.
@@ -171,7 +207,7 @@ pub fn draw(lut: &Lut, p: &WaveformParams, cols: &[u32], kind: Kind, rect: PxRec
     let (w, h) = (rect.w as usize, rect.h as usize);
     out.clear();
     out.resize(w * h, 0);
-    let pal = Palette::new(lut);
+    let pal = Palette::new(lut, p);
     match kind {
         Kind::Wave     => draw_wave(lut, &pal, p, cols, rect, out),
         Kind::Overview => draw_overview(lut, &pal, p, cols, rect, out),
@@ -180,6 +216,27 @@ pub fn draw(lut: &Lut, p: &WaveformParams, cols: &[u32], kind: Kind, rect: PxRec
 
 #[inline(always)]
 fn pack(c: Rgba) -> u32 { u32::from_ne_bytes(c) }
+
+impl Palette {
+    /// A finished pixel: flipped in LIGHT MODE (the shader's `finish`).
+    #[inline(always)]
+    fn px(&self, c: Rgba) -> u32 {
+        if !self.light { return pack(c); }
+        let [r, g, b] = crate::theme::flip_rgb([c[0], c[1], c[2]]);
+        pack([r, g, b, c[3]])
+    }
+}
+
+/// `mix(a, b, t)` in linear light, as the shader blends, back to sRGB bytes.
+fn blend(a: Rgba, b: Rgba, t: f32) -> Rgba {
+    if t <= 0.0 { return a; }
+    if t >= 1.0 { return b; }
+    let f = |x: u8, y: u8| {
+        let (x, y) = (srgb_decode(x as f32 / 255.0), srgb_decode(y as f32 / 255.0));
+        (srgb_encode(x + (y - x) * t) * 255.0 + 0.5) as u8
+    };
+    [f(a[0], b[0]), f(a[1], b[1]), f(a[2], b[2]), 255]
+}
 
 /// The parameters the overview depends on, so a backend can skip the raster
 /// when nothing it shows has moved (the playhead crosses a pixel every few
@@ -190,7 +247,7 @@ pub struct OverviewKey {
     // Half-pixel positions: the shader tests |q.x - x| against fixed widths.
     playhead_x: i32, cue_x: i32, loop_x: (i32, i32), slip_x: i32,
     loop_cols: (i32, i32),
-    color_mode: u32, dim: bool, amp_gain: f32, num_cols: f32,
+    color_mode: u32, dim: bool, amp_gain: f32, num_cols: f32, light: bool,
 }
 
 impl OverviewKey {
@@ -203,6 +260,7 @@ impl OverviewKey {
             loop_x: (px(p.loop_start_col), px(p.loop_end_col)), slip_x: if p.slip_col >= 0.0 { px(p.slip_col) } else { -1 },
             loop_cols: (p.loop_start_col as i32, p.loop_end_col as i32),
             color_mode: p.color_mode as u32, dim: p.dim_played > 0.5, amp_gain: p.amp_gain, num_cols: p.num_cols,
+            light: p.light > 0.5,
         }
     }
 }
@@ -257,9 +315,7 @@ fn classify(pal: &Palette, p: &WaveformParams, g: &WaveGeom, cols: &[u32], rect:
         if col_f < 0.0 || col_f >= p.num_cols || g.num_cols <= 0 || cols.is_empty() {
             Column::Field { bar: None, bg, tick: None }
         } else {
-            let col_lo = col_f as usize;
-            let col_hi = (col_lo + 1).min((g.num_cols - 1) as usize);
-            let c = mix4(unpack(cols[col_lo.min(cols.len() - 1)]), unpack(cols[col_hi.min(cols.len() - 1)]), col_f - col_lo as f32);
+            let c = wave_sample(cols, g.num_cols, col_f);
             let tick = if p.beat_period_cols > 0.0 {
                 let rel      = col_f - p.beat_anchor_col;
                 let beat_pos = ((rel % p.beat_period_cols) + p.beat_period_cols) % p.beat_period_cols;
@@ -270,9 +326,23 @@ fn classify(pal: &Palette, p: &WaveformParams, g: &WaveGeom, cols: &[u32], rect:
                 let tick_w   = if is_down { 2.5 } else { 1.5 } * g.cols_per_px;
                 (beat_pos < tick_w).then(|| (is_down, if is_down { 0.10 } else { 0.055 } * g.wave_h))
             } else { None };
-            Column::Field { bar: Some(Bar::new(c, p)), bg, tick }
+            let mut bar = Bar::new(c, p);
+            if pal.light {
+                let side = |d: f32| Bar::new(wave_sample(cols, g.num_cols, col_f + d), p);
+                bar = bar.with_widths(2.0 / g.wave_h, &side(-g.cue_per_px), &side(g.cue_per_px));
+            }
+            Column::Field { bar: Some(bar), bg, tick }
         }
     }
+}
+
+/// The shader's `wave_sample`: bands at `col_f`, bilinear, clamped to the track.
+fn wave_sample(cols: &[u32], num_cols: i64, col_f: f32) -> [f32; 4] {
+    let n = (num_cols - 1).max(0) as f32;
+    let cf = col_f.clamp(0.0, n);
+    let col_lo = cf as usize;
+    let col_hi = (col_lo + 1).min(n as usize);
+    mix4(unpack(cols[col_lo.min(cols.len() - 1)]), unpack(cols[col_hi.min(cols.len() - 1)]), cf - col_lo as f32)
 }
 
 /// Fill the rect's pixel columns `x0..x0+columns.len()` of every row from
@@ -297,22 +367,32 @@ fn fill_columns(l: &Lut, pal: &Palette, p: &WaveformParams, g: &WaveGeom, rect: 
             for (i, px) in row.iter_mut().enumerate() {
                 let qx = rect.x as f32 + (x0 + i) as f32 + 0.5;
                 let beat_x = (((qx - r[0]) + phase_px) % pixels_per_beat + pixels_per_beat) % pixels_per_beat;
-                *px = pack(if beat_x < 3.0 || beat_x > pixels_per_beat - 3.0 { pal.cyan } else { pal.strip_bg });
+                *px = pal.px(if beat_x < 3.0 || beat_x > pixels_per_beat - 3.0 { pal.cyan } else { pal.strip_bg });
             }
             continue;
         }
         for (px, column) in row.iter_mut().zip(columns) {
-            *px = pack(match column {
+            *px = pal.px(match column {
                 Column::Solid(c) => *c,
-                Column::Field { bar, bg, tick } => match bar.as_ref().and_then(|b| b.at(l, pal, dist)) {
-                    Some(c) => c,
-                    // Stem mix: a thin grey line where it is silent.
-                    None if silence_line && bar.is_some() && (yy - g.wave_h * 0.5).abs() < 1.0 => pal.silence,
-                    None => match tick {
-                        Some((is_down, len)) if yy < *len || yy > g.wave_h - *len => if *is_down { pal.down_hi } else { pal.tick_hi },
-                        _ => *bg,
-                    },
-                },
+                Column::Field { bar, bg, tick } => {
+                    let under = || {
+                        // Stem mix: a thin grey line where it is silent.
+                        if silence_line && bar.is_some() && (yy - g.wave_h * 0.5).abs() < 1.0 { return pal.silence; }
+                        match tick {
+                            Some((is_down, len)) if yy < *len || yy > g.wave_h - *len => if *is_down { pal.down_hi } else { pal.tick_hi },
+                            _ => *bg,
+                        }
+                    };
+                    if pal.light {
+                        match bar.as_ref().and_then(|b| b.at_aa(l, pal, dist)) {
+                            Some((c, a)) if a >= 1.0 => c,
+                            Some((c, a)) => blend(under(), c, a),
+                            None => under(),
+                        }
+                    } else {
+                        match bar.as_ref().and_then(|b| b.at(l, pal, dist)) { Some(c) => c, None => under() }
+                    }
+                }
             });
         }
     }
@@ -342,6 +422,7 @@ pub struct WaveKey {
     beat2_period: f32,
     cue_col: f32, loop_cols: (f32, f32), slip_col: f32,
     cols_ptr: usize, cols_len: usize,
+    light: bool,
 }
 
 impl WaveKey {
@@ -353,6 +434,7 @@ impl WaveKey {
             beat2_period: p.beat2_period_cols,
             cue_col: p.cue_col, loop_cols: (p.loop_start_col, p.loop_end_col), slip_col: p.slip_col,
             cols_ptr: cols.as_ptr() as usize, cols_len: cols.len(),
+            light: p.light > 0.5,
         }
     }
 }
@@ -391,7 +473,10 @@ pub enum WaveUpdate {
 }
 
 /// The playhead colour (sRGB bytes), for a backend drawing it as a rect.
-pub fn playhead_rgb(lut: &Lut) -> [u8; 4] { Palette::new(lut).playhead }
+pub fn playhead_rgb(lut: &Lut, p: &WaveformParams) -> [u8; 4] {
+    let pal = Palette::new(lut, p);
+    pal.px(pal.playhead).to_ne_bytes()
+}
 
 /// Pixel columns of `rect` the playhead line covers (the shader's
 /// `|q.x - centre| < 1.5`).
@@ -418,7 +503,7 @@ pub fn draw_wave_cached(lut: &Lut, p: &WaveformParams, cols: &[u32], rect: PxRec
     // every column it covers, over everything but the strip).
     out.clear();
     out.extend_from_slice(&cache.pix);
-    let ph = pack(playhead_rgb(lut));
+    let ph = pack(playhead_rgb(lut, p));
     for x in playhead_columns(p, rect) {
         for y in 0..h { out[y * w + x] = ph; }
     }
@@ -431,7 +516,7 @@ pub fn draw_wave_cached(lut: &Lut, p: &WaveformParams, cols: &[u32], rect: PxRec
 /// columns into `strip` and the backend shifts its texture on the GPU.
 pub fn update_wave_cache(lut: &Lut, p: &WaveformParams, cols: &[u32], rect: PxRect, cache: &mut WaveCache, keep_field: bool) -> WaveUpdate {
     let (w, h) = (rect.w as usize, rect.h as usize);
-    let pal = Palette::new(lut);
+    let pal = Palette::new(lut, p);
     let g = WaveGeom::new(p);
     // Quantise: the column at pixel x only depends on (playhead - half) +
     // x*cols_per_px, so moving the playhead by k*cols_per_px moves the
@@ -481,7 +566,7 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
     let r = p.over_rect;
     let (w, h) = (rect.w as usize, rect.h as usize);
     if p.num_cols <= 0.0 || cols.is_empty() {
-        out.fill(pack(pal.ground));
+        out.fill(pal.px(pal.ground));
         return;
     }
     let num_cols = p.num_cols as usize;
@@ -510,14 +595,22 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
         let col_here = sx * p.num_cols;
         let field = if in_loop(p, col_here) { loop_bg(pal, p) } else { pal.ground };
         // Peak of each band over the columns this pixel covers.
-        let c0 = (sx * p.num_cols).max(0.0) as usize;
-        let mut c = [0.0f32; 4];
-        for i in 0..n {
-            let idx = (c0 + i).min(num_cols - 1).min(cols.len() - 1);
-            let u = unpack(cols[idx]);
-            for k in 0..4 { c[k] = c[k].max(u[k]); }
+        let peak = |sx: f32| {
+            let c0 = (sx * p.num_cols).max(0.0) as usize;
+            let mut c = [0.0f32; 4];
+            for i in 0..n {
+                let idx = (c0 + i).min(num_cols - 1).min(cols.len() - 1);
+                let u = unpack(cols[idx]);
+                for k in 0..4 { c[k] = c[k].max(u[k]); }
+            }
+            c
+        };
+        let mut bar = Bar::new(peak(sx), p);
+        if pal.light {
+            let side = |d: f32| Bar::new(peak(sx + d / r[2]), p);
+            bar = bar.with_widths(2.0 / r[3], &side(-1.0), &side(1.0));
         }
-        Over::Body { bar: Bar::new(c, p), field, played: qx < ph_x && dim }
+        Over::Body { bar, field, played: qx < ph_x && dim }
     }).collect();
 
     for y in 0..h {
@@ -525,8 +618,12 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
         let dist = ((qy - r[1]) / r[3] - 0.5).abs() * 2.0;
         let row = &mut out[y * w..(y + 1) * w];
         for (px, column) in row.iter_mut().zip(&columns) {
-            *px = pack(match column {
+            *px = pal.px(match column {
                 Over::Solid(c) => *c,
+                Over::Body { bar, field, played } if pal.light => match bar.at_aa(l, pal, dist) {
+                    Some((c, a)) => blend(*field, if *played { dim_bar(c) } else { c }, a),
+                    None => *field,
+                },
                 Over::Body { bar, field, played } => match bar.at(l, pal, dist) {
                     Some(c) if *played => dim_bar(c),
                     Some(c) => c,
@@ -555,6 +652,7 @@ mod tests {
             downbeat_offset: 0.0, beats_per_bar: 4.0, beat2_phase_beats: 0.0, beat2_period_cols: 0.0,
             color_mode: ColorMode::Blue as u32 as f32, wave_rect: wave, over_rect: over, amp_gain: 1.0,
             dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 0.0, detail_off: 0.0,
+            light: 0.0, _pad: [0.0; 3],
         }
     }
 
@@ -565,7 +663,7 @@ mod tests {
     /// own silent columns draw nothing.
     #[test]
     fn silent_stem_mix_draws_a_thin_line() {
-        let lut = Lut::new(); let pal = Palette::new(&lut);
+        let lut = Lut::new(); let pal = Palette::new(&lut, &params(1, [0.0; 4], [0.0; 4]));
         let cols = vec![0u32; 2000];
         let mut p = params(2000, [100.0, 50.0, 800.0, 200.0], [0.0; 4]);
         p.beat_period_cols = 0.0;
@@ -586,7 +684,7 @@ mod tests {
 
     #[test]
     fn playhead_cue_and_bars_land_where_the_shader_puts_them() {
-        let lut = Lut::new(); let pal = Palette::new(&lut);
+        let lut = Lut::new(); let pal = Palette::new(&lut, &params(1, [0.0; 4], [0.0; 4]));
         let cols: Vec<u32> = (0..2000u32).map(|_| u32::from_le_bytes([80, 120, 200, 180])).collect();
         let p = params(2000, [100.0, 50.0, 800.0, 200.0], [0.0; 4]);
         let rect = PxRect::from_f32(p.wave_rect).unwrap();
@@ -606,7 +704,7 @@ mod tests {
     /// loop lines; the CDJ-3000 look shades it amber with no lines.
     #[test]
     fn loop_shading_follows_the_skin_style() {
-        let lut = Lut::new(); let pal = Palette::new(&lut);
+        let lut = Lut::new(); let pal = Palette::new(&lut, &params(1, [0.0; 4], [0.0; 4]));
         let cols: Vec<u32> = vec![0; 2000];   // silence: the field shows through
         let mut p = params(2000, [0.0, 0.0, 800.0, 200.0], [0.0; 4]);
         p.playhead_col = 1000.0;              // centre x = 400; 0.75 cols per px
@@ -634,7 +732,7 @@ mod tests {
 
     #[test]
     fn overview_marks_the_playhead_and_fills_the_body() {
-        let lut = Lut::new(); let pal = Palette::new(&lut);
+        let lut = Lut::new(); let pal = Palette::new(&lut, &params(1, [0.0; 4], [0.0; 4]));
         let cols: Vec<u32> = (0..5000u32).map(|_| u32::from_le_bytes([200, 200, 200, 255])).collect();
         let p = params(5000, [0.0; 4], [10.0, 500.0, 1000.0, 60.0]);
         let rect = PxRect::from_f32(p.over_rect).unwrap();
@@ -684,6 +782,48 @@ mod tests {
         let pq = WaveformParams { playhead_col: q * g.cols_per_px, ..p };
         draw(&lut, &pq, &cols, Kind::Wave, rect, &mut full);
         assert_eq!(inc, full, "after zoom change");
+    }
+
+    /// LIGHT MODE: the field is white, the bar keeps its hue, and its edge
+    /// is blended instead of a hard step; dark mode keeps hard edges.
+    #[test]
+    fn light_mode_draws_white_ground_and_soft_edges() {
+        let lut = Lut::new();
+        // A ramp of loudness, so the outline slopes from column to column.
+        let cols: Vec<u32> = (0..2000u32).map(|i| u32::from_le_bytes([60, 60, 20, (60 + i % 120) as u8])).collect();
+        let mut p = params(2000, [0.0, 0.0, 800.0, 200.0], [0.0; 4]);
+        p.beat_period_cols = 0.0;
+        p.cue_col = -100.0;
+        let rect = PxRect::from_f32(p.wave_rect).unwrap();
+        let w = rect.w as usize;
+        let mut out = Vec::new();
+        // The sharpest step between neighbouring rows of the column's top
+        // half (blue channel), as a share of the step from field to bar
+        // centre: 1.0-ish for a hard edge, smaller when the edge blends.
+        let sharpest = |out: &[u32], x: usize| {
+            let b = |y: usize| px(out, w, x, y)[2] as f32;
+            let span = (b(100) - b(0)).abs().max(1.0);
+            (0..99).map(|y| (b(y + 1) - b(y)).abs()).fold(0.0, f32::max) / span
+        };
+
+        draw(&lut, &p, &cols, Kind::Wave, rect, &mut out);
+        let dark_ground = px(&out, w, 200, 0);
+        let dark_step: f32 = (190..210).map(|x| sharpest(&out, x)).sum::<f32>() / 20.0;
+
+        p.light = 1.0;
+        draw(&lut, &p, &cols, Kind::Wave, rect, &mut out);
+        let ground = px(&out, w, 200, 0);
+        assert!(ground[0] > 245 && ground[1] > 245 && ground[2] > 245, "white field, got {ground:?}");
+        let [r, g, b] = crate::theme::flip_rgb([dark_ground[0], dark_ground[1], dark_ground[2]]);
+        assert_eq!(&ground[..3], &[r, g, b], "the dark field, mirrored");
+        let mid = px(&out, w, 200, 100);
+        assert!(mid[2] > mid[0] && mid[2] > 100, "the bar is still blue, got {mid:?}");
+        // The edge spreads over more than one row.
+        let light_step: f32 = (190..210).map(|x| sharpest(&out, x)).sum::<f32>() / 20.0;
+        assert!(light_step < dark_step * 0.8, "edges blend: steepest step {light_step:.2} of the span vs {dark_step:.2} in dark");
+        // The playhead stays red.
+        let ph = px(&out, w, 400, 0);
+        assert!(ph[0] > 200 && ph[1] < 80, "red playhead, got {ph:?}");
     }
 
     #[test]

@@ -71,6 +71,12 @@ pub struct WaveformParams {
     /// the stem mix is silent, as OverCue does.  The overview always reads
     /// the track's own.
     pub detail_off:       f32,
+    /// 1 = LIGHT MODE: the finished pixel's lightness is mirrored
+    /// (`theme::flip_rgb`) and bar edges are anti-aliased, since a hard
+    /// stair-stepped edge that hides on black shows on white.
+    pub light:            f32,
+    /// The uniform's size rounds up to 16 bytes.
+    pub _pad:             [f32; 3],
 }
 
 /// Where the shader draws its two waveforms, in physical pixels.
@@ -84,6 +90,8 @@ pub struct Viewports {
     /// draws its tick rows above and below it), amber loop shading without
     /// in/out lines, and bars filling the field the way the unit's do.
     pub cdj: bool,
+    /// LIGHT MODE (`WaveformParams::light`).
+    pub light: bool,
 }
 
 /// Waveform colour scheme, matching the CDJ `Waveform Color` setting.
@@ -174,6 +182,8 @@ impl WaveformParams {
             slip_col:          snap.slip_shadow.map_or(-1.0, |v| v as f32 / channels / hop_size),
             style:             if vp.cdj { 1.0 } else { 0.0 },
             detail_off:        0.0,
+            light:             if vp.light { 1.0 } else { 0.0 },
+            _pad:              [0.0; 3],
         }
     }
 }
@@ -384,6 +394,8 @@ impl WgpuRenderer {
             slip_col:         -1.0,
             style:            0.0,
             detail_off:       0.0,
+            light:            0.0,
+            _pad:             [0.0; 3],
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -806,6 +818,10 @@ struct Params {
     slip_col:           f32,  // SLIP shadow playhead column; < 0 = none
     style:              f32,  // 0 XDJ look, 1 CDJ-3000 look
     detail_off:         f32,  // enlarged waveform's first column in the buffer; > 0 = stem mix
+    light:              f32,  // 1 = LIGHT MODE: mirror lightness, anti-alias bar edges
+    _pad0:              f32,
+    _pad1:              f32,
+    _pad2:              f32,
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
@@ -870,29 +886,69 @@ fn unpack(v: u32) -> vec4<f32> {
     ) / 255.0;
 }
 
+// How much of a pixel at `dist` lies inside an edge at `edge`.  `w` is the
+// edge's travel across one pixel in `dist` units (a pixel down, plus its
+// slope across one column: a hand-made fwidth); 0 = hard edges (the dark
+// look, as the unit draws).
+fn cover(edge: f32, dist: f32, w: f32) -> f32 {
+    if w <= 0.0 { return select(0.0, 1.0, dist < edge); }
+    return clamp((edge - dist) / w + 0.5, 0.0, 1.0);
+}
+
+// A bar's edges in `dist` units: 3 BAND's low, mid, high bounds and the
+// outline; the other modes have only the outline (all four the same).
+fn bar_edges(c_in: vec4<f32>) -> vec4<f32> {
+    let amp = min(c_in.w * p.amp_gain, 1.0);
+    if u32(p.color_mode + 0.5) == 1u {
+        let m = max(c_in.x, max(c_in.y, c_in.z)) + 0.001;
+        let h = c_in.xyz / m * amp;
+        return vec4<f32>(h, max(h.x, max(h.y, h.z)));
+    }
+    return vec4<f32>(amp);
+}
+
+// LIGHT MODE's edge widths at a column, from the columns a pixel either side.
+fn edge_widths(px: f32, left: vec4<f32>, right: vec4<f32>) -> vec4<f32> {
+    if p.light < 0.5 { return vec4<f32>(0.0); }
+    return vec4<f32>(px) + abs(bar_edges(right) - bar_edges(left)) * 0.5;
+}
+
 // Colour of a bar pixel at normalised distance `dist` from the centre line
 // (0 = centre, 1 = edge), given band energies c = (low, mid, high, amp).
-// Alpha 0 means "not part of the bar".
-fn bar_color(c_in: vec4<f32>, dist: f32) -> vec4<f32> {
+// Alpha is the bar's coverage of the pixel: 0 = not part of the bar, and
+// with widths `fw` > 0 the edges (outer and between bands) blend.
+fn bar_color(c_in: vec4<f32>, dist: f32, fw: vec4<f32>) -> vec4<f32> {
     let c    = vec4<f32>(c_in.xyz, min(c_in.w * p.amp_gain, 1.0));
     let mode = u32(p.color_mode + 0.5);
+    let e    = bar_edges(c_in);
     if mode == 1u {
         // 3 BAND: the dominant band reaches the full amplitude; the others are
         // stacked inside it in proportion.  White highs at the core, amber
         // mids, blue lows outermost — the Pioneer look.
-        let m = max(c.x, max(c.y, c.z)) + 0.001;
-        let h = c.xyz / m * c.w;
-        if dist < h.z { return white(); }
-        if dist < h.y { return band_mid(); }
-        if dist < h.x { return band_low(); }
-        return vec4<f32>(0.0);
+        let a = cover(e.w, dist, fw.w);
+        if a <= 0.0 { return vec4<f32>(0.0); }
+        var col = mix(band_low(), band_mid(), cover(e.y, dist, fw.y));
+        col = mix(col, white(), cover(e.z, dist, fw.z));
+        return vec4<f32>(col.rgb, a);
     }
-    if dist >= c.w { return vec4<f32>(0.0); }
-    let shade = 1.0 - dist / (c.w + 0.001) * 0.3;
+    let a = cover(e.w, dist, fw.w);
+    if a <= 0.0 { return vec4<f32>(0.0); }
+    let shade = 1.0 - min(dist, c.w) / (c.w + 0.001) * 0.3;
     if mode == 2u {
-        return blue_wave(shade, c.z);
+        return vec4<f32>(blue_wave(shade, c.z).rgb, a);
     }
-    return vec4<f32>(pow(c.xyz * shade, vec3<f32>(2.2)), 1.0);
+    return vec4<f32>(pow(c.xyz * shade, vec3<f32>(2.2)), a);
+}
+
+// LIGHT MODE's last step: theme::flip_rgb on the sRGB-encoded pixel.
+fn enc(l: f32) -> f32 { return select(1.055 * pow(l, 1.0 / 2.4) - 0.055, l * 12.92, l <= 0.0031308); }
+fn dec(e: f32) -> f32 { return select(pow((e + 0.055) / 1.055, 2.4), e / 12.92, e <= 0.04045); }
+fn finish(c: vec4<f32>) -> vec4<f32> {
+    if p.light < 0.5 { return c; }
+    let e   = vec3<f32>(enc(c.r), enc(c.g), enc(c.b));
+    let off = 1.0 - max(e.r, max(e.g, e.b)) - min(e.r, min(e.g, e.b));
+    let f   = clamp(e + vec3<f32>(off), vec3<f32>(0.0), vec3<f32>(1.0));
+    return vec4<f32>(dec(f.r), dec(f.g), dec(f.b), c.a);
 }
 
 // ── Enlarged waveform ─────────────────────────────────────────────────────────
@@ -942,17 +998,34 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
         return bg;
     }
 
-    // Bilinear between adjacent columns so the scroll is sub-pixel smooth.
-    let col_lo = u32(col_f);
-    let col_hi = min(col_lo + 1u, u32(p.num_cols) - 1u);
-    let off    = u32(p.detail_off);
-    let c      = mix(unpack(waveform[col_lo + off]), unpack(waveform[col_hi + off]), col_f - f32(col_lo));
+    let off  = u32(p.detail_off);
+    let c    = wave_sample(col_f, off);
+    var fw   = vec4<f32>(0.0);
+    if p.light > 0.5 {
+        fw = edge_widths(2.0 / wave_h, wave_sample(col_f - cue_per_px, off), wave_sample(col_f + cue_per_px, off));
+    }
 
     let dist = abs(sy - 0.5) * 2.0;
-    let bar  = bar_color(c, dist);
-    if bar.a > 0.0 {
+    let bar  = bar_color(c, dist, fw);
+    if bar.a >= 1.0 {
         return bar;
     }
+    let under = wave_under(q, r, wave_h, sy, col_f, off, bg);
+    return vec4<f32>(mix(under.rgb, bar.rgb, bar.a), 1.0);
+}
+
+// The enlarged waveform's bands at `col_f`, bilinear between adjacent
+// columns so the scroll is sub-pixel smooth (clamped to the track).
+fn wave_sample(col_f: f32, off: u32) -> vec4<f32> {
+    let n      = u32(p.num_cols) - 1u;
+    let cf     = clamp(col_f, 0.0, f32(n));
+    let col_lo = u32(cf);
+    let col_hi = min(col_lo + 1u, n);
+    return mix(unpack(waveform[col_lo + off]), unpack(waveform[col_hi + off]), cf - f32(col_lo));
+}
+
+// What an enlarged-waveform pixel shows where the bar does not cover it.
+fn wave_under(q: vec2<f32>, r: vec4<f32>, wave_h: f32, sy: f32, col_f: f32, off: u32, bg: vec4<f32>) -> vec4<f32> {
     // Stem mix: a thin grey line where it is silent (2 px, as OverCue).
     if off > 0u && abs(sy - 0.5) * wave_h < 1.0 {
         return silence_line();
@@ -990,6 +1063,20 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
 }
 
 // ── Overview waveform ─────────────────────────────────────────────────────────
+// Each pixel column covers many waveform columns; take the peak of each band
+// so transients survive the downsample instead of aliasing away.
+fn over_peak(sx: f32) -> vec4<f32> {
+    let cols_per_px = p.num_cols / p.over_rect.z;
+    let c0 = u32(max(sx * p.num_cols, 0.0));
+    let n  = min(u32(cols_per_px) + 1u, 64u);
+    var c  = vec4<f32>(0.0);
+    for (var i = 0u; i < n; i = i + 1u) {
+        let idx = min(c0 + i, u32(p.num_cols) - 1u);
+        c = max(c, unpack(waveform[idx]));
+    }
+    return c;
+}
+
 fn draw_overview(q: vec2<f32>) -> vec4<f32> {
     let r  = p.over_rect;
     let sx = (q.x - r.x) / r.z;
@@ -1019,33 +1106,26 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
     }
     let over_field = select(over_bg(), loop_bg(), in_loop(col_here));
 
-    // Each pixel column covers many waveform columns; take the peak of each
-    // band so transients survive the downsample instead of aliasing away.
-    let cols_per_px = p.num_cols / r.z;
-    let c0 = u32(sx * p.num_cols);
-    let n  = min(u32(cols_per_px) + 1u, 64u);
-    var c  = vec4<f32>(0.0);
-    for (var i = 0u; i < n; i = i + 1u) {
-        let idx = min(c0 + i, u32(p.num_cols) - 1u);
-        c = max(c, unpack(waveform[idx]));
+    let c  = over_peak(sx);
+    var fw = vec4<f32>(0.0);
+    if p.light > 0.5 {
+        fw = edge_widths(2.0 / r.w, over_peak(sx - 1.0 / r.z), over_peak(sx + 1.0 / r.z));
     }
 
     let dist = abs(sy - 0.5) * 2.0;
-    let bar  = bar_color(c, dist);
-    if bar.a > 0.0 {
-        // REMAIN mode: the played part turns off from the left.  TIME mode
-        // leaves the whole graph lit.
-        return select(bar, bar * vec4<f32>(0.18, 0.18, 0.18, 1.0), q.x < ph_x && p.dim_played > 0.5);
-    }
-    return over_field;
+    let bar  = bar_color(c, dist, fw);
+    // REMAIN mode: the played part turns off from the left.  TIME mode
+    // leaves the whole graph lit.
+    let lit = select(bar.rgb, bar.rgb * 0.18, q.x < ph_x && p.dim_played > 0.5);
+    return vec4<f32>(mix(over_field.rgb, lit, bar.a), 1.0);
 }
 
 // ── Fragment ──────────────────────────────────────────────────────────────────
 @fragment
 fn fs_main(@builtin(position) frag_pos: vec4<f32>) -> @location(0) vec4<f32> {
     let q = frag_pos.xy;
-    if in_rect(q, p.wave_rect) { return draw_wave(q); }
-    if in_rect(q, p.over_rect) { return draw_overview(q); }
-    return ground();
+    if in_rect(q, p.wave_rect) { return finish(draw_wave(q)); }
+    if in_rect(q, p.over_rect) { return finish(draw_overview(q)); }
+    return finish(ground());
 }
 "#;

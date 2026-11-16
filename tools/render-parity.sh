@@ -20,6 +20,9 @@ cap() {   # cap <name> [env...]
         timeout 120 xvfb-run -a -s "-screen 0 1280x800x24" "$BIN" "$TRACK" 2>&1 | grep -E "captured|panic|error" || true
     rm -rf "$xdg"
 }
+# The crops below are the XDJ-1000MK2 screen's rects; the CDJ-3000 skin is
+# the app's default, so name the skin.  OPENDECK_LIGHT=1 checks LIGHT MODE.
+export OPENDECK_SKIN=${OPENDECK_SKIN:-xdj}
 cap wgpu OPENDECK_RENDERER=wgpu
 cap sdl  OPENDECK_RENDERER=sdl OPENDECK_WAVE_SCROLL=smooth   # the pixel-scroll cache quantises the playhead; parity measures the raster
 python3 - "$OUT" <<'PY'
@@ -35,6 +38,8 @@ ident=100*(d==0).mean()
 wave=d[210:395,200:800]; over=d[518:548,135:790]
 print(f"identical {ident:.1f}%  within 2 levels {100*(d<=2).mean():.1f}%  mean {d.mean():.2f}  max {d.max()}")
 print(f"enlarged waveform max {wave.max()}   overview max {over.max()}   (diff image: {out}/diff.png)")
-ok = ident>=90 and wave.max()<=1 and over.max()<=1
+# LIGHT MODE rounds more (blended edges in bytes vs floats, the flip): 3 levels.
+import os; tol = 3 if os.environ.get("OPENDECK_LIGHT") == "1" else 1
+ok = ident>=90 and wave.max()<=tol and over.max()<=tol
 print("PARITY", "OK" if ok else "FAIL"); sys.exit(0 if ok else 1)
 PY
