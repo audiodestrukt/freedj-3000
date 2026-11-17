@@ -682,6 +682,8 @@ struct DeckApp {
     /// MENU / UTILITY settings; persisted (see settings.rs).
     settings:     settings::Settings,
     menu_cursor:  usize,
+    /// MENU's ABOUT screen is open (the version, support, addresses).
+    about:        bool,
     /// SOURCE screen: highlighted row.
     source_cursor: usize,
     /// Where the loaded track came from (marks its SOURCE row "Loaded").
@@ -1099,6 +1101,7 @@ impl DeckApp {
             tag_list,
             settings,
             menu_cursor:       0,
+            about:             false,
             source_cursor:     0,
             loaded,
             // Dev: OPENDECK_HISTORY=a.mp3:b.mp3 seeds LOAD PREVIOUS TRACK.
@@ -1622,6 +1625,7 @@ impl DeckApp {
                     // The CDJ-3000 stays in SEARCH on BACK (its SEARCH key leaves).
                     ScreenMode::Browse if self.settings.skin == settings::Skin::Cdj3000 && self.browser.in_search() => {}
                     ScreenMode::Browse  => self.browser.back(),
+                    ScreenMode::Menu if self.about => self.about = false,
                     ScreenMode::TagList | ScreenMode::Menu | ScreenMode::Source | ScreenMode::History => self.screen_mode = ScreenMode::Playback,
                     _ => {}
                 }
@@ -1924,6 +1928,7 @@ impl DeckApp {
                 }
                 TopScreen::Menu => {
                     // MENU / UTILITY: the settings list.
+                    self.about = false;
                     self.screen_mode = if self.screen_mode == ScreenMode::Menu {
                         ScreenMode::Playback
                     } else {
@@ -2626,6 +2631,8 @@ impl DeckApp {
 
     /// Step a MENU setting and apply whatever it controls at runtime.
     fn cycle_setting(&mut self, s: settings::Setting) {
+        // ABOUT is a screen, not a value: the row opens it, BACK closes it.
+        if s == settings::Setting::About { self.about = true; log::info!("screen → ABOUT"); return; }
         let old_range = self.settings.tempo_range;
         self.settings.cycle(s, 1);
         if s == settings::Setting::TempoRange {
@@ -3713,7 +3720,7 @@ impl DeckApp {
             ScreenMode::Info     => screen::ScreenView::Info,
             ScreenMode::Perform  => screen::ScreenView::Perform,
             ScreenMode::TagList  => screen::ScreenView::TagList,
-            ScreenMode::Menu     => screen::ScreenView::Menu(&self.settings, self.menu_cursor),
+            ScreenMode::Menu     => screen::ScreenView::Menu(&self.settings, self.menu_cursor, self.about),
             // The XDJ has no SOURCE screen (its source keys sit in BROWSE).
             ScreenMode::Source if !cdj => screen::ScreenView::Browse(&self.browser),
             ScreenMode::Source   => screen::ScreenView::Source(&self.browser, self.source_cursor, self.loaded.as_ref()),
@@ -5092,6 +5099,32 @@ mod anlz_grid_tests {
         assert_eq!(grid.downbeat_offset, 0, "first beat is a downbeat");
         // first beat at 56 ms → 56*48000/1000 = 2688 frames
         assert_eq!(grid.anchor_sample, 2688, "anchor frames");
+    }
+}
+
+/// MENU → ABOUT: the last row opens the version / support / addresses
+/// screen; BACK returns to the list; no setting changes.
+#[cfg(test)]
+mod about_tests {
+    use super::deck_harness::*;
+    use super::*;
+
+    #[test]
+    fn the_last_menu_row_opens_about_and_back_returns_to_the_list() {
+        let mut d = deck(1.0);
+        let last = settings::MENU.len() - 1;
+        assert_eq!(settings::MENU[last], (settings::Setting::About, "ABOUT"), "ABOUT is the last row");
+        assert!(d.settings.value(settings::Setting::About).contains(crate::screen::APP_VERSION));
+        d.screen_mode = ScreenMode::Menu;
+        let before = d.settings.clone();
+        d.apply(Event::Ui(UiEvent::MenuTap(last)));
+        assert!(d.about, "ABOUT open");
+        assert_eq!(d.settings, before, "no setting changed");
+        d.apply(Event::Deck(opendeck_protocol::ControlEvent::Back));
+        assert!(!d.about, "BACK closes it");
+        assert_eq!(d.screen_mode, ScreenMode::Menu, "back on the list");
+        d.apply(Event::Deck(opendeck_protocol::ControlEvent::Back));
+        assert_eq!(d.screen_mode, ScreenMode::Playback, "and BACK again leaves MENU");
     }
 }
 

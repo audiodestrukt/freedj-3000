@@ -350,7 +350,8 @@ pub fn draw(ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, view: &Scree
             ScreenView::Browse(b) => return draw_browse(ui, snap, lay, b, tag_list, u, out),
             ScreenView::Source(b, cursor, loaded) => return draw_source(ui, snap, lay, b, *cursor, *loaded, u, out),
             ScreenView::TagList => return draw_tag_list(ui, snap, lay, tag_list, u, out),
-            ScreenView::Menu(settings, cursor) => return draw_utility(ui, snap, lay, settings, *cursor, u, out),
+            ScreenView::Menu(_, _, true) => return draw_about(ui, snap, lay, u, out),
+            ScreenView::Menu(settings, cursor, false) => return draw_utility(ui, snap, lay, settings, *cursor, u, out),
             ScreenView::Info => draw_info(ui, ctx, snap, lay, u, out),
             ScreenView::Playback | ScreenView::Perform | ScreenView::History(..) => {
                 draw_header(ui, ctx, snap, lay, u, out);
@@ -2413,15 +2414,30 @@ fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings,
         let rr = Rect::from_min_size(Pos2::new(pane.min.x, pane.min.y + 60.0 * u + ROW_H * u * i as f32), Vec2::new(pane.width(), ROW_H * u));
         if tap(ui, rr, &format!("cdj-util-{i}")).0 { out.push(Event::Ui(UiEvent::MenuTap(i))); }
     }
-    // Version and support, as the XDJ skin's UTILITY footer (and the unit's
-    // own UTILITY, which shows its firmware version).
-    let foot = Color32::from_rgb(170, 170, 170);   // DIM is lost on the row stripes
-    let x = pane.min.x + 16.0 * u;
-    label(ui, Pos2::new(x, pane.max.y - 40.0 * u), Align2::LEFT_BOTTOM,
-          format!("OpenDeck DJ  {}", crate::screen::APP_VERSION), 18.0, u, foot);
-    label(ui, Pos2::new(x, pane.max.y - 14.0 * u), Align2::LEFT_BOTTOM, crate::screen::SUPPORT_LINE, 18.0, u, foot);
-    // This deck's address(es), for tools and other players on the network.
-    label(ui, Pos2::new(pane.max.x - 16.0 * u, pane.max.y - 14.0 * u), Align2::RIGHT_BOTTOM, &snap.ip_line, 18.0, u, TEXT);
+    draw_status_strip(ui, snap, lay, u, out);
+}
+
+/// MENU → ABOUT (the last UTILITY row): the version to quote, where to
+/// write, and this deck's addresses on the network.  BACK returns to the
+/// list.
+fn draw_about(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<Event>) {
+    let sc = lay.screen;
+    draw_list_header(ui, snap, lay, "ABOUT", false, cached_tile(), u, out);
+    let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
+    let p = ui.painter();
+    p.rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
+    p.rect_filled(pane, 0.0, Color32::BLACK);
+    let x = pane.min.x + 40.0 * u;
+    let mut y = pane.min.y + 50.0 * u;
+    let mut line = |t: &str, size: f32, c: Color32, gap: f32| {
+        label(ui, Pos2::new(x, y), Align2::LEFT_TOP, t, size, u, c);
+        y += gap * u;
+    };
+    line(&format!("OpenDeck DJ  {}", crate::screen::APP_VERSION), 40.0, TEXT, 80.0);
+    line(crate::screen::SUPPORT_LINE, 24.0, ZOOM_BLUE, 70.0);
+    line("ON THE NETWORK", 18.0, Color32::from_rgb(170, 170, 170), 36.0);
+    if snap.ip_line.is_empty() { line("no network", 24.0, TEXT, 36.0); }
+    for a in snap.ip_line.split("  ·  ") { line(a.trim_start_matches("IP "), 24.0, TEXT, 36.0); }
     draw_status_strip(ui, snap, lay, u, out);
 }
 

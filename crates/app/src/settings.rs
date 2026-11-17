@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, OutputGain, Player, Skin, Light, WaveColor, Divisions, DeckView, Stems, PerfLog }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, OutputGain, Player, Skin, Light, WaveColor, Divisions, DeckView, Stems, PerfLog, About }
 
 /// DECK VIEW is a desktop row: the iPad always shows the whole deck and the
 /// phone has its two pages.
@@ -27,6 +27,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::DeckView,     "DECK VIEW"),
     (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
+    (Setting::About,        "ABOUT"),
 ];
 #[cfg(any(target_os = "ios", target_os = "android"))]
 pub const MENU: &[(Setting, &str)] = &[
@@ -41,6 +42,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
+    (Setting::About,        "ABOUT"),
 ];
 
 /// Which unit's screens the deck shows (an OpenDeck setting, not the
@@ -277,6 +279,8 @@ impl Settings {
             Setting::Stems        => c.stems = !c.stems,
             Setting::Light        => c.light = !c.light,
             Setting::PerfLog      => c.perf_log = !c.perf_log,
+            // Not a setting: the row opens the ABOUT screen.
+            Setting::About        => {}
         }
         c
     }
@@ -297,6 +301,7 @@ impl Settings {
             Setting::DeckView     => if self.full_deck { "FULL DECK   (F)".into() } else { "SCREEN ONLY   (F)".into() },
             Setting::Stems        => if self.stems { "ON".into() } else { "OFF".into() },
             Setting::Light        => if self.light { "ON".into() } else { "OFF".into() },
+            Setting::About        => format!("{}   ▶", crate::screen::APP_VERSION),
             Setting::PerfLog      => if self.perf_log { "ON   (Documents/opendeck-perf.log)".into() } else { "OFF".into() },
         }
     }

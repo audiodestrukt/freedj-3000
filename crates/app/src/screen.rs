@@ -1010,7 +1010,7 @@ pub(crate) fn draw_faceplate(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, 
 /// Which screen the LCD shows; the top / middle band follows it.
 #[derive(Clone, Copy)]
 pub enum ScreenView<'a> {
-    Playback, Browse(&'a Browser), Info, Perform, TagList, Menu(&'a Settings, usize),
+    Playback, Browse(&'a Browser), Info, Perform, TagList, Menu(&'a Settings, usize, bool),
     /// SOURCE (CDJ-3000 skin only): the browser's sources, the highlighted
     /// row, and where the loaded track came from.
     Source(&'a Browser, usize, Option<&'a crate::browser::Load>),
@@ -1080,7 +1080,7 @@ pub fn draw(
                         ScreenView::Browse(_)  => Some(TopScreen::Browse),
                         ScreenView::Info       => Some(TopScreen::Info),
                         ScreenView::TagList    => Some(TopScreen::TagList),
-                        ScreenView::Menu(_, _) => Some(TopScreen::Menu),
+                        ScreenView::Menu(..) => Some(TopScreen::Menu),
                         _ => None,
                     };
                     draw_keys(ui, lay, h, active, out);
@@ -1097,7 +1097,8 @@ pub fn draw(
                 // INFO: the middle band shows the loaded track's details.
                 ScreenView::Info => draw_info_screen(ui, snap, lay, h),
                 // MENU / UTILITY: the settings list.
-                ScreenView::Menu(settings, cursor) => draw_menu(ui, settings, snap.stems.state, &snap.ip_line, cursor, lay, h, out),
+                ScreenView::Menu(_, _, true) => draw_about(ui, &snap.ip_line, lay, h),
+                ScreenView::Menu(settings, cursor, false) => draw_menu(ui, settings, snap.stems.state, cursor, lay, h, out),
                 ScreenView::Playback | ScreenView::History(..) => {
                     draw_title(ui, snap, lay, h);
                     draw_phase(ui, snap, lay, h, out);
@@ -1250,7 +1251,7 @@ pub const APP_VERSION: &str = match option_env!("OPENDECK_VERSION") {
 };
 pub const SUPPORT_LINE: &str = "support@audiodestrukt.com   ·   audiodestrukt.com/opendeck";
 
-fn draw_menu(ui: &Ui, settings: &Settings, stems: StemsState, ip_line: &str, cursor: usize, lay: &Layout, h: f32, out: &mut Vec<Event>) {
+fn draw_menu(ui: &Ui, settings: &Settings, stems: StemsState, cursor: usize, lay: &Layout, h: f32, out: &mut Vec<Event>) {
     let p = ui.painter();
     let hdr = lay.title;
     p.rect_filled(hdr, 0.0, BAR);
@@ -1262,9 +1263,8 @@ fn draw_menu(ui: &Ui, settings: &Settings, stems: StemsState, ip_line: &str, cur
     p.rect_filled(body, 0.0, BG);
 
     let pad   = h * 0.025;
-    // Rows shrink to stay clear of the footer (the phone's band is short).
-    let footer = h * 0.030 + h * 0.022 + h * 0.012;
-    let row_h = (h * 0.062).min((body.height() - 2.0 * pad - footer) / MENU.len() as f32);
+    // Rows shrink to fit the band (the phone's is short).
+    let row_h = (h * 0.062).min((body.height() - 2.0 * pad) / MENU.len() as f32);
     for (i, (setting, label)) in MENU.iter().enumerate() {
         let y0  = body.min.y + pad + i as f32 * row_h;
         let row = Rect::from_min_max(Pos2::new(body.min.x + pad, y0), Pos2::new(body.max.x - pad, y0 + row_h - h * 0.006));
@@ -1279,17 +1279,30 @@ fn draw_menu(ui: &Ui, settings: &Settings, stems: StemsState, ip_line: &str, cur
         if clicked { out.push(Event::Ui(UiEvent::MenuTap(i))); }
     }
 
-    // About / support footer: the one place a user with a problem can find
-    // the version to quote and where to write.  The unit's UTILITY shows its
-    // firmware version here too.
-    let x = body.min.x + pad + h * 0.02;
-    text(ui, Pos2::new(x, body.max.y - pad - h * 0.030), Align2::LEFT_BOTTOM,
-         &format!("OpenDeck DJ  {APP_VERSION}"), h * 0.022, DIM);
-    text(ui, Pos2::new(x, body.max.y - pad), Align2::LEFT_BOTTOM, SUPPORT_LINE, h * 0.022, DIM);
-    // This deck's address(es), for tools and other players on the network.
-    // The column is narrow here: the first two addresses (Link's first).
-    let two = ip_line.split("  ·  ").take(2).collect::<Vec<_>>().join("  ·  ");
-    text(ui, Pos2::new(body.max.x - pad - h * 0.02, body.max.y - pad - h * 0.030), Align2::RIGHT_BOTTOM, two, h * 0.022, TEXT);
+}
+
+/// MENU → ABOUT: the version to quote, where to write, and this deck's
+/// addresses on the network (for tools and other players).  BACK returns
+/// to the list.
+fn draw_about(ui: &Ui, ip_line: &str, lay: &Layout, h: f32) {
+    let p = ui.painter();
+    let hdr = lay.title;
+    p.rect_filled(hdr, 0.0, BAR);
+    text(ui, Pos2::new(hdr.min.x + h * 0.02, hdr.center().y), Align2::LEFT_CENTER, "ABOUT", h * 0.030, TEXT);
+    text(ui, Pos2::new(hdr.max.x - h * 0.02, hdr.center().y), Align2::RIGHT_CENTER, "BACK: return", h * 0.020, DIM);
+    let body = middle_band(lay);
+    p.rect_filled(body, 0.0, BG);
+    let x = body.min.x + h * 0.045;
+    let mut y = body.min.y + h * 0.05;
+    let mut line = |t: &str, size: f32, c: Color32, gap: f32| {
+        text(ui, Pos2::new(x, y), Align2::LEFT_TOP, t, h * size, c);
+        y += h * gap;
+    };
+    line(&format!("OpenDeck DJ  {APP_VERSION}"), 0.040, TEXT, 0.070);
+    line(SUPPORT_LINE, 0.024, BLUE, 0.060);
+    line("ON THE NETWORK", 0.020, DIM, 0.035);
+    if ip_line.is_empty() { line("no network", 0.024, TEXT, 0.035); }
+    for a in ip_line.split("  ·  ") { line(a.trim_start_matches("IP "), 0.024, TEXT, 0.035); }
 }
 
 /// INFO screen: the loaded track's details in the middle band — its own tags

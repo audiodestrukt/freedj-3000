@@ -79,7 +79,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Fullscreen on a small panel fills it, no letterbox (SDL renderer, `OPENDECK_FULLSCREEN=1`; Pi 7" touch display 800 × 480); [design/display-fitting.md](design/display-fitting.md) | 🧪 text squeezed thin, rotary drawn oval, touch untested | Pi |
 | CDJ-3000 screen and faceplate (the default screen; MENU → SCREEN switches; the full deck by default on the Mac, Windows and iPad, `F` / MENU → DECK VIEW toggles it on the desktop): playback, BEAT LOOP / BEAT JUMP panels, SOURCE, BROWSE, TAG LIST, UTILITY, SEARCH, phase meter and master badge, STEMS panel | ✅ | D, Pi, iPad, Android tablet |
 | iPhone / Android phone: two landscape pages (SCREEN, CONTROLS) | ✅ | iOS, And |
-| MENU footer: version, support address and the deck's IP address(es), Link's first | ✅ | All |
+| MENU → ABOUT (the last row, the version as its value): a screen with the version, the support address and every address the deck has on the network; BACK returns to the list | ✅ | All |
 | Keyboard control | ✅ | D |
 | USB MIDI controllers mapped in `controllers.toml` with LED feedback (DJ2Go preset) | ✅ | D, Pi (not yet iOS / Android) |
 | PCF8574 I2C button boards | 🧪 built and unit-tested, no board yet | Pi |
