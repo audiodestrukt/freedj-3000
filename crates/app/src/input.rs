@@ -68,6 +68,17 @@ pub enum UiEvent {
     /// BROWSE on a rekordbox source: open the `n`th category (ARTIST, ALBUM…)
     /// from the CDJ-3000 skin's category column.
     BrowseCategory(usize),
+    /// A list row tapped while the category column has the highlight:
+    /// back into the list, on that row.
+    BrowseRow(usize),
+    /// The track table's second-row key.
+    BrowseDetail,
+    /// The track table's INFO key.
+    BrowseInfo,
+    /// The track table's PREVIEW tab.
+    BrowsePreview,
+    /// The table's text-size key.
+    BrowseFont,
     /// MENU: a row was tapped — select it and step its value.
     MenuTap(usize),
     /// GRID ADJUST touch keys (shown in place of the Bars readouts while the
@@ -107,7 +118,7 @@ pub enum Source { Link, Usb }
 pub enum SearchEdit { Open, Char(char), Backspace, Clear }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Screen { Browse, TagList, Info, Menu, Perform, Source, History }
+pub enum Screen { Browse, TagList, Info, Menu, Perform, Source, History, Playlist }
 
 /// PERFORM pad mode: the pads are hot cues, or beat jumps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

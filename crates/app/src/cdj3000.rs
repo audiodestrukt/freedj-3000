@@ -396,6 +396,42 @@ fn label(ui: &Ui, pos: Pos2, a: Align2, s: impl ToString, px: f32, u: f32, c: Co
     ui.painter().text(pos, a, s, FontId::proportional(px * u), c)
 }
 
+/// Text in a field, left-aligned at `x` and vertically centred on `cy`. When it
+/// is too long for the field and `active` is set it runs through it like an
+/// LED sign: a pause at the start, a slow scroll to the end, a pause there,
+/// and round again.
+fn scroll_text(ui: &Ui, field: Rect, x: f32, cy: f32, text: &str, font: FontId, color: Color32, active: bool, u: f32) {
+    const PAUSE: f32 = 2.5;
+    let p = ui.painter().with_clip_rect(field);
+    let width = p.layout_no_wrap(text.to_string(), font.clone(), color).size().x;
+    let over = width - (field.max.x - x);
+    if !active || over <= 1.0 {
+        p.text(Pos2::new(x, cy), Align2::LEFT_CENTER, text, font, color);
+        return;
+    }
+    let speed = 70.0 * u;
+    let run = over / speed;
+    let t = (ui.input(|i| i.time) as f32) % (PAUSE + run + PAUSE);
+    let off = if t < PAUSE { 0.0 } else if t < PAUSE + run { (t - PAUSE) * speed } else { over };
+    p.text(Pos2::new(x - off, cy), Align2::LEFT_CENTER, text, font, color);
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+}
+
+/// A stick's colour label as the unit tints its source tile (None: no label).
+fn stick_color(code: u8) -> Option<Color32> {
+    Some(match code {
+        1 => Color32::from_rgb(200, 60, 150),   // pink
+        2 => Color32::from_rgb(190, 40, 40),    // red
+        3 => Color32::from_rgb(210, 110, 20),   // orange
+        4 => Color32::from_rgb(190, 160, 20),   // yellow
+        5 => Color32::from_rgb(40, 150, 60),    // green
+        6 => Color32::from_rgb(30, 150, 170),   // aqua
+        7 => Color32::from_rgb(40, 90, 200),    // blue
+        8 => Color32::from_rgb(130, 60, 190),   // purple
+        _ => return None,
+    })
+}
+
 fn outline(ui: &Ui, r: Rect, c: Color32, u: f32) {
     ui.painter().rect_stroke(r, 0.0, Stroke::new((1.5 * u).max(1.0), c));
 }
@@ -405,11 +441,7 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
     p.rect_filled(lay.header, 0.0, HEADER);
 
     // Source tile: where the loaded track came from.
-    let s = lay.source;
-    p.rect_filled(s, 0.0, SOURCE_TILE);
-    let src = if snap.source_link { "LINK" } else { "USB" };
-    label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, src, 18.0, u, TEXT);
-    label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
+    draw_source_tile(ui, snap, lay.source, loaded_tile(), u);
 
     draw_art(ui, ctx, snap.tags, "deck", lay.art);
 
@@ -419,7 +451,7 @@ fn draw_header(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, 
     if stems_on { title_area.max.x = lay.stems_key.min.x - 8.0 * u; }
     let clip = ui.painter().with_clip_rect(title_area);
     let t = lay.title;
-    clip.text(Pos2::new(t.min.x, t.center().y), Align2::LEFT_CENTER, format!("♪ {}", snap.title), FontId::proportional(33.0 * u), TEXT);
+    scroll_text(ui, title_area, t.min.x, t.center().y, &format!("♪ {}", snap.title), FontId::proportional(33.0 * u), TEXT, true, u);
     let row = lay.track_row;
     let y = row.center().y;
     if snap.total_samples > 0 {
@@ -1373,13 +1405,65 @@ fn draw_status_strip(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &m
 }
 
 /// The header of a list screen: source tile, ← BACK, the title with its icon.
-fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, folder_icon: bool, u: f32, out: &mut Vec<Event>) {
+/// The linked stick last browsed (player, colour), for the source tile of the
+/// screens that are not about one stick (TAG LIST, UTILITY).
+static SOURCE_BADGE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+static LOADED_TILE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+fn pack(b: Option<(u8, u8)>, kind: crate::browser::SourceTile) -> u32 {
+    use crate::browser::SourceTile as K;
+    let k = match kind { K::None => 0u32, K::Folder => 1, K::Usb => 2, K::Link => 3 };
+    k << 24 | b.map_or(0, |(p, c)| 1 << 16 | (p as u32) << 8 | c as u32)
+}
+pub fn set_source_badge(b: Option<(u8, u8)>, kind: crate::browser::SourceTile) {
+    SOURCE_BADGE.store(pack(b, kind), std::sync::atomic::Ordering::Relaxed);
+}
+/// The loaded track's source, for the playback screen's tile.
+pub fn set_loaded_tile(b: Option<(u8, u8)>, kind: crate::browser::SourceTile) {
+    LOADED_TILE.store(pack(b, kind), std::sync::atomic::Ordering::Relaxed);
+}
+fn cached_tile() -> Tile { unpack(SOURCE_BADGE.load(std::sync::atomic::Ordering::Relaxed)) }
+fn loaded_tile() -> Tile { unpack(LOADED_TILE.load(std::sync::atomic::Ordering::Relaxed)) }
+fn unpack(v: u32) -> Tile {
+    use crate::browser::SourceTile as K;
+    let kind = match v >> 24 { 1 => K::Folder, 2 => K::Usb, 3 => K::Link, _ => K::None };
+    Tile { kind, badge: (v >> 16 & 0xff != 0).then_some((((v >> 8) & 0xff) as u8, (v & 0xff) as u8)) }
+}
+/// What the source tile shows.
+#[derive(Clone, Copy)]
+struct Tile { kind: crate::browser::SourceTile, badge: Option<(u8, u8)> }
+
+/// The source tile at the top left: tinted with the stick's colour label, its
+/// player number in the corner.
+fn draw_source_tile(ui: &Ui, _snap: &DeckSnapshot, s: Rect, t: Tile, u: f32) {
+    use crate::browser::SourceTile as K;
+    let badge = t.badge;
+    let p = ui.painter();
+    if t.kind == K::None {
+        p.rect_filled(s, 0.0, Color32::from_rgb(40, 40, 40));
+        return;
+    }
+    if t.kind == K::Folder {
+        p.rect_filled(s, 0.0, SOURCE_TILE);
+        folder(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), u * 1.5, TEXT);
+        label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, "FOLDER", 17.0, u, TEXT);
+        return;
+    }
+    p.rect_filled(s, 0.0, badge.and_then(|(_, c)| stick_color(c)).unwrap_or(SOURCE_TILE));
+    if let Some((n, _)) = badge {
+        let bd = Rect::from_min_size(Pos2::new(s.min.x + 2.0 * u, s.min.y + 2.0 * u), Vec2::splat(22.0 * u));
+        p.rect_filled(bd, 0.0, Color32::BLACK);
+        outline(ui, bd, TEXT, u);
+        label(ui, bd.center(), Align2::CENTER_CENTER, n, 15.0, u, TEXT);
+    }
+    label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, if t.kind == K::Link { "LINK" } else { "USB" }, 18.0, u, TEXT);
+    label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
+}
+
+fn draw_list_header(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, title: &str, folder_icon: bool, tile: Tile, u: f32, out: &mut Vec<Event>) {
     let p = ui.painter();
     p.rect_filled(lay.header, 0.0, HEADER);
     let s = lay.source;
-    p.rect_filled(s, 0.0, SOURCE_TILE);
-    label(ui, Pos2::new(s.center().x, s.min.y + 66.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
-    label(ui, Pos2::new(s.center().x, s.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
+    draw_source_tile(ui, snap, s, tile, u);
     let back = Rect::from_min_max(Pos2::new(lay.screen.min.x + 121.0 * u, lay.screen.min.y + 21.0 * u),
                                   Pos2::new(lay.screen.min.x + 169.0 * u, lay.screen.min.y + 69.0 * u));
     if tap(ui, back, "cdj-list-back").0 { out.push(Event::Deck(ControlEvent::Back)); }
@@ -1436,6 +1520,13 @@ fn draw_categories(ui: &Ui, lay: &Layout, cats: &[&str], u: f32) {
 /// `selected` in view. Tapping a row selects it; tapping the selected row
 /// loads it (the rotary's press).
 fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, empty: &str, u: f32, out: Option<&mut Vec<Event>>) {
+    draw_list_lit(ui, pane, head, rows, selected, true, empty, u, out)
+}
+
+/// As [`draw_list`]; `lit` false keeps the list where `selected` puts it but
+/// draws no highlight (the category column has it), and a tapped row takes
+/// the highlight back into the list.
+fn draw_list_lit(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, lit: bool, empty: &str, u: f32, out: Option<&mut Vec<Event>>) {
     let p = ui.painter();
     let hb = Rect::from_min_size(pane.min, Vec2::new(pane.width(), 60.0 * u));
     p.rect_filled(hb, 0.0, PANE_HEAD);
@@ -1448,12 +1539,13 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
         let rr = Rect::from_min_size(Pos2::new(pane.min.x, y), Vec2::new(pane.width(), ROW_H * u));
         if rr.max.y > pane.max.y + 1.0 { break; }
         let i = first + k;
-        let sel = i == selected && i < rows.len();
+        let sel = lit && i == selected && i < rows.len();
         p.rect_filled(rr, 0.0, if sel { KEY_LIT } else if k % 2 == 0 { ROW_GREY } else { BG });
         let Some(row) = rows.get(i) else { continue };
         if let Some(out) = out.as_deref_mut() {
             if tap(ui, rr, &format!("cdj-row-{head}-{i}")).0 {
-                if sel { out.push(Event::Deck(ControlEvent::Load)); }
+                if !lit { out.push(Event::Ui(UiEvent::BrowseRow(i))); }
+                else if sel { out.push(Event::Deck(ControlEvent::Load)); }
                 else { out.push(Event::Deck(ControlEvent::BrowseEncoderDelta { delta: i as i32 - selected as i32 })); }
             }
         }
@@ -1477,8 +1569,8 @@ fn draw_list(ui: &Ui, pane: Rect, head: &str, rows: &[Row], selected: usize, emp
         let right = if let Some(v) = &row.value {
             label(ui, Pos2::new(rr.max.x - 14.0 * u, cy), Align2::RIGHT_CENTER, v, 24.0, u, TEXT).min.x - 12.0 * u
         } else { rr.max.x - 10.0 * u };
-        p.with_clip_rect(Rect::from_min_max(Pos2::new(rr.min.x, rr.min.y), Pos2::new(right, rr.max.y)))
-            .text(Pos2::new(rr.min.x + tx * u, cy), Align2::LEFT_CENTER, row.text, FontId::proportional(27.0 * u), if row.played { PLAYED } else { TEXT });
+        scroll_text(ui, Rect::from_min_max(Pos2::new(rr.min.x, rr.min.y), Pos2::new(right, rr.max.y)), rr.min.x + tx * u, cy,
+                    row.text, FontId::proportional(27.0 * u), if row.played { PLAYED } else { TEXT }, sel, u);
         if row.tagged {
             p.circle_filled(Pos2::new(right - 6.0 * u, cy), 5.0 * u, BARS_ORANGE);
         }
@@ -1544,7 +1636,7 @@ fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: 
         }
         // Icon tile (inset by the selection border when highlighted).
         let tile = Rect::from_min_max(at(0.0, y), at(90.0, bottom));
-        p.rect_filled(if sel { tile.shrink(2.0 * u) } else { tile }, 0.0, SOURCE_TILE);
+        p.rect_filled(if sel { tile.shrink(2.0 * u) } else { tile }, 0.0, r.info.as_ref().and_then(|i| stick_color(i.color)).unwrap_or(SOURCE_TILE));
         let c = Pos2::new(tile.center().x, tile.min.y + 33.0 * u);
         let kind = match r.kind { SourceKind::Local => "FOLDER", SourceKind::Usb => "USB", SourceKind::Link if r.rekordbox => "PC", SourceKind::Link => "LINK" };
         match r.kind {
@@ -1588,12 +1680,17 @@ fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: 
     p.rect_filled(pane, 0.0, PANE);
     if let Some(r) = rows.get(cursor) {
         let counts = r.path.as_deref().and_then(|root| b.rekordbox_counts(root));
-        let (songs, lists) = match counts {
-            Some((s, l)) => (s.to_string(), l.to_string()),
-            None if r.rekordbox => ("-".into(), "-".into()),
-            None => ("0".into(), "0".into()),
+        // A linked player reports its own counts, date and sizes.
+        let (songs, lists) = match (&r.info, counts) {
+            (Some(i), _) => (i.tracks.to_string(), i.playlists.to_string()),
+            (None, Some((s, l))) => (s.to_string(), l.to_string()),
+            (None, None) if r.rekordbox => ("-".into(), "-".into()),
+            (None, None) => ("0".into(), "0".into()),
         };
-        let space = r.path.as_deref().and_then(|root| cached_space(ui.ctx(), root));
+        let space = match &r.info {
+            Some(i) if i.total > 0 => Some((i.total, i.free)),
+            _ => r.path.as_deref().and_then(|root| cached_space(ui.ctx(), root)),
+        };
         let line = |y: f32, name: &str, value: Option<(String, &str)>| {
             label(ui, at(949.0, y), Align2::LEFT_CENTER, name, 17.0, u, LABEL);
             if let Some((v, unit)) = value {
@@ -1606,7 +1703,7 @@ fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: 
         };
         line(120.0, "Songs", Some((songs, "")));
         line(166.0, "Playlists", Some((lists, "")));
-        line(219.0, "Date", None);
+        line(219.0, "Date", r.info.as_ref().filter(|i| !i.date.is_empty()).map(|i| (i.date.clone(), "")));
         if let Some((total, free)) = space {
             let (t, tu) = size_text(total);
             let (f, fu) = size_text(free);
@@ -1732,15 +1829,26 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         stems: stems_on && e.load().is_some_and(|l| b.has_stems(l)),
     }).collect();
     // The unit titles a category's name list BROWSE, a track list by its name.
-    let title = if names.is_some() || b.on_rb_history() { "BROWSE".to_string() } else { b.title() };
-    draw_list_header(ui, snap, lay, &title, cats.is_none(), u, out);
+    let title = if names.is_some() || b.on_rb_history() || b.idle() { "BROWSE".to_string() } else { b.title() };
+    draw_list_header(ui, snap, lay, &title, cats.is_none(), Tile { kind: b.source_kind(), badge: b.source_badge() }, u, out);
+    let bar = !b.playlist_only();
+    let lx = if bar { 92.0 } else { 0.0 };
     match &cats {
-        Some((names, open)) => draw_rb_categories(ui, lay, names, *open, u, out),
+        Some((names, open)) if bar => draw_rb_categories(ui, lay, names, *open, u, out),
+        Some(_) => {}
+        None if b.idle() => {}
         None => draw_categories(ui, lay, &["FOLDER"], u),
     }
     // A rekordbox track list is one full-width table (PREVIEW, TRACK, BPM, KEY).
     if cats.is_some() && !b.entries().is_empty() && b.entries().iter().all(|e| !e.is_dir) {
-        draw_track_table(ui, lay, b, &rows, 92.0, 628.0, 4, u, out);
+        draw_track_table(ui, lay, b, &rows, lx, 628.0, 4, u, out);
+        // INFO (the key in the table head): the highlighted track's details
+        // over the right of the table.
+        if let Some(e) = b.selected_entry().filter(|e| !e.is_dir).filter(|_| b.info_on()) {
+            let right = Rect::from_min_max(Pos2::new(sc.min.x + 732.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
+            ui.painter().rect_filled(right, 0.0, Color32::from_rgb(50, 50, 50));
+            draw_browse_info(ui, b, e, sc, right, u, out);
+        }
         if let Some(name) = snap.loading {
             label(ui, Pos2::new(sc.min.x + 1000.0 * u, sc.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
         }
@@ -1749,64 +1857,27 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     let head = match names {
         Some(f) => f_label(f),
         None if b.on_rb_history() => "HISTORY".to_string(),
-        None if cats.is_some() => "PLAYLIST".to_string(),
-        None => "FOLDER".to_string(),
+        None => match &cats {
+            Some((n, Some(o))) => n.get(*o).cloned().unwrap_or_else(|| "PLAYLIST".to_string()),
+            Some(_) => "PLAYLIST".to_string(),
+            None => "FOLDER".to_string(),
+        },
     };
-    let left = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 730.0 * u, sc.min.y + 628.0 * u));
-    draw_list(ui, left, &head, &rows, b.selected, "— empty —", u, Some(out));
+    let left = Rect::from_min_max(Pos2::new(sc.min.x + lx * u, sc.min.y + 92.0 * u), Pos2::new(sc.min.x + 730.0 * u, sc.min.y + 628.0 * u));
+    draw_list_lit(ui, left, &head, &rows, b.selected, !b.cat_focus(), "— empty —", u, Some(out));
     let right = Rect::from_min_max(Pos2::new(sc.min.x + 732.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(right, 0.0, BG);
     ui.painter().line_segment([Pos2::new(right.min.x - 1.0 * u, right.min.y), Pos2::new(right.min.x - 1.0 * u, right.max.y)], Stroke::new(2.0 * u, PANE_HEAD));
     match b.selected_entry() {
-        Some(e) if !e.is_dir => {
-            // A track: its details (tags for a local file; what the source
-            // listed otherwise), the cover, and LOAD, on the pane's grey.
-            ui.painter().rect_filled(right, 0.0, Color32::from_rgb(50, 50, 50));
-            let hb = Rect::from_min_size(right.min, Vec2::new(right.width(), 60.0 * u));
-            ui.painter().rect_filled(hb, 0.0, PANE_HEAD);
-            label(ui, Pos2::new(hb.min.x + 11.0 * u, hb.center().y), Align2::LEFT_CENTER, "INFO", 21.0, u, LABEL);
-            let tags = match e.load() {
-                Some(crate::browser::Load::Local { path, .. }) => browse_tags(ui.ctx(), path),
-                _ => None,
-            }.unwrap_or_default();
-            let title = tags.title.clone().unwrap_or_else(|| e.name.clone());
-            let artist = tags.artist.clone().or_else(|| e.artist.clone()).unwrap_or_default();
-            let bpm = tags.bpm.or(e.bpm).map(|b| format!("{b:.1}")).unwrap_or_default();
-            let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
-            let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0, Color32::from_rgb(70, 70, 70)));
-            let clip = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 152.0), at(1270.0, 248.0)));
-            label(ui, at(758.0, 176.0), Align2::CENTER_CENTER, "♪", 26.0, u, TEXT);
-            clip.text(at(780.0, 176.0), Align2::LEFT_CENTER, &title, FontId::proportional(26.0 * u), TEXT);
-            rule(200.0, 1270.0);
-            icon(ui, Icon::Person, at(758.0, 224.0), u);
-            clip.text(at(780.0, 224.0), Align2::LEFT_CENTER, &artist, FontId::proportional(26.0 * u), TEXT);
-            rule(248.0, 1270.0);
-            let small = ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 248.0), at(1062.0, 440.0)));
-            let rows: [(&str, String); 4] = [
-                ("disc", tags.album.clone().unwrap_or_default()),
-                ("BPM", bpm),
-                ("b#", tags.key.clone().unwrap_or_default()),
-                ("cal", tags.year.clone().unwrap_or_default()),
-            ];
-            for (i, (k, v)) in rows.iter().enumerate() {
-                let y = 272.0 + 48.0 * i as f32;
-                match *k {
-                    "disc" => icon(ui, Icon::Disc, at(758.0, y), u),
-                    "cal" => icon(ui, Icon::Calendar, at(758.0, y), u),
-                    t => boxed(ui, t, at(758.0, y), u),
-                }
-                small.text(at(780.0, y), Align2::LEFT_CENTER, v, FontId::proportional(22.0 * u), TEXT);
-                rule(y + 24.0, 1062.0);
-            }
-            draw_art(ui, ui.ctx(), &tags, "browse", Rect::from_min_max(at(1073.0, 252.0), at(1260.0, 439.0)));
-            icon(ui, Icon::Bubble, at(758.0, 513.0), u);
-            ui.painter().with_clip_rect(Rect::from_min_max(at(742.0, 490.0), at(1270.0, 536.0)))
-                .text(at(780.0, 513.0), Align2::LEFT_CENTER, tags.comment.clone().unwrap_or_default(), FontId::proportional(20.0 * u), TEXT);
-            rule(537.0, 1270.0);
-            let load = Rect::from_min_max(at(935.0, 552.0), at(1085.0, 602.0));
-            if tap(ui, load, "cdj-browse-load").0 { out.push(Event::Deck(ControlEvent::Load)); }
-            ui.painter().rect_filled(load, 0.0, Color32::from_rgb(225, 225, 225));
-            label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::from_rgb(30, 30, 30));
+        Some(e) if !e.is_dir => draw_browse_info(ui, b, e, sc, right, u, out),
+        _ if b.db_peek().is_some() => {
+            // A linked player's row: what it opens (a BPM's ranges, a
+            // range's tracks, a genre's artists, a playlist's tracks).
+            let (head, items) = b.db_peek().unwrap();
+            let rows: Vec<Row> = items.iter().map(|(d, n)| Row {
+                icon: if *d { RowIcon::List } else { RowIcon::Track }, text: n, value: None, tagged: false, played: false, stems: false,
+            }).collect();
+            draw_list(ui, right, head, &rows, usize::MAX, "", u, None);
         }
         _ if b.rb_preview().is_some() => {
             // A rekordbox name: an artist's albums, else its tracks.
@@ -1828,6 +1899,69 @@ fn draw_browse(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
         label(ui, Pos2::new(sc.min.x + 1000.0 * u, sc.min.y + 45.0 * u), Align2::RIGHT_CENTER, format!("LOADING  {name}"), 18.0, u, BARS_ORANGE);
     }
     draw_status_strip(ui, snap, lay, u, out);
+}
+
+/// The INFO pane for a highlighted track (right side of BROWSE): details,
+/// cover, comment and LOAD.
+fn draw_browse_info(ui: &Ui, b: &Browser, e: &crate::browser::Entry, sc: Rect, right: Rect, u: f32, out: &mut Vec<Event>) {
+    // As the unit lays it out: artist, album, time, BPM, key, date added,
+    // stars, comment; the cover top right; LOAD below.
+    ui.painter().rect_filled(right, 0.0, Color32::from_rgb(50, 50, 50));
+    let hb = Rect::from_min_size(right.min, Vec2::new(right.width(), 60.0 * u));
+    ui.painter().rect_filled(hb, 0.0, PANE_HEAD);
+    label(ui, Pos2::new(hb.min.x + 11.0 * u, hb.center().y), Align2::LEFT_CENTER, "INFO", 21.0, u, LABEL);
+    let load_ref = e.load();
+    let tags = match load_ref {
+        Some(crate::browser::Load::Local { path, .. }) => browse_tags(ui.ctx(), path),
+        // A linked player's track: what its library knows.
+        Some(l @ crate::browser::Load::Db { .. }) => b.db_tags(l),
+        _ => None,
+    }.unwrap_or_default();
+    let (dur, stars) = load_ref.and_then(|l| b.db_extra(l)).unwrap_or((None, 0));
+    let artist = tags.artist.clone().or_else(|| e.artist.clone()).unwrap_or_default();
+    let bpm = tags.bpm.or(e.bpm).map(|b| format!("{b:.1}")).unwrap_or_default();
+    let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
+    let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0, Color32::from_rgb(70, 70, 70)));
+    let time = dur.map(|d| format!("{:02}:{:02}", d / 60, d % 60)).unwrap_or_default();
+    let rows: [(&str, String); 7] = [
+        ("person", artist),
+        ("disc", tags.album.clone().unwrap_or_default()),
+        ("clock", time),
+        ("BPM", bpm),
+        ("b#", tags.key.clone().unwrap_or_default()),
+        ("cal", tags.year.clone().unwrap_or_default()),
+        ("stars", String::new()),
+    ];
+    for (i, (k, v)) in rows.iter().enumerate() {
+        let y = 176.0 + 46.0 * i as f32;
+        match *k {
+            "person" => icon(ui, Icon::Person, at(758.0, y), u),
+            "disc" => icon(ui, Icon::Disc, at(758.0, y), u),
+            "clock" => icon(ui, Icon::Clock, at(758.0, y), u),
+            "cal" => icon(ui, Icon::Calendar, at(758.0, y), u),
+            "stars" => {}
+            t => boxed(ui, t, at(758.0, y), u),
+        }
+        if *k == "stars" {
+            for n in 0..5 {
+                let c = at(790.0 + 30.0 * n as f32, y);
+                if (n as u8) < stars { ui.painter().circle_filled(c, 8.0 * u, TEXT); }
+                else { ui.painter().circle_stroke(c, 8.0 * u, Stroke::new(1.5 * u, TEXT)); }
+            }
+        } else {
+            scroll_text(ui, Rect::from_min_max(at(742.0, y - 22.0), at(1062.0, y + 22.0)), at(780.0, y).x, at(780.0, y).y, v, FontId::proportional(24.0 * u), TEXT, true, u);
+        }
+        rule(y + 23.0, 1062.0);
+    }
+    draw_art(ui, ui.ctx(), &tags, "browse", Rect::from_min_max(at(1075.0, 160.0), at(1262.0, 347.0)));
+    icon(ui, Icon::Bubble, at(758.0, 513.0), u);
+    scroll_text(ui, Rect::from_min_max(at(742.0, 490.0), at(1270.0, 536.0)), at(780.0, 513.0).x, at(780.0, 513.0).y,
+                &tags.comment.clone().unwrap_or_default(), FontId::proportional(20.0 * u), TEXT, true, u);
+    rule(537.0, 1270.0);
+    let load = Rect::from_min_max(at(935.0, 552.0), at(1085.0, 602.0));
+    if tap(ui, load, "cdj-browse-load").0 { out.push(Event::Deck(ControlEvent::Load)); }
+    ui.painter().rect_filled(load, 0.0, Color32::from_rgb(225, 225, 225));
+    label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::from_rgb(30, 30, 30));
 }
 
 fn f_label(f: crate::browser::RbField) -> String {
@@ -1888,31 +2022,67 @@ fn file_art(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::Texture
 
 /// The PREVIEW cell of a track row: the blue preview bottom-anchored on black
 /// (unit: 192×44 at x 92), then the cover in the 47 px square at x 284.
-fn draw_row_preview(ui: &Ui, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32) {
+/// The colour mode of the waveforms (the renderer's `ColorMode` as a number:
+/// 0 RGB, 1 3-band, 2 blue), for the track table's previews.
+static WAVE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
+pub fn set_wave_mode(m: u8) { WAVE_MODE.store(m, std::sync::atomic::Ordering::Relaxed); }
+
+fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32, wave_on: bool) {
     let p = ui.painter();
+    // The whole PREVIEW cell but the cover: the wave runs edge to edge.
     let wave = Rect::from_min_max(Pos2::new(x0 + 1.0 * u, y0 + 2.0 * u), Pos2::new(x0 + 191.0 * u, y0 + 46.0 * u));
-    p.rect_filled(wave, 0.0, Color32::BLACK);
+    if wave_on { p.rect_filled(wave, 0.0, Color32::BLACK); }
     let anlz = match e.load() { Some(crate::browser::Load::Local { analyze: Some(a), .. }) => Some(a.clone()), _ => None };
-    if let Some(w) = anlz.as_deref().and_then(|a| rb_wave(ui.ctx(), a)) {
+    let mode = WAVE_MODE.load(std::sync::atomic::Ordering::Relaxed);
+    let bands = if mode == 2 || !wave_on { None } else { e.load().and_then(|l| b.db_bands(l)) };
+    let cols = (wave.width() / u).floor().max(1.0) as usize;   // one stroke per unit pixel
+    let step = wave.width() / cols as f32;
+    if let Some(w) = bands {
         let n = w.len().max(1);
-        let cols = wave.width().floor().max(1.0) as usize;
+        for c in 0..cols {
+            let (a, z) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
+            let m = w[a..z].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])]);
+            let top = *m.iter().max().unwrap_or(&0) as f32;
+            if top <= 0.0 { continue; }
+            let h = wave.height() * (top / 127.0).min(1.0);
+            let col = if mode == 0 {
+                // RGB: bass red, mid green, high blue, scaled to full brightness.
+                let k = 255.0 / top;
+                Color32::from_rgb((m[0] as f32 * k) as u8, (m[1] as f32 * k) as u8, (m[2] as f32 * k) as u8)
+            } else {
+                // 3-band: the loudest band's colour (blue low, amber mid, white high).
+                match m.iter().position(|&v| v as f32 == top) {
+                    Some(0) => Color32::from_rgb(58, 123, 240),
+                    Some(1) => Color32::from_rgb(240, 160, 48),
+                    _ => Color32::from_rgb(235, 235, 235),
+                }
+            };
+            let x = wave.min.x + (c as f32 + 0.5) * step;
+            p.line_segment([Pos2::new(x, wave.max.y), Pos2::new(x, wave.max.y - h)], Stroke::new(step.max(1.0), col));
+        }
+    } else if let Some(w) = anlz.as_deref().filter(|_| wave_on).and_then(|a| rb_wave(ui.ctx(), a)).or_else(|| e.load().filter(|_| wave_on).and_then(|l| b.db_wave(l))) {
+        let n = w.len().max(1);
         for c in 0..cols {
             // The loudest source column under each pixel column.
-            let (a, b) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
-            let (h, wh) = w[a..b].iter().fold((0u8, 0u8), |m, &(h, wh)| if h > m.0 { (h, wh) } else { m });
+            let (a, z) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
+            let (h, wh) = w[a..z].iter().fold((0u8, 0u8), |m, &(h, wh)| if h > m.0 { (h, wh) } else { m });
             if h == 0 { continue; }
             let top = wave.max.y - wave.height() * h as f32 / 31.0;
-            let x = wave.min.x + c as f32 + 0.5;
+            let x = wave.min.x + (c as f32 + 0.5) * step;
             // Unit colours: blue (18,96,151) brightening with whiteness.
             let k = wh as f32 / 7.0;
             let col = Color32::from_rgb((18.0 + 90.0 * k) as u8, (96.0 + 90.0 * k) as u8, (151.0 + 80.0 * k) as u8);
-            p.line_segment([Pos2::new(x, top), Pos2::new(x, wave.max.y)], Stroke::new(1.0, col));
+            p.line_segment([Pos2::new(x, top), Pos2::new(x, wave.max.y)], Stroke::new(step.max(1.0), col));
         }
     }
-    let art = Rect::from_min_size(Pos2::new(x0 + 192.0 * u, y0 + 0.5 * u), Vec2::splat(47.0 * u));
-    match e.art.as_deref().and_then(|a| file_art(ui.ctx(), a)) {
-        Some(tex) => { p.image(tex.id(), art, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE); }
-        None => { p.rect_filled(art, 0.0, Color32::from_rgb(30, 30, 30)); }
+    let art = Rect::from_min_size(Pos2::new(x0 + if wave_on { 192.0 } else { 0.0 } * u, y0 + 0.5 * u), Vec2::splat(47.0 * u));
+    if let Some(tags) = e.load().and_then(|l| b.db_tags(l)).filter(|t| t.artwork.is_some()) {
+        draw_art(ui, ui.ctx(), &tags, &format!("row-{}", e.name), art);
+    } else {
+        match e.art.as_deref().and_then(|a| file_art(ui.ctx(), a)) {
+            Some(tex) => { p.image(tex.id(), art, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE); }
+            None => { p.rect_filled(art, 0.0, Color32::from_rgb(30, 30, 30)); }
+        }
     }
 }
 
@@ -1921,7 +2091,8 @@ fn draw_row_preview(ui: &Ui, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32
 /// LOAD in the BPM/KEY cells. Tap selects, a second tap (or LOAD) loads.
 fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32, bottom: f32, count_digits: usize, u: f32, out: &mut Vec<Event>) {
     // Columns from the left edge: PREVIEW 239, then TRACK from +240.
-    let (pv, tr) = (left + 239.0, left + 240.0);
+    let pw = if b.previews_on() { 239.0 } else { 48.0 };
+    let (pv, tr) = (left + pw, left + pw + 1.0);
     let vis = (((bottom - 152.0) / ROW_H).floor() as usize).max(1);
     let sc = lay.screen;
     let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
@@ -1938,15 +2109,48 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
         ui.painter().add(Shape::convex_polygon(vec![Pos2::new(x, y + h), Pos2::new(x + 2.0 * h, y + h), Pos2::new(x + h, y - h)], c, Stroke::NONE));
         x + 2.0 * h
     };
-    label(ui, at(left + 11.0, 122.0), Align2::LEFT_CENTER, "PREVIEW", 21.0, u, LABEL);
+    if b.previews_on() { label(ui, at(left + 11.0, 122.0), Align2::LEFT_CENTER, "PREVIEW", 21.0, u, LABEL); }
     let th = label(ui, at(tr + 11.0, 122.0), Align2::LEFT_CENTER, "TRACK", 21.0, u, ZOOM_BLUE);
     let tx = up(th, ZOOM_BLUE);
     label(ui, Pos2::new(tx + 22.0 * u, th.center().y), Align2::LEFT_CENTER, format!("[{:0w$}]", rows.len(), w = count_digits), 21.0, u, LABEL);
     up(label(ui, at(1090.0, 122.0), Align2::LEFT_CENTER, "BPM", 21.0, u, LABEL), LABEL);
     up(label(ui, at(1200.0, 122.0), Align2::LEFT_CENTER, "KEY", 21.0, u, LABEL), LABEL);
-    // The sort-order key (inert): a box with ⌃⌄.
+    // The tab strip above the table: PREVIEW, text size (inert), INFO.
+    {
+        let pt = Rect::from_min_max(at(890.0, 8.0), at(1045.0, 84.0));
+        let on = b.previews_on();
+        p.rect_filled(pt, 0.0, if on { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });
+        label(ui, pt.center(), Align2::CENTER_CENTER, "PREVIEW", 19.0, u, TEXT);
+        if tap(ui, pt, "cdj-trk-preview").0 { out.push(Event::Ui(UiEvent::BrowsePreview)); }
+        let at_ = Rect::from_min_max(at(1050.0, 8.0), at(1165.0, 84.0));
+        p.rect_filled(at_, 0.0, Color32::from_rgb(45, 45, 45));
+        // A A A: three sizes, the current one bright and underlined.
+        for (n, sz) in [14.0f32, 20.0, 27.0].into_iter().enumerate() {
+            let pos = Pos2::new(at_.min.x + (22.0 + 36.0 * n as f32) * u, at_.center().y + 4.0 * u);
+            let cur = n as u8 == b.font_size();
+            let r = label(ui, pos, Align2::CENTER_CENTER, "A", sz, u, if cur { TEXT } else { LABEL });
+            if cur { ui.painter().line_segment([Pos2::new(r.min.x, r.max.y + 3.0 * u), Pos2::new(r.max.x, r.max.y + 3.0 * u)], Stroke::new(2.0 * u, TEXT)); }
+        }
+        if tap(ui, at_, "cdj-trk-font").0 { out.push(Event::Ui(UiEvent::BrowseFont)); }
+        // No INFO pane in SEARCH (the keyboard takes the room).
+        let it = Rect::from_min_max(at(1172.0, 8.0), at(1275.0, 84.0));
+        if bottom >= 628.0 {
+        let ion = b.info_on();
+        p.rect_filled(Rect::from_center_size(Pos2::new(it.min.x + 14.0 * u, it.center().y), Vec2::splat(24.0 * u)), 2.0, if ion { SEL_BLUE } else { Color32::from_rgb(70, 70, 70) });
+        label(ui, Pos2::new(it.min.x + 66.0 * u, it.center().y), Align2::CENTER_CENTER, "INFO", 19.0, u, if ion { SEL_BLUE } else { TEXT });
+        if tap(ui, it, "cdj-trk-info").0 { out.push(Event::Ui(UiEvent::BrowseInfo)); }
+        }
+    }
+    // The second-row key: a box with ⌃⌄, lit while a detail row shows.
     let sb = Rect::from_min_max(at(1011.0, 98.0), at(1069.0, 146.0));
-    p.rect_filled(sb, 0.0, Color32::from_rgb(50, 50, 50));
+    p.rect_filled(sb, 0.0, if b.detail_name().is_some() { SEL_BLUE } else { Color32::from_rgb(50, 50, 50) });
+    if tap(ui, sb, "cdj-trk-detail").0 { out.push(Event::Ui(UiEvent::BrowseDetail)); }
+    // The second column beside TRACK (ARTIST or ALBUM), when switched on.
+    let dx = b.detail_name().map(|_| tr + (1079.0 - tr) * 0.5);
+    if let (Some(n), Some(dx)) = (b.detail_name(), dx) {
+        p.line_segment([at(dx, 92.0), at(dx, 152.0)], Stroke::new(1.5 * u, Color32::BLACK));
+        label(ui, at(dx + 11.0, 122.0), Align2::LEFT_CENTER, n, 21.0, u, LABEL);
+    }
     outline(ui, sb, Color32::BLACK, u);
     let (cx, cy) = (sb.center().x, sb.center().y);
     let st = Stroke::new(1.5 * u, LABEL);
@@ -1954,6 +2158,7 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
     p.line_segment([Pos2::new(cx, cy - 10.0 * u), Pos2::new(cx + 6.0 * u, cy - 4.0 * u)], st);
     p.line_segment([Pos2::new(cx - 6.0 * u, cy + 4.0 * u), Pos2::new(cx, cy + 10.0 * u)], st);
     p.line_segment([Pos2::new(cx, cy + 10.0 * u), Pos2::new(cx + 6.0 * u, cy + 4.0 * u)], st);
+    let fsz = [22.0, 27.0, 32.0][b.font_size() as usize];
     let sel = b.selected;
     let first = sel.saturating_sub(vis / 2).min(rows.len().saturating_sub(vis));
     for k in 0..vis {
@@ -1971,19 +2176,27 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
             rules(false);
             continue;
         };
-        let lit = i == sel;
+        let lit = i == sel && !b.cat_focus();
         let stripe = if k % 2 == 0 { Color32::from_rgb(40, 40, 40) } else { BG };
         p.rect_filled(Rect::from_min_max(at(left, y), at(pv, y + ROW_H)), 0.0, stripe);
-        draw_row_preview(ui, e, sc.min.x + left * u, sc.min.y + y * u, u);
+        draw_row_preview(ui, b, e, sc.min.x + left * u, sc.min.y + y * u, u, b.previews_on());
         p.rect_filled(Rect::from_min_max(at(tr, y), at(1280.0, y + ROW_H)), 0.0, if lit { SEL_BLUE } else { stripe });
         let cy = sc.min.y + (y + ROW_H / 2.0) * u;
         let title = Rect::from_min_max(at(tr, y), at(1079.0, y + ROW_H));
         if tap(ui, title, &format!("cdj-trk-{i}")).0 {
-            out.push(Event::Deck(if lit { ControlEvent::Load } else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - sel as i32 } }));
+            out.push(if b.cat_focus() { Event::Ui(UiEvent::BrowseRow(i)) }
+                     else { Event::Deck(if lit { ControlEvent::Load } else { ControlEvent::BrowseEncoderDelta { delta: i as i32 - sel as i32 } }) });
         }
         track_icon(ui, Pos2::new(sc.min.x + (tr + 23.0) * u, cy), r.stems, u);
-        p.with_clip_rect(title.shrink2(Vec2::new(0.0, 0.0)).intersect(Rect::from_min_max(at(tr, y), at(1075.0, y + ROW_H))))
-            .text(Pos2::new(sc.min.x + (tr + 46.0) * u, cy), Align2::LEFT_CENTER, r.text, FontId::proportional(27.0 * u), if r.played { PLAYED } else { TEXT });
+        let tcol = if r.played { PLAYED } else { TEXT };
+        let title_end = dx.map_or(1075.0, |d| d - 4.0);
+        scroll_text(ui, Rect::from_min_max(at(tr, y), at(title_end, y + ROW_H)), sc.min.x + (tr + 46.0) * u, cy,
+                    r.text, FontId::proportional(fsz * u), tcol, lit, u);
+        if let Some(d) = dx {
+            p.line_segment([at(d, y), at(d, y + ROW_H)], Stroke::new(1.0 * u, Color32::from_rgb(70, 70, 70)));
+            scroll_text(ui, Rect::from_min_max(at(d + 2.0, y), at(1075.0, y + ROW_H)), sc.min.x + (d + 10.0) * u, cy,
+                        &b.detail_text(e), FontId::proportional(fsz * 0.9 * u), LABEL, lit, u);
+        }
         if r.tagged { p.circle_filled(Pos2::new(sc.min.x + 1068.0 * u, cy), 5.0 * u, BARS_ORANGE); }
         rules(lit);
         if lit {
@@ -1992,11 +2205,12 @@ fn draw_track_table(ui: &Ui, lay: &Layout, b: &Browser, rows: &[Row], left: f32,
             label(ui, load.center(), Align2::CENTER_CENTER, "LOAD", 22.0, u, Color32::BLACK);
             if tap(ui, load, &format!("cdj-trk-load-{i}")).0 { out.push(Event::Deck(ControlEvent::Load)); }
         } else {
-            if let Some(bpm) = e.bpm.filter(|b| *b > 0.0) {
-                label(ui, Pos2::new(sc.min.x + 1178.0 * u, cy), Align2::RIGHT_CENTER, format!("{bpm:.1}"), 27.0, u, TEXT);
+            let (mb, mk) = e.load().map(|l| b.db_bpm_key(l)).unwrap_or((None, None));
+            if let Some(bpm) = e.bpm.or(mb).filter(|b| *b > 0.0) {
+                label(ui, Pos2::new(sc.min.x + 1178.0 * u, cy), Align2::RIGHT_CENTER, format!("{bpm:.1}"), fsz, u, TEXT);
             }
-            if let Some(k) = &e.key {
-                label(ui, Pos2::new(sc.min.x + 1200.0 * u, cy), Align2::LEFT_CENTER, k, 27.0, u, TEXT);
+            if let Some(k) = e.key.clone().or(mk) {
+                label(ui, Pos2::new(sc.min.x + 1200.0 * u, cy), Align2::LEFT_CENTER, k, fsz, u, TEXT);
             }
         }
     }
@@ -2021,9 +2235,7 @@ fn draw_search(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, tags: &T
     // Header: source tile, then the search field.
     p.rect_filled(lay.header, 0.0, HEADER);
     let st = lay.source;
-    p.rect_filled(st, 0.0, SOURCE_TILE);
-    label(ui, Pos2::new(st.center().x, st.min.y + 66.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
-    label(ui, Pos2::new(st.center().x, st.min.y + 38.0 * u), Align2::CENTER_CENTER, "▣", 24.0, u, TEXT);
+    draw_source_tile(ui, snap, st, Tile { kind: b.source_kind(), badge: b.source_badge() }, u);
     let field = Rect::from_min_max(at(109.0, 20.0), at(874.0, 70.0));
     p.rect_filled(field, 0.0, Color32::BLACK);
     let m = at(137.0, 43.0);
@@ -2093,7 +2305,7 @@ fn draw_tag_list(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, tags: &TagList, u: 
     let rows: Vec<Row> = tags.entries().iter().map(|e| Row {
         icon: RowIcon::Track, text: &e.name, value: e.artist.clone(), tagged: false, played: false, stems: false,
     }).collect();
-    draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, u, out);
+    draw_list_header(ui, snap, lay, &format!("TAG LIST   {} / {}", tags.len(), TagList::MAX), false, cached_tile(), u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
     draw_list(ui, pane, "TRACK", &rows, tags.selected, "No tagged tracks. Tag one in BROWSE.", u, Some(out));
@@ -2108,7 +2320,7 @@ fn draw_utility(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, settings: &Settings,
         icon: RowIcon::None, text: name, tagged: false, played: false, stems: false,
         value: Some(match s { Setting::Stems => snap.stems.state.menu_value().unwrap_or_else(|| settings.value(*s)), _ => settings.value(*s) }),
     }).collect();
-    draw_list_header(ui, snap, lay, "UTILITY", false, u, out);
+    draw_list_header(ui, snap, lay, "UTILITY", false, cached_tile(), u, out);
     let pane = Rect::from_min_max(Pos2::new(sc.min.x + 92.0 * u, sc.min.y + 92.0 * u), Pos2::new(sc.max.x, sc.min.y + 628.0 * u));
     ui.painter().rect_filled(Rect::from_min_max(Pos2::new(sc.min.x, pane.min.y), Pos2::new(pane.min.x, pane.max.y)), 0.0, COLUMN);
     draw_list(ui, pane, "SETTINGS", &rows, cursor, "", u, None);

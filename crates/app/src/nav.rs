@@ -86,7 +86,7 @@ mod tests {
     #[test]
     fn source_opens_on_the_loaded_tracks_row() {
         let row = |kind, path: &str| SourceRow { kind, label: String::new(), player: None,
-                                                 path: Some(PathBuf::from(path)), ip: None, rekordbox: false };
+                                                 path: Some(PathBuf::from(path)), ip: None, rekordbox: false, info: None };
         // A stick mounted inside the home folder.
         let rows = vec![row(SourceKind::Local, "/home/dan"), row(SourceKind::Usb, "/home/dan/stick")];
         let on = |p: &str| Load::Local { path: PathBuf::from(p), analyze: None };

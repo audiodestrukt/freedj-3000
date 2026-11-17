@@ -9,6 +9,7 @@
 
 mod audio;
 mod browser;
+mod dbsession;
 pub mod chrome;
 mod cpumeter;
 mod grids;
@@ -1614,7 +1615,11 @@ impl DeckApp {
                                 let entry = taglist::TagEntry { name: e.name.clone(), artist: e.artist.clone(), load: load.clone() };
                                 let tagged = self.tag_list.toggle(entry);
                                 log::info!("tag list: {} {}", if tagged { "tagged" } else { "removed" }, e.name);
+                            } else {
+                                log::info!("tag list: {:?} is not a track, nothing to tag", e.name);
                             }
+                        } else {
+                            log::info!("tag list: nothing highlighted to tag");
                         }
                     }
                     ScreenMode::TagList => {
@@ -1622,6 +1627,18 @@ impl DeckApp {
                             log::info!("tag list: removed {}", e.name);
                         }
                     }
+                    // Anywhere else (the playback screen, as on the unit):
+                    // tag, or untag, the track on the deck.
+                    ScreenMode::Playback | ScreenMode::Info | ScreenMode::Perform => match self.loaded.clone() {
+                        Some(load) => {
+                            let name = self.track_tags.title.clone()
+                                .unwrap_or_else(|| self.path.file_stem().and_then(|n| n.to_str()).unwrap_or("").to_string());
+                            let entry = taglist::TagEntry { name: name.clone(), artist: self.track_tags.artist.clone(), load };
+                            let tagged = self.tag_list.toggle(entry);
+                            log::info!("tag list: {} {} (loaded track)", if tagged { "tagged" } else { "removed" }, name);
+                        }
+                        None => log::info!("tag list: no loaded track to tag"),
+                    },
                     _ => {}
                 }
             }
@@ -1788,6 +1805,11 @@ impl DeckApp {
                     S::Clear => self.browser.set_search_query(String::new()),
                 }
             }
+            Event::Ui(UiEvent::BrowseDetail) => self.browser.cycle_detail(),
+            Event::Ui(UiEvent::BrowseFont) => self.browser.cycle_font(),
+            Event::Ui(UiEvent::BrowsePreview) => self.browser.toggle_previews(),
+            Event::Ui(UiEvent::BrowseInfo) => if self.screen_mode == ScreenMode::Browse { self.browser.toggle_info() },
+            Event::Ui(UiEvent::BrowseRow(i)) => self.browser.pick_row(i),
             Event::Ui(UiEvent::BrowseCategory(i)) => {
                 self.browser.open_rb_category(i);
                 self.screen_mode = ScreenMode::Browse;
@@ -1810,6 +1832,16 @@ impl DeckApp {
                         ScreenMode::Browse
                     };
                     log::info!("screen → {:?}", self.screen_mode);
+                }
+                TopScreen::Playlist => {
+                    // PLAY LIST: the playlists of the source being browsed,
+                    // else of the stick the last track came from.
+                    if self.browser.open_playlists() {
+                        self.screen_mode = ScreenMode::Browse;
+                        log::info!("screen → {:?} (playlists)", self.screen_mode);
+                    } else {
+                        self.notify("NO SOURCE LOADED");
+                    }
                 }
                 TopScreen::Info => {
                     // INFO: the loaded track's details, in the middle band.
@@ -2438,7 +2470,7 @@ impl DeckApp {
                 }
             };
             log::info!("LINK {ip}: read {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
-            prep.complete(Fetched { name, path: rel_path, audio: AudioSrc::Bytes(audio), grid, t0 }, tx)
+            prep.complete(Fetched { name, path: rel_path, audio: AudioSrc::Bytes(audio), grid, t0, meta: None }, tx)
         })
     }
 
@@ -2460,11 +2492,11 @@ impl DeckApp {
         let ports = self.link_ports;
         self.start_fetch(title.clone(), move |tx| {
             let t0 = Instant::now();
-            let (path, grid) = match known {
+            let (path, grid, meta) = match known {
                 Some(r) => r?,
                 None => {
                     let mut db = Client::discover_at(ip, ports.query, device)?;
-                    (db.file_path(slot, id)?, db.beat_grid(slot, id))
+                    (db.file_path(slot, id)?, db.beat_grid(slot, id), db.track_meta(slot, id).ok())
                 }
             };
             let path = path.ok_or_else(|| anyhow::anyhow!("LINK {ip}: no file path for track {id}"))?;
@@ -2479,10 +2511,7 @@ impl DeckApp {
             let want = if rekordbox { "/" } else if sd { "/B/" } else { "/C/" };
             let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
             let exports = nfs.exports()?;
-            let export = exports.iter().find(|e| **e == utf16(want)).or_else(|| exports.first()).cloned()
-                .unwrap_or_else(|| utf16(want));
-            let root = nfs.mount(&export)?;
-            let (fh, size) = nfs.lookup_path(&root, &path)?;
+            let (fh, size) = nfs_resolve(&mut nfs, &exports, &utf16(want), &path)?;
             // The download runs on its own thread while the decoder reads the
             // front of the file as it arrives: the deck is playable after the
             // first seconds, not after the whole file.
@@ -2498,7 +2527,7 @@ impl DeckApp {
                 }
             })?;
             let name = if title.is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { title };
-            prep.complete(Fetched { name, path, audio: AudioSrc::Stream(reader), grid: FetchedGrid::Beats(beats), t0 }, tx)
+            prep.complete(Fetched { name, path, audio: AudioSrc::Stream(reader), grid: FetchedGrid::Beats(beats), t0, meta }, tx)
         })
     }
 
@@ -2656,6 +2685,7 @@ impl DeckApp {
                     if self.loading.take().is_some() {
                         self.play_on_load = false;
                         log::warn!("load failed: {e:#}");
+                        self.notify("COULD NOT LOAD THE TRACK");
                     } else if !self.audio.complete.load(Ordering::Relaxed) {
                         // The start played; the rest would not decode (a
                         // damaged tail).  The track ends where decoding did.
@@ -3090,6 +3120,7 @@ impl DeckApp {
         let mode = match self.settings.wave_color {
             settings::WaveColor::Blue => M::Blue, settings::WaveColor::Rgb => M::Rgb, settings::WaveColor::ThreeBand => M::ThreeBand,
         };
+        cdj3000::set_wave_mode(mode as u8);
         if let Some(r) = &mut self.renderer { r.set_color_mode(mode); }
     }
 
@@ -3581,6 +3612,11 @@ impl DeckApp {
         }
         let mut touch = Vec::new();
         let _t_run = Instant::now();
+        cdj3000::set_source_badge(self.browser.source_badge(), self.browser.source_kind());
+        {
+            let (kind, badge) = self.loaded.as_ref().map_or((browser::SourceTile::None, None), |l| self.browser.load_tile(l));
+            cdj3000::set_loaded_tile(badge, kind);
+        }
         let view = match self.screen_mode {
             ScreenMode::Playback => screen::ScreenView::Playback,
             ScreenMode::Browse   => screen::ScreenView::Browse(&self.browser),
@@ -3629,6 +3665,7 @@ impl DeckApp {
             || self.loading.is_some()
             || self.transport.preview
             || egui_animating
+            || self.browser.db_pending()
             || frame_start.duration_since(self.last_input) < Duration::from_secs(1);
         // Hold the screen awake only while the deck is in use: playing, loading,
         // or touched in the last AWAKE_IDLE.  An idle deck on the desk then lets
@@ -3658,6 +3695,7 @@ impl DeckApp {
         self.poll_stems();
         self.sync_stem_wave();
         self.browser.poll_media();   // USB inserted / removed → source rows
+        if self.screen_mode == ScreenMode::Browse { self.browser.prefetch_meta(); }
         // Jog nudge snap-back: once the wheel has been still past the window,
         // return to the pitch-fader speed.
         if let Some(until) = self.jog_until {
@@ -3819,10 +3857,57 @@ impl CueLooks {
 /// The fetched audio: all of it, or a file still downloading that the decoder
 /// reads as it arrives.
 enum AudioSrc { Bytes(Vec<u8>), Stream(opendeck_decode::growing::Growing) }
-struct Fetched { name: String, path: String, audio: AudioSrc, grid: FetchedGrid, t0: Instant }
+struct Fetched { name: String, path: String, audio: AudioSrc, grid: FetchedGrid, t0: Instant,
+    /// The serving library's title, artist, … (a player's database knows them
+    /// when the file's own tags are missing or unread).
+    meta: Option<opendeck_dbserver::TrackMeta> }
 /// `Anlz`: the `.DAT`, and the `.EXT` beside it when there is one (cue
 /// colours and comments).
 enum FetchedGrid { None, Anlz(Vec<u8>, Option<Vec<u8>>), Beats(Vec<opendeck_dbserver::GridBeat>) }
+
+/// Find a file a player's library names, over NFS.  The player's own export
+/// (`want`, "/C/" for its USB) goes first, then every other export it
+/// advertises; within one, a name that is not there is looked up again in the
+/// directory's listing, ignoring case.  Every miss is logged with what the
+/// directory holds, so a path the library names but the volume does not have
+/// shows what is actually there.
+fn nfs_resolve(nfs: &mut opendeck_nfs::Nfs, exports: &[Vec<u8>], want: &[u8], path: &str) -> Result<(opendeck_nfs::Fh, u32)> {
+    let show = |e: &[u8]| String::from_utf16_lossy(&e.chunks_exact(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect::<Vec<_>>());
+    log::info!("LINK nfs: exports {:?}, want {:?}", exports.iter().map(|e| show(e)).collect::<Vec<_>>(), show(want));
+    let mut order: Vec<Vec<u8>> = exports.iter().filter(|e| e.as_slice() == want).cloned().collect();
+    order.extend(exports.iter().filter(|e| e.as_slice() != want).cloned());
+    if order.is_empty() { order.push(want.to_vec()); }
+    let mut last = anyhow::anyhow!("no export to mount");
+    for export in order {
+        let name = show(&export);
+        let root = match nfs.mount(&export) {
+            Ok(r) => r,
+            Err(e) => { log::info!("LINK nfs: mount {name:?}: {e:#}"); last = e; continue; }
+        };
+        let (mut fh, mut size) = (root, 0u32);
+        let mut here = String::from("/");
+        let mut ok = true;
+        for comp in path.split('/').filter(|c| !c.is_empty()) {
+            let found = match nfs.lookup(&fh, comp) {
+                Ok(f) => Some(f),
+                Err(e) => {
+                    let entries = nfs.readdir(&fh).unwrap_or_default();
+                    let alt = entries.iter().find(|d| d.name.to_lowercase() == comp.to_lowercase());
+                    let sample: Vec<&str> = entries.iter().take(25).map(|d| d.name.as_str()).collect();
+                    log::info!("LINK nfs: {name:?}: {comp:?} not in {here:?} ({e:#}); {} entries, first {sample:?}; case-insensitive match {:?}",
+                               entries.len(), alt.map(|d| d.name.as_str()));
+                    match alt { Some(d) => nfs.lookup(&fh, &d.name).ok(), None => { last = e; None } }
+                }
+            };
+            match found {
+                Some((f, sz)) => { fh = f; size = sz; here = format!("{}{comp}/", here); }
+                None => { ok = false; break; }
+            }
+        }
+        if ok { log::info!("LINK nfs: {path:?} found on export {name:?}"); return Ok((fh, size)); }
+    }
+    Err(last)
+}
 
 /// The deck facts a loader thread needs; captured before the thread starts.
 #[derive(Clone)]
@@ -3893,10 +3978,22 @@ impl Prep {
     /// Decode fetched bytes and stream them in (loader thread).
     fn complete(self, f: Fetched, tx: &LoadTx) -> Result<()> {
         let ext = f.path.rsplit('.').next();
-        let dec = match f.audio {
+        let mut dec = match f.audio {
             AudioSrc::Bytes(b) => opendeck_decode::SymphoniaDecoder::open_bytes(b, ext),
             AudioSrc::Stream(r) => opendeck_decode::SymphoniaDecoder::open_growing(r, ext),
         }.context("failed to open the fetched audio")?;
+        // The file's own tags win; the library fills what they lack.
+        if let Some(m) = f.meta {
+            let t = dec.tags_mut();
+            if t.title.is_none()  { t.title  = m.title; }
+            if t.artist.is_none() { t.artist = m.artist; }
+            if t.album.is_none()  { t.album  = m.album; }
+            if t.genre.is_none()  { t.genre  = m.genre; }
+            if t.key.is_none()    { t.key    = m.key; }
+            if t.year.is_none()   { t.year   = m.year; }
+            if t.comment.is_none() { t.comment = m.comment; }
+            if t.bpm.is_none()    { t.bpm    = m.bpm; }
+        }
         let ch = self.deck_ch;
         let grid_cue = match f.grid {
             FetchedGrid::None => None,

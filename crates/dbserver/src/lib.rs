@@ -41,11 +41,26 @@ pub mod kind {
     pub const SETUP:          u16 = 0x0000;
     /// Root menu: the browse categories of a slot (args: dmst, 0, 0xffffff).
     pub const ROOT_MENU:      u16 = 0x1000;
+    pub const GENRE_MENU:     u16 = 0x1001;
     pub const ARTIST_MENU:    u16 = 0x1002;
     pub const ALBUM_MENU:     u16 = 0x1003;
     pub const ALL_TRACKS:     u16 = 0x1004;
+    pub const BPM_MENU:       u16 = 0x1006;
+    pub const RATING_MENU:    u16 = 0x1007;
+    pub const YEAR_MENU:      u16 = 0x1008;
+    pub const LABEL_MENU:     u16 = 0x100a;
+    pub const COLOR_MENU:     u16 = 0x100d;
+    pub const TIME_MENU:      u16 = 0x1010;
+    pub const HISTORY_MENU:   u16 = 0x1012;
     /// Tracks listed by file name (args: dmst, sort).
     pub const FILENAME_MENU:  u16 = 0x1013;
+    pub const KEY_MENU:       u16 = 0x1014;
+    /// Search by substring (args: dmst, sort, text byte size, text, 0).
+    pub const SEARCH:         u16 = 0x1300;
+    /// The folder tree of the media (args: dmst, sort, folder id, 0; id 0 = root).
+    pub const FOLDER_MENU:    u16 = 0x2006;
+    pub const ORIG_ARTIST_MENU: u16 = 0x1302;
+    pub const REMIXER_MENU:   u16 = 0x1602;
     /// Albums of one artist (args: dmst, sort, artist id).
     pub const ALBUMS_FOR_ARTIST: u16 = 0x1102;
     /// Tracks of one album (args: dmst, sort, album id).
@@ -239,6 +254,11 @@ impl MenuItem {
     /// Human name for `item_type` (the low 16 bits; the upper ones carry flags).
     pub fn type_name(&self) -> &'static str {
         match self.item_type & 0xffff {
+            // A track row is 0x0004 or "track title and X" (0x0704 with the
+            // artist, 0x0204 album, 0x0d04 BPM, …): which one depends on the
+            // sort order and the player.  Only 0x0004 was taken before, so a
+            // CDJ-3000's typed rows were dropped and its lists came up empty.
+            t if t & 0xff == 0x04 => "track",
             0x0001 => "folder",   0x0002 => "album",    0x0003 => "disc",     0x0004 => "track",
             0x0006 => "genre",    0x0007 => "artist",   0x0008 => "playlist", 0x000a => "rating",
             0x000b => "duration", 0x000d => "tempo",    0x000e => "label",    0x000f => "key",
@@ -250,12 +270,52 @@ impl MenuItem {
             0x002e => "date-added", 0x0000 => "path",   0x002f => "flag?",
             0x0080 => "root-genre", 0x0081 => "root-artist", 0x0082 => "root-album",
             0x0083 => "root-track", 0x0084 => "root-playlist", 0x0085 => "root-bpm",
-            0x0086 => "root-rating", 0x0087 => "root-year", 0x008b => "root-key",
+            0x0086 => "root-rating", 0x0087 => "root-year", 0x0088 => "root-remixer",
+            0x0089 => "root-label", 0x008a => "root-orig-artist", 0x008b => "root-key",
             0x008c => "root-date-added", 0x008e => "root-color", 0x0090 => "root-folder",
             0x0091 => "root-search", 0x0092 => "root-time", 0x0093 => "root-bitrate",
             0x0094 => "root-filename", 0x0095 => "root-history", 0x0098 => "root-hot-cue-bank",
             0x00aa => "root-matching", 0x00a1 => "sort-default", 0x00a2 => "sort-alphabet", _ => "?",
         }
+    }
+}
+
+/// A track's library metadata, from the rows of its metadata menu.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TrackMeta {
+    pub title: Option<String>, pub artist: Option<String>, pub album: Option<String>,
+    pub genre: Option<String>, pub key: Option<String>, pub year: Option<String>,
+    pub comment: Option<String>,
+    /// "yyyy-mm-dd" the track was added to the library.
+    pub added: Option<String>,
+    pub bpm: Option<f32>,
+    /// Length in seconds, and the 0–5 star rating.
+    pub duration: Option<u32>, pub rating: u8,
+    /// The cover's id for [`Client::artwork`] (0 = none).
+    pub artwork_id: u32,
+}
+
+impl TrackMeta {
+    pub fn from_rows(rows: &[MenuItem]) -> TrackMeta {
+        let mut m = TrackMeta::default();
+        let text = |r: &MenuItem| Some(r.label.clone()).filter(|l| !l.trim().is_empty());
+        for r in rows {
+            match r.item_type & 0xffff {
+                0x04 if m.title.is_none()  => { m.title = text(r); m.artwork_id = r.artwork_id; }
+                0x07 if m.artist.is_none() => m.artist = text(r),
+                0x02 if m.album.is_none()  => m.album  = text(r),
+                0x06 if m.genre.is_none()  => m.genre  = text(r),
+                0x0f if m.key.is_none()    => m.key    = text(r),
+                0x11 if m.year.is_none()   => m.year   = text(r),
+                0x23 if m.comment.is_none() => m.comment = text(r),
+                0x2e if m.added.is_none()  => m.added  = text(r),
+                0x0b if m.duration.is_none() => m.duration = Some(r.id).filter(|d| *d > 0),
+                0x0a => m.rating = (r.id as u8).min(5),
+                0x0d if m.bpm.is_none()    => m.bpm    = Some(r.id as f32 / 100.0).filter(|b| *b > 0.0),
+                _ => {}
+            }
+        }
+        m
     }
 }
 
@@ -399,6 +459,36 @@ impl Client {
         self.menu(kind::TRACKS_FOR_ALBUM, slot, TrackType::Rekordbox, vec![Field::U32(0), Field::U32(album)])
     }
 
+    /// Any category or drill-down menu: `kind_` with the sort order (0) and
+    /// the ids that pick the entry (`ids`), as the player's own screen asks.
+    pub fn browse(&mut self, kind_: u16, slot: Slot, ids: &[u32]) -> Result<Vec<MenuItem>> {
+        let mut rest = vec![Field::U32(0)];
+        rest.extend(ids.iter().map(|&i| Field::U32(i)));
+        self.menu(kind_, slot, TrackType::Rekordbox, rest)
+    }
+
+    /// What the library knows about one track: the rows of its metadata menu
+    /// folded into title, artist, album, genre, key, BPM and year.
+    pub fn track_meta(&mut self, slot: Slot, rekordbox_id: u32) -> Result<TrackMeta> {
+        Ok(TrackMeta::from_rows(&self.metadata(slot, rekordbox_id)?))
+    }
+
+    /// A track's cover: the JPEG or PNG bytes the player stores (0x2003).
+    pub fn artwork(&mut self, slot: Slot, artwork_id: u32) -> Result<Vec<u8>> {
+        let d = self.dmst(8, slot, TrackType::Rekordbox);
+        self.blob(kind::ARTWORK, kind::ARTWORK_BLOB, vec![d, Field::U32(artwork_id)])
+    }
+
+    /// SEARCH: the tracks whose title, artist or album contain `text` (the
+    /// player's own search, 0x1300; the text goes up in upper case, as a
+    /// player's screen sends it).
+    pub fn search(&mut self, slot: Slot, text: &str) -> Result<Vec<MenuItem>> {
+        let upper = text.to_uppercase();
+        let bytes = (upper.encode_utf16().count() as u32 + 1) * 2;
+        self.menu(kind::SEARCH, slot, TrackType::Rekordbox,
+                  vec![Field::U32(0), Field::U32(bytes), Field::Str(upper), Field::U32(0)])
+    }
+
     /// FILENAME category: every track, labelled by file name.
     pub fn filenames(&mut self, slot: Slot) -> Result<Vec<MenuItem>> {
         self.menu(kind::FILENAME_MENU, slot, TrackType::Rekordbox, vec![Field::U32(0)])
@@ -482,6 +572,30 @@ pub fn parse_beat_grid(blob: &[u8]) -> Vec<GridBeat> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn typed_track_rows_are_tracks() {
+        let row = |t| MenuItem { parent_id: 0, id: 1, label: "x".into(), label2: String::new(), item_type: t, flags: 0, artwork_id: 0, position: 0, key: String::new(), bpm_x100: 0 };
+        // 0x0004, "track title and artist/album/BPM/key/…", and a CDJ-3000's
+        // extra bits above the low 16.
+        for t in [0x0004, 0x0704, 0x0204, 0x0d04, 0x0f04, 0x2e04, 0x0001_0704] {
+            assert_eq!(row(t).type_name(), "track", "0x{t:x}");
+        }
+        for (t, n) in [(0x0001, "folder"), (0x0008, "playlist"), (0x0007, "artist"), (0x0088, "root-remixer"), (0x008a, "root-orig-artist")] {
+            assert_eq!(row(t).type_name(), n, "0x{t:x}");
+        }
+    }
+
+    #[test]
+    fn track_meta_from_rows() {
+        let row = |t, id, l: &str| MenuItem { parent_id: 0, id, label: l.into(), label2: String::new(), item_type: t, flags: 0, artwork_id: 0, position: 0, key: String::new(), bpm_x100: 0 };
+        let m = TrackMeta::from_rows(&[row(0x04, 9, "Daddy"), row(0x07, 3, "Ali Storm"), row(0x02, 0, "B Album"),
+                                       row(0x0d, 12850, ""), row(0x0f, 0, "Am"), row(0x0b, 200, ""), row(0x23, 0, "warm")]);
+        assert_eq!(m.comment.as_deref(), Some("warm"));
+        assert_eq!((m.title.as_deref(), m.artist.as_deref(), m.album.as_deref(), m.key.as_deref()),
+                   (Some("Daddy"), Some("Ali Storm"), Some("B Album"), Some("Am")));
+        assert_eq!(m.bpm, Some(128.5));
+    }
+
     use super::*;
 
     #[test]

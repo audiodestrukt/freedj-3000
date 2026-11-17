@@ -46,10 +46,26 @@ fn is_audio(path: &Path) -> bool {
 }
 
 /// A linked track's file path (if the server has one) and its beat-grid blob.
-pub type DbTrackFile = (Option<String>, anyhow::Result<Vec<u8>>);
+pub type DbTrackFile = (Option<String>, anyhow::Result<Vec<u8>>, Option<opendeck_dbserver::TrackMeta>);
 
 /// Which category a dbserver root-menu row is: by its label when it is one
 /// we know (a source may number the item types its own way), else by type.
+/// A category row's name (`level`: entries picked so far).  Rows are named
+/// by their label; a row with only a second label (a count, a key) shows
+/// that.  BPM rows have neither: the tempo ×100 is the id of a BPM row
+/// (a player's 0x000d row, as our own server sends it), and a range row's
+/// id is its range, shown ±0 … ±6 as on the unit.
+fn cat_row_name(cat: Cat, level: usize, i: &opendeck_dbserver::MenuItem) -> String {
+    if !i.label.is_empty() { return i.label.clone(); }
+    if !i.label2.is_empty() { return i.label2.clone(); }
+    match (cat, level) {
+        (Cat::Bpm, 0) if i.id % 100 == 0 => (i.id / 100).to_string(),
+        (Cat::Bpm, 0) => format!("{:.1}", i.id as f32 / 100.0),
+        (Cat::Bpm, 1) => format!("\u{b1}{}", i.id),
+        _ => String::new(),
+    }
+}
+
 fn db_category(i: &opendeck_dbserver::MenuItem) -> &'static str {
     match i.label.to_ascii_uppercase().as_str() {
         "TRACK" => "root-track",
@@ -57,6 +73,19 @@ fn db_category(i: &opendeck_dbserver::MenuItem) -> &'static str {
         "ARTIST" => "root-artist",
         "ALBUM" => "root-album",
         "FILENAME" | "FILE NAME" => "root-filename",
+        "GENRE" => "root-genre",
+        "BPM" => "root-bpm",
+        "RATING" => "root-rating",
+        "YEAR" => "root-year",
+        "LABEL" => "root-label",
+        "COLOR" => "root-color",
+        "TIME" | "DURATION" => "root-time",
+        "HISTORY" => "root-history",
+        "KEY" => "root-key",
+        "ORIGINAL ARTIST" => "root-orig-artist",
+        "FOLDER" => "root-folder",
+        "SEARCH" => "root-search",
+        "REMIXER" => "root-remixer",
         _ => i.type_name(),
     }
 }
@@ -73,6 +102,10 @@ pub enum Load {
     /// come from dbserver, the audio over the peer's NFS export.
     Db { ip: Ipv4Addr, id: u32, title: String, rekordbox: bool, #[serde(default)] sd: bool },
 }
+
+/// What the header tile shows as the source.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SourceTile { None, Folder, Usb, Link }
 
 /// One visible row.
 #[derive(Clone)]
@@ -97,6 +130,12 @@ impl Entry {
         match &self.kind { EntryKind::Track(l) => Some(l), _ => None }
     }
 }
+
+use crate::dbsession::{DbInfo, InfoKey, Session as DbSession};
+
+/// Lookups (metadata, cover, previews) queued on the session at once: few,
+/// so a new highlight's row is next rather than behind the old neighbours.
+const INFO_IN_FLIGHT: usize = 2;
 
 #[derive(Clone)]
 enum EntryKind {
@@ -150,6 +189,152 @@ enum Loc {
     DbAlbums,
     DbAlbum(u32),
     DbFilenames,
+    /// The other categories a player lists (GENRE, BPM, KEY, …): the ids
+    /// picked so far.  Fewer than `Cat::depth` of them is a list of names to
+    /// pick from; all of them is the tracks.
+    DbCat(Cat, Vec<u32>),
+    /// The player's folder tree (FOLDER): folder id, 0 = the root.
+    DbTree(u32),
+}
+
+/// A dbserver category beyond the ones with their own `Loc`: the menu that
+/// lists it, and the requests that open one of its entries (Beat Link's /
+/// dysentery's tables).  The argument after the sort order is the picked
+/// entry's id; -1 means "all" where a request takes two.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Cat { Genre, Bpm, Rating, Year, Label, Color, Time, History, Key, OrigArtist, Remixer }
+
+impl Cat {
+    fn of_root(kind: &str) -> Option<Cat> {
+        Some(match kind {
+            "root-genre" => Cat::Genre, "root-bpm" => Cat::Bpm, "root-rating" => Cat::Rating,
+            "root-year" => Cat::Year, "root-label" => Cat::Label, "root-color" => Cat::Color,
+            "root-time" => Cat::Time, "root-history" => Cat::History, "root-key" => Cat::Key,
+            "root-orig-artist" => Cat::OrigArtist, "root-remixer" => Cat::Remixer,
+            _ => return None,
+        })
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Cat::Genre => "GENRE", Cat::Bpm => "BPM", Cat::Rating => "RATING", Cat::Year => "YEAR",
+            Cat::Label => "LABEL", Cat::Color => "COLOR", Cat::Time => "TIME", Cat::History => "HISTORY",
+            Cat::Key => "KEY", Cat::OrigArtist => "ORIGINAL ARTIST", Cat::Remixer => "REMIXER",
+        }
+    }
+    /// How many entries are picked before the tracks: GENRE → artist → tracks.
+    fn depth(self) -> usize {
+        match self {
+            Cat::Rating | Cat::Color | Cat::Time | Cat::History => 1,
+            // BPM → its range (±0 … ±6) → tracks, as on the unit.
+            Cat::Bpm | Cat::Genre | Cat::Year | Cat::Label | Cat::Key | Cat::OrigArtist | Cat::Remixer => 2,
+        }
+    }
+    /// The request that lists the names at this level (`picked` ids so far).
+    fn names_request(self, picked: &[u32]) -> (u16, Vec<u32>) {
+        use opendeck_dbserver::kind as k;
+        match (self, picked) {
+            (Cat::Genre, [])      => (k::GENRE_MENU, vec![]),
+            (Cat::Genre, [g])     => (0x1101, vec![*g]),
+            (Cat::Bpm, [])        => (k::BPM_MENU, vec![]),
+            (Cat::Bpm, [t])       => (0x1106, vec![*t]),
+            (Cat::Rating, _)      => (k::RATING_MENU, vec![]),
+            (Cat::Year, [])       => (k::YEAR_MENU, vec![]),
+            (Cat::Year, [d])      => (0x1108, vec![*d]),
+            (Cat::Label, [])      => (k::LABEL_MENU, vec![]),
+            (Cat::Label, [l])     => (0x110a, vec![*l]),
+            (Cat::Color, _)       => (k::COLOR_MENU, vec![]),
+            (Cat::Time, _)        => (k::TIME_MENU, vec![]),
+            (Cat::History, _)     => (k::HISTORY_MENU, vec![]),
+            (Cat::Key, [])        => (k::KEY_MENU, vec![]),
+            (Cat::Key, [key])     => (0x1114, vec![*key]),
+            (Cat::OrigArtist, []) => (k::ORIG_ARTIST_MENU, vec![]),
+            (Cat::OrigArtist, [a]) => (0x1402, vec![*a]),
+            (Cat::Remixer, [])    => (k::REMIXER_MENU, vec![]),
+            (Cat::Remixer, [a])   => (0x1702, vec![*a]),
+            _                     => (k::ALL_TRACKS, vec![]),
+        }
+    }
+    /// The request that lists the tracks once every entry is picked.
+    fn tracks_request(self, p: &[u32]) -> (u16, Vec<u32>) {
+        const ALL: u32 = 0xffff_ffff;
+        let at = |i: usize| p.get(i).copied().unwrap_or(0);
+        match self {
+            Cat::Genre      => (0x1301, vec![at(0), at(1), ALL]),
+            Cat::Bpm        => (0x1206, vec![at(0), at(1)]),
+            Cat::Rating     => (0x1107, vec![at(0)]),
+            Cat::Year       => (0x1208, vec![at(0), at(1)]),
+            Cat::Label      => (0x130a, vec![at(0), at(1), ALL]),
+            Cat::Color      => (0x110d, vec![at(0)]),
+            Cat::Time       => (0x1110, vec![at(0)]),
+            Cat::History    => (0x1112, vec![at(0)]),
+            Cat::Key        => (0x1214, vec![at(0), at(1)]),
+            Cat::OrigArtist => (0x1502, vec![at(0), at(1)]),
+            Cat::Remixer    => (0x1802, vec![at(0), at(1)]),
+        }
+    }
+}
+
+/// What a highlighted linked-player row opens, for the right-hand pane:
+/// a category's next level (a BPM's ranges, a range's tracks, a genre's
+/// artists), a playlist folder, a playlist, an artist's or album's tracks,
+/// a FOLDER tree level.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Peek { Cat(Cat, Vec<u32>), Folder(u32), Playlist(u32), Artist(u32), Album(u32), Tree(u32) }
+
+/// The pane's heading and rows (is a folder, name).
+type PeekRows = (&'static str, Vec<(bool, String)>);
+
+impl Peek {
+    fn of(loc: &Loc) -> Option<Peek> {
+        Some(match loc {
+            Loc::DbCat(c, ids) => Peek::Cat(*c, ids.clone()),
+            Loc::DbFolder(id)   => Peek::Folder(*id),
+            Loc::DbPlaylist(id) => Peek::Playlist(*id),
+            Loc::DbArtist(id)   => Peek::Artist(*id),
+            Loc::DbAlbum(id)    => Peek::Album(*id),
+            Loc::DbTree(id)     => Peek::Tree(*id),
+            _ => return None,
+        })
+    }
+
+    /// Whether it lists tracks (else the names of the next level).
+    fn lists_tracks(&self) -> bool {
+        match self {
+            Peek::Cat(c, ids) => ids.len() >= c.depth(),
+            Peek::Playlist(_) | Peek::Artist(_) | Peek::Album(_) => true,
+            Peek::Folder(_) | Peek::Tree(_) => false,
+        }
+    }
+
+    /// The request, as the level itself asks it when opened (`rebuild`).
+    fn request(&self) -> impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>> + Send + 'static {
+        let p = self.clone();
+        move |c: &mut DbClient, s: Slot| match &p {
+            Peek::Cat(cat, ids) if ids.len() >= cat.depth() => { let (k, a) = cat.tracks_request(ids); c.browse(k, s, &a) }
+            Peek::Cat(cat, ids) => { let (k, a) = cat.names_request(ids); c.browse(k, s, &a) }
+            Peek::Folder(id)   => c.playlist(s, *id, true),
+            Peek::Playlist(id) => c.playlist(s, *id, false),
+            Peek::Artist(id)   => c.tracks_for_artist(s, *id),
+            Peek::Album(id)    => c.tracks_for_album(s, *id),
+            Peek::Tree(id)     => c.browse(opendeck_dbserver::kind::FOLDER_MENU, s, &[*id, 0]),
+        }
+    }
+
+    /// The pane's rows from the player's reply, named as the level names them.
+    fn rows(&self, items: Vec<MenuItem>) -> PeekRows {
+        if self.lists_tracks() {
+            return ("TRACK", items.into_iter().filter(|i| i.type_name() == "track").map(|i| (false, i.label)).collect());
+        }
+        match self {
+            Peek::Cat(cat, ids) => (cat.label(), items.iter().map(|i| (true, cat_row_name(*cat, ids.len(), i))).collect()),
+            Peek::Folder(_) => ("PLAYLIST", items.into_iter().map(|i| (true, i.label)).collect()),
+            _ => ("FOLDER", items.into_iter().filter_map(|i| match i.type_name() {
+                "folder" => Some((true, i.label)),
+                "track"  => Some((false, i.label)),
+                _ => None,
+            }).collect()),
+        }
+    }
 }
 
 /// A track field the rekordbox categories group by.
@@ -196,6 +381,8 @@ pub struct SourceRow {
     /// A LINK source's address.
     pub ip:        Option<Ipv4Addr>,
     pub rekordbox: bool,
+    /// A linked player's report on the media: tracks, playlists, date, sizes.
+    pub info:      Option<opendeck_link::prodj::MediaInfo>,
 }
 
 impl SourceRow {
@@ -237,9 +424,9 @@ pub struct Browser {
     pub selected: usize,
     rb:        Option<Arc<RbExport>>,
     rb_source: Option<RbSource>,
-    /// Open dbserver session to a peer: its address, the client, and the slot
-    /// we browse (USB on a player, Collection on rekordbox).
-    db:        Option<(Ipv4Addr, DbClient, Slot)>,
+    /// Open dbserver session to a peer (its address and the slot we browse:
+    /// USB on a player, Collection on rekordbox), on its own thread.
+    db:        Option<DbSession>,
     /// Removable media seen at the last scan (USB rows at the top level).
     media:     Vec<Mount>,
     media_at:  Option<Instant>,
@@ -247,6 +434,22 @@ pub struct Browser {
     /// descend), and the source's own label ("3 USB: OPENDECK") for the root.
     db_title:  String,
     db_label:  String,
+    /// The linked player's category menu, kept for the left-hand column.
+    db_cats:   Vec<Entry>,
+    /// Library metadata of tracks shown in a dbserver list, fetched as each
+    /// is highlighted (a list row carries only title and artist).
+    meta_cache: std::collections::HashMap<InfoKey, Option<DbInfo>>,
+    /// Lookups asked of the session and not answered yet.
+    meta_asked: std::collections::HashSet<InfoKey>,
+    /// The right-hand pane for a highlighted linked row: what it opens, by
+    /// row, and the one list asked and not answered yet (its ticket).
+    peeks:      std::collections::HashMap<Peek, PeekRows>,
+    peek_asked: Option<(u64, Peek)>,
+    peek_ticket: u64,
+    /// The highlight is in the category column on the left (BACK from a
+    /// category's top level): the wheel steps through the categories, each
+    /// opening as it is reached, and pressing it goes back into the list.
+    cat_focus:  bool,
     link:      Arc<LinkState>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
@@ -274,6 +477,16 @@ pub struct Browser {
     /// The source browsed last: the USB / BROWSE key goes back to it rather
     /// than to whatever stick was mounted most recently.
     last_root: Option<PathBuf>,
+    /// PLAY LIST: the playlists only, no category column.
+    playlist_only: bool,
+    /// The second row of the track table: 0 off, then ARTIST, ALBUM, GENRE.
+    detail: u8,
+    info: bool,
+    previews: bool,
+    /// Nothing chosen yet since launch: BROWSE lists nothing until a source
+    /// (SOURCE, USB, PLAY LIST) is picked, as a unit with nothing loaded.
+    idle: bool,
+    font: u8,
     /// Which local tracks have OverCue stems (the "S" mark in lists).
     stem_marks: std::cell::RefCell<crate::stems::StemMarks>,
 }
@@ -316,6 +529,13 @@ impl Browser {
             media_at: Some(Instant::now()),
             db_title: String::new(),
             db_label: String::new(),
+            db_cats: Vec::new(),
+            meta_cache: Default::default(),
+            meta_asked: Default::default(),
+            peeks: Default::default(),
+            peek_asked: None,
+            peek_ticket: 0,
+            cat_focus: false,
             link,
             preview: Default::default(),
             home: start.clone(),
@@ -325,6 +545,12 @@ impl Browser {
             names: Vec::new(),
             positions: Default::default(),
             last_root: None,
+            playlist_only: false,
+            detail: 0,
+            info: true,
+            previews: true,
+            idle: !cfg!(test),
+            font: 1,
             stem_marks: Default::default(),
         };
         b.rebuild();
@@ -354,6 +580,91 @@ impl Browser {
     }
     pub fn selected_entry(&self) -> Option<&Entry> { self.entries.get(self.selected) }
 
+    /// Look up the highlighted dbserver track's library metadata once (title,
+    /// artist, album, key, BPM, year, cover, previews) for the INFO pane and
+    /// the table.  Call each frame; it never waits on the network: the
+    /// session's worker asks the player, and the answer is taken here a
+    /// frame or two later.
+    pub fn prefetch_meta(&mut self) {
+        let Some(db) = self.db.as_ref() else { return };
+        for (k, info) in db.answers() {
+            self.meta_asked.remove(&k);
+            self.meta_cache.insert(k, info);
+        }
+        // The right-hand pane: what the highlighted row opens, one list at
+        // a time (scrolling fast asks only for where the highlight stops).
+        for (ticket, r) in db.lists() {
+            let Some((t, peek)) = self.peek_asked.take() else { continue };
+            if t != ticket { self.peek_asked = Some((t, peek)); continue; }
+            let rows = match r {
+                Ok(items) => peek.rows(items),
+                Err(e) => { log::info!("LINK pane {peek:?}: {e:#}"); (if peek.lists_tracks() { "TRACK" } else { "" }, Vec::new()) }
+            };
+            self.peeks.insert(peek, rows);
+        }
+        if self.peek_asked.is_none() {
+            if let Some(peek) = self.selected_peek().filter(|p| !self.peeks.contains_key(p)) {
+                self.peek_ticket += 1;
+                if db.ask_list(self.peek_ticket, peek.request()) { self.peek_asked = Some((self.peek_ticket, peek)); }
+            }
+        }
+        // The highlighted row first, then its neighbours, so the table's
+        // previews and second rows fill in around it.
+        let n = self.entries.len();
+        let order = std::iter::once(self.selected)
+            .chain((1..=10usize).flat_map(|d| [self.selected + d, self.selected.wrapping_sub(d)]))
+            .filter(|&i| i < n);
+        for i in order {
+            if self.meta_asked.len() >= INFO_IN_FLIGHT { break; }
+            let EntryKind::Track(l @ Load::Db { ip, .. }) = &self.entries[i].kind else { continue };
+            if *ip != db.ip { continue; }
+            let Some(k) = Self::meta_key(l) else { continue };
+            if k.1 != db.slot as u8 || self.meta_cache.contains_key(&k) || self.meta_asked.contains(&k) { continue; }
+            if db.ask_info(k, i == self.selected) { self.meta_asked.insert(k); }
+        }
+    }
+
+    /// Lookups still under way (the app keeps drawing at full rate so their
+    /// answers show as they land).
+    pub fn db_pending(&self) -> bool { !self.meta_asked.is_empty() || self.peek_asked.is_some() }
+
+    fn selected_peek(&self) -> Option<Peek> {
+        match self.selected_entry() {
+            Some(Entry { kind: EntryKind::Descend(loc), .. }) => Peek::of(loc),
+            _ => None,
+        }
+    }
+
+    /// The right-hand pane for a highlighted linked-player row: the heading
+    /// and rows of what it opens (empty until the player answers).  `None`
+    /// for other rows.
+    pub fn db_peek(&self) -> Option<PeekRows> {
+        let p = self.selected_peek()?;
+        Some(self.peeks.get(&p).cloned().unwrap_or_else(|| (if p.lists_tracks() { "TRACK" } else { "" }, Vec::new())))
+    }
+
+    /// The tags (title, artist, album, key, BPM, cover) fetched for a
+    /// dbserver track, if any.
+    pub fn db_tags(&self, l: &Load) -> Option<opendeck_decode::TrackTags> {
+        let i = self.meta_cache.get(&Self::meta_key(l)?)?.as_ref()?;
+        let m = &i.meta;
+        Some(opendeck_decode::TrackTags {
+            title: m.title.clone(), artist: m.artist.clone(), album: m.album.clone(), genre: m.genre.clone(),
+            key: m.key.clone(), bpm: m.bpm, comment: m.comment.clone(),
+            // A player's metadata has no year row for most tracks; the date
+            // added fills the calendar row then.
+            year: m.year.clone().or_else(|| m.added.clone()),
+            artwork: i.art.as_ref().map(|b| (if b.starts_with(&[0x89, b'P']) { "image/png" } else { "image/jpeg" }.to_string(), b.clone())),
+            ..Default::default()
+        })
+    }
+
+    fn meta_key(l: &Load) -> Option<(Ipv4Addr, u8, u32)> {
+        let Load::Db { ip, id, sd, rekordbox, .. } = l else { return None };
+        let slot = if *rekordbox { Slot::Collection } else if *sd { Slot::Sd } else { Slot::Usb };
+        Some((*ip, slot as u8, *id))
+    }
+
     pub fn title(&self) -> String {
         match self.stack.last() {
             Some(Loc::Fs(p)) => p.file_name().and_then(|n| n.to_str()).unwrap_or("/").to_string(),
@@ -380,12 +691,88 @@ impl Browser {
             Some(Loc::DbArtists) => "ARTIST".to_string(),
             Some(Loc::DbAlbums) => "ALBUM".to_string(),
             Some(Loc::DbFilenames) => "FILENAME".to_string(),
+            Some(Loc::DbCat(c, ids)) if ids.is_empty() => c.label().to_string(),
+            Some(Loc::DbCat(..)) => self.db_title.clone(),
+            Some(Loc::DbTree(0)) => "FOLDER".to_string(),
+            Some(Loc::DbTree(_)) => self.db_title.clone(),
             Some(Loc::DbFolder(_)) | Some(Loc::DbPlaylist(_)) | Some(Loc::DbArtist(_)) | Some(Loc::DbAlbum(_)) => self.db_title.clone(),
             None => "/".to_string(),
         }
     }
 
-    pub fn refresh(&mut self) { self.rebuild(); }
+    pub fn refresh(&mut self) { self.playlist_only = false; self.cat_focus = false; self.rebuild(); }
+    /// BPM and key the player lists for a linked track, once fetched.
+    pub fn db_bpm_key(&self, l: &Load) -> (Option<f32>, Option<String>) {
+        match Self::meta_key(l).and_then(|k| self.meta_cache.get(&k)).and_then(|i| i.as_ref()) {
+            Some(i) => (i.meta.bpm, i.meta.key.clone()),
+            None => (None, None),
+        }
+    }
+    /// 0 small, 1 medium, 2 large: the table's text size ("A A A").
+    pub fn font_size(&self) -> u8 { self.font }
+    pub fn cycle_font(&mut self) { self.font = (self.font + 1) % 3; }
+    /// The linked stick being browsed: its player number and colour label,
+    /// for the header tile.  None outside a linked source.
+    pub fn source_badge(&self) -> Option<(u8, u8)> {
+        let in_link = self.stack.iter().any(|l| matches!(l, Loc::DbRoot | Loc::RbRoot | Loc::DbFolder(_) | Loc::DbCat(..) | Loc::DbAllTracks | Loc::DbTree(_)));
+        let (ip, slot) = match (&self.db, &self.rb_source) {
+            (Some(DbSession { ip, slot, .. }), _) if in_link && self.stack.iter().any(|l| matches!(l, Loc::DbRoot)) => (*ip, *slot as u8),
+            (_, Some(RbSource::Link(ip))) if in_link => (*ip, 3),
+            _ => return None,
+        };
+        let player = self.link.peer_player(ip)?;
+        let color = self.link.media(player).into_iter().find(|m| m.slot == slot).map_or(0, |m| m.color);
+        Some((player, color))
+    }
+    pub fn idle(&self) -> bool { self.idle }
+    /// The source a loaded track came from, for the playback screen's tile:
+    /// its kind, and for a linked stick its player number and colour label.
+    pub fn load_tile(&self, l: &Load) -> (SourceTile, Option<(u8, u8)>) {
+        let linked = |ip: Ipv4Addr, slot: u8| {
+            let player = self.link.peer_player(ip);
+            let color = player.and_then(|p| self.link.media(p).into_iter().find(|m| m.slot == slot)).map_or(0, |m| m.color);
+            (SourceTile::Link, player.map(|p| (p, color)))
+        };
+        match l {
+            Load::Local { path, .. } => {
+                if self.media.iter().any(|m| path.starts_with(&m.path)) { (SourceTile::Usb, None) } else { (SourceTile::Folder, None) }
+            }
+            Load::Link { ip, .. } => linked(*ip, 3),
+            Load::Db { ip, sd, .. } => linked(*ip, if *sd { 2 } else { 3 }),
+        }
+    }
+    pub fn previews_on(&self) -> bool { self.previews }
+    pub fn toggle_previews(&mut self) { self.previews = !self.previews; }
+    /// Length and stars the player lists for a linked track.
+    pub fn db_extra(&self, l: &Load) -> Option<(Option<u32>, u8)> {
+        let m = &self.meta_cache.get(&Self::meta_key(l)?)?.as_ref()?.meta;
+        Some((m.duration, m.rating))
+    }
+    pub fn info_on(&self) -> bool { self.info }
+    pub fn toggle_info(&mut self) { self.info = !self.info; }
+    pub fn playlist_only(&self) -> bool { self.playlist_only }
+    /// The table's second-row key: off → ARTIST → ALBUM → GENRE → off.
+    pub fn cycle_detail(&mut self) { self.detail = (self.detail + 1) % 3; }
+    pub fn detail_name(&self) -> Option<&'static str> {
+        [None, Some("ARTIST"), Some("ALBUM")][self.detail as usize]
+    }
+    /// What the second row shows for an entry (empty when not known yet).
+    pub fn detail_text(&self, e: &Entry) -> String {
+        let tags = e.load().and_then(|l| self.db_tags(l));
+        match self.detail {
+            1 => e.artist.clone().or_else(|| tags.and_then(|t| t.artist)).unwrap_or_default(),
+            2 => tags.and_then(|t| t.album).unwrap_or_default(),
+            _ => String::new(),
+        }
+    }
+    /// The blue preview of a linked track, once fetched.
+    /// The 3-band preview (low, mid, high per column) of a linked track.
+    pub fn db_bands(&self, l: &Load) -> Option<Arc<Vec<[u8; 3]>>> {
+        self.meta_cache.get(&Self::meta_key(l)?)?.as_ref()?.bands.clone()
+    }
+    pub fn db_wave(&self, l: &Load) -> Option<Arc<Vec<(u8, u8)>>> {
+        self.meta_cache.get(&Self::meta_key(l)?)?.as_ref()?.wave.clone()
+    }
 
     /// What is inside the highlighted row, if it is a folder on the
     /// filesystem: `(is_dir, name)` for its folders then audio files, sorted
@@ -420,7 +807,7 @@ impl Browser {
 
     fn rebuild(&mut self) {
         self.names.resize(self.stack.len(), String::new());
-        let entries = match self.stack.last().cloned() {
+        let entries = match self.stack.last().cloned().filter(|_| !self.idle) {
             Some(Loc::Fs(dir))        => self.fs_entries(&dir),
             Some(Loc::Link)           => self.link_entries(),
             Some(Loc::RbRoot)         => self.rb_root_entries(),
@@ -434,13 +821,15 @@ impl Browser {
             Some(Loc::RbHistoryList(id)) => self.rb_track_entries(|e| e.history_tracks(id)),
             Some(Loc::DbRoot)         => self.db_root_entries(),
             Some(Loc::DbFolder(id))   => self.db_folder_entries(id),
-            Some(Loc::DbPlaylist(id)) => self.db_track_entries(|c, s| c.playlist(s, id, false)),
+            Some(Loc::DbPlaylist(id)) => self.db_track_entries(move |c, s| c.playlist(s, id, false)),
             Some(Loc::DbAllTracks)    => self.db_track_entries(|c, s| c.all_tracks(s, 0)),
             Some(Loc::DbArtists)      => self.db_name_entries(|c, s| c.artists(s), Loc::DbArtist),
-            Some(Loc::DbArtist(id))   => self.db_track_entries(|c, s| c.tracks_for_artist(s, id)),
+            Some(Loc::DbArtist(id))   => self.db_track_entries(move |c, s| c.tracks_for_artist(s, id)),
             Some(Loc::DbAlbums)       => self.db_name_entries(|c, s| c.albums(s), Loc::DbAlbum),
-            Some(Loc::DbAlbum(id))    => self.db_track_entries(|c, s| c.tracks_for_album(s, id)),
+            Some(Loc::DbAlbum(id))    => self.db_track_entries(move |c, s| c.tracks_for_album(s, id)),
             Some(Loc::DbFilenames)    => self.db_track_entries(|c, s| c.filenames(s)),
+            Some(Loc::DbCat(c, ids))  => self.db_cat_entries(c, ids),
+            Some(Loc::DbTree(id))     => self.db_tree_entries(id),
             None                      => Vec::new(),
         };
         self.entries = entries;
@@ -556,21 +945,75 @@ impl Browser {
             Some(Ok(_)) => { log::info!("LINK: empty category menu; showing playlists"); return self.db_folder_entries(0); }
             Some(Err(e)) => { log::info!("LINK: no category menu ({e:#}); showing playlists"); return self.db_folder_entries(0); }
         };
-        items.into_iter().map(|i| {
+        for i in &items { log::info!("LINK category: {:?} item_type 0x{:x} id {} → {}", i.label, i.item_type, i.id, db_category(i)); }
+        // FOLDER and SEARCH stay off the list: SEARCH is its own key, and the
+        // categories cover what FOLDER would show.
+        let items: Vec<_> = items.into_iter().filter(|i| !matches!(db_category(i), "root-folder" | "root-search")).collect();
+        let rows: Vec<Entry> = items.into_iter().map(|i| {
             let kind = match db_category(&i) {
                 "root-track"    => EntryKind::Descend(Loc::DbAllTracks),
                 "root-playlist" => EntryKind::Descend(Loc::DbFolder(0)),
                 "root-artist"   => EntryKind::Descend(Loc::DbArtists),
                 "root-album"    => EntryKind::Descend(Loc::DbAlbums),
                 "root-filename" => EntryKind::Descend(Loc::DbFilenames),
-                _ => EntryKind::Unsupported,
+                "root-folder"   => EntryKind::Descend(Loc::DbTree(0)),
+                "root-search"   => EntryKind::Descend(Loc::Search),
+                other => match Cat::of_root(other) {
+                    Some(c) => EntryKind::Descend(Loc::DbCat(c, Vec::new())),
+                    None    => EntryKind::Unsupported,
+                },
             };
             Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None, kind }
-        }).collect()
+        }).collect();
+        self.db_cats = rows.clone();
+        rows
+    }
+
+    /// One of the `Cat` categories: the names to pick from at this level, or
+    /// the tracks once every entry is picked.
+    fn db_cat_entries(&mut self, cat: Cat, picked: Vec<u32>) -> Vec<Entry> {
+        if picked.len() >= cat.depth() {
+            let (kind, ids) = cat.tracks_request(&picked);
+            return self.db_track_entries(move |c, s| c.browse(kind, s, &ids));
+        }
+        let (kind, ids) = cat.names_request(&picked);
+        let req = ids.clone();
+        let Some(r) = self.db_call(move |c, s| c.browse(kind, s, &req)) else { return Vec::new() };
+        match r {
+            Ok(items) => {
+                // What the player sent, so a list of blank rows shows why.
+                for i in items.iter().take(3) { log::info!("LINK {} row: type 0x{:04x} id {} {:?} {:?}", cat.label(), i.item_type, i.id, i.label, i.label2); }
+                items.into_iter().map(|i| {
+                    let mut next = picked.clone();
+                    next.push(i.id);
+                    Entry { name: cat_row_name(cat, picked.len(), &i), is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(Loc::DbCat(cat, next)) }
+                }).collect()
+            }
+            Err(e) => { log::warn!("LINK {}: 0x{kind:04x} {ids:x?}: {e:#}", cat.label()); Vec::new() }
+        }
+    }
+
+    /// FOLDER: one level of the player's folder tree, folders then the
+    /// tracks in them.
+    fn db_tree_entries(&mut self, folder: u32) -> Vec<Entry> {
+        let Some(r) = self.db_call(move |c, s| c.browse(opendeck_dbserver::kind::FOLDER_MENU, s, &[folder, 0])) else { return Vec::new() };
+        let Some(DbSession { ip, slot, .. }) = self.db.as_ref() else { return Vec::new() };
+        let (ip, slot) = (*ip, *slot);
+        match r {
+            Ok(items) => items.into_iter().filter_map(|i| match i.type_name() {
+                "folder" => Some(Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None,
+                                         kind: EntryKind::Descend(Loc::DbTree(i.id)) }),
+                "track" => Some(Entry { name: i.label.clone(), is_dir: false,
+                    artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None, art: None,
+                    kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }) }),
+                other => { log::info!("LINK folder {folder}: row {:?} of type {other} (0x{:x}) skipped", i.label, i.item_type); None }
+            }).collect(),
+            Err(e) => { log::warn!("LINK folder {folder}: {e:#}"); Vec::new() }
+        }
     }
 
     /// A list of names (artists, albums) that each open as a track list.
-    fn db_name_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>, loc: fn(u32) -> Loc) -> Vec<Entry> {
+    fn db_name_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>> + Send + 'static, loc: fn(u32) -> Loc) -> Vec<Entry> {
         let Some(r) = self.db_call(fetch) else { return Vec::new() };
         match r {
             Ok(items) => items.into_iter().map(|i| Entry {
@@ -589,7 +1032,7 @@ impl Browser {
             out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None, key: None, art: None,
                              kind: EntryKind::Descend(Loc::DbAllTracks) });
         }
-        match self.db_call(|c, slot| c.playlist(slot, folder, true)).unwrap_or_else(|| Ok(Vec::new())) {
+        match self.db_call(move |c, slot| c.playlist(slot, folder, true)).unwrap_or_else(|| Ok(Vec::new())) {
             Ok(items) => for i in items {
                 let is_folder = i.type_name() == "folder";
                 out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None, key: None, art: None,
@@ -601,12 +1044,18 @@ impl Browser {
     }
 
     /// A track list: a playlist, a category's tracks, or the whole collection.
-    fn db_track_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>>) -> Vec<Entry> {
+    fn db_track_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>> + Send + 'static) -> Vec<Entry> {
         let Some(r) = self.db_call(fetch) else { return Vec::new() };
-        let Some((ip, _, slot)) = self.db.as_ref() else { return Vec::new() };
+        let Some(DbSession { ip, slot, .. }) = self.db.as_ref() else { return Vec::new() };
         let (ip, slot) = (*ip, *slot);
         match r {
-            Ok(items) => items.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
+            Ok(items) => {
+                // A row we don't take for a track is dropped; say what it was,
+                // so a player that types its rows differently shows in the log.
+                let dropped: Vec<_> = items.iter().filter(|i| i.type_name() != "track").map(|i| i.item_type).collect();
+                log::info!("LINK tracks: {} rows, {} dropped (types {:x?})", items.len(), dropped.len(), &dropped[..dropped.len().min(8)]);
+                items
+            }.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
                 name: i.label.clone(), is_dir: false,
                 artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None, art: None,
                 kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }),
@@ -615,48 +1064,44 @@ impl Browser {
         }
     }
 
-    /// Run a request on the open dbserver session. A player drops a session
-    /// when another opens from the same player number (seen on a CDJ-3000:
-    /// the first then reads EOF), so on an error reconnect once and retry.
-    /// `None` when no session is open.
-    fn db_call<T>(&mut self, mut f: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<T>) -> Option<anyhow::Result<T>> {
-        let (ip, c, slot) = self.db.as_mut()?;
-        let (ip, slot) = (*ip, *slot);
-        match f(c, slot) {
-            Ok(v) => Some(Ok(v)),
-            Err(e) => {
-                log::info!("LINK {ip}: request failed ({e:#}); reconnecting");
-                self.db = None;
-                if let Err(e) = self.connect_db(ip, slot) { return Some(Err(e)); }
-                let (_, c, slot) = self.db.as_mut()?;
-                Some(f(c, *slot))
-            }
-        }
+    /// Run a request on the open dbserver session and wait for it (a menu,
+    /// on a key press).  It goes ahead of the session's background lookups;
+    /// on an error the session reconnects once and retries (see
+    /// [`crate::dbsession`]).  `None` when no session is open.
+    fn db_call<T: Send + 'static>(&mut self, f: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<T> + Send + 'static) -> Option<anyhow::Result<T>> {
+        Some(self.db.as_ref()?.call(f))
     }
 
     /// For a LOAD from a linked player: the track's file path and beat-grid
     /// blob, asked on the browser's own session when it is open to that
     /// player and slot. Opening a second session would cost the browser its
-    /// own (see `db_call`). `None` when no such session is open.
+    /// own (see [`crate::dbsession`]). `None` when no such session is open.
     pub fn db_track_file(&mut self, ip: Ipv4Addr, slot: Slot, id: u32) -> Option<anyhow::Result<DbTrackFile>> {
-        if !matches!(&self.db, Some((cur, _, s)) if *cur == ip && *s == slot) { return None; }
-        let path = match self.db_call(|c, s| c.file_path(s, id))? {
+        if !matches!(&self.db, Some(d) if d.ip == ip && d.slot == slot) { return None; }
+        let path = match self.db_call(move |c, s| c.file_path(s, id))? {
             Ok(p) => p,
             Err(e) => return Some(Err(e)),
         };
-        let grid = self.db_call(|c, s| c.beat_grid(s, id)).unwrap_or_else(|| Err(anyhow::anyhow!("session closed")));
-        Some(Ok((path, grid)))
+        let grid = self.db_call(move |c, s| c.beat_grid(s, id)).unwrap_or_else(|| Err(anyhow::anyhow!("session closed")));
+        // The highlight already fetched it; no extra round trip.
+        let meta = self.meta_cache.get(&(ip, slot as u8, id)).and_then(|i| i.as_ref()).map(|i| i.meta.clone());
+        Some(Ok((path, grid, meta)))
     }
 
     /// Open a dbserver session to a peer (a player's USB slot, or rekordbox's
     /// collection).
     fn connect_db(&mut self, ip: Ipv4Addr, slot: Slot) -> anyhow::Result<()> {
-        if matches!(&self.db, Some((cur, _, s)) if *cur == ip && *s == slot) { return Ok(()); }
+        if matches!(&self.db, Some(d) if d.ip == ip && d.slot == slot) { return Ok(()); }
         // Servers answer requests from a real player number (1–4).
         let device = if (1..=4).contains(&self.link.player()) { self.link.player() } else { 1 };
-        let c = DbClient::discover(ip, device)?;
+        // The old session (if any) closes first: one session per player number.
+        self.db = None;
+        self.meta_asked.clear();
+        self.peeks.clear();
+        self.peek_asked = None;
+        let session = DbSession::open(ip, slot, move || DbClient::discover(ip, device))?;
         log::info!("LINK {ip}: dbserver session open ({slot:?})");
-        self.db = Some((ip, c, slot));
+        self.db = Some(session);
         Ok(())
     }
 
@@ -716,6 +1161,25 @@ impl Browser {
     /// The category column of a rekordbox source (CDJ-3000 skin): the
     /// categories and which one is open, while browsing inside one.
     pub fn rb_categories(&self) -> Option<(Vec<String>, Option<usize>)> {
+        if let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::DbRoot)) {
+            // A linked player: its categories down the left, like a unit.
+            if self.db_cats.is_empty() { return None; }
+            let group = |l: &Loc| -> (u8, Option<Cat>) { match l {
+                Loc::DbFolder(_) | Loc::DbPlaylist(_) => (0, None),
+                Loc::DbArtists | Loc::DbArtist(_) => (1, None),
+                Loc::DbAlbums | Loc::DbAlbum(_) => (2, None),
+                Loc::DbAllTracks => (3, None),
+                Loc::DbFilenames => (4, None),
+                Loc::DbTree(_) => (5, None),
+                Loc::DbCat(c, _) => (6, Some(*c)),
+                _ => (255, None),
+            } };
+            let open = self.stack.get(r + 1).and_then(|l| self.db_cats.iter().position(|c| match &c.kind {
+                EntryKind::Descend(k) => group(k) == group(l) && group(l).0 != 255,
+                _ => false,
+            }));
+            return Some((self.db_cats.iter().map(|c| c.name.clone()).collect(), open));
+        }
         let r = self.stack.iter().position(|l| matches!(l, Loc::RbRoot))?;
         let cats = self.rb_root_entries();
         let open = self.stack.get(r + 1).and_then(|l| cats.iter().position(|c| match (&c.kind, l) {
@@ -757,6 +1221,8 @@ impl Browser {
 
     /// SEARCH: start (or restart) a search from where the browser is.
     pub fn begin_search(&mut self) {
+        self.playlist_only = false;
+        self.cat_focus = false;
         if !self.in_search() { self.stack.push(Loc::Search); }
         self.search_query.clear();
         self.selected = 0;
@@ -775,13 +1241,19 @@ impl Browser {
     /// tracks whose title or artist contains it (the unit's SEARCH). In a
     /// folder: audio files anywhere below it whose name contains it.
     /// An empty query has no results, as on the unit.
-    fn search_entries(&self) -> Vec<Entry> {
+    fn search_entries(&mut self) -> Vec<Entry> {
         let q = self.search_query.to_lowercase();
         if q.is_empty() { return Vec::new(); }
         if self.stack.iter().any(|l| matches!(l, Loc::RbRoot)) {
             return self.rb_track_entries(|e| e.tracks.iter()
                 .filter(|t| t.title.to_lowercase().contains(&q) || t.artist.to_lowercase().contains(&q))
                 .collect());
+        }
+        // A linked player's library: its own search.
+        if self.db.is_some() && self.stack.iter().any(|l| matches!(l, Loc::DbRoot | Loc::DbFolder(_) | Loc::DbCat(..) | Loc::DbAllTracks)) {
+            if q.chars().count() < 2 { return Vec::new(); }
+            let text = self.search_query.clone();
+            return self.db_track_entries(move |c, s| c.search(s, &text));
         }
         let Some(dir) = self.stack.iter().rev().find_map(|l| match l { Loc::Fs(p) => Some(p.clone()), _ => None }) else { return Vec::new() };
         let mut idx = self.fs_index.borrow_mut();
@@ -822,8 +1294,11 @@ impl Browser {
 
     /// Open the `i`th rekordbox category from anywhere inside the source.
     pub fn open_rb_category(&mut self, i: usize) {
-        let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot)) else { return };
+        self.playlist_only = false;
+        self.cat_focus = false;
+        let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot | Loc::DbRoot)) else { return };
         self.stack.truncate(r + 1);
+        self.names.truncate(r + 1);
         self.rebuild();
         if i < self.entries.len() {
             self.selected = i;
@@ -871,21 +1346,53 @@ impl Browser {
         Ok(())
     }
 
+    /// A category's top level, with the category column beside it.
+    fn at_category_top(&self) -> bool {
+        if self.playlist_only { return false; }
+        let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot | Loc::DbRoot)) else { return false };
+        self.stack.len() == r + 2 && self.rb_categories().is_some_and(|(_, open)| open.is_some())
+    }
+
+    /// The highlight is in the category column (see `cat_focus`).
+    pub fn cat_focus(&self) -> bool { self.cat_focus }
+
+    /// A row of the list picked by touch: the highlight goes there (out of
+    /// the category column, if it was there).
+    pub fn pick_row(&mut self, i: usize) {
+        self.cat_focus = false;
+        if i < self.entries.len() { self.selected = i; }
+    }
+
     pub fn move_selection(&mut self, delta: i32) {
+        if self.cat_focus {
+            // Through the categories, each opening as the highlight reaches it.
+            let Some((names, Some(open))) = self.rb_categories() else { return };
+            let to = (open as i32 + delta).clamp(0, names.len() as i32 - 1) as usize;
+            if to != open { self.open_rb_category(to); }
+            self.cat_focus = true;
+            return;
+        }
         if self.entries.is_empty() { return; }
         let last = self.entries.len() as i32 - 1;
         self.selected = (self.selected as i32 + delta).clamp(0, last) as usize;
     }
 
     pub fn enter(&mut self) -> Enter {
+        // From the category column back into the list, on its first row.
+        if self.cat_focus {
+            self.cat_focus = false;
+            self.selected = 0;
+            return Enter::Folder;
+        }
         let Some(sel) = self.entries.get(self.selected) else { return Enter::Nothing };
         let (sel_name, kind) = (sel.name.clone(), sel.kind.clone());
         match kind {
             EntryKind::Unsupported => { log::info!("BROWSE: {:?} is not browsable here yet", sel_name); Enter::Nothing }
             EntryKind::Grant => { media::request_access(); Enter::Nothing }
             EntryKind::Descend(loc) => {
-                if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_)) { self.db_title = sel_name.clone(); }
+                if matches!(loc, Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbArtist(_) | Loc::DbAlbum(_) | Loc::DbCat(..) | Loc::DbTree(_)) { self.db_title = sel_name.clone(); }
                 let from_usb_row = sel_name.starts_with("USB: ");
+                if matches!(loc, Loc::Search) { self.search_query.clear(); }
                 self.stack.push(loc);
                 self.names.resize(self.stack.len() - 1, String::new());
                 self.names.push(sel_name.clone());
@@ -902,6 +1409,7 @@ impl Browser {
                     self.stack.push(Loc::DbRoot);
                     self.selected = 0;
                     self.rebuild();
+                    self.open_rb_category(0);
                     Enter::Folder
                 }
                 Err(e) => { log::warn!("LINK rekordbox {ip} failed: {e:#}"); Enter::Nothing }
@@ -914,6 +1422,7 @@ impl Browser {
                     self.stack.push(Loc::DbRoot);
                     self.selected = 0;
                     self.rebuild();
+                    self.open_rb_category(0);
                     Enter::Folder
                 }
                 Err(e) => {
@@ -941,7 +1450,7 @@ impl Browser {
         let name = self.home.file_name().and_then(|n| n.to_str()).unwrap_or("/").to_string();
         let mut out = vec![SourceRow {
             kind: SourceKind::Local, label: name, player: None,
-            path: Some(self.home.clone()), ip: None, rekordbox: media::has_rekordbox(&self.home),
+            path: Some(self.home.clone()), ip: None, rekordbox: media::has_rekordbox(&self.home), info: None,
         }];
         // A row with no path asks the OS for access when opened.
         for m in &self.media {
@@ -949,16 +1458,16 @@ impl Browser {
                 Access::Ready      => (format!("USB: {}", m.label), Some(m.path.clone())),
                 Access::NeedsGrant => (format!("USB: {} (ALLOW ACCESS)", m.label), None),
             };
-            out.push(SourceRow { kind: SourceKind::Usb, label, player: None, path, ip: None, rekordbox: m.rekordbox });
+            out.push(SourceRow { kind: SourceKind::Usb, label, player: None, path, ip: None, rekordbox: m.rekordbox, info: None });
         }
         if let Some(add) = media::ADD_DRIVE {
-            out.push(SourceRow { kind: SourceKind::Usb, label: format!("USB: {add}"), player: None, path: None, ip: None, rekordbox: false });
+            out.push(SourceRow { kind: SourceKind::Usb, label: format!("USB: {add}"), player: None, path: None, ip: None, rekordbox: false, info: None });
         }
         for e in self.link_entries() {
-            let (ip, rekordbox) = match e.kind {
-                EntryKind::ConnectLink(ip, _) => (Some(ip), false),
-                EntryKind::ConnectDb(ip) => (Some(ip), true),
-                _ => (None, false),
+            let (ip, rekordbox, slot) = match e.kind {
+                EntryKind::ConnectLink(ip, slot) => (Some(ip), false, Some(slot as u8)),
+                EntryKind::ConnectDb(ip) => (Some(ip), true, None),
+                _ => (None, false, None),
             };
             // "3 USB: NAME" → badge 3, "USB: NAME".
             let (player, label) = match e.name.split_once(' ') {
@@ -968,7 +1477,8 @@ impl Browser {
                 },
                 _ => (None, e.name.clone()),
             };
-            out.push(SourceRow { kind: SourceKind::Link, label, player, path: None, ip, rekordbox });
+            let info = player.zip(slot).and_then(|(p, sl)| self.link.media(p).into_iter().find(|m| m.slot == sl));
+            out.push(SourceRow { kind: SourceKind::Link, label, player, path: None, ip, rekordbox, info });
         }
         out
     }
@@ -977,6 +1487,9 @@ impl Browser {
     /// CDJ's SOURCE screen does). Returns false when there is no such row or
     /// a LINK source would not connect.
     pub fn open_source(&mut self, i: usize) -> bool {
+        self.idle = false;
+        self.cat_focus = false;
+        self.playlist_only = false;
         let rows = self.sources();
         let Some(row) = rows.get(i) else { return false };
         if row.kind == SourceKind::Usb && row.path.is_none() { media::request_access(); return false; }
@@ -1026,9 +1539,55 @@ impl Browser {
         }
     }
 
+    /// PLAY LIST: from anywhere inside a rekordbox or linked source, its
+    /// playlist tree; outside one, the stick the browser last used.
+    pub fn open_playlists(&mut self) -> bool {
+        let is_root = |l: &Loc| matches!(l, Loc::RbRoot | Loc::DbRoot);
+        let keep = (self.stack.clone(), self.names.clone(), self.selected, self.idle, self.entries.clone(), self.playlist_only);
+        self.idle = false;
+        self.cat_focus = false;
+        // Not inside a source: a linked player's session still open is the
+        // one the last track came from.
+        if !self.stack.iter().any(is_root) {
+            if self.db.is_some() && !self.db_cats.is_empty() {
+                self.stack = vec![self.stack.first().cloned().unwrap_or_else(|| Loc::Fs(self.home.clone())), Loc::Link, Loc::DbRoot];
+                self.names.resize(3, String::new());
+            } else { self.go_root(); }
+        }
+        let Some(r) = self.stack.iter().position(is_root) else {
+            // No stick with a library: nothing to show, as on a unit with
+            // nothing loaded.
+            (self.stack, self.names, self.selected, self.idle, self.entries, self.playlist_only) = keep;
+            return false;
+        };
+        self.playlist_only = true;
+        self.stack.truncate(r + 1);
+        self.selected = 0;
+        self.rebuild();
+        let at = self.entries.iter().position(|e| matches!(e.kind,
+            EntryKind::Descend(Loc::RbTree(0) | Loc::DbFolder(0))));
+        if let Some(i) = at {
+            self.selected = i;
+            self.enter();
+        }
+        true
+    }
+
+    /// Which kind of source is being browsed, for the header tile.
+    pub fn source_kind(&self) -> SourceTile {
+        if self.idle { return SourceTile::None; }
+        if self.stack.iter().any(|l| matches!(l, Loc::Link | Loc::DbRoot)) || matches!(&self.rb_source, Some(RbSource::Link(_))) && self.stack.iter().any(|l| matches!(l, Loc::RbRoot)) {
+            return SourceTile::Link;
+        }
+        let on_stick = self.stack.iter().any(|l| matches!(l, Loc::Fs(p) if self.media.iter().any(|m| m.path == *p)));
+        if on_stick { SourceTile::Usb } else { SourceTile::Folder }
+    }
+
     /// The LINK source key: jump to the list of linked players (from wherever
     /// the browser is).
     pub fn go_link(&mut self) {
+        self.idle = false;
+        self.playlist_only = false;
         self.remember();
         self.stack.truncate(1);
         self.stack.push(Loc::Link);
@@ -1051,6 +1610,8 @@ impl Browser {
     /// is mounted (on its rekordbox categories when it has an export), else
     /// the local root folder.
     pub fn go_root(&mut self) {
+        self.idle = false;
+        self.playlist_only = false;
         // Back to the source browsed last, where it was left, while it is
         // still there: a stick mounted since does not take the key over.
         self.remember();
@@ -1213,6 +1774,15 @@ impl Browser {
     }
 
     pub fn back(&mut self) {
+        if self.playlist_only && matches!(self.stack.last(), Some(Loc::DbFolder(0) | Loc::RbTree(0))) { return; }
+        // A source's categories are as far back as BACK goes, as on the unit:
+        // from a category's top level (ALBUM's albums) it moves the highlight
+        // into the category column, and there it does nothing.  The folders
+        // and the other sources are reached through FOLDER and SOURCE, not by
+        // backing out of the stick.
+        if self.cat_focus { return; }
+        if self.at_category_top() { self.cat_focus = true; return; }
+        if matches!(self.stack.last(), Some(Loc::DbRoot | Loc::RbRoot)) { return; }
         if self.stack.len() > 1 {
             self.stack.pop();
             let came_from = self.names.pop().unwrap_or_default();
@@ -1235,6 +1805,54 @@ impl Browser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// BPM on a CDJ-3000: the tempos, then a tempo's ranges (±0 … ±6), then
+    /// the tracks.  Neither level has labels: the tempo ×100 and the range
+    /// are the rows' ids, and lists of them came up blank.
+    #[test]
+    fn bpm_lists_tempos_then_ranges_then_tracks() {
+        let row = |t: u32, id: u32, label: &str| opendeck_dbserver::MenuItem {
+            parent_id: 0, id, label: label.into(), label2: String::new(), item_type: t, flags: 0,
+            artwork_id: 0, position: 0, key: String::new(), bpm_x100: 0 };
+        assert_eq!(Cat::Bpm.depth(), 2);
+        assert_eq!(Cat::Bpm.names_request(&[]), (opendeck_dbserver::kind::BPM_MENU, vec![]));
+        assert_eq!(Cat::Bpm.names_request(&[12800]), (0x1106, vec![12800]));
+        assert_eq!(Cat::Bpm.tracks_request(&[12800, 3]), (0x1206, vec![12800, 3]));
+        assert_eq!(cat_row_name(Cat::Bpm, 0, &row(0x000d, 12800, "")), "128");
+        assert_eq!(cat_row_name(Cat::Bpm, 0, &row(0x000d, 12850, "")), "128.5");
+        assert_eq!(cat_row_name(Cat::Bpm, 1, &row(0, 0, "")), "\u{b1}0");
+        assert_eq!(cat_row_name(Cat::Bpm, 1, &row(0, 6, "")), "\u{b1}6");
+        // A label, when the player sends one, wins.
+        assert_eq!(cat_row_name(Cat::Bpm, 1, &row(0, 2, "\u{b1}2")), "\u{b1}2");
+        assert_eq!(cat_row_name(Cat::Genre, 0, &row(0x0006, 4, "Techno")), "Techno");
+    }
+
+    /// The right-hand pane shows what the highlighted row opens: a BPM's
+    /// ranges, a range's tracks, a genre's artists, a playlist folder's
+    /// playlists, named as the level itself names them.
+    #[test]
+    fn the_pane_lists_what_a_highlighted_linked_row_opens() {
+        let row = |t: u32, id: u32, label: &str| opendeck_dbserver::MenuItem {
+            parent_id: 0, id, label: label.into(), label2: String::new(), item_type: t, flags: 0,
+            artwork_id: 0, position: 0, key: String::new(), bpm_x100: 0 };
+        // BPM 128 highlighted: its ranges.
+        let p = Peek::of(&Loc::DbCat(Cat::Bpm, vec![12800])).unwrap();
+        assert!(!p.lists_tracks());
+        assert_eq!(p.rows(vec![row(0, 0, ""), row(0, 1, "")]), ("BPM", vec![(true, "\u{b1}0".to_string()), (true, "\u{b1}1".to_string())]));
+        // ±1 highlighted: the tracks, typed rows included, anything else left out.
+        let p = Peek::of(&Loc::DbCat(Cat::Bpm, vec![12800, 1])).unwrap();
+        assert!(p.lists_tracks());
+        assert_eq!(p.rows(vec![row(0x0704, 9, "Song"), row(0x000d, 12800, "")]), ("TRACK", vec![(false, "Song".to_string())]));
+        // A genre: its artists.
+        let p = Peek::of(&Loc::DbCat(Cat::Genre, vec![4])).unwrap();
+        assert_eq!(p.rows(vec![row(0x0007, 2, "Artist")]).1, vec![(true, "Artist".to_string())]);
+        // A playlist folder: its playlists; the FOLDER tree: folders and tracks.
+        assert_eq!(Peek::of(&Loc::DbFolder(3)).unwrap().rows(vec![row(0x0008, 5, "Set")]), ("PLAYLIST", vec![(true, "Set".to_string())]));
+        assert_eq!(Peek::of(&Loc::DbTree(1)).unwrap().rows(vec![row(0x0001, 2, "Dir"), row(0x0004, 3, "Song")]).1,
+                   vec![(true, "Dir".to_string()), (false, "Song".to_string())]);
+        // Rows that open nothing on the player have no pane.
+        assert!(Peek::of(&Loc::Link).is_none());
+    }
 
     // A rekordbox stick appears as a USB row, its playlist tree opens from
     // the "rekordbox" row, and pulling the stick drops the browser back to
@@ -1327,14 +1945,15 @@ mod tests {
         for hidden in ["PIONEER", "CDJMODS", "System Volume Information"] {
             assert!(!names.contains(&hidden), "{hidden} hidden: {names:?}");
         }
+        // BACK from FOLDER's top level: the highlight goes to the category
+        // column (not out of the stick).
         b.back();
-        assert_eq!(b.title(), "REKORDBOX");
+        assert!(b.cat_focus());
         // The demo export has no playlists, but PLAYLIST is listed anyway (a
         // CDJ-3000 always shows it); TRACK lists both tracks.
-        assert!(b.entries().iter().any(|e| e.name == "PLAYLIST"));
-        let tr = b.entries().iter().position(|e| e.name.starts_with("TRACK")).expect("TRACK category");
-        b.selected = tr;
-        assert!(matches!(b.enter(), Enter::Folder));
+        let cats = b.rb_categories().unwrap().0;
+        assert!(cats.iter().any(|c| c == "PLAYLIST"));
+        b.open_rb_category(cats.iter().position(|c| c.starts_with("TRACK")).expect("TRACK category"));
         assert_eq!(b.title(), "TRACK");
         let names: Vec<&str> = b.entries().iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["Demo Track 1", "Demo Track 2"]);
@@ -1431,6 +2050,7 @@ mod tests {
         link.peer_names.lock().unwrap().extend([(3u8, "CDJ-3000".to_string()), (17u8, "rekordbox".to_string())]);
         link.peer_media.lock().unwrap().insert((3, 3), (opendeck_link::prodj::MediaInfo {
             player: 3, slot: 3, name: "OPENDECK".into(), tracks: 12, playlists: 1,
+            date: "2026-09-17".into(), total: 32 << 30, free: 16 << 30, color: 0,
         }, std::time::Instant::now()));
         let b = Browser::new(home.path(), link);
         let rows = b.sources();
@@ -1603,6 +2223,51 @@ mod tests {
         assert_eq!(b.title(), "REKORDBOX", "stays on the categories");
     }
 
+    /// BACK climbs to a category's top level, then moves the highlight into
+    /// the category column, and there does nothing more, as on the unit: from
+    /// ALBUM it does not back out of the stick (FOLDER and SOURCE lead
+    /// there).  In the column the wheel opens each category it reaches, and
+    /// pressing it goes back into the list.
+    #[test]
+    fn back_moves_into_the_category_column_and_no_further() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../third_party/rekordcrate/data/complete_export/demo_tracks");
+        let mut b = Browser::new(&root, crate::prodj::LinkState::new(1));
+        b.selected = b.entries().iter().position(|e| e.name == "rekordbox").expect("rekordbox row");
+        b.enter();
+        b.open_rb_category(1);
+        assert_eq!(b.title(), "ALBUM");
+        b.enter();
+        assert_ne!(b.title(), "ALBUM", "into an album");
+        b.back();
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ALBUM", false), "out of the album");
+        b.back();
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ALBUM", true), "the highlight in the column, ALBUM still open");
+        assert_eq!(b.rb_categories().unwrap().1, Some(1));
+        b.back();
+        b.back();
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ALBUM", true), "BACK goes no further");
+        // The wheel walks the column, opening each category.
+        b.move_selection(1);
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("TRACK", true));
+        b.move_selection(-2);
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ARTIST", true));
+        b.move_selection(-1);
+        assert_eq!(b.title(), "ARTIST", "the top of the column");
+        // Pressing it: back into the list, on its first row.
+        assert!(matches!(b.enter(), Enter::Folder));
+        assert_eq!((b.title().as_str(), b.cat_focus(), b.selected), ("ARTIST", false, 0));
+        b.move_selection(1);
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("ARTIST", false), "the wheel is the list's again");
+        // A tapped row takes the highlight back too (TRACK: two rows).
+        b.back();
+        assert!(b.cat_focus());
+        b.move_selection(2);
+        assert_eq!((b.title().as_str(), b.cat_focus()), ("TRACK", true));
+        b.pick_row(1);
+        assert_eq!((b.cat_focus(), b.selected), (false, 1));
+    }
+
     /// A stick inserted while browsing the home folder does not take the
     /// USB / BROWSE key over; each source keeps its own place, and a saved
     /// position (by names) puts a fresh browser back on the same row.
@@ -1631,9 +2296,8 @@ mod tests {
         let usb = b.sources().iter().position(|r| r.kind == SourceKind::Usb && r.path.as_deref() == Some(stick.as_path())).unwrap();
         assert!(b.open_source(usb));
         assert_eq!(b.title(), "ARTIST", "a rekordbox stick opens on ARTIST, as a CDJ");
-        b.back();
-        b.selected = b.entries().iter().position(|e| e.name.starts_with("TRACK")).unwrap();
-        assert!(matches!(b.enter(), Enter::Folder));
+        let cats = b.rb_categories().unwrap().0;
+        b.open_rb_category(cats.iter().position(|c| c.starts_with("TRACK")).unwrap());
         b.selected = 1;
         assert_eq!(b.title(), "TRACK");
         assert!(b.open_source(0));
