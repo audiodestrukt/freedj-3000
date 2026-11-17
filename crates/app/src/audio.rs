@@ -598,6 +598,21 @@ enum StreamOwner {
 /// The output callback's work, shared by the device stream and the tests'
 /// stand-in device: pull the ring into `out`, fading out on stop and
 /// flushing on a seek.  Real-time safe: no allocation, no blocking.
+/// MENU → OUTPUT GAIN: a trim on what leaves the deck, as a linear factor
+/// (f32 bits), 1.0 = 0 dB.  Only ever below 1: it turns the deck down
+/// against a hot output (an iPad at full volume) without touching the
+/// deck's own levels, meters or analysis.  Read once per output buffer.
+static OUTPUT_GAIN: AtomicU32 = AtomicU32::new(0x3f80_0000);   // 1.0
+
+/// Set the output trim in dB (0 or below; anything above is taken as 0).
+pub fn set_output_gain_db(db: f32) {
+    let g = 10f32.powf(db.min(0.0) / 20.0);
+    OUTPUT_GAIN.store(g.to_bits(), Ordering::Relaxed);
+}
+
+/// The output trim as a linear factor.
+pub fn output_gain() -> f32 { f32::from_bits(OUTPUT_GAIN.load(Ordering::Relaxed)) }
+
 struct OutputFill {
     consumer:   Arc<Mutex<rtrb::Consumer<f32>>>,
     playing:    Arc<AtomicBool>,
@@ -607,6 +622,8 @@ struct OutputFill {
     device_ch:  usize,
     fade_step:  f32,
     gain:       f32,
+    /// The output trim as last applied; a change ramps across one buffer.
+    trim:       f32,
 }
 
 impl OutputFill {
@@ -623,10 +640,26 @@ impl OutputFill {
             drain_flag: Arc::clone(&p.drain_flag), stats: Arc::clone(&p.stats), device_ch: p.device_ch,
             fade_step: 1.0 / (p.device_sr as f32 * STOP_FADE_S).max(1.0),   // per frame
             gain: 1.0,
+            trim: output_gain(),
         }
     }
 
     fn fill(&mut self, out: &mut [f32]) {
+        self.fill_raw(out);
+        // OUTPUT GAIN, last: 0 dB leaves the samples untouched; a change
+        // moves linearly across this buffer, so stepping it never clicks.
+        let target = output_gain();
+        if target == 1.0 && self.trim == 1.0 { return; }
+        let frames = (out.len() / self.device_ch.max(1)).max(1) as f32;
+        let step = (target - self.trim) / frames;
+        for frame in out.chunks_mut(self.device_ch.max(1)) {
+            self.trim += step;
+            for s in frame.iter_mut() { *s *= self.trim; }
+        }
+        self.trim = target;
+    }
+
+    fn fill_raw(&mut self, out: &mut [f32]) {
         // Only ever contended for the instant a replacement stream
         // takes over; silence is the right answer then.
         let Ok(mut consumer) = self.consumer.try_lock() else { out.fill(0.0); return; };
@@ -1530,5 +1563,52 @@ impl StreamResampler {
             for c in 0..self.channels { out.push(planar[c][f]); }
         }
         self.out_frames += (end - start) as u64;
+    }
+}
+
+/// MENU → OUTPUT GAIN at the very end of the output: what the device gets.
+#[cfg(test)]
+mod output_gain_tests {
+    use super::*;
+
+    /// A playing deck's output through the real fill: 0 dB passes the
+    /// samples untouched; −6 dB ramps down across one buffer (no click)
+    /// and then holds at half amplitude; back to 0 dB ramps up again.
+    #[test]
+    fn output_gain_trims_the_output_without_a_jump() {
+        let (mut tx, rx) = rtrb::RingBuffer::<f32>::new(1 << 16);
+        let parts = StreamParts {
+            config: cpal::StreamConfig { channels: 2, sample_rate: cpal::SampleRate(48_000), buffer_size: cpal::BufferSize::Default },
+            device_ch: 2, device_sr: 48_000,
+            consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
+            drain_flag: Arc::new(AtomicBool::new(false)), failed: Arc::new(AtomicBool::new(false)),
+            scrub_live: Arc::new(AtomicBool::new(false)),
+        };
+        set_output_gain_db(0.0);
+        let mut fill = OutputFill::new(&parts);
+        let mut buf = vec![0f32; 960];   // 10 ms of stereo
+        let mut run = |fill: &mut OutputFill, tx: &mut rtrb::Producer<f32>| {
+            for _ in 0..buf.len() { tx.push(0.8).unwrap(); }
+            fill.fill(&mut buf);
+            buf.clone()
+        };
+        assert!(run(&mut fill, &mut tx).iter().all(|&s| s == 0.8), "0 dB: untouched");
+
+        set_output_gain_db(-6.0);
+        let ramp = run(&mut fill, &mut tx);
+        let half = 0.8 * 10f32.powf(-6.0 / 20.0);
+        for w in ramp.chunks(2).collect::<Vec<_>>().windows(2) { assert!(w[1][0] <= w[0][0] + 1e-6, "falls, never jumps up"); }
+        let steps: f32 = ramp.chunks(2).collect::<Vec<_>>().windows(2).map(|w| (w[0][0] - w[1][0]).abs()).fold(0.0, f32::max);
+        assert!(steps < 0.01, "no step bigger than a sample's share of the ramp: {steps}");
+        assert!((ramp[ramp.len() - 1] - half).abs() < 1e-3, "ends at −6 dB");
+        assert!(run(&mut fill, &mut tx).iter().all(|&s| (s - half).abs() < 1e-5), "then holds at −6 dB");
+
+        set_output_gain_db(0.0);
+        let up = run(&mut fill, &mut tx);
+        assert!(up[0] < 0.8 && (up[up.len() - 1] - 0.8).abs() < 1e-5, "back up over one buffer");
+        // A boost is never applied: anything above 0 dB is 0 dB.
+        set_output_gain_db(6.0);
+        assert_eq!(output_gain(), 1.0);
+        set_output_gain_db(0.0);
     }
 }

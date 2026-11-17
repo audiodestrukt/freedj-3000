@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, Light, WaveColor, Divisions, DeckView, Stems, PerfLog }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, OutputGain, Player, Skin, Light, WaveColor, Divisions, DeckView, Stems, PerfLog }
 
 /// DECK VIEW is a desktop row: the iPad always shows the whole deck and the
 /// phone has its two pages.
@@ -18,6 +18,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
     (Setting::TempoRange,   "TEMPO RANGE"),
+    (Setting::OutputGain,   "OUTPUT GAIN"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
@@ -32,6 +33,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
     (Setting::TempoRange,   "TEMPO RANGE"),
+    (Setting::OutputGain,   "OUTPUT GAIN"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
@@ -108,6 +110,8 @@ impl Divisions {
 
 /// The unit's AUTO CUE LEVEL choices (dB).
 pub const AUTO_CUE_LEVELS: [f32; 8] = [-36.0, -42.0, -48.0, -54.0, -60.0, -66.0, -72.0, -78.0];
+/// OUTPUT GAIN choices (dB): a trim on the deck's output, never a boost.
+pub const OUTPUT_GAINS: [f32; 9] = [0.0, -3.0, -6.0, -9.0, -12.0, -15.0, -18.0, -24.0, -30.0];
 /// TEMPO RANGE choices as a fraction: ±6 %, ±10 %, ±16 %, WIDE (±100 %).
 pub const TEMPO_RANGES: [f32; 4] = [0.06, 0.10, 0.16, 1.00];
 
@@ -147,6 +151,9 @@ pub struct Settings {
     pub wave_color: WaveColor,
     /// Waveform Divisions (CDJ-3000 screen): TIME SCALE or PHRASE.
     pub divisions: Divisions,
+    /// OUTPUT GAIN (dB, 0 or below): turns the deck's output down,
+    /// independent of the device's volume.
+    pub output_gain_db: f32,
     /// Stems: a STEMS key and panel on the CDJ-3000 screen, a STEMS pad mode
     /// in the XDJ's PERFORM screen.  Prepared stems on a stick play as the
     /// track loads; a track without them is split on the device once its
@@ -175,7 +182,7 @@ const SEED: u8 = 4;
 impl Default for Settings {
     fn default() -> Self {
         Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000,
-               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, divisions: Divisions::Phrase, light: false, stems: true, seed: 0, phone: false }
+               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, divisions: Divisions::Phrase, output_gain_db: 0.0, light: false, stems: true, seed: 0, phone: false }
     }
 }
 
@@ -260,6 +267,7 @@ impl Settings {
             Setting::AutoCueLevel => c.auto_cue_level_db = step(&AUTO_CUE_LEVELS, c.auto_cue_level_db, dir),
             Setting::Quantize     => c.quantize = !c.quantize,
             Setting::TempoRange   => c.tempo_range = step(&TEMPO_RANGES, c.tempo_range, dir),
+            Setting::OutputGain   => c.output_gain_db = step(&OUTPUT_GAINS, c.output_gain_db, dir),
             Setting::Player       => c.player = step(&[0u8, 1, 2, 3, 4, 5, 6], c.player, dir),
             Setting::Skin if c.phone => {}
             Setting::Skin         => c.skin = step(&[Skin::Xdj1000Mk2, Skin::Cdj3000], c.skin, dir),
@@ -279,6 +287,7 @@ impl Settings {
             Setting::AutoCueLevel => format!("{:.0} dB", self.auto_cue_level_db),
             Setting::Quantize     => if self.quantize { "ON".into() } else { "OFF".into() },
             Setting::TempoRange   => Self::range_label(self.tempo_range),
+            Setting::OutputGain   => if self.output_gain_db == 0.0 { "0 dB".into() } else { format!("{:.0} dB", self.output_gain_db) },
             Setting::Player if self.player == 0 => "AUTO   (applies at next launch)".into(),
             Setting::Player       => format!("{}   (applies at next launch)", self.player),
             Setting::Skin if self.phone => format!("{}   (CDJ-3000: iPad only)", Skin::Xdj1000Mk2.label()),
@@ -301,6 +310,21 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// OUTPUT GAIN: 0 dB by default, steps down to −30 dB and wraps, never
+    /// a boost, saved.
+    #[test]
+    fn output_gain_steps_down_from_zero() {
+        let s = Settings::default();
+        assert_eq!(s.output_gain_db, 0.0);
+        assert_eq!(s.value(Setting::OutputGain), "0 dB");
+        let t = s.cycled(Setting::OutputGain, 1).cycled(Setting::OutputGain, 1);
+        assert_eq!((t.output_gain_db, t.value(Setting::OutputGain).as_str()), (-6.0, "-6 dB"));
+        assert!(OUTPUT_GAINS.iter().all(|&g| g <= 0.0));
+        assert_eq!(s.cycled(Setting::OutputGain, -1).output_gain_db, -30.0, "down from 0 wraps to the quietest");
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().output_gain_db, -6.0);
+    }
 
     /// WAVEFORM DIVISIONS: PHRASE by default, a MENU row that toggles to
     /// TIME SCALE and back, saved with the rest.

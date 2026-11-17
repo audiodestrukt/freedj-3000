@@ -1035,6 +1035,7 @@ impl DeckApp {
         let mut browser = browser;
         if let Some(l) = &loaded { browser.note_played(l); }
         let tag_list = taglist::TagList::open();
+        audio::set_output_gain_db(settings.output_gain_db);
         let full_deck = settings.full_deck;
         let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
             .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
@@ -2600,6 +2601,7 @@ impl DeckApp {
         cpumeter::set_file_log(self.settings.perf_log);
         if s == settings::Setting::DeckView { self.apply_deck_view(); }
         if s == settings::Setting::WaveColor { self.apply_wave_color(); }
+        if s == settings::Setting::OutputGain { audio::set_output_gain_db(self.settings.output_gain_db); }
         if s == settings::Setting::Stems {
             // On: look for the loaded track's stems now.  Off: drop them,
             // back to the plain track, and leave the STEMS pad mode.

@@ -74,6 +74,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | XDJ-1000MK2 screen: waveforms, grid, INFO, BROWSE, PERFORM pads, MENU / UTILITY | ✅ | All |
 | Waveform Color BLUE / RGB / 3BAND (MENU, saved; 3BAND default, as the CDJ-3000) | ✅ | All |
 | LIGHT MODE: the screen on a white ground, anti-aliased waveform edges (MENU, saved; off by default) | ✅ | All |
+| OUTPUT GAIN (MENU, saved): turns the deck's output down, 0 to −30 dB, independent of the device's volume; never a boost, applied last (the deck's own levels and analysis unchanged), ramped so a change never clicks | ✅ | All |
 | Fullscreen on a small panel fills it, no letterbox (SDL renderer, `OPENDECK_FULLSCREEN=1`; Pi 7" touch display 800 × 480); [design/display-fitting.md](design/display-fitting.md) | 🧪 text squeezed thin, rotary drawn oval, touch untested | Pi |
 | CDJ-3000 screen and faceplate (the default screen; MENU → SCREEN switches; the full deck by default on the Mac, Windows and iPad, `F` / MENU → DECK VIEW toggles it on the desktop): playback, BEAT LOOP / BEAT JUMP panels, SOURCE, BROWSE, TAG LIST, UTILITY, SEARCH, phase meter and master badge, STEMS panel | ✅ | D, Pi, iPad, Android tablet |
 | iPhone / Android phone: two landscape pages (SCREEN, CONTROLS) | ✅ | iOS, And |

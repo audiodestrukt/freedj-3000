@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- MENU → OUTPUT GAIN: turns the deck's output down (0 dB to −30 dB in
+  steps, saved), for an iPad or interface that is too hot at the volume
+  you want to leave it on.  It only trims what leaves the deck, last:
+  0 dB is the exact signal as before, there is no boost, and a change
+  ramps over one buffer so it never clicks.
 - Phrases on the CDJ-3000 screen (MENU → WAVEFORM DIVISIONS: PHRASE, the
   default; TIME SCALE brings the 30-second marks back).  The strip under
   the overall waveform shows the track's phrases as a CDJ-3000 does with
