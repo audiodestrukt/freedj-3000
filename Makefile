@@ -53,7 +53,7 @@ ios_app        = $(shell cd ios && xcodebuild -project freedj.xcodeproj -scheme 
                    | awk '/ BUILT_PRODUCTS_DIR =/{print $$3}')/freedj.app
 
 .DEFAULT_GOAL := help
-.PHONY: help build debug relink ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot shots-appstore check fmt clippy test perf cad clean reference distclean
+.PHONY: deckbench help build debug relink ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot shots-appstore check fmt clippy test perf cad clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -163,6 +163,10 @@ shots-appstore-iphone: build ## App Store screenshots (iPhone 6.9", 2868x1320 la
 
 test-shift-grid: debug ## End-to-end SYNC/SHIFT GRID test against cdj3k-emu on the djlink0 bridge (skips without the rig)
 	python3 tools/test_shift_grid.py
+
+deckbench: ## Pro DJ Link suite on Deckbench (loopback): SYNC, track info, waveform, MASTER, loop beats
+	$(CARGO) build --release -p opendeck-app
+	python3 tools/deckbench/suite.py
 
 check: ## Type-check the whole workspace
 	$(CARGO) check --workspace

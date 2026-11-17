@@ -4,6 +4,19 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `make deckbench`: the Pro DJ Link suite on Deckbench (loopback). A bench
+  deck at 126 BPM is master; OpenDeck syncs to it (126 BPM, beats within
+  0.05 beat), the bench reads OpenDeck's waveform and beat grid as a player
+  would, OpenDeck takes MASTER, and a one-beat loop sends one beat a turn.
+  Reading OpenDeck's track info is a known failure (#62).
+
+### Changed
+- With `OPENDECK_LINK_IFACE` set, the dbserver listens on that interface's
+  address only, as a player answers on its own; so OpenDeck shares the
+  port query with other devices bound to their own addresses on one
+  machine (Deckbench's decks).  Unpinned, it still listens on every address.
+
 ## [0.3.29] — 2026-11-17
 
 ### Added

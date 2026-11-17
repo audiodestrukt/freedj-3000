@@ -305,7 +305,7 @@ fn served_library(link: &Arc<prodj::LinkState>) -> Option<opendeck_dbserver::ser
     if std::env::var("OPENDECK_SERVE").map(|v| v == "0").unwrap_or(false) { return None; }
     let lib = opendeck_dbserver::server::Library { tracks: Vec::new(), name: "OpenDeck".into(), art: None, history: Vec::new() }.shared();
     let l = Arc::clone(link);
-    match opendeck_dbserver::server::Server::start_live(Arc::clone(&lib), Arc::new(move || l.player()), 0) {
+    match opendeck_dbserver::server::Server::start_on(Arc::clone(&lib), Arc::new(move || l.player()), prodj::media_bind_ip(), 0, opendeck_dbserver::PORT_QUERY) {
         Ok(db) => log::info!("link: dbserver on {} for the loaded track (no music folder served)", db.db_port),
         Err(e) => { log::warn!("link: no dbserver for the loaded track: {e:#}"); return None; }
     }
@@ -5126,7 +5126,7 @@ fn start_media_server(root: &std::path::Path, player: opendeck_dbserver::server:
         m.extend(scanned.files.iter().map(|(id, p)| (std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()), *id)));
     }
     let nfs = NfsServer::start(scanned.tree, "/C/", 111, 2049)?;
-    let db = DbServer::start_live(Arc::clone(&scanned.library), player, 0)?;
+    let db = DbServer::start_on(Arc::clone(&scanned.library), player, prodj::media_bind_ip(), 0, opendeck_dbserver::PORT_QUERY)?;
     if let Ok(mut l) = link.library.lock() { *l = Some(Arc::clone(&scanned.library)); }
     log::info!("media server: {n} tracks under {} — nfs portmap {} nfsd {}, dbserver {}", root.display(), nfs.portmap, nfs.nfsd, db.db_port);
     opendeck_mediaserver::start_analysis(scanned.library, scanned.files, Some(link_cache_dir()))?;

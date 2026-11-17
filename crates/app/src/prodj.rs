@@ -622,6 +622,10 @@ fn same_subnet(a: Ipv4Addr, b: Ipv4Addr, mask: Ipv4Addr) -> bool {
 /// freedj may take master without reaching the real decks on the LAN. An
 /// interface that does not exist pins Link to loopback rather than falling
 /// back to the LAN. Returns (name, ip, netmask).
+/// The address the media server (dbserver) listens on: the pinned Link
+/// interface's (`OPENDECK_LINK_IFACE`), else every address.
+pub fn media_bind_ip() -> Ipv4Addr { pinned_iface().map(|p| p.1).unwrap_or(Ipv4Addr::UNSPECIFIED) }
+
 fn pinned_iface() -> Option<&'static (String, Ipv4Addr, Ipv4Addr)> {
     static PIN: std::sync::OnceLock<Option<(String, Ipv4Addr, Ipv4Addr)>> = std::sync::OnceLock::new();
     PIN.get_or_init(|| {

@@ -681,7 +681,16 @@ impl Server {
     /// As `start_live` with the port query on `query_port` (0 = any free
     /// port): for tests, beside a deck that already holds 12523.
     pub fn start_at(lib: SharedLibrary, device: DeviceNumber, db_port: u16, query_port: u16) -> Result<Server> {
-        let bind = |p: u16| TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, p));
+        Self::start_on(lib, device, Ipv4Addr::UNSPECIFIED, db_port, query_port)
+    }
+
+    /// As `start_at`, listening on one address only (`UNSPECIFIED` = all).
+    /// A deck pinned to one interface answers there, as a player answers on
+    /// its own address; and it can then share 12523 with other devices
+    /// bound to their own addresses on one machine (Deckbench's decks on
+    /// 127.0.0.2, .3 … beside OpenDeck on 127.0.0.1).
+    pub fn start_on(lib: SharedLibrary, device: DeviceNumber, ip: Ipv4Addr, db_port: u16, query_port: u16) -> Result<Server> {
+        let bind = |p: u16| TcpListener::bind(SocketAddrV4::new(ip, p));
         let db = if db_port == 0 {
             bind(crate::DB_PORT).or_else(|e| {
                 log::info!("dbserver: {} is taken ({e}); using another port (12523 reports it)", crate::DB_PORT);
@@ -689,7 +698,7 @@ impl Server {
             })
         } else { bind(db_port) }.context("bind dbserver")?;
         let db_port = db.local_addr()?.port();
-        let pq = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, query_port)).with_context(|| format!("bind {query_port}"))?;
+        let pq = TcpListener::bind(SocketAddrV4::new(ip, query_port)).with_context(|| format!("bind {query_port}"))?;
         let query_port = pq.local_addr()?.port();
         log::info!("dbserver: port query on {query_port}, database on {db_port}, {} tracks", lib.read().unwrap().tracks.len());
         thread::Builder::new().name("dbserver-portquery".into()).spawn(move || {
@@ -825,6 +834,24 @@ mod tests {
     /// 2026-11-14: "About It", Em, 126 BPM, from a CDJ-3000 3.22's TRACK
     /// list), but for the two ids that are the player's own database rows:
     /// its artwork id and its key row id.
+    /// Two devices on one machine, each on its own loopback address, share
+    /// the port query's port, as Deckbench's decks (127.0.0.2, .3) and
+    /// OpenDeck (127.0.0.1, `OPENDECK_LINK_IFACE=lo`) do; each answers on
+    /// its own address.
+    #[test]
+    fn servers_on_their_own_addresses_share_the_query_port() {
+        let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = probe.local_addr().unwrap().port();
+        drop(probe);
+        let other = TcpListener::bind(SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 2), port)).unwrap();   // "a bench deck"
+        let ours = Server::start_on(lib().shared(), Arc::new(|| 4), Ipv4Addr::LOCALHOST, 0, port).expect("beside it");
+        assert_eq!(ours.query_port, port);
+        assert!(Server::start_at(lib().shared(), Arc::new(|| 4), 0, port).is_err(), "every address: taken");
+        let mut c = crate::Client::discover_at(Ipv4Addr::LOCALHOST, port, 2).expect("ours answers on 127.0.0.1");
+        assert!(!c.all_tracks(Slot::Usb, 0).unwrap().is_empty());
+        drop(other);
+    }
+
     #[test]
     fn track_rows_match_a_cdj3000() {
         let t = Track { id: 0x52, title: "About It".into(), key: "Em".into(), bpm: 126.0, ..Default::default() };
