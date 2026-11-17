@@ -82,7 +82,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | PCF8574 I2C button boards | 🧪 built and unit-tested, no board yet | Pi |
 | A CDJ-3000 as OpenDeck's control surface and screen (HID over LINK, Control Mode) | 🧪 emulator only | D |
 | The CDJ-3000's own panel over its sub-CPU SPI device (`OPENDECK_SUBUCOM`): keys, jog, fader, rotary, LCD touch, LEDs | 🧪 unit-tested, not yet run in the emulator | Linux |
-| OpenDeck as cdj3k-emu firmware: emulator UPD, bare 1280×720 CDJ-3000 screen, framebuffer output (`OPENDECK_FBDEV`) | 🧪 boots in QEMU with the emulator's kernel; wizard install not yet tried | cdj3k-emu |
+| OpenDeck as cdj3k-emu firmware: emulator UPD, bare 1280×720 CDJ-3000 screen, framebuffer output (`OPENDECK_FBDEV`) | 🧪 the release `.iso` installs (`--provision`) and boots to OpenDeck's screen, 0.3.30+ (earlier releases fail to install, #60); small text clipped (#61) | cdj3k-emu |
 | ADK-1000 hardware panel (RP2350 hub) | 📋 PCB routed, not made | — |
 | 5" deck enclosure: Pi 5, 5" display, 140 mm jog, 100 mm fader; prints on a 220 mm bed ([hardware/cad/deck5](../hardware/cad/deck5/README.md)) | 🧪 designed and checked in CAD, not printed; switch board not designed | — |
 
@@ -94,14 +94,14 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | PLAYER No. AUTO: claims a free player number like a CDJ (tries 4, 5, 6, 3, 2, 1), defends it, moves on a collision; or set 1–6 (5–6 need a 6-player network) | 🧪 tested between OpenDecks, not yet real players | All |
 | SYNC to the master's tempo and phase; a jog nudge while synced is kept as an offset | ✅ | All |
 | MASTER, handoff both ways | ✅ tested on an XDJ-1000MK2 | All |
-| LINK: browse and load from other players' USB / SD and from rekordbox (dbserver + NFS), with their grids and cues | ✅ | All |
-| Players browsing OpenDeck: ARTIST, ALBUM, TRACK, KEY, PLAYLIST, HISTORY, MATCHING, FILE NAME | ✅ CDJ-3000 (emulator) | All |
-| Serve our own music to other decks (metadata, grid, waveforms, art, hot and memory cues) | ✅ OpenDeck→OpenDeck; a CDJ-3000 lists, browses (ARTIST, ALBUM, TRACK, PLAYLIST, FILE NAME, with PREVIEW, BPM and KEY columns), loads and plays it with its waveforms, shows the hot cues (A–H) and memory cues set on OpenDeck, and its hot cue pads jump to them (emulator, 2026-11-14); XDJ untested | All |
+| LINK: browse and load from other players' USB / SD and from rekordbox (dbserver + NFS), with their grids and cues: every category a CDJ-3000 lists, its BROWSE table with PREVIEW waveforms and covers, the right-hand pane, metadata for tracks whose tags lack it; connecting never blocks the deck | ✅ two CDJ-3000s and the emulator; blue previews checked row by row against the unit; 3-band previews drawn short (#59) | All |
+| Players browsing OpenDeck: ARTIST, ALBUM, TRACK, KEY, PLAYLIST, HISTORY, MATCHING, FILE NAME | ✅ CDJ-3000 (emulator); menu rows are the CDJ-3000's 16-field shape, older players unchecked (#62) | All |
+| Serve our own music to other decks (metadata, grid, waveforms, art, hot and memory cues) | ✅ OpenDeck→OpenDeck; a CDJ-3000 lists, browses (ARTIST, ALBUM, TRACK, PLAYLIST, FILE NAME, with PREVIEW, BPM and KEY columns), loads and plays it with its waveforms, shows the hot cues (A–H) and memory cues set on OpenDeck, and its hot cue pads jump to them (emulator, 2026-11-14); Deckbench reads OpenDeck's waveform and grid (`make deckbench`); XDJ untested | All |
 | The playing track's metadata, grid, waveforms and phrases answer a lookup by the ID our status names, from the moment it loads, wherever the file came from (for other players and Pro DJ Link lighting controllers) | ✅ unit-tested; lighting hardware untested | All |
 | CDJ-3000 Absolute Position packets (playhead ms, length, pitch, BPM every 30 ms on 50001, to each device as a CDJ-3000 sends them) for lighting / video / timecode tools | ✅ measured on a test network; untested with the tester's tool | All |
 | Works over Wi-Fi or ethernet; survives iOS backgrounding | ✅ | All |
 | DJM mixer channel assignment of player numbers | 📋 | — |
-| Read a CDJ-3000's USB over LINK | ✅ emulator: 226 tracks, audio, analysis | All |
+| Read a CDJ-3000's USB over LINK | ✅ emulator: 226 tracks, audio, analysis, KEY's related-key levels | All |
 
 ## Platforms and releases
 

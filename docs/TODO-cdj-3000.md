@@ -1,6 +1,6 @@
 # CDJ-3000 work: what is left
 
-As of `35e39f6` (2026-11-09), stale rows refreshed 2026-11-14. Collected from the CDJ-3000 sessions (HID over
+As of `35e39f6` (2026-11-09), stale rows refreshed 2026-11-14 and 2026-11-17 (after #53 and the 0.3.29 / 0.3.30 fixes). Collected from the CDJ-3000 sessions (HID over
 LINK, the native display feed, the CDJ-3000 skin, SYNC/SHIFT GRID) so nothing
 lives only in a chat. Detail lives in the linked docs; this is the list.
 
@@ -49,11 +49,11 @@ exceptions:
 | TRACK FILTER (and its editor) | all | M |
 | PLAYLIST bank | all | M |
 | MATCHING category (listed, does not open) | all | M |
-| Category column for LINK/dbserver sources (only local rekordbox sticks today) | all | M |
+| ~~Category column for LINK/dbserver sources~~ done in #53: the category column, every category a CDJ-3000 lists (GENRE, BPM ±ranges, KEY with its related-key levels, HISTORY …), BACK into the column | all | ✓ |
 | "H" mark by the ♪ (track has hot cues) on OpenDeck's own BROWSE (a CDJ-3000 browsing OpenDeck already shows it) | all | S |
 | Green on the category a played track came from; dim green (22,139,22) in the preview pane | all | S |
 | Verify covers in the PREVIEW column and HISTORY on Dan's real stick; it is mounted on the dev box now (`/run/media/dan/CDJ2`) | all | S |
-| Header extras: PREVIEW toggle, text-size A A A, INFO key; ← BACK dimmed at the category root | all | S |
+| ~~Header extras: PREVIEW toggle, text-size A A A, INFO key~~ done in #53; ← BACK dimmed at the category root still open | all | S |
 | SOURCE panel: Date row, Background Color, MY SETTINGS LOAD | all | S |
 
 ## Playback screen and deck features (phases 1 and 4)
@@ -70,11 +70,21 @@ exceptions:
 | Active loop, emergency loop, loop slip | all | M |
 | Vinyl speed adjust (touch/release) (`varispeed-engine.md`) | all | M |
 | Touch Cue on the overview | all | S |
-| INFO overlay: EDIT RATING, other players' tabs | all | S |
+| INFO overlay: EDIT RATING; other players' tabs are in #54 (draft) | all | S |
 | SHORTCUT screen; full UTILITY list (phase 6) | all | M |
 | Waveform current position CENTER/LEFT | all | S |
 | Waveform Divisions PHRASE on our own overview (phrase bands from our PSSI). Low priority: fw 3.22 offers the setting for no source we have seen | all | S |
 | ~~6 players on PRO DJ LINK~~ done: PLAYER No. AUTO and 1–6 | all | ✓ |
+
+## LINK with CDJ-3000s: open issues (2026-11-17)
+
+| Item | Who | Size |
+|---|---|---|
+| 3-band / RGB previews in BROWSE drawn at about half height, one colour per column; the unit stacks the bands (#59). The blue previews match the unit since 0.3.29 | all | S |
+| Menu rows are the CDJ-3000's 16 fields for every requester; check an XDJ-1000MK2 / NXS2, else send 12 to older players (#62). Deckbench's `trackinfo` check is a known failure on it | all | S |
+| Other players' waveform view, INFO tabs, MASTER release: #54 (contributor, draft). "Other decks can't browse OpenDeck's files" from its notes is still open | all | M |
+| The emulator image: small text clipped (#61); CI should boot the real install, and the docs should mention the first-boot pkexec prompt (#63) | cdj3k-emu | S |
+| Almost every LINK check so far is against cdj3k-emu (fw 3.22); #53 was the only work also tried on physical CDJ-3000s | all | — |
 
 ## Waveform colours and LIGHT MODE (revisit, not now)
 
