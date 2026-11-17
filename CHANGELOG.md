@@ -51,6 +51,12 @@ All notable changes to this project will be documented in this file.
   (`deploy/pi/cross/build.sh`) now includes it.
 
 ### Fixed
+- BROWSE on a linked CDJ-3000: the blue waveform previews in the track
+  table now show each track's own shape.  The player's reply (400
+  height / whiteness pairs, then a 100-byte tiny preview) was read as its
+  last 400 bytes, one column a byte, so the previews looked plausible but
+  were wrong.  Checked row by row against the CDJ-3000's own BROWSE in
+  cdj3k-emu.
 - IN works as the unit's IN/CUE: pressing it also sets the cue point
   there, so CUE afterwards returns to the loop's start (it returned to the
   old cue).  OUT with no IN pressed since the load no longer starts a loop

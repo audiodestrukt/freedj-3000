@@ -29,7 +29,7 @@ def main():
     ap.add_argument("--keep", help="keep the capture and logs in this folder")
     a = ap.parse_args()
 
-    work = Path(a.keep or tempfile.mkdtemp(prefix="deckbench-loop-"))
+    work = Path(a.keep or tempfile.mkdtemp(prefix="deckbench-loop-")).resolve()   # deckbench runs from its own folder
     work.mkdir(parents=True, exist_ok=True)
     cap, ready = work / "capture.jsonl", work / "ready.json"
     for f in (cap, ready):

@@ -289,11 +289,16 @@ impl<C: InfoSource> Worker<C> {
     }
 }
 
-/// 400 columns, one byte each: height in the low 5 bits, whiteness in the
-/// top 3.  Some replies carry a header.  `None` when it is all silence.
+/// The blue preview (`0x4402`): 400 columns of two bytes each, height
+/// (low 5 bits of the first) and whiteness (low 3 bits of the second), as
+/// Beat Link reads it and as our own server sends it (800 bytes).  A
+/// CDJ-3000 sends 900: the same 400 pairs, then a 100-byte tiny preview,
+/// which is left out.  (It was read as the last 400 bytes, one column a
+/// byte: the tiny preview and half the pairs, so the shapes were wrong.)
+/// `None` when it is all silence.
 fn parse_wave(b: &[u8]) -> Option<Arc<Vec<(u8, u8)>>> {
-    let d = if b.len() > 400 { &b[b.len() - 400..] } else { b };
-    Some(Arc::new(d.iter().map(|&v| (v & 0x1f, v >> 5)).collect::<Vec<_>>())).filter(|w| w.iter().any(|&(h, _)| h > 0))
+    let d = &b[..b.len().min(800)];
+    Some(Arc::new(d.chunks_exact(2).map(|p| (p[0] & 0x1f, p[1] & 0x07)).collect::<Vec<_>>())).filter(|w| w.iter().any(|&(h, _)| h > 0))
 }
 
 /// PWV6: 1,200 columns of low, mid, high, behind whatever header the reply
@@ -309,6 +314,29 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
+
+    /// The blue preview as a CDJ-3000 sends it (400 pairs + a 100-byte tiny
+    /// preview) and as our server sends it (the 400 pairs alone): the same
+    /// 400 columns either way, the tail left out.
+    #[test]
+    fn the_blue_preview_is_400_height_whiteness_pairs() {
+        let pairs: Vec<u8> = (0..400u32).flat_map(|i| [(i % 32) as u8 | 0xe0, (i % 8) as u8 | 0xf8]).collect();
+        let mut cdj = pairs.clone();
+        cdj.extend(std::iter::repeat(0x1f).take(100));
+        for b in [pairs, cdj] {
+            let w = parse_wave(&b).unwrap();
+            assert_eq!(w.len(), 400);
+            assert_eq!((w[0], w[33], w[399]), ((0, 0), (1, 1), (15, 7)));
+        }
+        // The server's own encoder, read back.
+        let cache = opendeck_analysis::WaveformCache { columns: (0..2000).map(|i| [0, 0, (i % 50) as u8, (i % 100) as u8]).collect(), sample_rate: 44_100, hop_size: 512 };
+        let (blob, _) = opendeck_mediaserver::waveform_blobs(&cache, 2000 * 512, 44_100);
+        let w = parse_wave(&blob).unwrap();
+        assert_eq!(w.len(), 400);
+        assert!(w.iter().all(|&(h, wh)| h <= 31 && wh <= 7));
+        assert_eq!(w.iter().map(|p| p.0).max(), Some(31), "the loudest column fills the height");
+        assert!(parse_wave(&[0u8; 900]).is_none(), "silence");
+    }
 
     /// A player that answers every request after `delay`, and fails each
     /// request while `down` is set (a dropped session).
@@ -331,7 +359,10 @@ mod tests {
     impl InfoSource for FakePlayer {
         fn metadata(&mut self, _: Slot, id: u32) -> Result<Vec<MenuItem>> { self.ask()?; Ok(vec![title_row(id)]) }
         fn artwork(&mut self, _: Slot, _: u32) -> Result<Vec<u8>> { self.ask()?; Ok(vec![0x89, b'P']) }
-        fn waveform_preview(&mut self, _: Slot, _: u32) -> Result<Vec<u8>> { self.ask()?; Ok(vec![0x25; 400]) }
+        fn waveform_preview(&mut self, _: Slot, _: u32) -> Result<Vec<u8>> {
+            // As a CDJ-3000 sends it: 400 (height, whiteness) pairs, then a 100-byte tiny preview.
+            self.ask()?; Ok([5u8, 1].repeat(400).into_iter().chain([0x1f; 100]).collect())
+        }
         fn band_preview(&mut self, _: Slot, _: u32) -> Result<Vec<u8>> { self.ask()?; Ok(vec![9; 3600]) }
     }
 
