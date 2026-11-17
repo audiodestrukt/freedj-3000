@@ -8,7 +8,9 @@ The emulator image's rootfs comes from a container export, which leaves
 it and reads that script's console output for a "handed back" marker;
 with no /dev/console the output is lost and the install fails with "the
 provisioning guest did not hand back a rootfs" (v0.3.23, reproduced and
-fixed 2026-11-17).  So the cpio must carry /dev/console itself.
+fixed 2026-11-17).  So the cpio must carry /dev/console itself, as the
+device: docker's export (CI) leaves an empty regular file there instead,
+which is how 0.3.29 still shipped broken.
 """
 import gzip, io, os, sys, tarfile, tempfile
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -32,29 +34,34 @@ def cpio_entries(data):
         i += (-i) % 4
 
 
-def rootfs_tar(with_console):
-    """A tiny rootfs as a container export writes it: /dev a bare folder."""
+def rootfs_tar(console):
+    """A tiny rootfs as a container export writes it.  `console`: None (podman:
+    /dev a bare folder), "file" (docker: an empty regular file), "chr" (the
+    device itself)."""
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as t:
         for d in ("dev", "usr", "usr/bin"):
             ti = tarfile.TarInfo(d); ti.type = tarfile.DIRTYPE; ti.mode = 0o755; t.addfile(ti)
         ti = tarfile.TarInfo("usr/bin/bash"); body = b"#!fake\n"; ti.size = len(body); ti.mode = 0o755
         t.addfile(ti, io.BytesIO(body))
-        if with_console:
+        if console == "chr":
             ti = tarfile.TarInfo("dev/console"); ti.type = tarfile.CHRTYPE; ti.devmajor, ti.devminor = 5, 1; ti.mode = 0o600
             t.addfile(ti)
+        elif console == "file":
+            ti = tarfile.TarInfo("dev/console"); ti.size = 0; ti.mode = 0o755
+            t.addfile(ti, io.BytesIO(b""))
     f = tempfile.NamedTemporaryFile(suffix=".tar", delete=False)
     f.write(buf.getvalue()); f.close()
     return f.name
 
 
 def main():
-    for with_console in (False, True):
+    for console in (None, "file", "chr"):
         out = io.BytesIO()
-        updpack.rootfs_cpio(rootfs_tar(with_console), [], out)
+        updpack.rootfs_cpio(rootfs_tar(console), [], out)
         ents = cpio_entries(out.getvalue())
         consoles = [e for e in ents if e[0] == "dev/console"]
-        assert len(consoles) == 1, f"one dev/console (rootfs had one: {with_console}): {ents}"
+        assert len(consoles) == 1, f"one dev/console (rootfs had: {console}): {ents}"
         _, mode, maj, minor = consoles[0]
         assert mode & 0o170000 == 0o020000 and (maj, minor) == (5, 1), f"char device 5,1: {consoles[0]}"
         assert "usr/bin/bash" in [e[0] for e in ents]

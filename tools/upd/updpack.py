@@ -209,6 +209,12 @@ def rootfs_cpio(tar_path, extra, out):
     tf = tarfile.open(tar_path)
     members = tf.getmembers()
     replaced = {d.strip("/") for _, d, _ in extra}
+    # /dev/console must be the character device 5,1; docker's export leaves
+    # an empty regular file in its place (podman's leaves nothing).  Either
+    # way it is written below, as the device.
+    console_ok = any(m.name.lstrip("./").strip("/") == "dev/console" and m.ischr() for m in members)
+    if not console_ok:
+        replaced.add("dev/console")
     links = {}
     for m in members:
         if m.islnk():
@@ -241,12 +247,12 @@ def rootfs_cpio(tar_path, extra, out):
             _newc(out, name, S_IFMT["fifo"] | m.mode, m.uid, m.gid, 1, m.mtime, b"", ino)
     dirs_seen = {m.name.lstrip("./").strip("/") for m in members if m.isdir()}
     # /dev/console, as the firmware's own initramfs has it.  A container
-    # export leaves /dev empty, and with no console the kernel starts init
+    # export leaves /dev empty (podman) or a plain empty file there (docker,
+    # which is what shipped in 0.3.29), and with no console the kernel starts init
     # with nothing on stdout: cdj3k-emu's provisioning guest then prints
     # nothing, its "handed back" marker included, and the install fails
     # with "the provisioning guest did not hand back a rootfs".
-    names = {m.name.lstrip("./").strip("/") for m in members}
-    if "dev/console" not in names:
+    if not console_ok:
         if "dev" not in dirs_seen:
             ino += 1
             _newc(out, "dev", S_IFMT["dir"] | 0o755, 0, 0, 2, 0, b"", ino)

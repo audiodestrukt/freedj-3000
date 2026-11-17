@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.30] — 2026-11-17
+
+### Fixed
+- The CDJ-3000 emulator image installs in cdj3k-emu (0.3.29's still did
+  not): the release builds its rootfs with docker, whose export leaves an
+  empty regular file at `/dev/console` instead of the device, and the
+  0.3.29 fix only added the device where the name was missing.  It now
+  replaces whatever is there.  Rebuilt from 0.3.29's own rootfs, the image
+  installs (6,968 entries).
+
 ### Added
 - `make deckbench`: the Pro DJ Link suite on Deckbench (loopback). A bench
   deck at 126 BPM is master; OpenDeck syncs to it (126 BPM, beats within
