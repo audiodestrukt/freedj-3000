@@ -5811,12 +5811,17 @@ mod deck_tests {
     fn a_beat_loop_runs_its_length_and_the_same_length_again_exits() {
         let mut d = deck(30.0);
         d.send(C::Play);
-        d.run(1.2);                                           // in the 3rd beat (1.0–1.5 s)
+        d.run(1.2);                                           // about the 3rd beat (1.0–1.5 s)
+        // A busy machine may be a beat behind: the loop starts on the beat
+        // the playhead is in when the pad is pressed, wherever that is.
+        let at = d.at();
         d.send(C::BeatLoop { beats: 4.0, held: false });
         assert!(looping(&d));
         let s = d.audio.loop_start.load(Ordering::Relaxed) as f64 / (SR as f64 * 2.0);
         let e = d.audio.loop_end.load(Ordering::Relaxed) as f64 / (SR as f64 * 2.0);
-        assert!((s - 1.0).abs() < 0.01 && (e - 3.0).abs() < 0.01, "4 beats from the beat: {s:.3}..{e:.3}");
+        assert!(((s / 0.5).round() * 0.5 - s).abs() < 0.01, "the loop starts on a beat: {s:.3}");
+        assert!(s <= at + 0.05 && s > at - 0.55, "on the beat the playhead is in ({at:.3}): {s:.3}");
+        assert!((e - s - 2.0).abs() < 0.01, "4 beats long: {s:.3}..{e:.3}");
         stays_inside(&mut d, s, e, 2.5);
         d.send(C::BeatLoop { beats: 4.0, held: false });
         assert!(!looping(&d), "the same pad exits");
