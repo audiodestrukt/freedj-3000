@@ -55,7 +55,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 |---|---|---|
 | PLAY / CUE with hold-to-preview and back-cue, AUTO CUE (with level setting) | ✅ | All |
 | Hot cues (A–D on the XDJ screen, A–H on the CDJ-3000 faceplate), memory cues; rekordbox's hot cue colours on pads and waveforms | ✅ | All |
-| Loops: manual IN / OUT, beat loops 1/2–16, BEAT JUMP | ✅ | All |
+| Loops: manual IN / OUT (IN sets the cue point too, as IN/CUE), RELOOP / EXIT, beat loops 1/2–16, BEAT JUMP | ✅ | All |
 | QUANTIZE for cues and loops | ✅ | All |
 | SLIP mode: loops, held hot cues, VINYL scratches (the track runs on underneath and returns) | ✅ | All |
 | Jog wheel: VINYL (scratch) and CDJ (nudge) modes; the platter turns under the finger, one turn = one record turn | ✅ | All |

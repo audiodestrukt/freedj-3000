@@ -51,6 +51,10 @@ All notable changes to this project will be documented in this file.
   (`deploy/pi/cross/build.sh`) now includes it.
 
 ### Fixed
+- IN works as the unit's IN/CUE: pressing it also sets the cue point
+  there, so CUE afterwards returns to the loop's start (it returned to the
+  old cue).  OUT with no IN pressed since the load no longer starts a loop
+  from 0:00.
 - A Raspberry Pi said NEEDS MORE MEMORY for every split: the check asked
   for the 4.6 GB the iPad's Core ML model needs, where the Rust model
   peaks at 1.2 GB. It now asks for what the model that will run needs

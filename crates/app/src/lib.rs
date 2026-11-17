@@ -802,6 +802,8 @@ struct DeckApp {
     /// Beat length of the active BEAT LOOP (0 = a manual IN/OUT loop), so the
     /// matching pad lights.  The loop itself lives on `audio.loop_*`.
     loop_beats:        f32,
+    /// IN pressed since the last load or loop: OUT has a start to close from.
+    loop_in_set:       bool,
     /// SLIP: while a loop / held hot cue is in progress with SLIP on, the
     /// playhead the track WOULD be at — (audible position when the action
     /// began, audio.source_consumed then).  Shadow = pos + consumed-since.
@@ -1158,6 +1160,7 @@ impl DeckApp {
             perform_bank:      0,
             perform_delete:    false,
             loop_beats:        0.0,
+            loop_in_set:       false,
             slip_anchor:       None,
             slip_hold:         None,
             exit_after_capture: false,
@@ -1661,19 +1664,33 @@ impl DeckApp {
                 }
             }
             Event::Deck(ControlEvent::LoopIn) => {
-                // Start a manual loop here; OUT closes it.  Any running loop ends.
+                // IN/CUE: start a manual loop here (OUT closes it; any running
+                // loop ends), and set the cue point here too, as the unit's
+                // IN/CUE does, so CUE afterwards returns to the loop's start.
                 let ch = self.audio.channels as u64;
                 let pos = self.quantized(self.smoothed_pos);
                 self.exit_loop();
                 self.audio.loop_start.store(pos, Ordering::Relaxed);
                 self.audio.loop_end.store(pos, Ordering::Relaxed);
                 self.loop_beats = 0.0;
+                self.loop_in_set = true;
+                if self.audio.playing.load(Ordering::Relaxed) {
+                    self.transport.cue_point = pos;
+                    self.transport.cued = false;
+                } else {
+                    self.transport.arrived_at_cue(pos);
+                }
+                self.cue_set = true;
                 log::info!("loop in: {:.2}s", pos as f64 / (self.audio.sample_rate as f64 * ch as f64));
             }
             Event::Deck(ControlEvent::LoopOut) => {
                 let pos = self.quantized(self.smoothed_pos);
                 let start = self.audio.loop_start.load(Ordering::Relaxed);
-                if pos > start { self.set_loop(start, pos, 0.0); }
+                // Only after an IN (or on a running loop, to move its end):
+                // OUT on its own used to loop from 0:00.
+                if !self.loop_in_set && !self.audio.loop_active.load(Ordering::Relaxed) {
+                    log::info!("loop out: no IN point — ignored");
+                } else if pos > start { self.set_loop(start, pos, 0.0); self.loop_in_set = false; }
                 else { log::info!("loop out: before the in point — ignored"); }
             }
             Event::Deck(ControlEvent::LoopToggle) | Event::Deck(ControlEvent::Reloop) => {
@@ -2374,6 +2391,7 @@ impl DeckApp {
             self.exit_loop();
             self.audio.loop_start.store(0, Ordering::Relaxed);
             self.audio.loop_end.store(0, Ordering::Relaxed);
+            self.loop_in_set = false;
             self.audio.set_playing(false);
             self.transport.arrived_at_cue(self.load_cue);
             self.cue_set = false;
@@ -2974,6 +2992,7 @@ impl DeckApp {
         self.prev_pos     = 0;
         self.transport.preview = false;
         self.transport.arrived_at_cue(p.cue_pt);
+        self.loop_in_set = false;
         self.load_cue = p.cue_pt;
         self.cue_set = false;
         // Park the deck at the cue (a CDJ sits at the cue after load) so PLAY
@@ -5413,6 +5432,144 @@ mod deck_tests {
             let want = if d.settings.tempo_range >= 0.99 { 50.0 } else { d.settings.tempo_range * 50.0 };
             assert!((pct - want).abs() < 0.01, "tempo follows the range: {pct}% on {}", d.settings.tempo_range);
         }
+    }
+
+    // ── Loops and SLIP: the paths the tests above don't walk ────────────────
+
+    fn looping(d: &DeckApp) -> bool { d.audio.loop_active.load(Ordering::Relaxed) }
+
+    /// A manual loop between `a` s and `a + len` s of a playing deck.
+    fn manual_loop(d: &mut DeckApp, len: f64) -> (f64, f64) {
+        d.send(C::LoopIn);
+        let start = d.at();
+        d.run(len);
+        d.send(C::LoopOut);
+        (start, d.at())
+    }
+
+    fn stays_inside(d: &mut DeckApp, start: f64, out: f64, secs: f64) {
+        let t0 = Instant::now();
+        while t0.elapsed().as_secs_f64() < secs {
+            d.run(0.05);
+            assert!(d.at() >= start - 0.05 && d.at() <= out + 0.05, "inside {start:.2}..{out:.2}: at {:.2}", d.at());
+        }
+    }
+
+    /// RELOOP/EXIT without SLIP: EXIT plays on out of the loop; RELOOP jumps
+    /// back to its start and loops it again.
+    #[test]
+    fn exit_plays_on_and_reloop_goes_back_into_the_loop() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(1.0);
+        let (start, out) = manual_loop(&mut d, 0.6);
+        d.run(0.7);
+        d.send(C::Reloop);                                    // EXIT
+        assert!(!looping(&d), "EXIT leaves the loop");
+        let at_exit = d.at();
+        assert!(at_exit >= start - 0.05 && at_exit <= out + 0.05, "no jump on EXIT without SLIP: {at_exit:.2}");
+        d.run(1.0);
+        assert!(d.at() > at_exit + 0.8 && d.at() > out, "plays on past the out point: {:.2}", d.at());
+        d.send(C::Reloop);                                    // RELOOP
+        assert!(looping(&d), "RELOOP runs the loop again");
+        near(d.at(), start, "RELOOP jumps to the loop's start");
+        stays_inside(&mut d, start, out, 1.2);
+    }
+
+    /// LOOP OUT with no IN before it (or at the IN point) makes no loop.
+    #[test]
+    fn loop_out_without_a_loop_in_does_nothing() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(0.5);
+        d.send(C::LoopOut);
+        assert!(!looping(&d));
+        d.run(0.5);
+        assert!(d.at() > 0.8, "plays on: {:.2}", d.at());
+    }
+
+    /// IN pressed on a paused deck sets the loop's start there; PLAY, then
+    /// OUT, closes the loop from that point.
+    #[test]
+    fn loop_in_while_paused_starts_the_loop_where_the_deck_stands() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(1.0);
+        d.send(C::PlayPause);
+        d.run(0.2);
+        let paused_at = d.at();
+        d.send(C::LoopIn);
+        d.send(C::PlayPause);
+        d.run(0.6);
+        d.send(C::LoopOut);
+        assert!(looping(&d));
+        let start = d.audio.loop_start.load(Ordering::Relaxed) as f64 / (SR as f64 * 2.0);
+        near(start, paused_at, "the loop starts where IN was pressed");
+        stays_inside(&mut d, paused_at, paused_at + 0.6, 1.0);
+    }
+
+    /// A 4-beat loop at 120 BPM is 2 s from the beat the playhead is in; the
+    /// same length again exits and the deck plays on.
+    #[test]
+    fn a_beat_loop_runs_its_length_and_the_same_length_again_exits() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(1.2);                                           // in the 3rd beat (1.0–1.5 s)
+        d.send(C::BeatLoop { beats: 4.0, held: false });
+        assert!(looping(&d));
+        let s = d.audio.loop_start.load(Ordering::Relaxed) as f64 / (SR as f64 * 2.0);
+        let e = d.audio.loop_end.load(Ordering::Relaxed) as f64 / (SR as f64 * 2.0);
+        assert!((s - 1.0).abs() < 0.01 && (e - 3.0).abs() < 0.01, "4 beats from the beat: {s:.3}..{e:.3}");
+        stays_inside(&mut d, s, e, 2.5);
+        d.send(C::BeatLoop { beats: 4.0, held: false });
+        assert!(!looping(&d), "the same pad exits");
+        d.run(2.5);
+        assert!(d.at() > e, "plays on past the loop: {:.2}", d.at());
+    }
+
+    /// SLIP with a beat loop: exiting returns to where the track would be.
+    #[test]
+    fn slip_returns_after_a_beat_loop() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(1.2);
+        d.send(C::SlipToggle);
+        let before = d.at();
+        d.send(C::BeatLoop { beats: 1.0, held: false });
+        d.run(1.6);                                           // round a 0.5 s loop three times
+        d.send(C::BeatLoop { beats: 1.0, held: false });
+        near(d.at(), before + 1.6, "SLIP: the loop's exit returns to the shadow");
+    }
+
+    /// SLIP turned off while a loop runs: the exit no longer returns.
+    #[test]
+    fn slip_off_during_a_loop_exits_without_returning() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(1.0);
+        d.send(C::SlipToggle);
+        let (start, out) = manual_loop(&mut d, 0.5);
+        d.run(1.0);
+        d.send(C::SlipToggle);                                // SLIP off
+        d.send(C::Reloop);
+        assert!(!looping(&d));
+        assert!(d.at() >= start - 0.1 && d.at() <= out + 0.1, "stays in the loop's span: {:.2}", d.at());
+    }
+
+    /// IN/CUE: on a CDJ, IN pressed during playback also sets the cue point
+    /// there (real-time cue), so CUE afterwards returns to the loop's start.
+    #[test]
+    fn loop_in_during_playback_sets_the_cue_point() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(1.0);
+        let (start, _) = manual_loop(&mut d, 0.5);
+        d.send(C::Reloop);                                    // EXIT
+        d.run(0.5);
+        d.send(C::Cue { pressed: true });
+        d.send(C::Cue { pressed: false });
+        d.run(0.1);
+        near(d.at(), start, "CUE returns to where IN was pressed");
     }
 }
 

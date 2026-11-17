@@ -15,6 +15,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use crate::prodj::LinkState;
 use opendeck_dbserver::{Client as DbClient, MenuItem, Slot};
+#[cfg(test)]
 use opendeck_nfs::Nfs;
 use opendeck_rekordbox::{read_export, read_export_from, RbExport};
 use crate::media::{self, Access, Mount};
@@ -451,6 +452,9 @@ pub struct Browser {
     /// opening as it is reached, and pressing it goes back into the list.
     cat_focus:  bool,
     link:      Arc<LinkState>,
+    /// The ports a linked player is reached on (a player's own by default;
+    /// tests point them at a server on free ports).
+    pub(crate) ports: crate::LinkPorts,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
     /// container's UUID directories — so the start is the floor there.
@@ -537,6 +541,7 @@ impl Browser {
             peek_ticket: 0,
             cat_focus: false,
             link,
+            ports: crate::LinkPorts::default(),
             preview: Default::default(),
             home: start.clone(),
             played: Vec::new(),
@@ -1099,7 +1104,8 @@ impl Browser {
         self.meta_asked.clear();
         self.peeks.clear();
         self.peek_asked = None;
-        let session = DbSession::open(ip, slot, move || DbClient::discover(ip, device))?;
+        let query = self.ports.query;
+        let session = DbSession::open(ip, slot, move || DbClient::discover_at(ip, query, device))?;
         log::info!("LINK {ip}: dbserver session open ({slot:?})");
         self.db = Some(session);
         Ok(())
@@ -1335,7 +1341,7 @@ impl Browser {
 
     /// Connect to a linked player, read its `export.pdb` over NFS, and browse it.
     fn connect_link(&mut self, ip: Ipv4Addr) -> anyhow::Result<()> {
-        let mut nfs = Nfs::connect_any(ip)?;
+        let mut nfs = self.ports.nfs(ip, false)?;
         let root = nfs.mount_usb()?;
         let (fh, size) = nfs.lookup_path(&root, "PIONEER/rekordbox/export.pdb")?;
         let bytes = nfs.read_file(&fh, size)?;
@@ -2399,5 +2405,235 @@ mod tests {
         let bytes = nfs.read_file(&fh, size).unwrap();
         assert!(bytes.len() == size as usize && size > 0, "read {} of {size}", bytes.len());
         println!("OK: LINK → dbserver track {id} at {path} → {size} bytes over NFS");
+    }
+}
+
+/// BROWSE on a linked player, end to end: OpenDeck's own dbserver (and NFS
+/// export) on free loopback ports stands in for the player, and the browser
+/// walks it the way a DJ does: LINK → the player → its categories → a list
+/// → a track, BACK into the category column, the right-hand pane, the
+/// highlighted track's metadata, and a player that isn't there.
+#[cfg(test)]
+mod link_browse_tests {
+    use super::*;
+    use opendeck_dbserver::server::{Library, Server, Track};
+    use std::time::Duration;
+
+    /// Four tracks by two artists on two albums, keys and tempos set so
+    /// KEY and the related-key lists have something to show.
+    fn library() -> Library {
+        let t = |id: u32, title: &str, artist: &str, album: &str, key: &str, bpm: f32| Track {
+            id, title: title.into(), artist: artist.into(), album: album.into(), key: key.into(), bpm,
+            path: format!("/Contents/{}.mp3", title.to_lowercase().replace(' ', "_")), duration_s: 300,
+            beats: vec![(1, bpm, 0), (2, bpm, (60_000.0 / bpm) as u32)], ..Default::default()
+        };
+        Library { name: "OPENDECK".into(), tracks: vec![
+            t(1, "Night Drive", "Aurora Grid", "Signals", "Am", 124.0),
+            t(2, "Low Orbit", "Aurora Grid", "Signals", "C", 126.0),
+            t(3, "Static Bloom", "Kessler", "Debris", "Em", 128.0),
+            t(4, "Far Field", "Kessler", "Field Notes", "F#m", 140.0),
+        ], ..Default::default() }
+    }
+
+    struct Rig { _db: Server, b: Browser }
+
+    /// A player (number 2) on loopback serving `lib`, and a browser that
+    /// knows it from the Link peer table.
+    fn rig(lib: Library) -> Rig {
+        let db = Server::start_at(lib.shared(), Arc::new(|| 2), 0, 0).unwrap();
+        let link = crate::prodj::LinkState::new(1);
+        link.peers.lock().unwrap().insert(2, Ipv4Addr::LOCALHOST);
+        let home = std::env::temp_dir();
+        let mut b = Browser::new(&home, link);
+        b.ports = crate::LinkPorts { query: db.query_port, portmap: None };
+        Rig { _db: db, b }
+    }
+
+    fn names(b: &Browser) -> Vec<String> { b.entries().iter().map(|e| e.name.clone()).collect() }
+
+    fn pick(b: &mut Browser, name: &str) -> Enter {
+        b.selected = b.entries().iter().position(|e| e.name == name)
+            .unwrap_or_else(|| panic!("no {name:?} in {:?}", names(b)));
+        b.enter()
+    }
+
+    /// LINK, then the player's row: the browser is on the player's categories.
+    fn open_player(b: &mut Browser) {
+        b.go_link();
+        assert_eq!(names(b).len(), 1, "one player listed: {:?}", names(b));
+        assert!(names(b)[0].contains("127.0.0.1"), "{:?}", names(b));
+        b.selected = 0;
+        assert!(matches!(b.enter(), Enter::Folder), "the player opens");
+    }
+
+    /// Run `prefetch_meta` as the frames do until `done` (or 3 s).
+    fn frames_until(b: &mut Browser, mut done: impl FnMut(&Browser) -> bool) -> bool {
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_secs(3) {
+            b.prefetch_meta();
+            if done(b) { return true; }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        false
+    }
+
+    #[test]
+    fn a_linked_player_opens_on_its_categories_and_its_first_one() {
+        let mut r = rig(library());
+        open_player(&mut r.b);
+        let (cats, open) = r.b.rb_categories().expect("the category column");
+        for c in ["ARTIST", "ALBUM", "TRACK", "KEY", "PLAYLIST", "HISTORY", "FILENAME"] {
+            assert!(cats.iter().any(|n| n == c), "{c} in {cats:?}");
+        }
+        // It opens on the first category, ARTIST, as a unit does.
+        assert_eq!(open, Some(0));
+        assert_eq!(names(&r.b), ["Aurora Grid", "Kessler"]);
+        assert_eq!(r.b.source_kind(), SourceTile::Link);
+    }
+
+    #[test]
+    fn an_artist_lists_their_tracks_and_a_track_loads_from_that_player() {
+        let mut r = rig(library());
+        open_player(&mut r.b);
+        assert!(matches!(pick(&mut r.b, "Kessler"), Enter::Folder));
+        assert_eq!(r.b.title(), "Kessler");
+        assert_eq!(names(&r.b), ["Far Field", "Static Bloom"], "by title, as the player sorts them");
+        assert!(r.b.entries().iter().all(|e| !e.is_dir && e.artist.as_deref() == Some("Kessler")));
+        let Enter::Track(load) = pick(&mut r.b, "Far Field") else { panic!("a track") };
+        let Load::Db { ip, id, rekordbox, sd, .. } = load.clone() else { panic!("{load:?}") };
+        assert_eq!((ip, id, rekordbox, sd), (Ipv4Addr::LOCALHOST, 4, false, false));
+        // LOAD asks the browser's own session for the file and grid (a
+        // second session from our player number would cost the browser its).
+        let (path, grid, _meta) = r.b.db_track_file(ip, Slot::Usb, id).expect("the open session").unwrap();
+        assert_eq!(path.as_deref(), Some("/Contents/far_field.mp3"));
+        assert!(grid.is_ok_and(|g| !g.is_empty()), "the player's beat grid");
+        // Not the session's player or slot: no answer, so the loader opens its own.
+        assert!(r.b.db_track_file(ip, Slot::Sd, id).is_none());
+    }
+
+    #[test]
+    fn album_track_and_filename_list_as_the_player_serves_them() {
+        let mut r = rig(library());
+        open_player(&mut r.b);
+        r.b.open_rb_category(1);                                   // ALBUM
+        assert_eq!(names(&r.b), ["Debris", "Field Notes", "Signals"]);
+        assert!(matches!(pick(&mut r.b, "Signals"), Enter::Folder));
+        assert_eq!(names(&r.b), ["Low Orbit", "Night Drive"]);
+        let cats = r.b.rb_categories().unwrap().0;
+        r.b.open_rb_category(cats.iter().position(|c| c == "TRACK").unwrap());
+        assert_eq!(names(&r.b).len(), 4, "every track: {:?}", names(&r.b));
+        r.b.open_rb_category(cats.iter().position(|c| c == "FILENAME").unwrap());
+        assert_eq!(names(&r.b), ["far_field.mp3", "low_orbit.mp3", "night_drive.mp3", "static_bloom.mp3"]);
+    }
+
+    /// KEY → a key → how far from it (same, relative, …) → the tracks in
+    /// those keys.  OpenDeck serving OpenDeck: both ends are ours.
+    #[test]
+    #[ignore = "open: the browser opens a distance row by its id, which OpenDeck's server sets to the key (the distance is the row's parent), so every distance lists the widest set; which side matches a CDJ-3000 is unchecked"]
+    fn key_lists_keys_then_related_sets_then_tracks() {
+        let mut r = rig(library());
+        open_player(&mut r.b);
+        let cats = r.b.rb_categories().unwrap().0;
+        r.b.open_rb_category(cats.iter().position(|c| c == "KEY").unwrap());
+        assert_eq!(names(&r.b), ["Am", "C", "Em", "F#m"]);
+        assert!(matches!(pick(&mut r.b, "Am"), Enter::Folder));
+        let levels = names(&r.b);
+        assert_eq!(levels.len(), 3, "{levels:?}");
+        assert_eq!(levels[0], "Am", "distance 0: the key itself");
+        assert!(levels[1].contains("C"), "distance 1 holds the relative major: {levels:?}");
+        // Distance 0: only the track in A minor.
+        r.b.selected = 0;
+        assert!(matches!(r.b.enter(), Enter::Folder));
+        assert_eq!(names(&r.b), ["Night Drive"]);
+        // Distance 1 adds C major (relative) and E minor (a fifth up).
+        r.b.back();
+        r.b.selected = 1;
+        assert!(matches!(r.b.enter(), Enter::Folder));
+        let mut got = names(&r.b);
+        got.sort();
+        assert_eq!(got, ["Low Orbit", "Night Drive", "Static Bloom"]);
+    }
+
+    #[test]
+    fn back_from_a_category_steps_into_the_column_and_the_wheel_walks_it() {
+        let mut r = rig(library());
+        open_player(&mut r.b);
+        assert!(matches!(pick(&mut r.b, "Kessler"), Enter::Folder));
+        r.b.back();                                                 // to ARTIST's artists
+        assert_eq!(names(&r.b), ["Aurora Grid", "Kessler"]);
+        assert_eq!(r.b.selected_entry().unwrap().name, "Kessler", "the highlight comes back to where it was");
+        r.b.back();                                                 // into the column
+        assert!(r.b.cat_focus());
+        r.b.back();                                                 // and no further
+        assert!(r.b.cat_focus());
+        assert_eq!(r.b.source_kind(), SourceTile::Link, "still on the player");
+        r.b.move_selection(1);                                      // the wheel opens ALBUM
+        assert_eq!(r.b.rb_categories().unwrap().1, Some(1));
+        assert_eq!(names(&r.b), ["Debris", "Field Notes", "Signals"]);
+        assert!(matches!(r.b.enter(), Enter::Folder));              // press: back into the list
+        assert!(!r.b.cat_focus());
+        assert_eq!(r.b.selected, 0);
+    }
+
+    /// The right-hand pane fills in with what the highlighted row opens, and
+    /// a highlighted track's library metadata arrives a few frames later —
+    /// neither waits on the player.
+    #[test]
+    fn the_pane_and_the_highlighted_tracks_metadata_arrive_without_waiting() {
+        let mut r = rig(library());
+        open_player(&mut r.b);
+        r.b.selected = 1;                                           // Kessler
+        assert_eq!(r.b.db_peek(), Some(("TRACK", vec![])), "empty until the player answers");
+        assert!(frames_until(&mut r.b, |b| b.db_peek().is_some_and(|p| !p.1.is_empty())), "the pane filled");
+        assert_eq!(r.b.db_peek().unwrap().1, vec![(false, "Far Field".into()), (false, "Static Bloom".into())]);
+
+        assert!(matches!(pick(&mut r.b, "Kessler"), Enter::Folder));
+        r.b.selected = 0;                                           // Far Field
+        let load = r.b.selected_entry().unwrap().load().cloned().unwrap();
+        assert!(r.b.db_tags(&load).is_none(), "nothing asked yet");
+        assert!(frames_until(&mut r.b, |b| b.db_tags(&load).is_some()), "metadata arrived");
+        let tags = r.b.db_tags(&load).unwrap();
+        assert_eq!(tags.title.as_deref(), Some("Far Field"));
+        assert_eq!(tags.artist.as_deref(), Some("Kessler"));
+        assert_eq!(tags.album.as_deref(), Some("Field Notes"));
+        assert_eq!(tags.key.as_deref(), Some("F#m"));
+        assert!(tags.bpm.is_some_and(|b| (b - 140.0).abs() < 0.01), "{:?}", tags.bpm);
+        assert!(frames_until(&mut r.b, |b| !b.db_pending()), "nothing left in flight");
+    }
+
+    /// PLAY LIST with the last track from a linked player: the player's
+    /// playlists, without the category column, and BACK stays there.
+    #[test]
+    fn play_list_reopens_the_linked_players_playlists() {
+        let mut r = rig(library());
+        open_player(&mut r.b);
+        r.b.go_root();                                              // somewhere else
+        assert!(r.b.open_playlists());
+        assert!(r.b.playlist_only());
+        assert_eq!(r.b.source_kind(), SourceTile::Link);
+        // OpenDeck has no playlists: only ALL TRACKS would be offered, and the
+        // list is the player's playlist root.
+        r.b.back();
+        assert!(r.b.playlist_only(), "BACK stays in the playlists");
+    }
+
+    #[test]
+    #[ignore = "open: entering a player that has gone away blocks the UI thread ~12 s (connect and the export.pdb fallback run on it)"]
+    fn a_player_that_is_not_there_leaves_the_link_list_up_and_does_not_hang() {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let link = crate::prodj::LinkState::new(1);
+        link.peers.lock().unwrap().insert(3, Ipv4Addr::LOCALHOST);
+        let mut b = Browser::new(&std::env::temp_dir(), link);
+        // Nothing on the port query, nor on the portmapper for the
+        // export.pdb fallback.
+        b.ports = crate::LinkPorts { query: free, portmap: Some(free) };
+        b.go_link();
+        let before = names(&b);
+        let t0 = Instant::now();
+        b.selected = 0;
+        assert!(matches!(b.enter(), Enter::Nothing));
+        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
+        assert_eq!(names(&b), before, "still on the LINK list");
+        assert_ne!(b.source_kind(), SourceTile::None);
     }
 }
