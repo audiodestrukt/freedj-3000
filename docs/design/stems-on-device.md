@@ -304,3 +304,11 @@ removed the throttling, and the model is now the limit. Splitting ahead of
 the playhead from the start of a track only keeps up with this, with no
 margin for the deck itself. 2x still needs a lighter model (the distilled
 Demucs).
+
+**Overclocked to 2.8 GHz** (`arm_freq=2800`, `over_voltage_delta=50000`,
+same cooler, same test): **296 s, 1.06x real time**, 5.36 s a chunk against
+5.73 at 2.4 GHz. 17 % more clock bought 7 %: the four cores are waiting on
+memory, as the per-core rates above showed. 2.8 GHz throughout, no
+throttling, 69 °C with the fan at its top step, the supply down to 4.76 V.
+1.2x (4.9 s a chunk) won't come from the clock; it needs less memory
+traffic a chunk (fused passes, fp16 activations) or the distilled model.
