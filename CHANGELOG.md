@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.29] — 2026-11-17
+
 ### Added
 - A 5" deck to print (`hardware/cad/deck5/`): Raspberry Pi 5 with its
   cooler, a 5" 800 × 480 display, a 140 mm jog on two bearings with a
