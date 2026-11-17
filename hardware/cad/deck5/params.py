@@ -115,7 +115,7 @@ def pi_holes():
 # ── Jog ──────────────────────────────────────────────────────────────────────
 JOG_D = 140.0
 JOG_CX, JOG_CY = 110.0, 82.0
-JOG_H = 16.0
+JOG_H = 12.40                 # the reference platter at JOG_D (jog.py checks it)
 JOG_GAP = 1.0                 # platter skirt clears the top by this
 JOG_Z0 = H + JOG_GAP          # platter skirt bottom
 SHAFT_D = 8.0                 # 8 mm steel rod (or ground M8 bolt shank)

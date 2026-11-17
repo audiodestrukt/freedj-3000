@@ -84,7 +84,7 @@ def printed():
     bf, bb = base.parts()
     s = [("top_front", tf, "shell"), ("top_back", tb, "shell"),
          ("base_front", bf, "base"), ("base_back", bb, "base")]
-    s.append(("jog_platter", place(jog.platter(), jog.MATES["platter_axis"], jog.MATES["jog_world_platter"]), "platter"))
+    s.append(("jog_platter", jog.place_mesh(jog.platter(), jog.MATES["platter_axis"], jog.MATES["jog_world_platter"]), "platter"))
     s.append(("jog_tower", place(jog.tower(), jog.MATES["tower_foot"], jog.MATES["jog_world_tower"]), "base"))
     s.append(("cap_play", Pos(*PLAY, H) * caps.big_cap(), "play"))
     s.append(("cap_cue", Pos(*CUE, H) * caps.big_cap(), "cue"))
@@ -111,6 +111,9 @@ def screen_face(dz=0.0):
 
 
 def mesh(solid, path):
+    if isinstance(solid, trimesh.Trimesh):      # a mesh part (the platter)
+        solid.export(path)
+        return solid
     export_stl(solid, path, tolerance=0.02, angular_tolerance=0.08)
     return trimesh.load(path)
 

@@ -83,11 +83,18 @@ def main():
     os.makedirs(PRINT, exist_ok=True)
     bad = []
     for name, (solid, flip, n) in parts().items():
-        s = FLIP * solid if flip else solid
-        bb = s.bounding_box()
-        s = Pos(-bb.min.X, -bb.min.Y, -bb.min.Z) * s
         path = os.path.join(PRINT, f"{name}.stl")
-        export_stl(s, path)
+        if isinstance(solid, trimesh.Trimesh):   # a mesh part (the platter)
+            s = solid.copy()
+            if flip:
+                s.apply_transform(trimesh.transformations.rotation_matrix(np.pi, [1, 0, 0]))
+            s.apply_translation(-s.bounds[0])
+            s.export(path)
+        else:
+            s = FLIP * solid if flip else solid
+            bb = s.bounding_box()
+            s = Pos(-bb.min.X, -bb.min.Y, -bb.min.Z) * s
+            export_stl(s, path)
         m = trimesh.load(path)
         ext = m.bounds[1] - m.bounds[0]
         bodies = len(m.split(only_watertight=False))

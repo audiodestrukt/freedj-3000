@@ -1,9 +1,9 @@
 # deck5 — the 5" flagship deck, first iteration
 
 A small, quick-to-print OpenDeck: a Raspberry Pi 5 with its Active Cooler,
-a 5" 800 × 480 DSI touch display (Hosyond), a 140 mm jog on two 608 bearings with a
+a 5" 800 × 480 DSI touch display (Hosyond), a 140 mm Pioneer-style jog on two 608 bearings with a
 contactless AS5600 encoder, a 100 mm pitch fader, CUE / PLAY, six keys and
-a browse encoder.  214 × 280 × 46 mm (63 mm to the top of the jog).
+a browse encoder.  214 × 280 × 46 mm (59.4 mm to the top of the jog).
 
 Small on purpose: every part fits a 220 × 220 bed, so a design change is a
 print overnight, not a weekend.  The full-size deck can grow out of the
@@ -79,7 +79,7 @@ screen panel, where a seam reads as a design line, not a repair.
 | `top_front.stl` | 1 | 214 × 184. Top face on the bed (smooth / textured PEI picks the finish). No supports. |
 | `top_back.stl` | 1 | 214 × 100. Same. The Pi port window's top is a 54 mm bridge. |
 | `base_front.stl`, `base_back.stl` | 1 each | Flat. Countersinks are on the bed side (cones, no supports). |
-| `jog_platter.stl` | 1 | Top face down. 140 mm. |
+| `jog_platter.stl` | 1 | Top face down (the flat top on the bed). 140 mm. |
 | `jog_tower.stl` | 1 | Bearing seat up; the sensor slot bridges 25 mm. |
 | `cap_play_cue.stl` | 2 | One green, one orange (or paint). |
 | `cap_key.stl` | 6 | |
@@ -145,6 +145,20 @@ Every ⚠ VERIFY in `params.py` is a datasheet number or a guess:
 - **Active Cooler height** (`PI_COOLER_H`): the gap to the display above
   it is about 7 mm.
 
+## The platter
+
+The platter's shape comes from a real Pioneer platter: a Meshy mesh made
+from a photo, its dome cut flat in Blender (`hardware/cad/jog.stl`,
+`jog.blend`), with the finger dimples on the shoulder and the band round
+the base.  `python3 jog.py --ref` normalises it once into
+`assets/platter_ref.stl`: its two shells welded, simplified to 0.03 mm, 1
+unit across.  `jog.py` scales that to `JOG_D` and cuts the working parts into
+it with mesh booleans (manifold3d): the hollow under the flat top, the hub
+with the 8 mm shaft bore and grub screw, and the label recess.  The dimpled
+shoulder stays solid, which adds inertia.  `JOG_H` follows the shape (12.4 mm
+at 140 mm), and `jog.py` fails if the two disagree.  The full-size deck only
+changes `JOG_D` (about 200 mm).
+
 ## Not done yet
 
 - **The switch board.**  CUE / PLAY and the keys have guide sleeves and
@@ -166,7 +180,8 @@ hardware/cad/deck5/render.sh       # assembly GLBs + renders/ (Blender, GPU)
 ```
 
 - `params.py`: every dimension, one place.
-- `top_shell.py`, `base.py`, `jog.py`, `caps.py`: the printed parts.
+- `top_shell.py`, `base.py`, `jog.py`, `caps.py`: the printed parts
+  (the platter is a mesh, not a build123d solid; needs `manifold3d`).
 - `assembly.py`: the printed parts plus stand-ins for the bought ones,
   exported as `build/deck5.glb`, `_cutaway`, `_exploded` and `_seam`.
   Open any of them in a glTF viewer (Blender, three.js, VS Code).
