@@ -51,6 +51,11 @@ All notable changes to this project will be documented in this file.
   (`deploy/pi/cross/build.sh`) now includes it.
 
 ### Fixed
+- BROWSE → KEY on a linked player: a key's rows (the key, its relatives,
+  wider) each list their own set of tracks.  Every row opened the same
+  set: the browser asked for the row's id, which a CDJ-3000 sets to the
+  key on all three rows (the distance is the row's parent).  Checked on
+  a CDJ-3000 in cdj3k-emu: Abm lists 10 tracks, its widest set 36.
 - The CDJ-3000 emulator image installs again.  cdj3k-emu stopped with
   "the provisioning guest did not hand back a rootfs" on the released
   `.iso`: the image had no `/dev/console` (a container export leaves

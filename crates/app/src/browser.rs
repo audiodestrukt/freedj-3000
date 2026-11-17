@@ -67,6 +67,18 @@ fn cat_row_name(cat: Cat, level: usize, i: &opendeck_dbserver::MenuItem) -> Stri
     }
 }
 
+/// The id a picked row adds to the request for the next level.  Most rows
+/// are named by their id; KEY's second level (the key, its relatives,
+/// wider) carries the key as the id on every row and the distance as the
+/// parent, as a CDJ-3000 sends it (checked in cdj3k-emu: ids 1, 1, 1 for
+/// "Abm", "Abm, B", "Abm, B, Dbm, Ebm"), so it is opened by the parent.
+fn cat_row_id(cat: Cat, level: usize, i: &opendeck_dbserver::MenuItem) -> u32 {
+    match (cat, level) {
+        (Cat::Key, 1) => i.parent_id,
+        _ => i.id,
+    }
+}
+
 fn db_category(i: &opendeck_dbserver::MenuItem) -> &'static str {
     match i.label.to_ascii_uppercase().as_str() {
         "TRACK" => "root-track",
@@ -990,7 +1002,7 @@ impl Browser {
                 for i in items.iter().take(3) { log::info!("LINK {} row: type 0x{:04x} id {} {:?} {:?}", cat.label(), i.item_type, i.id, i.label, i.label2); }
                 items.into_iter().map(|i| {
                     let mut next = picked.clone();
-                    next.push(i.id);
+                    next.push(cat_row_id(cat, picked.len(), &i));
                     Entry { name: cat_row_name(cat, picked.len(), &i), is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(Loc::DbCat(cat, next)) }
                 }).collect()
             }
@@ -2529,7 +2541,6 @@ mod link_browse_tests {
     /// KEY → a key → how far from it (same, relative, …) → the tracks in
     /// those keys.  OpenDeck serving OpenDeck: both ends are ours.
     #[test]
-    #[ignore = "open: the browser opens a distance row by its id, which OpenDeck's server sets to the key (the distance is the row's parent), so every distance lists the widest set; which side matches a CDJ-3000 is unchecked"]
     fn key_lists_keys_then_related_sets_then_tracks() {
         let mut r = rig(library());
         open_player(&mut r.b);
@@ -2540,18 +2551,23 @@ mod link_browse_tests {
         let levels = names(&r.b);
         assert_eq!(levels.len(), 3, "{levels:?}");
         assert_eq!(levels[0], "Am", "distance 0: the key itself");
-        assert!(levels[1].contains("C"), "distance 1 holds the relative major: {levels:?}");
+        assert_eq!(levels[1], "Am, C", "distance 1: the key and its relative major");
         // Distance 0: only the track in A minor.
         r.b.selected = 0;
         assert!(matches!(r.b.enter(), Enter::Folder));
         assert_eq!(names(&r.b), ["Night Drive"]);
-        // Distance 1 adds C major (relative) and E minor (a fifth up).
-        r.b.back();
-        r.b.selected = 1;
-        assert!(matches!(r.b.enter(), Enter::Folder));
-        let mut got = names(&r.b);
-        got.sort();
-        assert_eq!(got, ["Low Orbit", "Night Drive", "Static Bloom"]);
+        // Distance 1 adds the relative major (C), as the unit's "Abm, B";
+        // distance 2 the neighbours a fifth away (E minor among them).
+        let wider = |b: &mut Browser, row: usize| {
+            b.back();
+            b.selected = row;
+            assert!(matches!(b.enter(), Enter::Folder));
+            let mut got = names(b);
+            got.sort();
+            got
+        };
+        assert_eq!(wider(&mut r.b, 1), ["Low Orbit", "Night Drive"]);
+        assert_eq!(wider(&mut r.b, 2), ["Low Orbit", "Night Drive", "Static Bloom"]);
     }
 
     #[test]
