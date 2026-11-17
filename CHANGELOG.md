@@ -21,6 +21,14 @@ All notable changes to this project will be documented in this file.
   analysis.  A track with neither shows the time scale.
 
 ### Fixed
+- A linked player that drops off the network mid-browse no longer freezes
+  the deck.  Every list opened on it (a category, an artist, a playlist,
+  SEARCH) and LOAD's file lookup waited on the player on the UI thread:
+  with its cable pulled, one press froze the screen and keys for 15 s
+  (a request timeout, a reconnect, a retry).  Lists now load in the
+  background behind a "Loading…" row and stay cached for the session, so
+  BACK and the category wheel are instant; a player that doesn't answer
+  says so in the list; LOAD asks from the loader thread.
 - Cues from a CDJ-3000: a track loaded from a linked CDJ-3000 now comes
   with its hot cues, memory points, their colours and comments, and its
   phrases.  The load went through the player's dbserver, which serves a

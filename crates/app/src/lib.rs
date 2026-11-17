@@ -2547,12 +2547,14 @@ impl DeckApp {
         // second session from our player number makes a CDJ drop the first,
         // which left BROWSE on a dead session (only ALL TRACKS) and could
         // cut a download short when BROWSE reconnected.
-        let known = self.browser.db_track_file(ip, slot, id);
+        // The browser's session, asked from the loader thread: LOAD never
+        // waits on the network either.
+        let known = self.browser.db_track_caller(ip, slot, id);
         let ports = self.link_ports;
         self.start_fetch(title.clone(), move |tx| {
             let t0 = Instant::now();
             let (path, grid, meta) = match known {
-                Some(r) => r?,
+                Some((caller, meta)) => (caller.call(move |c, s| c.file_path(s, id))?, caller.call(move |c, s| c.beat_grid(s, id)), meta),
                 None => {
                     let mut db = Client::discover_at(ip, ports.query, device)?;
                     (db.file_path(slot, id)?, db.beat_grid(slot, id), db.track_meta(slot, id).ok())

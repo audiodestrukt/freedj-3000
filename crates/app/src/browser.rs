@@ -47,7 +47,6 @@ fn is_audio(path: &Path) -> bool {
 }
 
 /// A linked track's file path (if the server has one) and its beat-grid blob.
-pub type DbTrackFile = (Option<String>, anyhow::Result<Vec<u8>>, Option<opendeck_dbserver::TrackMeta>);
 
 /// Which category a dbserver root-menu row is: by its label when it is one
 /// we know (a source may number the item types its own way), else by type.
@@ -166,7 +165,7 @@ enum EntryKind {
     Grant,
 }
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 enum Loc {
     Fs(PathBuf),
     /// The LINK source: a list of discovered players.
@@ -211,6 +210,9 @@ enum Loc {
     /// A linked player being connected to (see [`Connecting`]): one row
     /// saying so, or why it did not answer.
     Connecting,
+    /// A linked player's search results for a query: only the key its list
+    /// is asked and cached under (SEARCH itself is [`Loc::Search`]).
+    DbSearch(String),
 }
 
 /// A linked player's row was pressed: the session opens (and, for a player
@@ -503,6 +505,13 @@ pub struct Browser {
     /// tests point them at a server on free ports).
     pub(crate) ports: crate::LinkPorts,
     connecting: Option<Connecting>,
+    /// The linked player's lists this session (see [`Browser::db_list`]):
+    /// those in, the one asked and not in yet (ticket, where, root
+    /// fallback), the last that failed, and what waits for the one asked.
+    list_cache: Vec<(Loc, Vec<Entry>)>,
+    list_wait:  Option<(u64, Loc, bool)>,
+    list_error: Option<(Loc, String)>,
+    after_list: Option<Box<dyn FnOnce(&mut Browser)>>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
     /// container's UUID directories — so the start is the floor there.
@@ -591,6 +600,10 @@ impl Browser {
             link,
             ports: crate::LinkPorts::default(),
             connecting: None,
+            list_cache: Vec::new(),
+            list_wait: None,
+            list_error: None,
+            after_list: None,
             preview: Default::default(),
             home: start.clone(),
             played: Vec::new(),
@@ -642,13 +655,23 @@ impl Browser {
     pub fn prefetch_meta(&mut self) {
         self.poll_connect();
         let Some(db) = self.db.as_ref() else { return };
-        for (k, info) in db.answers() {
+        let answers: Vec<_> = db.answers().collect();
+        let arrived: Vec<_> = db.lists().collect();
+        for (k, info) in answers {
             self.meta_asked.remove(&k);
             self.meta_cache.insert(k, info);
         }
         // The right-hand pane: what the highlighted row opens, one list at
         // a time (scrolling fast asks only for where the highlight stops).
-        for (ticket, r) in db.lists() {
+        for (ticket, r) in arrived {
+            // The list on screen (or one BROWSE moved on from: dropped).
+            if let Some((t, _, _)) = &self.list_wait {
+                if *t == ticket {
+                    let (_, loc, fallback) = self.list_wait.take().unwrap();
+                    self.list_arrived(loc, fallback, r);
+                    continue;
+                }
+            }
             let Some((t, peek)) = self.peek_asked.take() else { continue };
             if t != ticket { self.peek_asked = Some((t, peek)); continue; }
             let rows = match r {
@@ -657,6 +680,7 @@ impl Browser {
             };
             self.peeks.insert(peek, rows);
         }
+        let Some(db) = self.db.as_ref() else { return };
         if self.peek_asked.is_none() {
             if let Some(peek) = self.selected_peek().filter(|p| !self.peeks.contains_key(p)) {
                 self.peek_ticket += 1;
@@ -681,7 +705,7 @@ impl Browser {
 
     /// Lookups still under way (the app keeps drawing at full rate so their
     /// answers show as they land).
-    pub fn db_pending(&self) -> bool { !self.meta_asked.is_empty() || self.peek_asked.is_some() || self.connecting() }
+    pub fn db_pending(&self) -> bool { !self.meta_asked.is_empty() || self.peek_asked.is_some() || self.list_wait.is_some() || self.connecting() }
 
     fn selected_peek(&self) -> Option<Peek> {
         match self.selected_entry() {
@@ -725,6 +749,7 @@ impl Browser {
             Some(Loc::Fs(p)) => p.file_name().and_then(|n| n.to_str()).unwrap_or("/").to_string(),
             Some(Loc::Link)  => "LINK".to_string(),
             Some(Loc::Connecting) => self.connecting.as_ref().map(|c| c.label.clone()).unwrap_or_else(|| "LINK".to_string()),
+            Some(Loc::DbSearch(_)) => "SEARCH".to_string(),
             Some(Loc::RbRoot) => match &self.rb_source {
                 Some(RbSource::Link(ip)) => format!("LINK  {ip}"),
                 _ => "REKORDBOX".to_string(),
@@ -875,17 +900,9 @@ impl Browser {
             Some(Loc::RbHistory)      => self.rb_history_entries(),
             Some(Loc::Search)         => self.search_entries(),
             Some(Loc::RbHistoryList(id)) => self.rb_track_entries(|e| e.history_tracks(id)),
-            Some(Loc::DbRoot)         => self.db_root_entries(),
-            Some(Loc::DbFolder(id))   => self.db_folder_entries(id),
-            Some(Loc::DbPlaylist(id)) => self.db_track_entries(move |c, s| c.playlist(s, id, false)),
-            Some(Loc::DbAllTracks)    => self.db_track_entries(|c, s| c.all_tracks(s, 0)),
-            Some(Loc::DbArtists)      => self.db_name_entries(|c, s| c.artists(s), Loc::DbArtist),
-            Some(Loc::DbArtist(id))   => self.db_track_entries(move |c, s| c.tracks_for_artist(s, id)),
-            Some(Loc::DbAlbums)       => self.db_name_entries(|c, s| c.albums(s), Loc::DbAlbum),
-            Some(Loc::DbAlbum(id))    => self.db_track_entries(move |c, s| c.tracks_for_album(s, id)),
-            Some(Loc::DbFilenames)    => self.db_track_entries(|c, s| c.filenames(s)),
-            Some(Loc::DbCat(c, ids))  => self.db_cat_entries(c, ids),
-            Some(Loc::DbTree(id))     => self.db_tree_entries(id),
+            Some(loc @ (Loc::DbRoot | Loc::DbFolder(_) | Loc::DbPlaylist(_) | Loc::DbAllTracks | Loc::DbArtists | Loc::DbArtist(_)
+                        | Loc::DbAlbums | Loc::DbAlbum(_) | Loc::DbFilenames | Loc::DbCat(..) | Loc::DbTree(_))) => self.db_list(loc),
+            Some(Loc::DbSearch(_))    => Vec::new(),   // a cache key, never on the stack
             Some(Loc::Connecting)     => {
                 let text = match &self.connecting {
                     Some(Connecting { failed: Some(why), label, .. }) => format!("{label}: not answering ({why})"),
@@ -998,158 +1015,202 @@ impl Browser {
         out
     }
 
-    /// A dbserver source's category menu, as the source lists it.  Each row
-    /// is typed (`root-track`, `root-playlist`, …); the ones we can walk
-    /// descend, the rest are shown but inert.  A source without a root menu
-    /// (older servers) falls back to PLAYLIST view with ALL TRACKS on top.
-    fn db_root_entries(&mut self) -> Vec<Entry> {
-        let items = match self.db_call(|c, slot| c.root_menu(slot)) {
-            None => return Vec::new(),
-            Some(Ok(items)) if !items.is_empty() => items,
-            Some(Ok(_)) => { log::info!("LINK: empty category menu; showing playlists"); return self.db_folder_entries(0); }
-            Some(Err(e)) => { log::info!("LINK: no category menu ({e:#}); showing playlists"); return self.db_folder_entries(0); }
-        };
-        for i in &items { log::info!("LINK category: {:?} item_type 0x{:x} id {} → {}", i.label, i.item_type, i.id, db_category(i)); }
-        // FOLDER and SEARCH stay off the list: SEARCH is its own key, and the
-        // categories cover what FOLDER would show.
-        let items: Vec<_> = items.into_iter().filter(|i| !matches!(db_category(i), "root-folder" | "root-search")).collect();
-        let rows: Vec<Entry> = items.into_iter().map(|i| {
-            let kind = match db_category(&i) {
-                "root-track"    => EntryKind::Descend(Loc::DbAllTracks),
-                "root-playlist" => EntryKind::Descend(Loc::DbFolder(0)),
-                "root-artist"   => EntryKind::Descend(Loc::DbArtists),
-                "root-album"    => EntryKind::Descend(Loc::DbAlbums),
-                "root-filename" => EntryKind::Descend(Loc::DbFilenames),
-                "root-folder"   => EntryKind::Descend(Loc::DbTree(0)),
-                "root-search"   => EntryKind::Descend(Loc::Search),
-                other => match Cat::of_root(other) {
-                    Some(c) => EntryKind::Descend(Loc::DbCat(c, Vec::new())),
-                    None    => EntryKind::Unsupported,
-                },
-            };
-            Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None, kind }
-        }).collect();
-        self.db_cats = rows.clone();
-        rows
+    /// A list on the linked player, without waiting for it: a list asked
+    /// before comes from this session's cache; otherwise it is asked on the
+    /// session's thread and a loading row stands in until it arrives
+    /// ([`prefetch_meta`](Self::prefetch_meta) takes it a frame or two
+    /// later).  A player that stops answering never blocks the deck: the
+    /// list then says so, and BACK and the wheel work on the lists already
+    /// in.
+    fn db_list(&mut self, loc: Loc) -> Vec<Entry> {
+        if let Some((_, e)) = self.list_cache.iter().find(|(l, _)| *l == loc) { return e.clone(); }
+        let row = |name: String| vec![Entry { name, is_dir: false, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Unsupported }];
+        if let Some((_, why)) = self.list_error.as_ref().filter(|(l, _)| *l == loc) {
+            return row(format!("{}: not answering ({why})", if self.db_label.is_empty() { "LINK" } else { &self.db_label }));
+        }
+        if !matches!(&self.list_wait, Some((_, l, _)) if *l == loc) {
+            let Some(db) = self.db.as_ref() else { return Vec::new() };
+            self.peek_ticket += 1;
+            if !db.ask_list(self.peek_ticket, Self::db_request(&loc, false)) { return Vec::new(); }
+            self.list_wait = Some((self.peek_ticket, loc, false));
+        }
+        row("Loading…".into())
     }
 
-    /// One of the `Cat` categories: the names to pick from at this level, or
-    /// the tracks once every entry is picked.
-    fn db_cat_entries(&mut self, cat: Cat, picked: Vec<u32>) -> Vec<Entry> {
-        if picked.len() >= cat.depth() {
-            let (kind, ids) = cat.tracks_request(&picked);
-            return self.db_track_entries(move |c, s| c.browse(kind, s, &ids));
+    /// The request that lists `loc` on the player.  `fallback`: a source
+    /// with no category menu (older servers) shows its playlist root
+    /// instead of DbRoot's categories.
+    fn db_request(loc: &Loc, fallback: bool) -> Box<dyn FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>> + Send> {
+        use opendeck_dbserver::kind;
+        match loc.clone() {
+            Loc::DbRoot if fallback => Box::new(|c, s| c.playlist(s, 0, true)),
+            Loc::DbRoot          => Box::new(|c, s| c.root_menu(s)),
+            Loc::DbFolder(id)    => Box::new(move |c, s| c.playlist(s, id, true)),
+            Loc::DbPlaylist(id)  => Box::new(move |c, s| c.playlist(s, id, false)),
+            Loc::DbAllTracks     => Box::new(|c, s| c.all_tracks(s, 0)),
+            Loc::DbArtists       => Box::new(|c, s| c.artists(s)),
+            Loc::DbArtist(id)    => Box::new(move |c, s| c.tracks_for_artist(s, id)),
+            Loc::DbAlbums        => Box::new(|c, s| c.albums(s)),
+            Loc::DbAlbum(id)     => Box::new(move |c, s| c.tracks_for_album(s, id)),
+            Loc::DbFilenames     => Box::new(|c, s| c.filenames(s)),
+            Loc::DbSearch(text)  => Box::new(move |c, s| c.search(s, &text)),
+            Loc::DbTree(id)      => Box::new(move |c, s| c.browse(kind::FOLDER_MENU, s, &[id, 0])),
+            Loc::DbCat(cat, picked) => {
+                let (k, ids) = if picked.len() >= cat.depth() { cat.tracks_request(&picked) } else { cat.names_request(&picked) };
+                Box::new(move |c, s| c.browse(k, s, &ids))
+            }
+            _ => Box::new(|_, _| Ok(Vec::new())),
         }
-        let (kind, ids) = cat.names_request(&picked);
-        let req = ids.clone();
-        let Some(r) = self.db_call(move |c, s| c.browse(kind, s, &req)) else { return Vec::new() };
+    }
+
+    /// A list arrived: rows for it, cached for the session, shown if the
+    /// browser is still on it, and whatever was waiting for it run.
+    fn list_arrived(&mut self, loc: Loc, fallback: bool, r: anyhow::Result<Vec<MenuItem>>) {
+        // A source with no category menu shows its playlist root instead.
+        if loc == Loc::DbRoot && !fallback {
+            match &r {
+                Ok(items) if !items.is_empty() => {}
+                Ok(_) => log::info!("LINK: empty category menu; showing playlists"),
+                Err(e) => log::info!("LINK: no category menu ({e:#}); showing playlists"),
+            }
+            if !matches!(&r, Ok(items) if !items.is_empty()) {
+                if let Some(db) = self.db.as_ref() {
+                    self.peek_ticket += 1;
+                    if db.ask_list(self.peek_ticket, Self::db_request(&loc, true)) {
+                        self.list_wait = Some((self.peek_ticket, loc, true));
+                        return;
+                    }
+                }
+            }
+        }
         match r {
             Ok(items) => {
-                // What the player sent, so a list of blank rows shows why.
-                for i in items.iter().take(3) { log::info!("LINK {} row: type 0x{:04x} id {} {:?} {:?}", cat.label(), i.item_type, i.id, i.label, i.label2); }
-                items.into_iter().map(|i| {
-                    let mut next = picked.clone();
-                    next.push(cat_row_id(cat, picked.len(), &i));
-                    Entry { name: cat_row_name(cat, picked.len(), &i), is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(Loc::DbCat(cat, next)) }
-                }).collect()
+                let rows = self.db_rows(&loc, fallback, items);
+                self.list_cache.push((loc.clone(), rows));
             }
-            Err(e) => { log::warn!("LINK {}: 0x{kind:04x} {ids:x?}: {e:#}", cat.label()); Vec::new() }
+            Err(e) => { log::warn!("LINK list: {e:#}"); self.list_error = Some((loc.clone(), format!("{e:#}"))); }
+        }
+        if self.showing(&loc) {
+            let keep = self.selected;
+            self.rebuild();
+            self.selected = keep.min(self.entries.len().saturating_sub(1));
+            if let Some(then) = self.after_list.take() { then(self); }
         }
     }
 
-    /// FOLDER: one level of the player's folder tree, folders then the
-    /// tracks in them.
-    fn db_tree_entries(&mut self, folder: u32) -> Vec<Entry> {
-        let Some(r) = self.db_call(move |c, s| c.browse(opendeck_dbserver::kind::FOLDER_MENU, s, &[folder, 0])) else { return Vec::new() };
-        let Some(DbSession { ip, slot, .. }) = self.db.as_ref() else { return Vec::new() };
-        let (ip, slot) = (*ip, *slot);
-        match r {
-            Ok(items) => items.into_iter().filter_map(|i| match i.type_name() {
-                "folder" => Some(Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None,
-                                         kind: EntryKind::Descend(Loc::DbTree(i.id)) }),
+    /// Whether the browser shows `loc`'s list: it is on top of the stack, or
+    /// (a linked search) SEARCH is, with that query.
+    fn showing(&self, loc: &Loc) -> bool {
+        match loc {
+            Loc::DbSearch(q) => matches!(self.stack.last(), Some(Loc::Search)) && self.search_query == *q,
+            l => self.stack.last() == Some(l),
+        }
+    }
+
+    /// The list is still on its way (the loading row is up).
+    fn db_loading(&self) -> bool { matches!(&self.list_wait, Some((_, l, _)) if self.showing(l)) }
+
+    /// Run `then` once the list on screen is in: now if it is, else when it
+    /// arrives (a later wait replaces an earlier one).
+    fn when_listed(&mut self, then: impl FnOnce(&mut Browser) + 'static) {
+        if self.db_loading() { self.after_list = Some(Box::new(then)); } else { then(self); }
+    }
+
+    /// The rows of a list the player sent for `loc`.
+    fn db_rows(&mut self, loc: &Loc, fallback: bool, items: Vec<MenuItem>) -> Vec<Entry> {
+        let (ip, slot) = match self.db.as_ref() { Some(d) => (d.ip, d.slot), None => return Vec::new() };
+        let dir = |name: String, kind: EntryKind| Entry { name, is_dir: true, artist: None, bpm: None, key: None, art: None, kind };
+        let tracks = |items: Vec<MenuItem>| -> Vec<Entry> {
+            // A row we don't take for a track is dropped; say what it was,
+            // so a player that types its rows differently shows in the log.
+            let dropped: Vec<_> = items.iter().filter(|i| i.type_name() != "track").map(|i| i.item_type).collect();
+            log::info!("LINK tracks: {} rows, {} dropped (types {:x?})", items.len(), dropped.len(), &dropped[..dropped.len().min(8)]);
+            items.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
+                name: i.label.clone(), is_dir: false,
+                artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None, art: None,
+                kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }),
+            }).collect()
+        };
+        match loc.clone() {
+            // A playlist folder (0 = the root, which for a source without a
+            // category menu also lists ALL TRACKS on top).
+            Loc::DbRoot if fallback => self.db_folder_rows(0, true, items),
+            Loc::DbFolder(id) => self.db_folder_rows(id, false, items),
+            // The category menu: each row is typed (`root-track`, …); the
+            // ones we can walk descend, the rest are shown but inert.  FOLDER
+            // and SEARCH stay off the list: SEARCH is its own key, and the
+            // categories cover what FOLDER would show.
+            Loc::DbRoot => {
+                for i in &items { log::info!("LINK category: {:?} item_type 0x{:x} id {} → {}", i.label, i.item_type, i.id, db_category(i)); }
+                let rows: Vec<Entry> = items.into_iter().filter(|i| !matches!(db_category(i), "root-folder" | "root-search")).map(|i| {
+                    let kind = match db_category(&i) {
+                        "root-track"    => EntryKind::Descend(Loc::DbAllTracks),
+                        "root-playlist" => EntryKind::Descend(Loc::DbFolder(0)),
+                        "root-artist"   => EntryKind::Descend(Loc::DbArtists),
+                        "root-album"    => EntryKind::Descend(Loc::DbAlbums),
+                        "root-filename" => EntryKind::Descend(Loc::DbFilenames),
+                        "root-folder"   => EntryKind::Descend(Loc::DbTree(0)),
+                        other => match Cat::of_root(other) {
+                            Some(c) => EntryKind::Descend(Loc::DbCat(c, Vec::new())),
+                            None    => EntryKind::Unsupported,
+                        },
+                    };
+                    dir(i.label, kind)
+                }).collect();
+                self.db_cats = rows.clone();
+                rows
+            }
+            Loc::DbArtists => items.into_iter().map(|i| dir(i.label, EntryKind::Descend(Loc::DbArtist(i.id)))).collect(),
+            Loc::DbAlbums  => items.into_iter().map(|i| dir(i.label, EntryKind::Descend(Loc::DbAlbum(i.id)))).collect(),
+            // FOLDER: one level of the player's folder tree, folders then the
+            // tracks in them.
+            Loc::DbTree(folder) => items.into_iter().filter_map(|i| match i.type_name() {
+                "folder" => Some(dir(i.label, EntryKind::Descend(Loc::DbTree(i.id)))),
                 "track" => Some(Entry { name: i.label.clone(), is_dir: false,
                     artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None, art: None,
                     kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }) }),
                 other => { log::info!("LINK folder {folder}: row {:?} of type {other} (0x{:x}) skipped", i.label, i.item_type); None }
             }).collect(),
-            Err(e) => { log::warn!("LINK folder {folder}: {e:#}"); Vec::new() }
+            // One of the `Cat` categories: the names to pick from at this
+            // level, or the tracks once every entry is picked.
+            Loc::DbCat(cat, picked) if picked.len() < cat.depth() => {
+                // What the player sent, so a list of blank rows shows why.
+                for i in items.iter().take(3) { log::info!("LINK {} row: type 0x{:04x} id {} {:?} {:?}", cat.label(), i.item_type, i.id, i.label, i.label2); }
+                items.into_iter().map(|i| {
+                    let mut next = picked.clone();
+                    next.push(cat_row_id(cat, picked.len(), &i));
+                    dir(cat_row_name(cat, picked.len(), &i), EntryKind::Descend(Loc::DbCat(cat, next)))
+                }).collect()
+            }
+            _ => tracks(items),
         }
     }
 
-    /// A list of names (artists, albums) that each open as a track list.
-    fn db_name_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>> + Send + 'static, loc: fn(u32) -> Loc) -> Vec<Entry> {
-        let Some(r) = self.db_call(fetch) else { return Vec::new() };
-        match r {
-            Ok(items) => items.into_iter().map(|i| Entry {
-                name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(loc(i.id)),
-            }).collect(),
-            Err(e) => { log::warn!("LINK names: {e:#}"); Vec::new() }
-        }
-    }
-
-    /// A playlist folder of a dbserver library (0 = the tree's root, which for
-    /// a source without a category menu also lists ALL TRACKS on top).
-    fn db_folder_entries(&mut self, folder: u32) -> Vec<Entry> {
-        if self.db.is_none() { return Vec::new(); }
+    /// A playlist folder's rows: its folders and playlists, after ALL
+    /// TRACKS at the root of a source without a category menu.
+    fn db_folder_rows(&self, folder: u32, all_tracks: bool, items: Vec<MenuItem>) -> Vec<Entry> {
         let mut out = Vec::new();
-        if folder == 0 && !matches!(self.stack.last(), Some(Loc::DbFolder(0))) {
+        if folder == 0 && all_tracks {
             out.push(Entry { name: "ALL TRACKS".into(), is_dir: true, artist: None, bpm: None, key: None, art: None,
                              kind: EntryKind::Descend(Loc::DbAllTracks) });
         }
-        match self.db_call(move |c, slot| c.playlist(slot, folder, true)).unwrap_or_else(|| Ok(Vec::new())) {
-            Ok(items) => for i in items {
-                let is_folder = i.type_name() == "folder";
-                out.push(Entry { name: i.label.clone(), is_dir: true, artist: None, bpm: None, key: None, art: None,
-                    kind: EntryKind::Descend(if is_folder { Loc::DbFolder(i.id) } else { Loc::DbPlaylist(i.id) }) });
-            },
-            Err(e) => log::warn!("rekordbox folder {folder}: {e:#}"),
-        }
+        out.extend(items.into_iter().map(|i| {
+            let loc = if i.type_name() == "folder" { Loc::DbFolder(i.id) } else { Loc::DbPlaylist(i.id) };
+            Entry { name: i.label, is_dir: true, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Descend(loc) }
+        }));
         out
     }
 
-    /// A track list: a playlist, a category's tracks, or the whole collection.
-    fn db_track_entries(&mut self, fetch: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<Vec<MenuItem>> + Send + 'static) -> Vec<Entry> {
-        let Some(r) = self.db_call(fetch) else { return Vec::new() };
-        let Some(DbSession { ip, slot, .. }) = self.db.as_ref() else { return Vec::new() };
-        let (ip, slot) = (*ip, *slot);
-        match r {
-            Ok(items) => {
-                // A row we don't take for a track is dropped; say what it was,
-                // so a player that types its rows differently shows in the log.
-                let dropped: Vec<_> = items.iter().filter(|i| i.type_name() != "track").map(|i| i.item_type).collect();
-                log::info!("LINK tracks: {} rows, {} dropped (types {:x?})", items.len(), dropped.len(), &dropped[..dropped.len().min(8)]);
-                items
-            }.into_iter().filter(|i| i.type_name() == "track").map(|i| Entry {
-                name: i.label.clone(), is_dir: false,
-                artist: (!i.label2.is_empty()).then(|| i.label2.clone()), bpm: None, key: None, art: None,
-                kind: EntryKind::Track(Load::Db { ip, id: i.id, title: i.label, rekordbox: slot == Slot::Collection, sd: slot == Slot::Sd }),
-            }).collect(),
-            Err(e) => { log::warn!("LINK tracks: {e:#}"); Vec::new() }
-        }
-    }
-
-    /// Run a request on the open dbserver session and wait for it (a menu,
-    /// on a key press).  It goes ahead of the session's background lookups;
-    /// on an error the session reconnects once and retries (see
-    /// [`crate::dbsession`]).  `None` when no session is open.
-    fn db_call<T: Send + 'static>(&mut self, f: impl FnMut(&mut DbClient, Slot) -> anyhow::Result<T> + Send + 'static) -> Option<anyhow::Result<T>> {
-        Some(self.db.as_ref()?.call(f))
-    }
-
-    /// For a LOAD from a linked player: the track's file path and beat-grid
-    /// blob, asked on the browser's own session when it is open to that
-    /// player and slot. Opening a second session would cost the browser its
-    /// own (see [`crate::dbsession`]). `None` when no such session is open.
-    pub fn db_track_file(&mut self, ip: Ipv4Addr, slot: Slot, id: u32) -> Option<anyhow::Result<DbTrackFile>> {
-        if !matches!(&self.db, Some(d) if d.ip == ip && d.slot == slot) { return None; }
-        let path = match self.db_call(move |c, s| c.file_path(s, id))? {
-            Ok(p) => p,
-            Err(e) => return Some(Err(e)),
-        };
-        let grid = self.db_call(move |c, s| c.beat_grid(s, id)).unwrap_or_else(|| Err(anyhow::anyhow!("session closed")));
-        // The highlight already fetched it; no extra round trip.
+    /// For a LOAD from a linked player: a handle on the browser's own
+    /// session when it is open to that player and slot (opening a second
+    /// session would cost the browser its own, see [`crate::dbsession`]),
+    /// for the loader thread to ask the file path and grid on, and the
+    /// metadata the highlight already fetched.  `None` when no such session
+    /// is open.  It never waits on the network.
+    pub fn db_track_caller(&self, ip: Ipv4Addr, slot: Slot, id: u32) -> Option<(crate::dbsession::Caller, Option<opendeck_dbserver::TrackMeta>)> {
+        let db = self.db.as_ref().filter(|d| d.ip == ip && d.slot == slot)?;
         let meta = self.meta_cache.get(&(ip, slot as u8, id)).and_then(|i| i.as_ref()).map(|i| i.meta.clone());
-        Some(Ok((path, grid, meta)))
+        Some((db.caller(), meta))
     }
 
     /// Connect to a peer (a player's USB or SD slot, or rekordbox's
@@ -1169,6 +1230,10 @@ impl Browser {
         self.meta_asked.clear();
         self.peeks.clear();
         self.peek_asked = None;
+        self.list_cache.clear();
+        self.list_wait = None;
+        self.list_error = None;
+        self.after_list = None;
         let ports = self.ports;
         let (tx, rx) = std::sync::mpsc::channel();
         let spawned = std::thread::Builder::new().name("link-connect".into()).spawn(move || {
@@ -1393,8 +1458,7 @@ impl Browser {
         // A linked player's library: its own search.
         if self.db.is_some() && self.stack.iter().any(|l| matches!(l, Loc::DbRoot | Loc::DbFolder(_) | Loc::DbCat(..) | Loc::DbAllTracks)) {
             if q.chars().count() < 2 { return Vec::new(); }
-            let text = self.search_query.clone();
-            return self.db_track_entries(move |c, s| c.search(s, &text));
+            return self.db_list(Loc::DbSearch(self.search_query.clone()));
         }
         let Some(dir) = self.stack.iter().rev().find_map(|l| match l { Loc::Fs(p) => Some(p.clone()), _ => None }) else { return Vec::new() };
         let mut idx = self.fs_index.borrow_mut();
@@ -1440,11 +1504,13 @@ impl Browser {
         let Some(r) = self.stack.iter().position(|l| matches!(l, Loc::RbRoot | Loc::DbRoot)) else { return };
         self.stack.truncate(r + 1);
         self.names.truncate(r + 1);
+        self.list_error = None;
         self.rebuild();
-        if i < self.entries.len() {
-            self.selected = i;
-            self.enter();
-        }
+        // A linked player's categories may still be on their way.
+        self.when_listed(move |b| if i < b.entries.len() {
+            b.selected = i;
+            b.enter();
+        });
     }
 
     fn rb_playlist_entries(&self, id: u32) -> Vec<Entry> {
@@ -1659,12 +1725,14 @@ impl Browser {
         self.stack.truncate(r + 1);
         self.selected = 0;
         self.rebuild();
-        let at = self.entries.iter().position(|e| matches!(e.kind,
-            EntryKind::Descend(Loc::RbTree(0) | Loc::DbFolder(0))));
-        if let Some(i) = at {
-            self.selected = i;
-            self.enter();
-        }
+        self.when_listed(|b| {
+            let at = b.entries.iter().position(|e| matches!(e.kind,
+                EntryKind::Descend(Loc::RbTree(0) | Loc::DbFolder(0))));
+            if let Some(i) = at {
+                b.selected = i;
+                b.enter();
+            }
+        });
         true
     }
 
@@ -1883,7 +1951,7 @@ impl Browser {
             let came_from = self.names.pop().unwrap_or_default();
             self.selected = 0;
             self.rebuild();
-            self.select_named(&came_from);
+            self.when_listed(move |b| b.select_named(&came_from));
         } else if let Some(Loc::Fs(dir)) = self.stack.last().cloned() {
             if self.floor.as_deref() == Some(dir.as_path()) { return; }
             if let Some(parent) = dir.parent().map(Path::to_path_buf) {
@@ -2546,7 +2614,15 @@ mod link_browse_tests {
     fn pick(b: &mut Browser, name: &str) -> Enter {
         b.selected = b.entries().iter().position(|e| e.name == name)
             .unwrap_or_else(|| panic!("no {name:?} in {:?}", names(b)));
-        b.enter()
+        let e = b.enter();
+        settle(b);
+        e
+    }
+
+    /// Frames until the list on screen is in (lists from a linked player
+    /// arrive a frame or two after the key, as in the app).
+    fn settle(b: &mut Browser) {
+        assert!(frames_until(b, |b| b.list_wait.is_none() && !b.connecting()), "the list came in: {:?}", names(b));
     }
 
     /// LINK, then the player's row: the browser is on the player's categories.
@@ -2557,6 +2633,7 @@ mod link_browse_tests {
         b.selected = 0;
         assert!(matches!(b.enter(), Enter::Folder), "the player opens");
         assert!(frames_until(b, |b| !b.connecting()), "connected");
+        settle(b);
         assert!(b.rb_categories().is_some(), "on its categories: {:?}", names(b));
     }
 
@@ -2598,11 +2675,13 @@ mod link_browse_tests {
         assert_eq!((ip, id, rekordbox, sd), (Ipv4Addr::LOCALHOST, 4, false, false));
         // LOAD asks the browser's own session for the file and grid (a
         // second session from our player number would cost the browser its).
-        let (path, grid, _meta) = r.b.db_track_file(ip, Slot::Usb, id).expect("the open session").unwrap();
+        let (caller, _meta) = r.b.db_track_caller(ip, Slot::Usb, id).expect("the open session");
+        let (path, grid) = std::thread::spawn(move || (caller.call(move |c, s| c.file_path(s, id)).unwrap(), caller.call(move |c, s| c.beat_grid(s, id))))
+            .join().unwrap();   // the loader thread's side
         assert_eq!(path.as_deref(), Some("/Contents/far_field.mp3"));
         assert!(grid.is_ok_and(|g| !g.is_empty()), "the player's beat grid");
         // Not the session's player or slot: no answer, so the loader opens its own.
-        assert!(r.b.db_track_file(ip, Slot::Sd, id).is_none());
+        assert!(r.b.db_track_caller(ip, Slot::Sd, id).is_none());
     }
 
     #[test]
@@ -2610,13 +2689,16 @@ mod link_browse_tests {
         let mut r = rig(library());
         open_player(&mut r.b);
         r.b.open_rb_category(1);                                   // ALBUM
+        settle(&mut r.b);
         assert_eq!(names(&r.b), ["Debris", "Field Notes", "Signals"]);
         assert!(matches!(pick(&mut r.b, "Signals"), Enter::Folder));
         assert_eq!(names(&r.b), ["Low Orbit", "Night Drive"]);
         let cats = r.b.rb_categories().unwrap().0;
         r.b.open_rb_category(cats.iter().position(|c| c == "TRACK").unwrap());
+        settle(&mut r.b);
         assert_eq!(names(&r.b).len(), 4, "every track: {:?}", names(&r.b));
         r.b.open_rb_category(cats.iter().position(|c| c == "FILENAME").unwrap());
+        settle(&mut r.b);
         assert_eq!(names(&r.b), ["far_field.mp3", "low_orbit.mp3", "night_drive.mp3", "static_bloom.mp3"]);
     }
 
@@ -2628,6 +2710,7 @@ mod link_browse_tests {
         open_player(&mut r.b);
         let cats = r.b.rb_categories().unwrap().0;
         r.b.open_rb_category(cats.iter().position(|c| c == "KEY").unwrap());
+        settle(&mut r.b);
         assert_eq!(names(&r.b), ["Am", "C", "Em", "F#m"]);
         assert!(matches!(pick(&mut r.b, "Am"), Enter::Folder));
         let levels = names(&r.b);
@@ -2637,13 +2720,16 @@ mod link_browse_tests {
         // Distance 0: only the track in A minor.
         r.b.selected = 0;
         assert!(matches!(r.b.enter(), Enter::Folder));
+        settle(&mut r.b);
         assert_eq!(names(&r.b), ["Night Drive"]);
         // Distance 1 adds the relative major (C), as the unit's "Abm, B";
         // distance 2 the neighbours a fifth away (E minor among them).
         let wider = |b: &mut Browser, row: usize| {
             b.back();
+            settle(b);
             b.selected = row;
             assert!(matches!(b.enter(), Enter::Folder));
+            settle(b);
             let mut got = names(b);
             got.sort();
             got
@@ -2658,17 +2744,22 @@ mod link_browse_tests {
         open_player(&mut r.b);
         assert!(matches!(pick(&mut r.b, "Kessler"), Enter::Folder));
         r.b.back();                                                 // to ARTIST's artists
+        settle(&mut r.b);
         assert_eq!(names(&r.b), ["Aurora Grid", "Kessler"]);
         assert_eq!(r.b.selected_entry().unwrap().name, "Kessler", "the highlight comes back to where it was");
         r.b.back();                                                 // into the column
+        settle(&mut r.b);
         assert!(r.b.cat_focus());
         r.b.back();                                                 // and no further
+        settle(&mut r.b);
         assert!(r.b.cat_focus());
         assert_eq!(r.b.source_kind(), SourceTile::Link, "still on the player");
         r.b.move_selection(1);                                      // the wheel opens ALBUM
+        settle(&mut r.b);
         assert_eq!(r.b.rb_categories().unwrap().1, Some(1));
         assert_eq!(names(&r.b), ["Debris", "Field Notes", "Signals"]);
         assert!(matches!(r.b.enter(), Enter::Folder));              // press: back into the list
+        settle(&mut r.b);
         assert!(!r.b.cat_focus());
         assert_eq!(r.b.selected, 0);
     }
@@ -2706,13 +2797,128 @@ mod link_browse_tests {
         let mut r = rig(library());
         open_player(&mut r.b);
         r.b.go_root();                                              // somewhere else
+        settle(&mut r.b);
         assert!(r.b.open_playlists());
+        settle(&mut r.b);
         assert!(r.b.playlist_only());
         assert_eq!(r.b.source_kind(), SourceTile::Link);
         // OpenDeck has no playlists: only ALL TRACKS would be offered, and the
         // list is the player's playlist root.
         r.b.back();
+        settle(&mut r.b);
         assert!(r.b.playlist_only(), "BACK stays in the playlists");
+    }
+
+    /// A player in front of a switch we can pull: a proxy for the port
+    /// query and the database port that forwards to `db` until `frozen` is
+    /// set, then holds every byte (a cable pulled mid-browse, Wi-Fi gone).
+    struct Freezable { query: u16, frozen: Arc<std::sync::atomic::AtomicBool> }
+
+    fn freezable(db: &Server) -> Freezable {
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let frozen = Arc::new(AtomicBool::new(false));
+        let dbl = TcpListener::bind("127.0.0.1:0").unwrap();
+        let db_proxy = dbl.local_addr().unwrap().port();
+        let ql = TcpListener::bind("127.0.0.1:0").unwrap();
+        let query = ql.local_addr().unwrap().port();
+        std::thread::spawn(move || for c in ql.incoming().flatten() {
+            let mut c = c;
+            let mut q = [0u8; 64];
+            let _ = c.read(&mut q);
+            let _ = c.write_all(&db_proxy.to_be_bytes());
+        });
+        let real = db.db_port;
+        let f = Arc::clone(&frozen);
+        std::thread::spawn(move || for c in dbl.incoming().flatten() {
+            let Ok(up) = TcpStream::connect(("127.0.0.1", real)) else { continue };
+            for (mut from, mut to) in [(c.try_clone().unwrap(), up.try_clone().unwrap()), (up, c)] {
+                let f = Arc::clone(&f);
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 4096];
+                    while let Ok(n) = from.read(&mut buf) {
+                        if n == 0 { break; }
+                        while f.load(Ordering::SeqCst) { std::thread::sleep(Duration::from_millis(20)); }
+                        if to.write_all(&buf[..n]).is_err() { break; }
+                    }
+                });
+            }
+        });
+        Freezable { query, frozen }
+    }
+
+    /// The player stops answering mid-browse: opening a list returns at once
+    /// (the deck keeps drawing and playing), the list says it is loading,
+    /// then that the player is not answering; BACK still works.
+    #[test]
+    fn a_player_that_stops_answering_never_blocks_the_deck() {
+        let quick = |what: &str, t: Instant| assert!(t.elapsed() < Duration::from_millis(100), "{what} returned at once: {:?}", t.elapsed());
+        let mut r = rig(library());
+        let proxy = freezable(&r._db);
+        r.b.ports = crate::LinkPorts { query: proxy.query, portmap: None };
+        open_player(&mut r.b);
+        assert_eq!(names(&r.b), ["Aurora Grid", "Kessler"]);
+        let load = r.b.entries().iter().position(|e| e.name == "Kessler").unwrap();
+        // A track to LOAD later, listed while the player still answered.
+        r.b.selected = load;
+        r.b.enter();
+        settle(&mut r.b);
+        let far_field = r.b.entries()[0].load().cloned().expect("a track row");
+        r.b.back();
+        settle(&mut r.b);
+
+        // The cable is pulled.
+        proxy.frozen.store(true, std::sync::atomic::Ordering::SeqCst);
+
+        // Opening a list not in yet: at once, a loading row, the app drawing.
+        let t = Instant::now();
+        r.b.selected = r.b.entries().iter().position(|e| e.name == "Aurora Grid").unwrap();
+        r.b.enter();
+        quick("opening a list", t);
+        assert_eq!(names(&r.b), ["Loading…"]);
+        assert!(r.b.db_pending(), "the app keeps drawing while the list loads");
+
+        // BACK: the list it came from, from this session's cache, at once.
+        let t = Instant::now();
+        r.b.back();
+        quick("BACK", t);
+        assert_eq!(names(&r.b), ["Aurora Grid", "Kessler"]);
+        assert_eq!(r.b.selected_entry().unwrap().name, "Aurora Grid", "the highlight where it was");
+
+        // The wheel through the category column onto a category not in yet.
+        r.b.back();
+        assert!(r.b.cat_focus());
+        let t = Instant::now();
+        r.b.move_selection(1);
+        quick("the category wheel", t);
+        assert_eq!(names(&r.b), ["Loading…"]);
+
+        // SEARCH on the player.
+        let t = Instant::now();
+        r.b.begin_search();
+        r.b.set_search_query("orbit".into());
+        quick("SEARCH", t);
+
+        // LOAD: the browser only hands over its session; the loader asks.
+        let crate::browser::Load::Db { ip, id, .. } = far_field else { panic!("{far_field:?}") };
+        let t = Instant::now();
+        assert!(r.b.db_track_caller(ip, Slot::Usb, id).is_some());
+        quick("LOAD's hand-over", t);
+
+        // Meanwhile the frames keep running, and once the request gives up
+        // the list says the player is not answering.
+        let t = Instant::now();
+        let mut slowest = Duration::ZERO;
+        while r.b.list_wait.is_some() && t.elapsed() < Duration::from_secs(40) {
+            let f = Instant::now();
+            r.b.prefetch_meta();
+            slowest = slowest.max(f.elapsed());
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(slowest < Duration::from_millis(50), "no frame waited on the player: slowest {slowest:?}");
+        assert!(r.b.list_wait.is_none(), "the request gave up");
+        assert!(names(&r.b).iter().any(|n| n.contains("not answering")), "{:?}", names(&r.b));
     }
 
     /// A player that has gone away: the press returns at once (the deck

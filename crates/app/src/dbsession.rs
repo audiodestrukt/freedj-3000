@@ -98,21 +98,17 @@ impl<C: InfoSource> Session<C> {
 
     /// Run a request on the session and wait for its answer.  It goes ahead
     /// of queued [`ask_info`](Self::ask_info) work.  On an error the worker
-    /// reconnects once and retries.
-    pub fn call<T: Send + 'static>(&self, mut f: impl FnMut(&mut C, Slot) -> Result<T> + Send + 'static) -> Result<T> {
-        let (tx, rx) = mpsc::sync_channel(1);
-        let job: CallFn<C> = Box::new(move |c, slot, last| {
-            let r = match c {
-                Ok(c) => f(c, slot),
-                Err(e) => Err(anyhow::anyhow!("dbserver session lost: {e:#}")),
-            };
-            if r.is_err() && !last { return false; }
-            let _ = tx.send(r);
-            true
-        });
-        self.jobs.send(Job::Call(job)).map_err(|_| anyhow::anyhow!("dbserver session closed"))?;
-        rx.recv().map_err(|_| anyhow::anyhow!("dbserver session closed"))?
+    /// reconnects once and retries.  It waits on the network: never call it
+    /// on the UI thread (use [`ask_list`](Self::ask_list), or a
+    /// [`caller`](Self::caller) on another thread).
+    pub fn call<T: Send + 'static>(&self, f: impl FnMut(&mut C, Slot) -> Result<T> + Send + 'static) -> Result<T> {
+        self.caller().call(f)
     }
+
+    /// A handle that runs requests on this session from another thread (a
+    /// loader), so a load from the player BROWSE has open uses its session
+    /// instead of opening a second one.
+    pub fn caller(&self) -> Caller<C> { Caller { jobs: self.jobs.clone() } }
 
     /// Look a track up in the background (metadata, cover, previews); the
     /// answer comes through [`answers`](Self::answers), `None` if the player
@@ -126,7 +122,7 @@ impl<C: InfoSource> Session<C> {
         self.answers.try_iter()
     }
 
-    /// List something in the background (no retry: a pane can ask again).
+    /// List something in the background (a dropped session reconnects once).
     /// The rows come through [`lists`](Self::lists) under `ticket`.
     pub fn ask_list(&self, ticket: u64, f: impl FnMut(&mut C, Slot) -> Result<Vec<MenuItem>> + Send + 'static) -> bool {
         self.jobs.send(Job::List { ticket, f: Box::new(f) }).is_ok()
@@ -135,6 +131,27 @@ impl<C: InfoSource> Session<C> {
     /// The lists finished since the last call.  Never blocks.
     pub fn lists(&self) -> impl Iterator<Item = (u64, Result<Vec<MenuItem>>)> + '_ {
         self.lists.try_iter()
+    }
+}
+
+/// Runs requests on a [`Session`] from any thread; see [`Session::caller`].
+pub struct Caller<C: InfoSource = Client> { jobs: mpsc::Sender<Job<C>> }
+
+impl<C: InfoSource> Caller<C> {
+    /// As [`Session::call`]: waits for the answer, so not on the UI thread.
+    pub fn call<T: Send + 'static>(&self, mut f: impl FnMut(&mut C, Slot) -> Result<T> + Send + 'static) -> Result<T> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let job: CallFn<C> = Box::new(move |c, slot, last| {
+            let r = match c {
+                Ok(c) => f(c, slot),
+                Err(e) => Err(anyhow::anyhow!("dbserver session lost: {e:#}")),
+            };
+            if r.is_err() && !last { return false; }
+            let _ = tx.send(r);
+            true
+        });
+        self.jobs.send(Job::Call(job)).map_err(|_| anyhow::anyhow!("dbserver session closed"))?;
+        rx.recv().map_err(|_| anyhow::anyhow!("dbserver session closed"))?
     }
 }
 
@@ -175,7 +192,13 @@ impl<C: InfoSource> Worker<C> {
             if let Some(job) = calls.pop_front() { self.run_call(job); continue; }
             if let Some((ticket, mut f)) = lists.pop_front() {
                 let slot = self.slot;
-                let r = match self.client.as_mut() { Some(c) => f(c, slot), None => Err(anyhow::anyhow!("no session")) };
+                let mut r = match self.client.as_mut() { Some(c) => f(c, slot), None => Err(anyhow::anyhow!("no session")) };
+                // As a menu call: a dropped session reconnects once (a
+                // player closes an idle one after some minutes).
+                if r.is_err() {
+                    log::info!("LINK {}: list failed; reconnecting", self.ip);
+                    r = self.reconnect().and_then(|c| f(c, slot));
+                }
                 let _ = self.listed.send((ticket, r));
                 continue;
             }
