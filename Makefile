@@ -182,6 +182,9 @@ perf: ## Run the DSP real-time-factor guard, printing the measured RTF
 cad: ## Build the hardware CAD parts to STL (hardware/cad/build/)
 	python3 hardware/cad/jog_wheel.py
 
+deck5: ## Check the 5" deck's parts (watertight, bed fit, no clashes) and export print/ STLs
+	cd hardware/cad/deck5 && python3 make_print.py
+
 ## ── Reference material ─────────────────────────────────────────────────────
 
 reference: ## Download the CDJ-3000X manual and extract screen pages (local only)

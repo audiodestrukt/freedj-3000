@@ -84,6 +84,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | The CDJ-3000's own panel over its sub-CPU SPI device (`OPENDECK_SUBUCOM`): keys, jog, fader, rotary, LCD touch, LEDs | 🧪 unit-tested, not yet run in the emulator | Linux |
 | OpenDeck as cdj3k-emu firmware: emulator UPD, bare 1280×720 CDJ-3000 screen, framebuffer output (`OPENDECK_FBDEV`) | 🧪 boots in QEMU with the emulator's kernel; wizard install not yet tried | cdj3k-emu |
 | ADK-1000 hardware panel (RP2350 hub) | 📋 PCB routed, not made | — |
+| 5" deck enclosure: Pi 5, 5" display, 140 mm jog, 100 mm fader; prints on a 220 mm bed ([hardware/cad/deck5](../hardware/cad/deck5/README.md)) | 🧪 designed and checked in CAD, not printed; switch board not designed | — |
 
 ## Pro DJ Link
 

@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- A 5" deck to print (`hardware/cad/deck5/`): Raspberry Pi 5 with its
+  cooler, a 5" 800 × 480 display, a 140 mm jog on two bearings with a
+  magnetic encoder, a 100 mm pitch fader, CUE / PLAY, six keys and a
+  browse encoder, in a 214 × 280 mm case where every part fits a
+  220 mm bed. The top prints in two pieces joined by a tongue and groove
+  behind a reveal line, clamped by a base split elsewhere; print-ready
+  STLs, renders (hero, cutaway, exploded, the seam), and `make deck5`,
+  which checks every part and that nothing in the assembly collides.
 - Fullscreen fills a small panel instead of letterboxing it (SDL renderer,
   `OPENDECK_FULLSCREEN=1`): on the Raspberry Pi 7" touch display
   (800 × 480) the CDJ-3000 screen and its key columns cover the whole
