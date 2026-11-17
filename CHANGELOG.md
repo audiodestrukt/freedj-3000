@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.31] — 2026-11-17
+
 ### Added
 - MENU → ABOUT, the last row (it shows the version): a screen of its own
   with the version, the support address and every address the deck has on
