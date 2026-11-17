@@ -41,3 +41,6 @@ build/
 
 # Packaging keys for CDJ-3000 .UPD builds (docs/hardware/cdj-3000-upd.md#keys): never committed.
 *.key
+
+# Python bytecode
+__pycache__/
