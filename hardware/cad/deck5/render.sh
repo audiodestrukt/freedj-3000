@@ -19,3 +19,4 @@ r exploded      build/deck5_exploded.glb --res 1300 --resy 1600 --az 32  --el 24
 r exploded_back build/deck5_exploded.glb --res 1300 --resy 1600 --az 148 --el 26 --dist 3.0
 r seam_tongue   build/deck5_seam.glb     --res 1400 --resy 1000 --az 35  --el 38 --dist 1.9
 r seam_groove   build/deck5_seam.glb     --res 1400 --resy 1000 --az 150 --el 38 --dist 1.9
+r screen_mount  build/deck5_cutaway.glb  --res 1400 --resy 900  --az 70  --el 22 --dist 0.9 --target 0.110,0.236,0.038 --lens 70

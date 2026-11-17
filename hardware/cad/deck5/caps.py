@@ -1,11 +1,11 @@
 """caps.py — the small printed parts: PLAY / CUE caps, key caps, fader
-knob, encoder knob, and the screen clamp strap.
+knob, encoder knob, and the screen frame.
 
     python3 hardware/cad/deck5/caps.py  ->  build/<part>.stl
 
 Caps drop into their holes from below before the switch board goes on: a
 flange under the top plate keeps them in, a stem presses a 12 mm tact
-switch.  Print caps top face down; the knob and the strap flat.
+switch.  Print caps top face down; the knobs and the frame flat.
 """
 import os
 from build123d import *
@@ -64,18 +64,27 @@ def enc_knob():
     return k
 
 
-def clamp_strap():
-    """Screen clamp: spans the module's back between two bosses (print 2)."""
-    span = 2 * SCR_BOSS[0]
-    s = box(-span / 2 - 6.0, span / 2 + 6.0, -6.0, 6.0, 0, CLAMP_T)
-    s = fillet(s.edges().filter_by(Axis.Z), 3.0)
+def screen_frame():
+    """The frame the display sits on (local frame: centred on the display,
+    z = 0 underneath, top face = the display's back).  M2.5 screws come up
+    through it into the display's inserts; its four ears screw to bosses
+    under the top plate.  Print flat."""
+    ow, oh = SCR_OUT
+    f = box(-ow / 2, ow / 2, -oh / 2, oh / 2, 0, FRAME_T)
     for sx in (-1, 1):
-        s -= cyl(sx * span / 2, 0, -OVS, CLAMP_T + OVS, M3_CLR)
-    return s
+        x0, x1 = sorted((sx * (ow / 2 - 1.0), sx * (SCR_BOSS[0] + 6.0)))
+        f = f.fuse(box(x0, x1, -SCR_BOSS[1] - 6.0, SCR_BOSS[1] + 6.0, 0, FRAME_T))
+    r = FRAME_RING
+    cuts = [box(-ow / 2 + r, ow / 2 - r, -oh / 2 + r, oh / 2 - r, -OVS, FRAME_T + OVS)]
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            cuts.append(cyl(sx * SCR_HOLES[0] / 2, sy * SCR_HOLES[1] / 2, -OVS, FRAME_T + OVS, M25_CLR))
+            cuts.append(cyl(sx * SCR_BOSS[0], sy * SCR_BOSS[1], -OVS, FRAME_T + OVS, M3_CLR))
+    return f.cut(*cuts)
 
 
 PARTS = {"cap_play_cue": big_cap, "cap_key": key_cap, "knob_fader": fader_knob,
-         "knob_encoder": enc_knob, "screen_clamp": clamp_strap}
+         "knob_encoder": enc_knob, "screen_frame": screen_frame}
 
 if __name__ == "__main__":
     import trimesh

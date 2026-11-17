@@ -61,7 +61,7 @@ def whole():
         adds.append(cyl(x, y, BASE_T, Z_UNDER + 1.0, BOSS_D))
     # Upper jog bearing boss.
     adds.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z - 1.0, Z_UNDER + 1.0, JOG_BOSS_D))
-    # Screen clamp bosses, down to the module's back.
+    # Screen frame bosses, down to the display's back (the frame's top).
     for sx in (-1, 1):
         for sy in (-1, 1):
             adds.append(cyl(SCR_CX + sx * SCR_BOSS[0], SCR_CY + sy * SCR_BOSS[1],
@@ -75,11 +75,10 @@ def whole():
     body = body.fuse(*adds)
 
     cuts = []
-    # Screen: the window through the plate, and the pocket the glass sits in.
-    aw, ah = SCR_AA
-    cuts.append(box(SCR_CX - aw / 2, SCR_CX + aw / 2, SCR_CY - ah / 2, SCR_CY + ah / 2, Z_UNDER - OVS, H + OVS))
+    # Screen: an opening the display drops into from above (it rests on the
+    # screen frame under the plate, glass flush with the top).
     ow, oh = SCR_OUT[0] + 2 * SCR_FIT, SCR_OUT[1] + 2 * SCR_FIT
-    cuts.append(box(SCR_CX - ow / 2, SCR_CX + ow / 2, SCR_CY - oh / 2, SCR_CY + oh / 2, SCR_Z_BOT - OVS, SCR_Z_TOP))
+    cuts.append(box(SCR_CX - ow / 2, SCR_CX + ow / 2, SCR_CY - oh / 2, SCR_CY + oh / 2, SCR_Z_BOT - OVS, H + OVS))
     # Jog: shaft through the plate, the bearing seat in the boss.
     cuts.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z, H + OVS, SHAFT_D + 1.0))
     cuts.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z - 1.0 - OVS, BRG_UP_Z + BRG[2], BRG[0] + BRG_FIT))
@@ -111,7 +110,7 @@ def whole():
     # Heat-set insert bores in the base-screw bosses.
     for x, y in base_screws():
         cuts.append(cyl(x, y, BASE_T - OVS, BASE_T + INSERT_L, INSERT_D))
-    # Screen clamp screws (M3 inserts).
+    # Screen frame screws (M3 inserts).
     for sx in (-1, 1):
         for sy in (-1, 1):
             cuts.append(cyl(SCR_CX + sx * SCR_BOSS[0], SCR_CY + sy * SCR_BOSS[1],

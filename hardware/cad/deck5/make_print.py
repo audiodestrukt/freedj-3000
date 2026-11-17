@@ -31,7 +31,7 @@ def parts():
         "jog_platter": (jog.platter(), True, 1), "jog_tower": (jog.tower(), False, 1),
         "cap_play_cue": (caps.big_cap(), True, 2), "cap_key": (caps.key_cap(), True, 6),
         "knob_fader": (caps.fader_knob(), True, 1), "knob_encoder": (caps.enc_knob(), True, 1),
-        "screen_clamp": (caps.clamp_strap(), False, 2),
+        "screen_frame": (caps.screen_frame(), False, 1),
     }
 
 

@@ -63,20 +63,30 @@ def base_screws():
         pts += [(e, y), (W - e, y)]
     return pts
 
-# ── Display: Waveshare 5" DSI LCD, 800 x 480 IPS ⚠ VERIFY all ───────────────
+# ── Display: Hosyond 5" DSI, 800 x 480 IPS, capacitive ⚠ VERIFY all ──────────
 # 800 x 480 is the panel the deck's fill path already runs at (the 7"
 # official display is the same resolution), so the UI needs no new layout.
-SCR_OUT = (121.0, 76.0)       # glass / module outline
-SCR_AA = (108.0, 64.8)        # active area (the window)
-SCR_GLASS_T = 2.0             # glass + touch layer
-SCR_T = 11.0                  # module total, glass top to back of its PCB
-SCR_CX, SCR_CY = W / 2, 236.0 # centre of the window
-SCR_POCKET = 1.0              # glass sits this far up into the top plate
-SCR_FIT = 0.4                 # pocket clearance per side
-SCR_Z_TOP = Z_UNDER + SCR_POCKET          # glass top
-SCR_Z_BOT = SCR_Z_TOP - SCR_T             # module back
-SCR_BOSS = (66.0, 28.0)       # clamp bosses at (cx ± dx, cy ± dy)
-CLAMP_T = 3.0                 # clamp strap thickness
+# No Hosyond drawing found: these are the numbers the common 5" DSI boards
+# share (outline 120.7 x 75.8 x 4.9, M2.5 panel holes 113 x 68).  Caliper
+# the outline, the thickness at the inserts, and the insert pitch.
+#
+# Mount: the display drops into an opening in the top plate from above,
+# glass flush with the top surface, and sits on a printed frame under the
+# plate; M2.5 screws come up through the frame into the threaded inserts on
+# the display's back, and the frame screws to four bosses under the plate.
+SCR_OUT = (120.7, 75.8)       # outline (glass and board)
+SCR_AA = (108.0, 64.8)        # active area (assumed centred: VERIFY)
+SCR_T = 4.9                   # glass top to the back face the inserts are in
+SCR_HOLES = (113.0, 68.0)     # threaded inserts on the back: pitch (x, y), M2.5
+SCR_CX, SCR_CY = W / 2, 236.0 # centre of the display
+SCR_FIT = 0.3                 # opening clearance per side
+SCR_SINK = 0.0                # glass this far below the top surface (0 = flush)
+SCR_Z_TOP = H - SCR_SINK                  # glass top
+SCR_Z_BOT = SCR_Z_TOP - SCR_T             # display back = frame top
+SCR_BOSS = (66.0, 28.0)       # frame bosses at (cx ± dx, cy ± dy)
+FRAME_T = 3.0                 # screen frame thickness
+FRAME_RING = 9.0              # frame ring width under the display's edges
+M25_CLR = 2.8
 
 # ── Raspberry Pi 5 + Active Cooler ───────────────────────────────────────────
 PI = (56.0, 85.0, 1.6)        # board (x, y, t): long side runs front→back
