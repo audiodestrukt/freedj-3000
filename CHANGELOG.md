@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Phrases on the CDJ-3000 screen (MENU → WAVEFORM DIVISIONS: PHRASE, the
+  default; TIME SCALE brings the 30-second marks back).  The strip under
+  the overall waveform shows the track's phrases as a CDJ-3000 does with
+  rekordbox phrase data: a block per phrase in rekordbox's colours (red
+  intro, purple up, brown down, green chorus, blue outro; verses and
+  bridges for mid and low moods), the label once across a run of the same
+  phrase, and a dashed line where a fill-in ends one.  The stick's own
+  rekordbox phrases (`.EXT`) when the track has them, else OpenDeck's
+  analysis.  A track with neither shows the time scale.
+
 ### Fixed
 - BROWSE on a linked CDJ-3000, WAVEFORM COLOR 3BAND: the track table's
   previews are drawn as the unit draws them, the bands stacked (blue

@@ -73,7 +73,7 @@ exceptions:
 | INFO overlay: EDIT RATING; other players' tabs are in #54 (draft) | all | S |
 | SHORTCUT screen; full UTILITY list (phase 6) | all | M |
 | Waveform current position CENTER/LEFT | all | S |
-| Waveform Divisions PHRASE on our own overview (phrase bands from our PSSI). Low priority: fw 3.22 offers the setting for no source we have seen | all | S |
+| ~~Waveform Divisions PHRASE on our own overview~~ done: MENU → WAVEFORM DIVISIONS, rekordbox's phrases from the stick's `.EXT` or our own. A linked player's phrases (its PSSI over dbserver) not yet fetched | all | ✓ |
 | ~~6 players on PRO DJ LINK~~ done: PLAYER No. AUTO and 1–6 | all | ✓ |
 
 ## LINK with CDJ-3000s: open issues (2026-11-17)

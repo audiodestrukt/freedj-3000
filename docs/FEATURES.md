@@ -47,6 +47,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Analysis cache (a track is analysed once) | ✅ | All |
 | Key detection for untagged tracks (72 % exact vs rekordbox on a house stick) | ✅ | All |
 | Phrase analysis served as rekordbox PSSI (phrase starts P 0.70 / R 0.73 vs rekordbox on 31 house tracks; mood needs more genres) | 🧪 a CDJ-3000 (fw 3.22, emulator) fetches it but draws no phrases: its WAVEFORM DIVISIONS setting does not appear, for OpenDeck or for a rekordbox 6.8 stick | All |
+| Phrases on OpenDeck's screen (CDJ-3000 screen, MENU → WAVEFORM DIVISIONS: PHRASE, the default, or TIME SCALE): the strip under the overall waveform shows each phrase in rekordbox's colours with its label (Intro, Up, Down, Chorus, Outro; Verse / Bridge for mid and low moods) and the fill-ins; from the stick's rekordbox analysis (`.EXT` PSSI) when it has it, else OpenDeck's own | ✅ | All (CDJ-3000 screen) |
 | Downbeat (bar 1) detection; drum & bass at full tempo; 4:5 / 2:3 tempo mistakes | 📋 | — |
 
 ## Playing

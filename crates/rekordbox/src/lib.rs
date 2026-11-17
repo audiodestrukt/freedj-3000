@@ -283,6 +283,10 @@ pub struct RbAnalysis {
     /// a height 0–31 and a whiteness 0–7, as players draw in their browse
     /// lists and overview.
     pub preview:     Vec<(u8, u8)>,
+    /// The `.EXT`'s phrase analysis (PSSI section, fourcc to end, as stored:
+    /// masked by rekordbox 6+), for `opendeck_analysis::phrase::parse_pssi`.
+    /// Empty when the track has none.
+    pub phrases:     Vec<u8>,
 }
 
 /// Read a rekordbox `ANLZ####.DAT` analysis file: beat grid, cue points and
@@ -307,7 +311,29 @@ pub fn merge_ext<R: Read + Seek>(a: &mut RbAnalysis, reader: &mut R) -> Result<(
         a.hot_cues = ext.hot_cues;
         a.memory_cues = ext.memory_cues;
     }
+    // The phrases (PSSI): rekordcrate does not decode them, so the section
+    // is taken as raw bytes.
+    let mut raw = Vec::new();
+    reader.rewind()?;
+    reader.read_to_end(&mut raw)?;
+    if let Some(p) = anlz_section(&raw, b"PSSI") { a.phrases = p.to_vec(); }
     Ok(())
+}
+
+/// One tagged section of an ANLZ file, fourcc to end: after the `PMAI` file
+/// header, each section is its fourcc, a header length and a total length
+/// (big-endian u32s).
+pub fn anlz_section<'a>(file: &'a [u8], fourcc: &[u8; 4]) -> Option<&'a [u8]> {
+    let be = |o: usize| file.get(o..o + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    if file.get(..4)? != b"PMAI" { return None; }
+    let mut off = be(4)?;
+    while off + 12 <= file.len() {
+        let len = be(off + 8)?;
+        if len < 12 || off + len > file.len() { return None; }
+        if &file[off..off + 4] == fourcc { return Some(&file[off..off + len]); }
+        off += len;
+    }
+    None
 }
 
 /// rekordbox's memory cue colour number (0 none, 1 pink … 8 purple).
@@ -372,6 +398,32 @@ pub fn read_anlz_from<R: Read + Seek>(reader: &mut R) -> Result<RbAnalysis> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A section is found by its fourcc after the PMAI header, whole (fourcc
+    /// to its end), past the sections before it; a missing one or a file
+    /// that is not ANLZ gives None.
+    #[test]
+    fn anlz_section_finds_a_tagged_section() {
+        let section = |tag: &[u8; 4], body: &[u8]| {
+            let mut v = tag.to_vec();
+            v.extend(12u32.to_be_bytes());
+            v.extend((12 + body.len() as u32).to_be_bytes());
+            v.extend_from_slice(body);
+            v
+        };
+        let mut file = b"PMAI".to_vec();
+        file.extend(28u32.to_be_bytes());
+        file.extend(0u32.to_be_bytes());
+        file.resize(28, 0);
+        let pco2 = section(b"PCO2", &[1, 2, 3, 4]);
+        let pssi = section(b"PSSI", &[9; 20]);
+        file.extend(&pco2);
+        file.extend(&pssi);
+        assert_eq!(anlz_section(&file, b"PSSI"), Some(&pssi[..]));
+        assert_eq!(anlz_section(&file, b"PCO2"), Some(&pco2[..]));
+        assert_eq!(anlz_section(&file, b"PWV5"), None);
+        assert_eq!(anlz_section(b"nonsense", b"PSSI"), None);
+    }
     // Gated: OPENDECK_TEST_RB=/run/media/dan/CDJ1
     /// rekordcrate's demo export: artist, album, key and date resolve.
     #[test]

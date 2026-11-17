@@ -33,6 +33,7 @@ mod stems;
 mod separate;
 mod modelfetch;
 mod snapshot;
+mod phrases;
 mod taglist;
 mod theme;
 #[cfg(target_os = "android")]
@@ -794,6 +795,10 @@ struct DeckApp {
     /// comment (hot cues A–H by slot; memory points by position).  A cue set
     /// on the deck has none.
     cue_looks:         CueLooks,
+    /// The loaded track's phrases (WAVEFORM DIVISIONS → PHRASE) and where
+    /// they came from: the stick's rekordbox analysis, else our own.
+    phrases:           Vec<phrases::PhraseSpan>,
+    phrases_src:       Option<phrases::Source>,
     /// PERFORM screen state: pad mode, which bank the four pads show (0 = A–D,
     /// 1 = E–H), and whether DELETE –CALL is armed (next pad tap deletes).
     perform_mode:      PerformMode,
@@ -931,6 +936,8 @@ fn make_snapshot<'a>(
         total_samples: audio.len() as u64,
         cue_point:     f.cue_point,
         memory_cues,
+        phrases:       &[],
+        divisions:     Default::default(),
         hot_cues:      f.hot_cues,
         hot_rgb:       f.hot_rgb,
         perform_mode:  f.perform_mode,
@@ -1156,6 +1163,8 @@ impl DeckApp {
             track_tags,
             hot_cues,
             cue_looks:         CueLooks::default(),
+            phrases:           Vec::new(),
+            phrases_src:       None,
             perform_mode:      PerformMode::HotCue,
             perform_bank:      0,
             perform_delete:    false,
@@ -2184,7 +2193,9 @@ impl DeckApp {
         }
         looks.memory = a.memory_cues.iter().map(|c| (to_samples(c.time_ms), CueLook::of(c)))
             .filter(|(_, l)| *l != CueLook::default()).collect();
-        Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks })
+        // The stick's phrases (the .EXT's PSSI), on its own beat grid.
+        let phrases = phrases::spans(&a.phrases, |n| a.beats.get((n as usize).checked_sub(1)?).map(|b| b.time_ms), u64::MAX, deck_sr, ch as u16);
+        Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks, phrases })
     }
 
     /// Dispatch a browser selection: a local file, or a track on a linked player.
@@ -2460,6 +2471,8 @@ impl DeckApp {
         let rb = opendeck_rekordbox::RbAnalysis {
             beats: a.beats.iter().map(|&(bib, bpm, ms)| opendeck_rekordbox::RbBeat { time_ms: ms, bpm, beat_in_bar: bib }).collect(),
             memory_cues: Vec::new(), hot_cues: Vec::new(), preview: Vec::new(),
+            // The cached analysis's phrases, so they show from the first frame.
+            phrases: a.phrases.clone(),
         };
         Self::anlz_to_grid(rb, deck_sr, ch)
     }
@@ -2716,6 +2729,17 @@ impl DeckApp {
         }
     }
 
+    /// Our own phrase analysis of the loaded track (the one we serve), for
+    /// WAVEFORM DIVISIONS → PHRASE, unless the stick's rekordbox phrases are
+    /// already on the deck.
+    fn own_phrases(&mut self, a: &opendeck_mediaserver::Analysis) {
+        if self.phrases_src == Some(phrases::Source::Rekordbox) { return; }
+        let (sr, ch) = (self.audio.sample_rate, self.audio.channels);
+        self.phrases = phrases::spans(&a.phrases, |n| a.beats.get((n as usize).checked_sub(1)?).map(|b| b.2), self.audio.len() as u64, sr, ch as u16);
+        self.phrases_src = (!self.phrases.is_empty()).then_some(phrases::Source::OpenDeck);
+        log::info!("phrases: {} from OpenDeck's analysis", self.phrases.len());
+    }
+
     /// More of a streaming track; with `done`, the whole track and what
     /// needed it: a detected grid, stems, the analysis we serve over LINK.
     fn apply_grow(&mut self, g: Grow) {
@@ -2738,6 +2762,7 @@ impl DeckApp {
             let a = a.lock().map(|g| g.clone()).unwrap_or_default();
             serve_loaded(&self.link, &self.path, &a);
             self.serve_deck_grid();
+            self.own_phrases(&a);
         }
         self.publish_track();
         log::info!("load: whole track in ({:.1}s, {} BPM)",
@@ -2973,6 +2998,10 @@ impl DeckApp {
         self.hot_cues       = p.hot_cues;
         self.audio.key_shift.store(0, Ordering::Relaxed);
         self.cue_looks      = p.looks;
+        // The stick's phrases; without them, our own arrive with the whole
+        // track's analysis (`apply_grow`).
+        self.phrases_src    = (!p.phrases.is_empty()).then_some(phrases::Source::Rekordbox);
+        self.phrases        = p.phrases;
         self.perform_delete = false;
         if p.total > 0 { self.audio.load_streaming(Arc::clone(&p.samples), p.total, deck_sr, p.ch as u8)?; }
         else { self.audio.load_samples(Arc::clone(&p.samples), deck_sr, p.ch as u8)?; }
@@ -3506,6 +3535,8 @@ impl DeckApp {
         let ip_line = if self.screen_mode == ScreenMode::Menu { Self::ip_line(&mut self.ip_cache, &self.link) } else { String::new() };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
+        snap.phrases      = &self.phrases;
+        snap.divisions    = self.settings.divisions;
         if self.screen_mode == ScreenMode::Info {
             snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
             snap.link_peers = self.link.peers_summary();
@@ -3767,6 +3798,8 @@ impl DeckApp {
         let ip_line = if self.screen_mode == ScreenMode::Menu { Self::ip_line(&mut self.ip_cache, &self.link) } else { String::new() };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
+        snap.phrases      = &self.phrases;
+        snap.divisions    = self.settings.divisions;
         if self.screen_mode == ScreenMode::Info {
             snap.link_addr  = self.link.own_addr.lock().map(|a| a.clone()).unwrap_or_default();
             snap.link_peers = self.link.peers_summary();
@@ -3842,7 +3875,7 @@ fn set_idle_timer_disabled(disabled: bool) {
 /// KEY SHIFT reaches an octave either way.
 pub(crate) const KEY_SHIFT_MAX: i8 = 12;
 
-struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8], looks: CueLooks }
+struct AnlzLoad { grid: BeatGrid, cue: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8], looks: CueLooks, phrases: Vec<phrases::PhraseSpan> }
 
 /// A cue's colour and comment from rekordbox (see [`opendeck_rekordbox::RbCue`]).
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -3961,6 +3994,8 @@ struct Prepared {
     name: String, path: std::path::PathBuf, tags: opendeck_decode::TrackTags,
     samples: Arc<Vec<f32>>, ch: usize, waveform: WaveformCache,
     beat_grid: Option<BeatGrid>, cue_pt: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8], looks: CueLooks,
+    /// The stick's phrases, when the track came with rekordbox analysis.
+    phrases: Vec<phrases::PhraseSpan>,
     grid_src: &'static str, t0: Instant,
     /// Still decoding: the expected length in samples (the rest arrives as
     /// [`Grow`]s).  0 = `samples` is the whole track.
@@ -4020,7 +4055,7 @@ impl Prep {
             FetchedGrid::Beats(beats) if !beats.is_empty() => {
                 let a = opendeck_rekordbox::RbAnalysis {
                     beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
-                    memory_cues: Vec::new(), hot_cues: Vec::new(), preview: Vec::new(),
+                    memory_cues: Vec::new(), hot_cues: Vec::new(), preview: Vec::new(), phrases: Vec::new(),
                 };
                 DeckApp::anlz_to_grid(a, self.deck_sr, ch)
             }
@@ -4055,9 +4090,9 @@ impl Prep {
         let total_hint = dec.total_frames().map(|f| (f as f64 * deck_sr as f64 / header_sr.max(1) as f64).round() as u64 * ch as u64).unwrap_or(0);
         let per_sec = (deck_sr as usize * ch) as f64;
 
-        let (beat_grid, rb_cue, memory_cues, hot_cues, looks, grid_src) = match grid_cue {
-            Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks }) => (Some(grid), cue, memory_cues, hot_cues, looks, "rekordbox"),
-            None => (None, 0, Vec::new(), [None; 8], CueLooks::default(), "freedj"),
+        let (beat_grid, rb_cue, memory_cues, hot_cues, (looks, rb_phrases), grid_src) = match grid_cue {
+            Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks, phrases }) => (Some(grid), cue, memory_cues, hot_cues, (looks, phrases), "rekordbox"),
+            None => (None, 0, Vec::new(), [None; 8], (CueLooks::default(), Vec::new()), "freedj"),
         };
         let grid_src = match (&local, grid_src) { (Some(Some(_)), "rekordbox") => "cache", (_, g) => g };
         // AUTO CUE only when rekordbox gave no cue: then the first sound.
@@ -4119,7 +4154,7 @@ impl Prep {
                     name: name.clone(), path: path.clone(), tags: tags.clone(),
                     samples: Arc::new(out.clone()), ch, waveform: if eof { wb.snapshot() } else { partial(&wb) },
                     beat_grid: beat_grid.clone(), cue_pt, memory_cues: memory_cues.clone(), hot_cues, looks: looks.clone(),
-                    grid_src, t0, total,
+                    phrases: rb_phrases.clone(), grid_src, t0, total,
                 };
                 log::info!("load: playable in {} ms ({:.1}s decoded)", t0.elapsed().as_millis(), out.len() as f64 / per_sec);
                 if tx.send(LoadMsg::Ready(p)).is_err() { return Ok(()); }
@@ -4787,7 +4822,7 @@ pub fn run(cfg: Config) -> Result<()> {
     let has_track = track.is_some();
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
     if has_track {
-        if let Some(a) = &startup_analysis { serve_loaded(&app.link, &app.path, a); app.serve_deck_grid(); }
+        if let Some(a) = &startup_analysis { serve_loaded(&app.link, &app.path, a); app.serve_deck_grid(); app.own_phrases(a); }
         app.publish_track();
     }
     // Park the startup track at its cue (AUTO CUE's first sound, or the
@@ -5238,6 +5273,30 @@ mod deck_tests {
     /// debug build: playable in ~20–35 ms, whole track in ~1 s.  The budget
     /// leaves room for slow CI machines; a regression to decoding the whole
     /// track first (seconds) still fails it.  Times print with --nocapture.
+    /// WAVEFORM DIVISIONS → PHRASE: a loaded track with no rekordbox
+    /// analysis gets OpenDeck's own phrases once the whole track is in:
+    /// spans in order, inside the track, each with a label and a colour, and
+    /// the snapshot hands them to the screen.
+    #[test]
+    fn a_loaded_track_gets_its_phrases_for_the_screen() {
+        let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../amplificate.mp3");
+        let mut d = deck(2.0);
+        assert!(d.phrases.is_empty());
+        d.load_track(&mp3, None).unwrap();
+        let t0 = Instant::now();
+        while d.fetch_rx.is_some() && t0.elapsed() < Duration::from_secs(60) {
+            d.poll_fetch();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(d.phrases.len() >= 4, "{} phrases", d.phrases.len());
+        assert_eq!(d.phrases_src, Some(phrases::Source::OpenDeck));
+        let total = d.audio.len() as u64;
+        for w in d.phrases.windows(2) { assert!(w[0].end <= w[1].start, "in order, not overlapping"); }
+        assert!(d.phrases.iter().all(|p| p.start < p.end && p.end <= total && !p.label.is_empty()));
+        assert!(d.phrases.iter().any(|p| p.label.starts_with("Intro")), "{:?}", d.phrases.iter().map(|p| &p.label).collect::<Vec<_>>());
+        assert_eq!(d.settings.divisions, settings::Divisions::Phrase);
+    }
+
     #[test]
     fn a_long_mp3_is_playable_within_the_load_budget() {
         const BUDGET_MS: u128 = 500;

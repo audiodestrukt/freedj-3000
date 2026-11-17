@@ -2027,6 +2027,49 @@ fn file_art(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::Texture
 static WAVE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 pub fn set_wave_mode(m: u8) { WAVE_MODE.store(m, std::sync::atomic::Ordering::Relaxed); }
 
+/// WAVEFORM DIVISIONS → PHRASE: the track's phrases in the strip under the
+/// overall waveform, where the time scale is otherwise, as a CDJ-3000 draws
+/// rekordbox's phrase data there: a block a phrase in its colour, a dark
+/// line between phrases, the label where it fits, and a dashed white line
+/// along the bottom where a fill-in ends the phrase.
+fn draw_phrases(ui: &Ui, snap: &DeckSnapshot, ru: Rect, total: f32, u: f32) {
+    let p = ui.painter();
+    let x = |pos: u64| ru.min.x + (pos as f32 / total).clamp(0.0, 1.0) * ru.width();
+    let (top, bottom) = (ru.min.y + 1.0 * u, ru.max.y - 1.0 * u);
+    for ph in snap.phrases {
+        let (a, b) = (x(ph.start), x(ph.end));
+        if b - a < 0.5 { continue; }
+        let block = Rect::from_min_max(Pos2::new(a, top), Pos2::new(b, bottom));
+        p.rect_filled(block, 0.0, Color32::from_rgb(ph.rgb[0], ph.rgb[1], ph.rgb[2]));
+        p.line_segment([Pos2::new(a, top), Pos2::new(a, bottom)], Stroke::new(1.0 * u, Color32::BLACK));
+        if let Some(f) = ph.fill {
+            let (fa, y) = (x(f), bottom - 1.5 * u);
+            let mut d = fa;
+            while d < b - 1.0 {
+                p.line_segment([Pos2::new(d, y), Pos2::new((d + 4.0 * u).min(b - 1.0), y)], Stroke::new(2.0 * u, Color32::WHITE));
+                d += 7.0 * u;
+            }
+        }
+    }
+    // Labels: one across each run of the same phrase (an 8-bar chorus after
+    // another reads "Chorus" once, not "Cho Cho Cho"), clipped to the run,
+    // left out where not even a few letters fit.
+    let mut i = 0;
+    while i < snap.phrases.len() {
+        let ph = &snap.phrases[i];
+        let mut j = i + 1;
+        while j < snap.phrases.len() && snap.phrases[j].label == ph.label && snap.phrases[j].start == snap.phrases[j - 1].end { j += 1; }
+        let (a, b) = (x(ph.start), x(snap.phrases[j - 1].end));
+        if b - a > 24.0 * u {
+            let run = Rect::from_min_max(Pos2::new(a, top), Pos2::new(b, bottom));
+            let text = if ph.dark_text { Color32::BLACK } else { Color32::WHITE };
+            ui.painter().with_clip_rect(run.shrink(1.0)).text(Pos2::new(a + 3.0 * u, run.center().y), Align2::LEFT_CENTER,
+                &ph.label, FontId::proportional(12.0 * u), text);
+        }
+        i = j;
+    }
+}
+
 /// A 3-band preview column (PWV6 low, mid, high) as a CDJ-3000 stacks it:
 /// the heights of the tops of its low (blue), mid (amber) and high (white)
 /// parts above the baseline, in a cell `height` high.  Measured on the
@@ -2519,8 +2562,10 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
         let dur = snap.total_secs();
         let ru = lay.ruler;
         let x_at = |t: f64| ru.min.x + (t / dur) as f32 * ru.width();
+        let phrases = snap.divisions == crate::settings::Divisions::Phrase && !snap.phrases.is_empty();
+        if phrases { draw_phrases(ui, snap, ru, total, u); }
         let mut half = 1u32;
-        loop {
+        while !phrases {
             let t = if snap.remain_mode { dur - half as f64 * 30.0 } else { half as f64 * 30.0 };
             if t < 0.0 || t > dur { break; }
             let x = x_at(t);
@@ -2536,7 +2581,7 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
             }
             half += 1;
         }
-        for x in [ru.min.x, ru.max.x] {
+        for x in [ru.min.x, ru.max.x].into_iter().filter(|_| !phrases) {
             p.line_segment([Pos2::new(x, ru.min.y), Pos2::new(x, ru.max.y - 2.0 * u)], Stroke::new(3.0 * u, TEXT));
         }
         // The cue point: an orange ▲ under the overview.

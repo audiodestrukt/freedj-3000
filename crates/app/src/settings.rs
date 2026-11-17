@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, Light, WaveColor, DeckView, Stems, PerfLog }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, Player, Skin, Light, WaveColor, Divisions, DeckView, Stems, PerfLog }
 
 /// DECK VIEW is a desktop row: the iPad always shows the whole deck and the
 /// phone has its two pages.
@@ -22,6 +22,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
+    (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::DeckView,     "DECK VIEW"),
     (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
@@ -35,6 +36,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
+    (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
 ];
@@ -87,6 +89,23 @@ impl WaveColor {
     }
 }
 
+/// Waveform Divisions: what the strip under the overall waveform shows, as
+/// on a CDJ-3000 — marks every 30 s, or the track's phrases (rekordbox's
+/// from the stick when it has them, else OpenDeck's own analysis).  A track
+/// with no phrase data shows the time scale either way, as on the unit.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+pub enum Divisions {
+    TimeScale,
+    #[default]
+    Phrase,
+}
+
+impl Divisions {
+    pub fn label(self) -> &'static str {
+        match self { Divisions::TimeScale => "TIME SCALE", Divisions::Phrase => "PHRASE" }
+    }
+}
+
 /// The unit's AUTO CUE LEVEL choices (dB).
 pub const AUTO_CUE_LEVELS: [f32; 8] = [-36.0, -42.0, -48.0, -54.0, -60.0, -66.0, -72.0, -78.0];
 /// TEMPO RANGE choices as a fraction: ±6 %, ±10 %, ±16 %, WIDE (±100 %).
@@ -126,6 +145,8 @@ pub struct Settings {
     pub light: bool,
     /// Waveform Color (both waveforms); the C key cycles it too.
     pub wave_color: WaveColor,
+    /// Waveform Divisions (CDJ-3000 screen): TIME SCALE or PHRASE.
+    pub divisions: Divisions,
     /// Stems: a STEMS key and panel on the CDJ-3000 screen, a STEMS pad mode
     /// in the XDJ's PERFORM screen.  Prepared stems on a stick play as the
     /// track loads; a track without them is split on the device once its
@@ -154,7 +175,7 @@ const SEED: u8 = 4;
 impl Default for Settings {
     fn default() -> Self {
         Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000,
-               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, light: false, stems: true, seed: 0, phone: false }
+               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, divisions: Divisions::Phrase, light: false, stems: true, seed: 0, phone: false }
     }
 }
 
@@ -244,6 +265,7 @@ impl Settings {
             Setting::Skin         => c.skin = step(&[Skin::Xdj1000Mk2, Skin::Cdj3000], c.skin, dir),
             Setting::DeckView     => c.full_deck = !c.full_deck,
             Setting::WaveColor    => c.wave_color = step(&[WaveColor::Blue, WaveColor::Rgb, WaveColor::ThreeBand], c.wave_color, dir),
+            Setting::Divisions    => c.divisions = step(&[Divisions::TimeScale, Divisions::Phrase], c.divisions, dir),
             Setting::Stems        => c.stems = !c.stems,
             Setting::Light        => c.light = !c.light,
             Setting::PerfLog      => c.perf_log = !c.perf_log,
@@ -262,6 +284,7 @@ impl Settings {
             Setting::Skin if self.phone => format!("{}   (CDJ-3000: iPad only)", Skin::Xdj1000Mk2.label()),
             Setting::Skin         => self.skin.label().into(),
             Setting::WaveColor    => format!("{}   (C)", self.wave_color.label()),
+            Setting::Divisions    => self.divisions.label().into(),
             Setting::DeckView     => if self.full_deck { "FULL DECK   (F)".into() } else { "SCREEN ONLY   (F)".into() },
             Setting::Stems        => if self.stems { "ON".into() } else { "OFF".into() },
             Setting::Light        => if self.light { "ON".into() } else { "OFF".into() },
@@ -278,6 +301,20 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WAVEFORM DIVISIONS: PHRASE by default, a MENU row that toggles to
+    /// TIME SCALE and back, saved with the rest.
+    #[test]
+    fn waveform_divisions_default_to_phrase_and_toggle() {
+        let s = Settings::default();
+        assert_eq!(s.divisions, Divisions::Phrase);
+        assert!(MENU.iter().any(|(k, n)| *k == Setting::Divisions && *n == "WAVEFORM DIVISIONS"));
+        let t = s.cycled(Setting::Divisions, 1);
+        assert_eq!((t.divisions, t.value(Setting::Divisions).as_str()), (Divisions::TimeScale, "TIME SCALE"));
+        assert_eq!(t.cycled(Setting::Divisions, 1).divisions, Divisions::Phrase);
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(serde_json::from_str::<Settings>(&json).unwrap().divisions, Divisions::TimeScale);
+    }
 
     #[test]
     fn light_mode_is_a_menu_row_off_by_default() {

@@ -151,6 +151,10 @@ pub struct DeckSnapshot<'a> {
     /// Memory points (interleaved sample indices, sorted) — drawn as markers on
     /// the waveforms; CALL ◀▶ steps through them.
     pub memory_cues:  &'a [u64],
+    /// The track's phrases, and whether the strip under the overview shows
+    /// them (WAVEFORM DIVISIONS: PHRASE) or the time scale.
+    pub phrases:      &'a [crate::phrases::PhraseSpan],
+    pub divisions:    crate::settings::Divisions,
     /// The track's own tags (ID3 etc.) for the INFO screen.
     pub tags:         &'a opendeck_decode::TrackTags,
     /// The file name (INFO shows it even when the title bar uses a tagged title).
@@ -269,7 +273,7 @@ impl<'a> DeckSnapshot<'a> {
     pub fn test(tags: &'a opendeck_decode::TrackTags) -> Self {
         DeckSnapshot {
             title: "", loading: None, notice: None, stems: StemsView::default(), tags, file: "", position: 0, sample_rate: 44_100, channels: 2,
-            total_samples: 0, cue_point: 0, memory_cues: &[], hot_cues: [None; 8], hot_rgb: [None; 8],
+            total_samples: 0, cue_point: 0, memory_cues: &[], phrases: &[], divisions: Default::default(), hot_cues: [None; 8], hot_rgb: [None; 8],
             perform_mode: crate::input::PerformMode::HotCue, perform_bank: 0, perform_delete: false,
             loop_active: false, loop_start: 0, loop_end: 0, loop_beats: 0.0, tempo_range: 10.0, quantize: false,
             slip_shadow: None, playing: false, speed: 1.0, fader_speed: 1.0, key_lock: false, jog_vinyl: false,
