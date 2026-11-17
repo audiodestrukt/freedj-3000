@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- BROWSE on a linked CDJ-3000, WAVEFORM COLOR 3BAND: the track table's
+  previews are drawn as the unit draws them, the bands stacked (blue
+  lows, amber mids on them, white highs on top) at the unit's heights and
+  colours.  They were a third of the height, one colour per column, and
+  came out purple-grey: each sub-pixel column's anti-aliased edge let the
+  layers under it show through.  Measured against the CDJ-3000's own
+  BROWSE and overview in cdj3k-emu (the PWV6 bytes it serves against its
+  pixels: the mid counts half the low, the high 0.54, 143 units fill the
+  cell).  RGB previews are unchanged and not yet checked against the unit.
+
 ## [0.3.30] — 2026-11-17
 
 ### Fixed

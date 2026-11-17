@@ -2027,6 +2027,21 @@ fn file_art(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::Texture
 static WAVE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 pub fn set_wave_mode(m: u8) { WAVE_MODE.store(m, std::sync::atomic::Ordering::Relaxed); }
 
+/// A 3-band preview column (PWV6 low, mid, high) as a CDJ-3000 stacks it:
+/// the heights of the tops of its low (blue), mid (amber) and high (white)
+/// parts above the baseline, in a cell `height` high.  Measured on the
+/// unit (cdj3k-emu, fw 3.22, its own BROWSE and overview against the PWV6
+/// bytes it serves, 2026-11-17): the mid counts half as much as the low,
+/// the high 0.54, and 143 units of that sum fill the cell; fitted to 2.9 px
+/// rms on a 46 px row, the same ratios on the 40 px overview.
+fn three_band_stack(m: [u8; 3], height: f32) -> [f32; 3] {
+    const FULL: f32 = 143.0;
+    let lo = m[0] as f32;
+    let mid = lo + 0.5 * m[1] as f32;
+    let hi = mid + 0.54 * m[2] as f32;
+    [lo, mid, hi].map(|v| (height * v / FULL).min(height))
+}
+
 fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32, wave_on: bool) {
     let p = ui.painter();
     // The whole PREVIEW cell but the cover: the wave runs edge to edge.
@@ -2039,26 +2054,52 @@ fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0
     let step = wave.width() / cols as f32;
     if let Some(w) = bands {
         let n = w.len().max(1);
-        for c in 0..cols {
+        let col_max = |c: usize| {
             let (a, z) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
-            let m = w[a..z].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])]);
+            w[a..z].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])])
+        };
+        // Filled bars that meet edge to edge (a column-wide anti-aliased line
+        // bleeds into its neighbours).
+        let bar = |c: usize, h: f32, col: Color32| if h > 0.0 {
+            let (xa, xb) = (wave.min.x + c as f32 * step, wave.min.x + (c + 1) as f32 * step);
+            p.rect_filled(Rect::from_min_max(Pos2::new(xa, wave.max.y - h.min(wave.height())), Pos2::new(xb, wave.max.y)), 0.0, col);
+        };
+        if mode == 1 {
+            // 3BAND as a CDJ-3000 draws it: the bands stacked, low at the
+            // bottom, the mid on it, the high on top.  Each band is its own
+            // segment (blue 0→low, amber low→mid, white mid→high), one column a
+            // physical pixel: painted as overlapping bars, a sub-pixel column's
+            // anti-aliased edge let the layers under it show through, and the
+            // whole preview came out purple-grey.
+            // Edges on physical pixel boundaries: off them, every pixel is half
+            // covered by two anti-aliased bars and the preview comes out dim
+            // (measured 0.6 of the colours).
+            let ppp = ui.ctx().pixels_per_point();
+            let snap = |v: f32| (v * ppp).round() / ppp;
+            let (left, base) = (snap(wave.min.x), snap(wave.max.y));
+            let px = ((snap(wave.max.x) - left) * ppp).round().max(1.0) as usize;
+            let (blue, amber) = (Color32::from_rgb(0, 85, 225), Color32::from_rgb(255, 166, 0));
+            for c in 0..px {
+                let (a, z) = (c * n / px, ((c + 1) * n / px).max(c * n / px + 1).min(n));
+                let m = w[a..z].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])]);
+                let [lo, mid, hi] = three_band_stack(m, wave.height()).map(snap);
+                let xa = left + c as f32 / ppp;
+                for (y0, y1, colour) in [(0.0, lo, blue), (lo, mid, amber), (mid, hi, Color32::WHITE)] {
+                    if y1 > y0 {
+                        p.rect_filled(Rect::from_min_max(Pos2::new(xa, base - y1), Pos2::new(xa + 1.0 / ppp, base - y0)), 0.0, colour);
+                    }
+                }
+            }
+        } else {
+        for c in 0..cols {
+            let m = col_max(c);
             let top = *m.iter().max().unwrap_or(&0) as f32;
             if top <= 0.0 { continue; }
-            let h = wave.height() * (top / 127.0).min(1.0);
-            let col = if mode == 0 {
-                // RGB: bass red, mid green, high blue, scaled to full brightness.
-                let k = 255.0 / top;
-                Color32::from_rgb((m[0] as f32 * k) as u8, (m[1] as f32 * k) as u8, (m[2] as f32 * k) as u8)
-            } else {
-                // 3-band: the loudest band's colour (blue low, amber mid, white high).
-                match m.iter().position(|&v| v as f32 == top) {
-                    Some(0) => Color32::from_rgb(58, 123, 240),
-                    Some(1) => Color32::from_rgb(240, 160, 48),
-                    _ => Color32::from_rgb(235, 235, 235),
-                }
-            };
-            let x = wave.min.x + (c as f32 + 0.5) * step;
-            p.line_segment([Pos2::new(x, wave.max.y), Pos2::new(x, wave.max.y - h)], Stroke::new(step.max(1.0), col));
+            // RGB: bass red, mid green, high blue, scaled to full brightness.
+            let k = 255.0 / top;
+            let col = Color32::from_rgb((m[0] as f32 * k) as u8, (m[1] as f32 * k) as u8, (m[2] as f32 * k) as u8);
+            bar(c, wave.height() * (top / 127.0).min(1.0), col);
+        }
         }
     } else if let Some(w) = anlz.as_deref().filter(|_| wave_on).and_then(|a| rb_wave(ui.ctx(), a)).or_else(|| e.load().filter(|_| wave_on).and_then(|l| b.db_wave(l))) {
         let n = w.len().max(1);
@@ -2686,5 +2727,38 @@ mod tick_tests {
             assert!((out - out.floor() - 0.5).abs() < 1e-3, "{x} → output {out} is a pixel centre");
         }
         assert!((px.width(1.0) * px.k - 1.0).abs() < 1e-6, "a 0.74 px tick is drawn one pixel wide");
+    }
+}
+
+#[cfg(test)]
+mod three_band_preview_tests {
+    use super::three_band_stack;
+
+    /// Columns of "About It" as a CDJ-3000 (cdj3k-emu, fw 3.22) draws them
+    /// in its 46 px BROWSE preview: the PWV6 bytes it serves, and the tops of
+    /// its blue, amber and white parts read off its screen.  The stack lands
+    /// within a few pixels of the unit (its own drawing anti-aliases and
+    /// rounds; the fit over the whole row was 2.9 px rms).
+    #[test]
+    fn three_band_columns_stack_as_on_the_unit() {
+        let unit: [([u8; 3], [f32; 3]); 4] = [
+            ([22, 30, 40], [8.0, 14.0, 24.0]),
+            ([37, 29, 44], [11.0, 16.0, 26.0]),
+            ([46, 31, 40], [16.0, 23.0, 36.0]),
+            ([45, 23, 33], [15.0, 18.0, 20.0]),
+        ];
+        for (m, want) in unit {
+            let got = three_band_stack(m, 46.0);
+            // Blue and amber within 4 px; the white tops are thin anti-aliased
+            // peaks that read noisily off the unit's screen (most of the fit's
+            // error), so 10 px there.
+            for (k, tol) in [(0, 4.0), (1, 4.0), (2, 10.0)] {
+                assert!((got[k] - want[k]).abs() <= tol, "{m:?}: {got:?} vs the unit's {want:?}");
+            }
+            assert!(got[0] <= got[1] && got[1] <= got[2], "stacked, low at the bottom: {got:?}");
+        }
+        // Loud columns use most of the cell and never leave it; silence draws nothing.
+        assert_eq!(three_band_stack([255, 255, 255], 46.0), [46.0; 3]);
+        assert_eq!(three_band_stack([0, 0, 0], 46.0), [0.0; 3]);
     }
 }
