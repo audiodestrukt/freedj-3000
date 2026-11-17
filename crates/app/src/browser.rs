@@ -208,6 +208,41 @@ enum Loc {
     DbCat(Cat, Vec<u32>),
     /// The player's folder tree (FOLDER): folder id, 0 = the root.
     DbTree(u32),
+    /// A linked player being connected to (see [`Connecting`]): one row
+    /// saying so, or why it did not answer.
+    Connecting,
+}
+
+/// A linked player's row was pressed: the session opens (and, for a player
+/// with no database server, its `export.pdb` is read over NFS) on a thread
+/// of its own, so the deck keeps drawing and playing while a player that
+/// has gone away times out.  The answer is taken a frame later
+/// ([`Browser::prefetch_meta`]); a failure stays on screen in place of the
+/// list, where the key was pressed.  BACK leaves at once, and a late
+/// answer is then dropped.
+struct Connecting {
+    ip:     Ipv4Addr,
+    label:  String,
+    rx:     std::sync::mpsc::Receiver<Connected>,
+    failed: Option<String>,
+}
+
+enum Connected {
+    Db(DbSession),
+    Export(RbExport),
+    Failed(String),
+}
+
+/// Read a linked player's `export.pdb` over NFS (a player with no database
+/// server).
+fn read_link_export(ip: Ipv4Addr, ports: crate::LinkPorts) -> anyhow::Result<RbExport> {
+    let mut nfs = ports.nfs(ip, false)?;
+    let root = nfs.mount_usb()?;
+    let (fh, size) = nfs.lookup_path(&root, "PIONEER/rekordbox/export.pdb")?;
+    let bytes = nfs.read_file(&fh, size)?;
+    let exp = read_export_from(&mut std::io::Cursor::new(bytes), PathBuf::from(format!("link://{ip}")))?;
+    log::info!("LINK {ip}: {} tracks, {} playlists", exp.tracks.len(), exp.playlists.len());
+    Ok(exp)
 }
 
 /// A dbserver category beyond the ones with their own `Loc`: the menu that
@@ -467,6 +502,7 @@ pub struct Browser {
     /// The ports a linked player is reached on (a player's own by default;
     /// tests point them at a server on free ports).
     pub(crate) ports: crate::LinkPorts,
+    connecting: Option<Connecting>,
     /// BACK at the top level normally climbs to the parent folder; on iOS the
     /// start folder is the app's sandbox, and climbing out of it only shows the
     /// container's UUID directories — so the start is the floor there.
@@ -554,6 +590,7 @@ impl Browser {
             cat_focus: false,
             link,
             ports: crate::LinkPorts::default(),
+            connecting: None,
             preview: Default::default(),
             home: start.clone(),
             played: Vec::new(),
@@ -603,6 +640,7 @@ impl Browser {
     /// session's worker asks the player, and the answer is taken here a
     /// frame or two later.
     pub fn prefetch_meta(&mut self) {
+        self.poll_connect();
         let Some(db) = self.db.as_ref() else { return };
         for (k, info) in db.answers() {
             self.meta_asked.remove(&k);
@@ -643,7 +681,7 @@ impl Browser {
 
     /// Lookups still under way (the app keeps drawing at full rate so their
     /// answers show as they land).
-    pub fn db_pending(&self) -> bool { !self.meta_asked.is_empty() || self.peek_asked.is_some() }
+    pub fn db_pending(&self) -> bool { !self.meta_asked.is_empty() || self.peek_asked.is_some() || self.connecting() }
 
     fn selected_peek(&self) -> Option<Peek> {
         match self.selected_entry() {
@@ -686,6 +724,7 @@ impl Browser {
         match self.stack.last() {
             Some(Loc::Fs(p)) => p.file_name().and_then(|n| n.to_str()).unwrap_or("/").to_string(),
             Some(Loc::Link)  => "LINK".to_string(),
+            Some(Loc::Connecting) => self.connecting.as_ref().map(|c| c.label.clone()).unwrap_or_else(|| "LINK".to_string()),
             Some(Loc::RbRoot) => match &self.rb_source {
                 Some(RbSource::Link(ip)) => format!("LINK  {ip}"),
                 _ => "REKORDBOX".to_string(),
@@ -847,6 +886,14 @@ impl Browser {
             Some(Loc::DbFilenames)    => self.db_track_entries(|c, s| c.filenames(s)),
             Some(Loc::DbCat(c, ids))  => self.db_cat_entries(c, ids),
             Some(Loc::DbTree(id))     => self.db_tree_entries(id),
+            Some(Loc::Connecting)     => {
+                let text = match &self.connecting {
+                    Some(Connecting { failed: Some(why), label, .. }) => format!("{label}: not answering ({why})"),
+                    Some(c) => format!("Connecting to {}…", c.label),
+                    None => String::new(),
+                };
+                vec![Entry { name: text, is_dir: false, artist: None, bpm: None, key: None, art: None, kind: EntryKind::Unsupported }]
+            }
             None                      => Vec::new(),
         };
         self.entries = entries;
@@ -1105,10 +1152,16 @@ impl Browser {
         Some(Ok((path, grid, meta)))
     }
 
-    /// Open a dbserver session to a peer (a player's USB slot, or rekordbox's
-    /// collection).
-    fn connect_db(&mut self, ip: Ipv4Addr, slot: Slot) -> anyhow::Result<()> {
-        if matches!(&self.db, Some(d) if d.ip == ip && d.slot == slot) { return Ok(()); }
+    /// Connect to a peer (a player's USB or SD slot, or rekordbox's
+    /// collection) on a thread of its own; see [`Connecting`].  With
+    /// `fallback`, a player with no database server is read from its
+    /// `export.pdb` instead.  Already connected to it: opens at once.
+    fn start_connect(&mut self, ip: Ipv4Addr, slot: Slot, label: String, fallback: bool) {
+        if matches!(&self.db, Some(d) if d.ip == ip && d.slot == slot) {
+            let session = self.db.take().unwrap();
+            self.connected(ip, label, Connected::Db(session));
+            return;
+        }
         // Servers answer requests from a real player number (1–4).
         let device = if (1..=4).contains(&self.link.player()) { self.link.player() } else { 1 };
         // The old session (if any) closes first: one session per player number.
@@ -1116,12 +1169,82 @@ impl Browser {
         self.meta_asked.clear();
         self.peeks.clear();
         self.peek_asked = None;
-        let query = self.ports.query;
-        let session = DbSession::open(ip, slot, move || DbClient::discover_at(ip, query, device))?;
-        log::info!("LINK {ip}: dbserver session open ({slot:?})");
-        self.db = Some(session);
-        Ok(())
+        let ports = self.ports;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let spawned = std::thread::Builder::new().name("link-connect".into()).spawn(move || {
+            let r = match DbSession::open(ip, slot, move || DbClient::discover_at(ip, ports.query, device)) {
+                Ok(session) => { log::info!("LINK {ip}: dbserver session open ({slot:?})"); Connected::Db(session) }
+                Err(e) if fallback => {
+                    log::info!("LINK {ip}: no dbserver ({e:#}); trying export.pdb over NFS");
+                    match read_link_export(ip, ports) {
+                        Ok(exp) => Connected::Export(exp),
+                        Err(e2) => { log::warn!("LINK connect {ip} failed: {e2:#}"); Connected::Failed(format!("{e:#}")) }
+                    }
+                }
+                Err(e) => { log::warn!("LINK {ip} failed: {e:#}"); Connected::Failed(format!("{e:#}")) }
+            };
+            let _ = tx.send(r);
+        });
+        let failed = spawned.err().map(|e| format!("{e}"));
+        self.connecting = Some(Connecting { ip, label, rx, failed });
+        self.stack.push(Loc::Connecting);
+        self.names.resize(self.stack.len() - 1, String::new());
+        self.names.push(String::new());
+        self.selected = 0;
+        self.rebuild();
     }
+
+    /// Take a connect's answer, if it has come (each frame, from
+    /// [`prefetch_meta`](Self::prefetch_meta)).  Dropped if BACK has left
+    /// the CONNECTING row since.
+    fn poll_connect(&mut self) {
+        let Some(c) = self.connecting.as_ref() else { return };
+        if !matches!(self.stack.last(), Some(Loc::Connecting)) { self.connecting = None; return; }
+        if c.failed.is_some() { return; }
+        let r = match c.rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => Connected::Failed("the connection thread stopped".into()),
+        };
+        let (ip, label) = (c.ip, c.label.clone());
+        self.connected(ip, label, r);
+    }
+
+    /// Open what a connect brought: the player's categories, its export's,
+    /// or the reason on the CONNECTING row.
+    fn connected(&mut self, ip: Ipv4Addr, label: String, r: Connected) {
+        if matches!(self.stack.last(), Some(Loc::Connecting)) { self.stack.pop(); self.names.pop(); }
+        match r {
+            Connected::Db(session) => {
+                self.connecting = None;
+                self.db = Some(session);
+                self.db_label = label;
+                self.stack.push(Loc::DbRoot);
+                self.selected = 0;
+                self.rebuild();
+                self.open_rb_category(0);
+            }
+            // Its export opens on the categories, as a USB stick does.
+            Connected::Export(exp) => {
+                self.connecting = None;
+                self.rb = Some(Arc::new(exp));
+                self.rb_source = Some(RbSource::Link(ip));
+                self.stack.push(Loc::RbRoot);
+                self.selected = 0;
+                self.rebuild();
+            }
+            Connected::Failed(why) => {
+                if let Some(c) = self.connecting.as_mut() { c.failed = Some(why); }
+                self.stack.push(Loc::Connecting);
+                self.names.push(String::new());
+                self.selected = 0;
+                self.rebuild();
+            }
+        }
+    }
+
+    /// A linked player is being connected to (the app keeps drawing).
+    pub fn connecting(&self) -> bool { self.connecting.as_ref().is_some_and(|c| c.failed.is_none()) }
 
     fn rb_tree_entries(&self, node: u32) -> Vec<Entry> {
         let Some(exp) = self.rb.as_ref() else { return Vec::new() };
@@ -1351,19 +1474,6 @@ impl Browser {
         }).collect()
     }
 
-    /// Connect to a linked player, read its `export.pdb` over NFS, and browse it.
-    fn connect_link(&mut self, ip: Ipv4Addr) -> anyhow::Result<()> {
-        let mut nfs = self.ports.nfs(ip, false)?;
-        let root = nfs.mount_usb()?;
-        let (fh, size) = nfs.lookup_path(&root, "PIONEER/rekordbox/export.pdb")?;
-        let bytes = nfs.read_file(&fh, size)?;
-        let exp = read_export_from(&mut std::io::Cursor::new(bytes), PathBuf::from(format!("link://{ip}")))?;
-        log::info!("LINK {ip}: {} tracks, {} playlists", exp.tracks.len(), exp.playlists.len());
-        self.rb = Some(Arc::new(exp));
-        self.rb_source = Some(RbSource::Link(ip));
-        Ok(())
-    }
-
     /// A category's top level, with the category column beside it.
     fn at_category_top(&self) -> bool {
         if self.playlist_only { return false; }
@@ -1421,43 +1531,10 @@ impl Browser {
                 if from_usb_row { self.into_rb_root(); }
                 Enter::Folder
             }
-            EntryKind::ConnectDb(ip) => match self.connect_db(ip, Slot::Collection) {
-                Ok(()) => {
-                    self.db_label = sel_name.clone();
-                    self.stack.push(Loc::DbRoot);
-                    self.selected = 0;
-                    self.rebuild();
-                    self.open_rb_category(0);
-                    Enter::Folder
-                }
-                Err(e) => { log::warn!("LINK rekordbox {ip} failed: {e:#}"); Enter::Nothing }
-            },
+            EntryKind::ConnectDb(ip) => { self.start_connect(ip, Slot::Collection, sel_name, false); Enter::Folder }
             // A player: browse the slot over dbserver like a CDJ does; if it
-            // has no database service, fall back to reading export.pdb over NFS.
-            EntryKind::ConnectLink(ip, slot) => match self.connect_db(ip, slot) {
-                Ok(()) => {
-                    self.db_label = sel_name.clone();
-                    self.stack.push(Loc::DbRoot);
-                    self.selected = 0;
-                    self.rebuild();
-                    self.open_rb_category(0);
-                    Enter::Folder
-                }
-                Err(e) => {
-                    log::info!("LINK {ip}: no dbserver ({e:#}); trying export.pdb over NFS");
-                    match self.connect_link(ip) {
-                        // Its export opens on the categories, as a USB
-                        // stick does (it went straight to PLAYLIST before).
-                        Ok(()) => {
-                            self.stack.push(Loc::RbRoot);
-                            self.selected = 0;
-                            self.rebuild();
-                            Enter::Folder
-                        }
-                        Err(e) => { log::warn!("LINK connect {ip} failed: {e:#}"); Enter::Nothing }
-                    }
-                }
-            },
+            // has no database service, read its export.pdb over NFS.
+            EntryKind::ConnectLink(ip, slot) => { self.start_connect(ip, slot, sel_name, true); Enter::Folder }
             EntryKind::Track(load) => Enter::Track(load),
         }
     }
@@ -2389,12 +2466,15 @@ mod tests {
         assert!(matches!(b.enter(), Enter::Folder));                    // LINK list
         assert_eq!(b.entries().len(), 1, "one peer listed");
         b.selected = 0;
-        assert!(matches!(b.enter(), Enter::Folder));                    // category menu
-        let cats: Vec<&str> = b.entries().iter().map(|e| e.name.as_str()).collect();
-        assert!(cats.contains(&"TRACK") && cats.contains(&"PLAYLIST"), "categories: {cats:?}");
-        let all = b.entries().iter().position(|e| e.name == "TRACK").expect("TRACK category");
-        b.selected = all;
-        assert!(matches!(b.enter(), Enter::Folder));
+        assert!(matches!(b.enter(), Enter::Folder));                    // connecting …
+        let t0 = Instant::now();
+        while b.connecting() && t0.elapsed() < std::time::Duration::from_secs(15) {
+            b.prefetch_meta();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let (cats, _) = b.rb_categories().expect("the player's categories");  // … its categories
+        assert!(cats.iter().any(|c| c == "TRACK") && cats.iter().any(|c| c == "PLAYLIST"), "categories: {cats:?}");
+        b.open_rb_category(cats.iter().position(|c| c == "TRACK").unwrap());
         assert_eq!(b.title(), "TRACK");
         assert!(b.entries().iter().all(|e| !e.is_dir) && !b.entries().is_empty(), "tracks");
         b.selected = 0;
@@ -2476,6 +2556,8 @@ mod link_browse_tests {
         assert!(names(b)[0].contains("127.0.0.1"), "{:?}", names(b));
         b.selected = 0;
         assert!(matches!(b.enter(), Enter::Folder), "the player opens");
+        assert!(frames_until(b, |b| !b.connecting()), "connected");
+        assert!(b.rb_categories().is_some(), "on its categories: {:?}", names(b));
     }
 
     /// Run `prefetch_meta` as the frames do until `done` (or 3 s).
@@ -2633,9 +2715,11 @@ mod link_browse_tests {
         assert!(r.b.playlist_only(), "BACK stays in the playlists");
     }
 
+    /// A player that has gone away: the press returns at once (the deck
+    /// keeps drawing and playing), the row says it is connecting, then why
+    /// it did not answer; BACK returns to the LINK list at any point.
     #[test]
-    #[ignore = "open: entering a player that has gone away blocks the UI thread ~12 s (connect and the export.pdb fallback run on it)"]
-    fn a_player_that_is_not_there_leaves_the_link_list_up_and_does_not_hang() {
+    fn a_player_that_is_not_there_never_blocks_the_deck() {
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let link = crate::prodj::LinkState::new(1);
         link.peers.lock().unwrap().insert(3, Ipv4Addr::LOCALHOST);
@@ -2647,9 +2731,28 @@ mod link_browse_tests {
         let before = names(&b);
         let t0 = Instant::now();
         b.selected = 0;
-        assert!(matches!(b.enter(), Enter::Nothing));
-        assert!(t0.elapsed() < Duration::from_secs(5), "{:?}", t0.elapsed());
-        assert_eq!(names(&b), before, "still on the LINK list");
-        assert_ne!(b.source_kind(), SourceTile::None);
+        assert!(matches!(b.enter(), Enter::Folder));
+        assert!(t0.elapsed() < Duration::from_millis(100), "the press returned at once: {:?}", t0.elapsed());
+        assert!(b.connecting() && b.db_pending(), "connecting, and the app keeps drawing");
+        assert!(names(&b)[0].starts_with("Connecting to "), "{:?}", names(&b));
+        // The answer: not answering, shown where the key was pressed.
+        let t1 = Instant::now();
+        while b.connecting() && t1.elapsed() < Duration::from_secs(30) {
+            b.prefetch_meta();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(!b.connecting(), "gave up");
+        assert!(names(&b)[0].contains("not answering"), "{:?}", names(&b));
+        b.back();
+        assert_eq!(names(&b), before, "BACK: the LINK list again");
+
+        // BACK while it is still connecting: out at once, the late answer dropped.
+        b.selected = 0;
+        b.enter();
+        b.back();
+        assert_eq!(names(&b), before);
+        b.prefetch_meta();
+        assert!(!b.connecting());
+        assert_eq!(names(&b), before);
     }
 }

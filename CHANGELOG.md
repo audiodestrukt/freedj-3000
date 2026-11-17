@@ -51,6 +51,12 @@ All notable changes to this project will be documented in this file.
   (`deploy/pi/cross/build.sh`) now includes it.
 
 ### Fixed
+- Opening a linked player no longer freezes the deck.  Its database
+  session (and, for a player without one, its `export.pdb` over NFS) was
+  opened on the UI thread: a player that had left the network froze the
+  screen and keys for 12 s or more.  The row now reads "Connecting to …",
+  the deck keeps drawing and playing, a player that doesn't answer says so
+  in its place, and BACK leaves at any point.
 - BROWSE → KEY on a linked player: a key's rows (the key, its relatives,
   wider) each list their own set of tracks.  Every row opened the same
   set: the browser asked for the row's id, which a CDJ-3000 sets to the
