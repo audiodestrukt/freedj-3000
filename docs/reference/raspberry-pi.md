@@ -42,6 +42,8 @@ becomes the only clock.
 - **Official 27 W USB-C PSU.** The Pi 5 browns out on underpowered supplies,
   and audio glitches are the first symptom — don't debug xruns on a weak PSU.
 - **Active cooler / heatsink.** Sustained time-stretch keeps a core busy.
+  For stems split on the device it is required, with a 2.8 GHz overclock:
+  see [Stems on a Pi 5](#stems-on-a-pi-5).
 - **NVMe HAT + a small NVMe, or a good A2 microSD.** Tracks decode fully into
   RAM at load (no streaming yet), so load time is disk-bound; NVMe is nicer.
 - **HDMI cable** (micro-HDMI → HDMI on the Pi 5) for the display. Any screen;
@@ -202,6 +204,37 @@ On one core the audio threads also need real-time priority:
 `deploy/pi/rt-audio/README.md` (a limits.d file; the threads ask for
 `SCHED_FIFO` at start and say in the log whether they got it) and
 `OPENDECK_RING_MS` to decode further ahead.
+
+## Stems on a Pi 5
+
+Splitting stems on the device (HTDemucs in plain Rust, the aarch64 build's
+`separate-native`, `OPENDECK_SEPARATE_MODEL=…/htdemucs.safetensors`) has to
+keep ahead of the playhead, so it has to run faster than real time. A 4 GB
+Pi 5 does that only cooled and overclocked (techno.mp3, 5:13, through the
+app's split code; details in [design/stems-on-device.md](../design/stems-on-device.md)):
+
+| Pi 5 | Whole track | Real time |
+|---|---|---|
+| No cooler (throttles to 1.5 GHz, 89 °C) | 393 s | 0.8x |
+| Active Cooler, 2.4 GHz | 316 s | 1.0x |
+| **Active Cooler, 2.8 GHz** (the setting to use) | 296 s | **1.06x** |
+
+The overclock, in `/boot/firmware/config.txt` (back the file up first):
+
+```ini
+[all]
+arm_freq=2800
+over_voltage_delta=50000
+```
+
+Then reboot and check `vcgencmd get_config arm_freq` (2800). During a split
+it held 2.8 GHz with no throttling at 69 °C, the fan at its top step. Use the
+official 27 W supply: the 5 V rail dipped to 4.76 V during the split, and
+the under-voltage threshold is about 4.63 V. Check `vcgencmd get_throttled`
+after a long split (0x0 means nothing happened since boot). More clock
+helps little: the cores wait on memory (2.8 GHz bought 7 % for 17 % more
+clock), so 3.0 GHz isn't worth the heat. More speed has to come from the
+model (the distilled Demucs).
 
 ## Smaller boards
 
