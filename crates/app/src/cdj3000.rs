@@ -249,6 +249,28 @@ pub struct Layout {
     pub strip_overview: Rect,
 }
 
+/// Output pixels across the enlarged waveform, for the marks that scroll
+/// with it.  The SDL backend scrolls the waveform in whole output pixels
+/// (playhead quantised to one pixel's worth of columns); ticks drawn at the
+/// exact playhead, a fraction of a pixel off it and smeared over two pixels
+/// by anti-aliasing, flicker against it.  So they take the same quantised
+/// playhead, sit on pixel centres and are at least one pixel wide.
+#[derive(Clone, Copy)]
+struct OutPx { k: f32, cols_per_px: f64 }
+
+impl OutPx {
+    fn of(ui: &Ui, wave: Rect, cols: f64) -> Self {
+        let k = ui.ctx().pixels_per_point() * crate::renderer::squeeze_x();
+        Self { k, cols_per_px: cols / (wave.width() * k).max(1.0) as f64 }
+    }
+    /// The playhead column, quantised as the waveform's scroll is.
+    fn playhead(self, col: f64) -> f64 { (col / self.cols_per_px).round() * self.cols_per_px }
+    /// `x` (points) moved to the centre of its output pixel.
+    fn snap(self, x: f32) -> f32 { ((x * self.k).floor() + 0.5) / self.k }
+    /// A line width (points) as a whole number of output pixels, at least one.
+    fn width(self, w: f32) -> f32 { (w * self.k).round().max(1.0) / self.k }
+}
+
 /// Lay the playback screen out in `screen` (16:9). With a touch panel open
 /// the waveform field shrinks to make room for its row of keys.
 pub fn layout(screen: Rect, panel_open: bool) -> Layout {
@@ -496,13 +518,14 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         let ch = snap.channels.max(1) as f64;
         let w = lay.wave;
         let cols = snap.cols_visible.max(1.0) as f64;
-        let play_col = snap.position as f64 / ch / hop;
-        let x_of = |frame: f64| w.min.x + ((frame / hop - play_col) / cols + 0.5) as f32 * w.width();
+        let px = OutPx::of(ui, w, cols);
+        let play_col = px.playhead(snap.position as f64 / ch / hop);
+        let x_of = |frame: f64| px.snap(w.min.x + ((frame / hop - play_col) / cols + 0.5) as f32 * w.width());
         let period = snap.sample_rate as f64 * 60.0 / g.bpm;
         let first_frame = (play_col - cols / 2.0) * hop;
         let k0 = ((first_frame - g.anchor_sample as f64) / period).floor() as i64;
         let k1 = k0 + (cols * hop / period).ceil() as i64 + 2;
-        let stroke = |c| Stroke::new((1.5 * u).max(1.0), c);
+        let stroke = |c| Stroke::new(px.width(1.5 * u), c);
         for k in k0..=k1 {
             let x = x_of(g.sample_of_beat(k, snap.sample_rate) as f64);
             if x < w.min.x || x > w.max.x { continue; }
@@ -530,8 +553,9 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         let ch = snap.channels.max(1) as f64;
         let w = lay.wave;
         let cols = snap.cols_visible.max(1.0) as f64;
-        let play_col = snap.position as f64 / ch / hop;
-        let x_of = |s: u64| w.min.x + ((s as f64 / ch / hop - play_col) / cols + 0.5) as f32 * w.width();
+        let px = OutPx::of(ui, w, cols);
+        let play_col = px.playhead(snap.position as f64 / ch / hop);
+        let x_of = |s: u64| px.snap(w.min.x + ((s as f64 / ch / hop - play_col) / cols + 0.5) as f32 * w.width());
         let on = |x: f32| x >= w.min.x - 20.0 * u && x <= w.max.x;
         let top = lay.ticks_top.min.y - 6.0 * u;
         for &m in snap.memory_cues {
@@ -2424,5 +2448,31 @@ mod stems_panel_tests {
         // Fully split: no status line at all, and the stems play everywhere.
         snap.stems = StemsView::of(StemsState::Ready);
         assert!(snap.stems.split_at(0.75) && stems_status(&snap.stems, true).is_none());
+    }
+
+}
+
+#[cfg(test)]
+mod tick_tests {
+    use super::OutPx;
+
+    /// The beat ticks step with the waveform: on the squeezed 7" panel
+    /// (0.741 output px per point) they take the waveform's quantised
+    /// playhead, land on output pixel centres and are a whole pixel wide,
+    /// so a scroll moves them a whole pixel at a time with the bars.
+    #[test]
+    fn ticks_sit_on_whole_output_pixels() {
+        let px = OutPx { k: 800.0 / 1080.0, cols_per_px: 3180.0 / 632.0 };
+        for col in [0.0, 1.3, 2.6, 1234.567] {
+            let q = px.playhead(col);
+            let steps = q / px.cols_per_px;
+            assert!((steps - steps.round()).abs() < 1e-9, "playhead {col} → {q} is a whole pixel of scroll");
+            assert!((q - col).abs() <= px.cols_per_px / 2.0 + 1e-9);
+        }
+        for x in [100.0f32, 100.3, 333.33] {
+            let out = px.snap(x) * px.k;
+            assert!((out - out.floor() - 0.5).abs() < 1e-3, "{x} → output {out} is a pixel centre");
+        }
+        assert!((px.width(1.0) * px.k - 1.0).abs() < 1e-6, "a 0.74 px tick is drawn one pixel wide");
     }
 }

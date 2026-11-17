@@ -79,6 +79,14 @@ pub struct WaveformParams {
     pub _pad:             [f32; 3],
 }
 
+/// Output pixels per layout pixel across: 1, except fullscreen fill on a
+/// panel of another shape (`sdl_backend::Fill`), which draws the layout
+/// squeezed sideways.  The UI reads it to put thin moving lines (the beat
+/// ticks) on whole output pixels.
+static SQUEEZE_X: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
+pub fn squeeze_x() -> f32 { f32::from_bits(SQUEEZE_X.load(std::sync::atomic::Ordering::Relaxed)) }
+pub fn set_squeeze_x(xs: f32) { SQUEEZE_X.store(xs.to_bits(), std::sync::atomic::Ordering::Relaxed) }
+
 /// Where the shader draws its two waveforms, in physical pixels.
 #[derive(Clone, Copy, Debug)]
 pub struct Viewports {

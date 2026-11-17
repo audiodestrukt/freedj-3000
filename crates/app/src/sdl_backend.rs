@@ -53,8 +53,7 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
     wb.position_centered().allow_highdpi();
     // OPENDECK_FULLSCREEN=1: the appliance case.  A true fullscreen window
     // makes SDL pick the display mode closest to the design size (a 1024x600
-    // panel gets its own mode; a 1080p monitor gets 1024x768), so the deck
-    // draws 1:1 and is letterboxed, instead of being scaled up and blurred.
+    // panel gets its own mode; a 1080p monitor gets 1024x768).
     if std::env::var("OPENDECK_FULLSCREEN").as_deref() == Ok("1") { wb.fullscreen(); }
     let window = wb.build().context("SDL window")?;
 
@@ -66,11 +65,20 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
     let mut cb = window.into_canvas();
     if vsync { cb = cb.present_vsync(); }
     let mut canvas = cb.build().context("SDL renderer")?;
-    // Fullscreen on a panel that is not 1024x600 (or whatever OPENDECK_WINDOW
-    // asked for): keep rendering at the design size and let the GPU scale
-    // it, letterboxed — a 1080p HDMI monitor costs the same CPU as the 7"
-    // panel.  SDL maps pointer and touch into logical units too.
-    if fullscreen {
+    // Fullscreen on a panel no taller than the design (the 800x480 7"
+    // touch display under the CDJ-3000 layout): fill it, no letterbox.  The
+    // deck is laid out at the panel's height with the design's shape and
+    // squeezed sideways to the panel's width as it is drawn (`Fill`), so
+    // text and lines are drawn at the panel's own pixels, not shrunk.
+    let fill = fullscreen && {
+        let (_, oh) = canvas.output_size().unwrap_or((0, 0));
+        oh > 0 && oh <= win_h
+    };
+    // Fullscreen on a bigger display: keep rendering at the design size and
+    // let the GPU scale it, letterboxed — a 1080p HDMI monitor costs the
+    // same CPU as the 7" panel.  SDL maps pointer and touch into logical
+    // units too.
+    if fullscreen && !fill {
         let (ow, oh) = canvas.output_size().unwrap_or((0, 0));
         // Integer scale where the mode allows it (1:1 on the closest mode),
         // linear only when the output is not a multiple of the design size.
@@ -91,10 +99,21 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
         }
     }
 
-    let renderer = SdlRenderer::new(canvas, &app.waveform)?;
+    let mut renderer = SdlRenderer::new(canvas, &app.waveform)?;
+    if fill {
+        renderer.fill = Some(Fill { aspect: win_w as f32 / win_h as f32, xs: 1.0, out_w: 0 });
+        renderer.resize(0, 0);
+        let f = renderer.fill.unwrap();
+        log::info!("fullscreen: {}x{} output, laid out at {}x{} and squeezed x{:.3} to fill it",
+                   f.out_w, renderer.size.1, renderer.size.0, renderer.size.1, f.xs);
+    }
     let (pw, ph) = renderer.size;
-    let (lw, _lh) = renderer.canvas.window().size();
-    let ppp = if lw > 0 { pw as f32 / lw as f32 } else { 1.0 };
+    let (_lw, lh) = renderer.canvas.window().size();
+    // Points per pixel from the heights: a filled panel is wider in layout
+    // pixels than the window is in points.
+    let ppp = if lh > 0 { ph as f32 / lh as f32 } else { 1.0 };
+    let xs = renderer.fill.map_or(1.0, |f| f.xs);
+    crate::renderer::set_squeeze_x(xs);
     log::info!("window {}x{} px, scale {:.2}", pw, ph, ppp);
     let pump = sdl.event_pump().map_err(|e| anyhow!("SDL event pump: {e}"))?;
 
@@ -119,7 +138,7 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
     let max_fps: Option<f32> = std::env::var("OPENDECK_MAX_FPS").ok().and_then(|v| v.parse().ok()).filter(|f: &f32| *f > 0.0);
     if let Some(f) = max_fps { log::info!("frame rate capped at {f} fps"); }
     app.host     = Some(Host::Sdl(SdlHost { pump, events: Vec::new(), modifiers: egui::Modifiers::default(),
-                                            size_px: (pw, ph), ppp, start: Instant::now(), focused: true }));
+                                            size_px: (pw, ph), ppp, xs, start: Instant::now(), focused: true }));
     app.renderer = Some(Box::new(renderer));
     app.apply_wave_color();
 
@@ -219,6 +238,8 @@ pub struct SdlHost {
     modifiers: egui::Modifiers,
     size_px:   (u32, u32),
     ppp:       f32,
+    /// Output pixels per layout pixel across (`Fill`; 1 otherwise).
+    xs:        f32,
     start:     Instant,
     focused:   bool,
 }
@@ -249,7 +270,7 @@ impl SdlHost {
         let (w, h) = self.size_px;
         let (pw, ph) = (w as f32 / self.ppp, h as f32 / self.ppp);
         match ev {
-            SdlEvent::MouseMotion { x, y, .. } => self.events.push(egui::Event::PointerMoved(egui::pos2(*x as f32, *y as f32))),
+            SdlEvent::MouseMotion { x, y, .. } => self.events.push(egui::Event::PointerMoved(egui::pos2(*x as f32 / self.xs, *y as f32))),
             SdlEvent::MouseButtonDown { x, y, mouse_btn, .. } | SdlEvent::MouseButtonUp { x, y, mouse_btn, .. } => {
                 let pressed = matches!(ev, SdlEvent::MouseButtonDown { .. });
                 let button = match mouse_btn {
@@ -258,7 +279,7 @@ impl SdlHost {
                     sdl2::mouse::MouseButton::Middle => egui::PointerButton::Middle,
                     _ => return,
                 };
-                self.events.push(egui::Event::PointerButton { pos: egui::pos2(*x as f32, *y as f32), button, pressed, modifiers: self.modifiers });
+                self.events.push(egui::Event::PointerButton { pos: egui::pos2(*x as f32 / self.xs, *y as f32), button, pressed, modifiers: self.modifiers });
             }
             SdlEvent::MouseWheel { precise_x, precise_y, .. } => {
                 self.events.push(egui::Event::MouseWheel { unit: egui::MouseWheelUnit::Line, delta: egui::vec2(*precise_x, *precise_y), modifiers: self.modifiers });
@@ -338,6 +359,9 @@ pub struct SdlRenderer {
     lut:        Lut,
 
     capture:    Option<std::path::PathBuf>,
+    /// Fullscreen fill: `size` is the layout (the design's shape at the
+    /// panel's height), drawn squeezed across to the panel's width.
+    pub fill:   Option<Fill>,
     /// OPENDECK_FBDEV: each finished frame is also copied to this framebuffer.
     #[cfg(target_os = "linux")]
     fb:         Option<crate::fbdev::Fb>,
@@ -372,6 +396,7 @@ impl SdlRenderer {
             pix: Vec::new(),
             lut: Lut::new(),
             capture: None,
+            fill: None,
             #[cfg(target_os = "linux")]
             fb: std::env::var("OPENDECK_FBDEV").ok().filter(|p| !p.is_empty()).and_then(|p| {
                 crate::fbdev::Fb::open(&p).map_err(|e| log::error!("fbdev: {e:#}")).ok()
@@ -554,6 +579,30 @@ impl SdlRenderer {
     }
 }
 
+/// Fullscreen fill (`OPENDECK_FULLSCREEN=1` on a panel no taller than the
+/// design): the deck is laid out at the panel's height in the design's own
+/// shape, and drawn squeezed (or stretched) across to the panel's width.
+#[derive(Clone, Copy, Debug)]
+pub struct Fill {
+    /// The design's width / height (the CDJ-3000 side layout: 2.25).
+    pub aspect: f32,
+    /// Output pixels per layout pixel across.
+    pub xs: f32,
+    /// The panel's width in pixels.
+    pub out_w: u32,
+}
+
+impl Fill {
+    /// The layout size for an `out` (w, h) panel; updates `xs` and `out_w`.
+    pub fn layout(&mut self, out: (u32, u32)) -> (u32, u32) {
+        let (ow, oh) = out;
+        let lw = ((oh as f32 * self.aspect).round() as u32).max(1);
+        self.xs = ow as f32 / lw as f32;
+        self.out_w = ow;
+        (lw, oh)
+    }
+}
+
 /// Premultiplied egui colour → straight RGBA bytes.
 #[inline]
 fn unmultiply(c: egui::Color32) -> [u8; 4] {
@@ -592,7 +641,12 @@ impl Renderer for SdlRenderer {
     /// The canvas tracks the window itself; this just refreshes the cached
     /// pixel size (the arguments are ignored, the canvas is the truth).
     fn resize(&mut self, _width: u32, _height: u32) {
-        if let Ok(sz) = Self::drawable_size(&self.canvas) { self.size = sz; }
+        if let Ok(sz) = Self::drawable_size(&self.canvas) {
+            self.size = match self.fill.as_mut() {
+                Some(f) => f.layout(sz),
+                None => sz,
+            };
+        }
     }
 
     fn request_capture(&mut self, path: std::path::PathBuf) { self.capture = Some(path); }
@@ -600,8 +654,13 @@ impl Renderer for SdlRenderer {
     fn render(&mut self, snap: &DeckSnapshot, vp: &Viewports, egui_ctx: &egui::Context, full_output: egui::FullOutput) {
         let ppp = full_output.pixels_per_point;
         let (sw, sh) = self.size;
+        // Filled: the waveforms are drawn straight at their squeezed size
+        // (output pixels), everything else is squeezed as it is drawn.
+        let (xs, out_w) = self.fill.map_or((1.0, sw), |f| (f.xs, f.out_w));
+        let sq = |r: [f32; 4]| [r[0] * xs, r[1], r[2] * xs, r[3]];
+        let vp = &Viewports { wave: sq(vp.wave), overview: sq(vp.overview), ..*vp };
         let mut params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
-                                                    self.num_cols, sw, sh);
+                                                    self.num_cols, out_w, sh);
         if self.detail.is_some() { params.detail_off = self.num_cols as f32; }
 
         // ── Ground + waveforms (the shader's pass 1) ─────────────────────
@@ -624,16 +683,16 @@ impl Renderer for SdlRenderer {
             if mesh.indices.is_empty() { continue; }
             // Clip rect in pixels, intersected with the surface.
             let c = prim.clip_rect;
-            let x0 = (c.min.x * ppp).floor().max(0.0) as i32;
+            let x0 = (c.min.x * ppp * xs).floor().max(0.0) as i32;
             let y0 = (c.min.y * ppp).floor().max(0.0) as i32;
-            let x1 = ((c.max.x * ppp).ceil() as i32).min(sw as i32);
+            let x1 = ((c.max.x * ppp * xs).ceil() as i32).min(out_w as i32);
             let y1 = ((c.max.y * ppp).ceil() as i32).min(sh as i32);
             if x1 <= x0 || y1 <= y0 { continue; }
             self.canvas.set_clip_rect(Rect::new(x0, y0, (x1 - x0) as u32, (y1 - y0) as u32));
             self.verts.clear();
             self.verts.extend(mesh.vertices.iter().map(|v| {
                 let [r, g, b, a] = unmultiply(v.color);
-                Vertex { position: FPoint::new(v.pos.x * ppp, v.pos.y * ppp), color: Color::RGBA(r, g, b, a), tex_coord: FPoint::new(v.uv.x, v.uv.y) }
+                Vertex { position: FPoint::new(v.pos.x * ppp * xs, v.pos.y * ppp), color: Color::RGBA(r, g, b, a), tex_coord: FPoint::new(v.uv.x, v.uv.y) }
             }));
             let tex = self.textures.get(&mesh.texture_id).map(|(t, _)| t);
             if let Err(e) = self.canvas.render_geometry(&self.verts, tex, VertexIndices::U32(&mesh.indices)) {
@@ -678,5 +737,27 @@ impl Drop for SdlRenderer {
             for x in t { unsafe { x.destroy(); } }
             unsafe { strip.destroy(); }
         }
+    }
+}
+
+#[cfg(test)]
+mod fill_tests {
+    use super::Fill;
+
+    /// The 7" touch display (800 x 480) under the CDJ-3000 side layout
+    /// (1620 x 720): laid out at the panel's full height in the layout's
+    /// shape, then squeezed across to exactly the panel's width — no
+    /// letterbox either way.
+    #[test]
+    fn a_small_panel_is_filled_not_letterboxed() {
+        let mut f = Fill { aspect: 1620.0 / 720.0, xs: 1.0, out_w: 0 };
+        let (lw, lh) = f.layout((800, 480));
+        assert_eq!((lw, lh), (1080, 480), "full height, the layout's own shape");
+        assert_eq!(f.out_w, 800);
+        assert!((lw as f32 * f.xs - 800.0).abs() < 0.01, "squeezed to the full width");
+        // A panel of the design's own shape is drawn 1:1.
+        let mut f = Fill { aspect: 1024.0 / 600.0, xs: 1.0, out_w: 0 };
+        assert_eq!(f.layout((1024, 600)), (1024, 600));
+        assert_eq!(f.xs, 1.0);
     }
 }

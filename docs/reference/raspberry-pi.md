@@ -187,7 +187,9 @@ CPU.  It is for the boards wgpu cannot drive — the VideoCore IV (Zero, Zero
 `SDL_VIDEODRIVER=wayland|x11|kmsdrm`, `SDL_RENDER_DRIVER=opengles2|software`.
 Knobs: `OPENDECK_MAX_FPS`, `OPENDECK_RENDER_NICE` (default +10 so the audio
 threads win the core), `OPENDECK_FULLSCREEN=1` (true fullscreen: the mode
-closest to the design size, letterboxed 1:1), `OPENDECK_WAVE_SCROLL=smooth`
+closest to the design size; a panel no bigger than the design is filled,
+the layout squeezed to its shape, a bigger one letterboxed; see
+`docs/design/display-fitting.md`), `OPENDECK_WAVE_SCROLL=smooth`
 (sub-pixel waveform scroll instead of the whole-pixel GPU scroll).  Pi 4/5
 keep wgpu/Vulkan.
 

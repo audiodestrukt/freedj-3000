@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Fullscreen fills a small panel instead of letterboxing it (SDL renderer,
+  `OPENDECK_FULLSCREEN=1`): on the Raspberry Pi 7" touch display
+  (800 × 480) the CDJ-3000 screen and its key columns cover the whole
+  panel, the screen stretched to fit, drawn at the panel's own pixels
+  instead of a shrunk image. The beat ticks and cue markers above and below
+  the waveform now step with it a whole pixel at a time, so they no longer
+  flicker while it scrolls. Why this was hard, and a checklist for new
+  displays: docs/design/display-fitting.md.
 - LIGHT MODE (MENU → LIGHT MODE, saved; `OPENDECK_LIGHT=1` for one run):
   the screen on a white ground, like the CDJ-3000 light-mode mods. Every
   colour keeps its hue and mirrors its lightness, so black turns white,
