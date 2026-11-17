@@ -21,6 +21,15 @@ All notable changes to this project will be documented in this file.
   analysis.  A track with neither shows the time scale.
 
 ### Fixed
+- Cues from a CDJ-3000: a track loaded from a linked CDJ-3000 now comes
+  with its hot cues, memory points, their colours and comments, and its
+  phrases.  The load went through the player's dbserver, which serves a
+  CDJ-3000's cue lists empty; they are in the stick's rekordbox analysis,
+  which OpenDeck now reads over NFS the way a player does (the export
+  once per player, then the track's ANLZ files, about 50 ms).
+- rekordbox loops play as loops: a hot loop's pad starts the loop (it only
+  jumped), and calling a memory loop sets it as the loop RELOOP enters.
+  Both are served on to other players as loops.
 - BROWSE on a linked CDJ-3000, WAVEFORM COLOR 3BAND: the track table's
   previews are drawn as the unit draws them, the bands stacked (blue
   lows, amber mids on them, white highs on top) at the unit's heights and

@@ -293,8 +293,12 @@ fn served_cues(hot: &[Option<u64>; 8], memory: &[u64], looks: &CueLooks, sr: u32
         Some(l) => Cue { color_code: l.code, rgb: l.rgb, comment: l.comment.clone(), ..c },
         None => c,
     };
-    let mut v: Vec<_> = memory.iter().map(|&p| dress(Cue { hot: 0, ms: ms(p), ..Default::default() }, looks.memory_at(p))).collect();
-    v.extend(hot.iter().enumerate().filter_map(|(i, c)| c.map(|p| dress(Cue { hot: i as u8 + 1, ms: ms(p), ..Default::default() }, looks.hot.get(i)))));
+    // rekordbox's loops go out as loops.
+    let mem_end = |p: u64| looks.memory_loops.iter().find(|(a, _)| *a == p).map(|&(_, b)| ms(b));
+    let mut v: Vec<_> = memory.iter().map(|&p| dress(Cue { hot: 0, ms: ms(p), loop_end_ms: mem_end(p), ..Default::default() }, looks.memory_at(p))).collect();
+    v.extend(hot.iter().enumerate().filter_map(|(i, c)| c.map(|p| dress(Cue {
+        hot: i as u8 + 1, ms: ms(p), loop_end_ms: looks.hot_loop_end[i].map(ms), ..Default::default()
+    }, looks.hot.get(i)))));
     v
 }
 
@@ -1392,6 +1396,13 @@ impl DeckApp {
                         self.transport.arrived_at_cue(m);
                         self.cue_set = true;
                         self.seek_to(m);
+                        // A memory loop: it becomes the loop RELOOP enters.
+                        if let Some(&(a, b)) = self.cue_looks.memory_loops.iter().find(|(a, _)| *a == m) {
+                            self.exit_loop();
+                            self.audio.loop_start.store(a, Ordering::Relaxed);
+                            self.audio.loop_end.store(b, Ordering::Relaxed);
+                            self.loop_beats = 0.0;
+                        }
                         let sr_ch = self.audio.sample_rate as f64 * ch as f64;
                         log::info!("call {}: cued at {:.2}s", if next { "▶" } else { "◀" }, m as f64 / sr_ch);
                     }
@@ -1419,6 +1430,7 @@ impl DeckApp {
                     let pos = self.quantized(self.smoothed_pos);
                     self.hot_cues[s] = Some(pos);
                     self.cue_looks.hot[s] = CueLook::default();
+                    self.cue_looks.hot_loop_end[s] = None;
                     let sr_ch = self.audio.sample_rate as f64 * ch as f64;
                     log::info!("hot cue {}: set at {:.2}s", (b'A' + slot) as char, pos as f64 / sr_ch);
                     self.serve_deck_cues();
@@ -1432,9 +1444,12 @@ impl DeckApp {
                     // letting go returns to where it would be.
                     let (from, playing) = (self.smoothed_pos, self.audio.playing.load(Ordering::Relaxed));
                     self.seek_to(pos);
+                    // A hot loop (rekordbox's): the pad starts the loop.
+                    let loop_end = self.cue_looks.hot_loop_end.get(slot as usize).copied().flatten().filter(|&e| e > pos);
+                    if let Some(end) = loop_end { self.set_loop(pos, end, 0.0); }
                     if held && playing { self.slip_hold_begin(from, Some(slot)); }
                     self.lock_in_play();
-                    log::info!("hot cue {}: play", (b'A' + slot) as char);
+                    log::info!("hot cue {}: play{}", (b'A' + slot) as char, if loop_end.is_some() { " (loop)" } else { "" });
                 } else {
                     log::info!("hot cue {}: empty", (b'A' + slot) as char);
                 }
@@ -1443,6 +1458,7 @@ impl DeckApp {
                 if let Some(c) = self.hot_cues.get_mut(slot as usize) {
                     *c = None;
                     self.cue_looks.hot[slot as usize] = CueLook::default();
+                    self.cue_looks.hot_loop_end[slot as usize] = None;
                     log::info!("hot cue {}: deleted", (b'A' + slot) as char);
                     self.serve_deck_cues();
                 }
@@ -2172,6 +2188,9 @@ impl DeckApp {
     }
 
     fn anlz_to_grid(a: opendeck_rekordbox::RbAnalysis, deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
+        log::info!("rekordbox analysis: {} beats, {} hot cues ({} loops), {} memory points ({} loops), phrases {} bytes",
+                   a.beats.len(), a.hot_cues.len(), a.hot_cues.iter().filter(|c| c.is_loop).count(),
+                   a.memory_cues.len(), a.memory_cues.iter().filter(|c| c.is_loop).count(), a.phrases.len());
         let first = *a.beats.first()?;
         let anchor = (first.time_ms as u64 * deck_sr as u64) / 1000;      // frames
         let mut grid = BeatGrid::new_constant(anchor, first.bpm as f64);
@@ -2194,6 +2213,14 @@ impl DeckApp {
         }
         looks.memory = a.memory_cues.iter().map(|c| (to_samples(c.time_ms), CueLook::of(c)))
             .filter(|(_, l)| *l != CueLook::default()).collect();
+        // rekordbox's loops: a cue with an end after its start.
+        for c in &a.hot_cues {
+            if let (Some(n @ 1..=8), true) = (c.hot_cue, c.is_loop && c.loop_ms > c.time_ms) {
+                looks.hot_loop_end[n as usize - 1] = Some(to_samples(c.loop_ms));
+            }
+        }
+        looks.memory_loops = a.memory_cues.iter().filter(|c| c.is_loop && c.loop_ms > c.time_ms)
+            .map(|c| (to_samples(c.time_ms), to_samples(c.loop_ms))).collect();
         // The stick's phrases (the .EXT's PSSI), on its own beat grid.
         let phrases = phrases::spans(&a.phrases, |n| a.beats.get((n as usize).checked_sub(1)?).map(|b| b.time_ms), u64::MAX, deck_sr, ch as u16);
         Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks, phrases })
@@ -2544,6 +2571,15 @@ impl DeckApp {
             let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
             let exports = nfs.exports()?;
             let (fh, size) = nfs_resolve(&mut nfs, &exports, &utf16(want), &path)?;
+            // Cues, their colours and comments, loops and phrases: a player
+            // serves none of them over dbserver (a CDJ-3000 answers its cue
+            // requests with "no data"); they are in the stick's ANLZ files,
+            // which it reads over NFS, as we do here.  Without them the
+            // dbserver's beat grid is all there is.
+            let grid = match (!rekordbox).then(|| player_anlz(&mut nfs, &exports, &utf16(want), ip, id)).flatten() {
+                Some((dat, ext)) => FetchedGrid::Anlz(dat, ext),
+                None => FetchedGrid::Beats(beats),
+            };
             // The download runs on its own thread while the decoder reads the
             // front of the file as it arrives: the deck is playable after the
             // first seconds, not after the whole file.
@@ -2559,7 +2595,7 @@ impl DeckApp {
                 }
             })?;
             let name = if title.is_empty() { path.rsplit('/').next().unwrap_or(&path).to_string() } else { title };
-            prep.complete(Fetched { name, path, audio: AudioSrc::Stream(reader), grid: FetchedGrid::Beats(beats), t0, meta }, tx)
+            prep.complete(Fetched { name, path, audio: AudioSrc::Stream(reader), grid, t0, meta }, tx)
         })
     }
 
@@ -3895,11 +3931,17 @@ impl CueLook {
     }
 }
 
-/// The loaded track's cue looks: hot cues by slot, memory points by position.
+/// The loaded track's cue looks: hot cues by slot, memory points by
+/// position; and rekordbox's loops (a hot cue or memory point with an end).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct CueLooks {
     hot: [CueLook; 8],
     memory: Vec<(u64, CueLook)>,
+    /// A hot loop's end, by slot: the pad starts the loop, not just a jump.
+    hot_loop_end: [Option<u64>; 8],
+    /// Memory loops: (start, end).  CALL onto one sets it as the loop
+    /// RELOOP enters.
+    memory_loops: Vec<(u64, u64)>,
 }
 
 impl CueLooks {
@@ -3961,6 +4003,52 @@ fn nfs_resolve(nfs: &mut opendeck_nfs::Nfs, exports: &[Vec<u8>], want: &[u8], pa
         if ok { log::info!("LINK nfs: {path:?} found on export {name:?}"); return Ok((fh, size)); }
     }
     Err(last)
+}
+
+/// A linked player's stick: its rekordbox export, read over NFS once per
+/// player, export and file size (a different stick, or the same one
+/// re-exported, reads again).
+type ExportCache = std::collections::HashMap<(std::net::Ipv4Addr, Vec<u8>), (u32, Arc<opendeck_rekordbox::RbExport>)>;
+fn export_cache() -> &'static std::sync::Mutex<ExportCache> {
+    static C: std::sync::OnceLock<std::sync::Mutex<ExportCache>> = std::sync::OnceLock::new();
+    C.get_or_init(Default::default)
+}
+
+/// A track's rekordbox analysis on a linked player's stick, over NFS: the
+/// ANLZ `.DAT` and the `.EXT` beside it, found through the stick's
+/// `export.pdb` by rekordbox ID.  `None` (logged) when the stick has no
+/// export, the track no analysis, or a file can't be read: the load then
+/// goes on with the dbserver's beat grid.
+fn player_anlz(nfs: &mut opendeck_nfs::Nfs, exports: &[Vec<u8>], want: &[u8], ip: std::net::Ipv4Addr, id: u32) -> Option<(Vec<u8>, Option<Vec<u8>>)> {
+    let t0 = Instant::now();
+    let read = |nfs: &mut opendeck_nfs::Nfs, path: &str| -> Result<(u32, Vec<u8>)> {
+        let (fh, size) = nfs_resolve(nfs, exports, want, path)?;
+        Ok((size, nfs.read_file(&fh, size)?))
+    };
+    let (_, pdb_size) = match nfs_resolve(nfs, exports, want, "PIONEER/rekordbox/export.pdb") {
+        Ok(f) => f,
+        Err(e) => { log::info!("LINK {ip}: no export.pdb for cues ({e:#})"); return None; }
+    };
+    let key = (ip, want.to_vec());
+    let cached = export_cache().lock().ok()?.get(&key).filter(|(sz, _)| *sz == pdb_size).map(|(_, e)| Arc::clone(e));
+    let export = match cached {
+        Some(e) => e,
+        None => {
+            let (_, bytes) = read(nfs, "PIONEER/rekordbox/export.pdb").map_err(|e| log::info!("LINK {ip}: export.pdb: {e:#}")).ok()?;
+            let e = Arc::new(opendeck_rekordbox::read_export_from(&mut std::io::Cursor::new(bytes), PathBuf::from(format!("link://{ip}")))
+                .map_err(|e| log::info!("LINK {ip}: export.pdb: {e:#}")).ok()?);
+            if let Ok(mut c) = export_cache().lock() { c.insert(key, (pdb_size, Arc::clone(&e))); }
+            e
+        }
+    };
+    let track = export.tracks.iter().find(|t| t.id == id)?;
+    if track.analyze_rel.is_empty() { log::info!("LINK {ip}: track {id} has no rekordbox analysis"); return None; }
+    let (_, dat) = read(nfs, &track.analyze_rel).map_err(|e| log::info!("LINK {ip}: ANLZ {}: {e:#}", track.analyze_rel)).ok()?;
+    let ext_rel = std::path::Path::new(&track.analyze_rel).with_extension("EXT").to_string_lossy().into_owned();
+    let ext = read(nfs, &ext_rel).ok().map(|(_, b)| b);
+    log::info!("LINK {ip}: track {id}'s analysis over NFS: .DAT {} bytes, .EXT {} ({:.0} ms)",
+               dat.len(), ext.as_ref().map_or("none".into(), |e| format!("{} bytes", e.len())), t0.elapsed().as_secs_f64() * 1e3);
+    Some((dat, ext))
 }
 
 /// The deck facts a loader thread needs; captured before the thread starts.
@@ -5002,6 +5090,119 @@ mod anlz_grid_tests {
         assert_eq!(grid.downbeat_offset, 0, "first beat is a downbeat");
         // first beat at 56 ms → 56*48000/1000 = 2688 frames
         assert_eq!(grid.anchor_sample, 2688, "anchor frames");
+    }
+}
+
+/// rekordbox loops on the deck (#64): a hot loop's pad starts the loop, a
+/// memory loop is what RELOOP enters after CALL lands on it.
+#[cfg(test)]
+mod rekordbox_loop_tests {
+    use super::deck_harness::*;
+    use super::*;
+    use opendeck_protocol::ControlEvent as C;
+    use opendeck_rekordbox::fixtures::{anlz_file, pcob, pqtz, FxCue};
+
+    /// The deck's cues and loops from an ANLZ file: hot cue A at 1 s, a hot
+    /// loop on C 2–3 s, a memory loop 5–6 s.
+    fn analysed() -> AnlzLoad {
+        let dat = anlz_file(&[pqtz(120.0, 0, 60),
+                              pcob(false, &[FxCue { ms: 5_000, loop_end_ms: Some(6_000), ..Default::default() }]),
+                              pcob(true, &[FxCue { hot: 1, ms: 1_000, ..Default::default() },
+                                           FxCue { hot: 3, ms: 2_000, loop_end_ms: Some(3_000), ..Default::default() }])]);
+        DeckApp::grid_from_anlz_bytes(&dat, None, SR, 2).expect("the analysis")
+    }
+
+    fn with(a: AnlzLoad) -> DeckApp {
+        let mut d = deck(30.0);
+        d.hot_cues = a.hot_cues;
+        d.memory_cues = a.memory_cues;
+        d.cue_looks = a.looks;
+        d
+    }
+
+    #[test]
+    fn a_hot_loop_pad_starts_the_loop_and_a_hot_cue_pad_just_plays() {
+        let a = analysed();
+        assert_eq!(a.looks.hot_loop_end[2], Some(deck_samples(3.0)), "C is a loop to 3 s");
+        assert_eq!(a.looks.hot_loop_end[0], None, "A is a cue");
+        let mut d = with(a);
+        d.send(C::HotCueTrigger { slot: 2, held: false });
+        assert!(d.audio.loop_active.load(Ordering::Relaxed), "the loop runs");
+        let t0 = Instant::now();
+        while t0.elapsed() < Duration::from_millis(1600) {
+            d.run(0.05);
+            assert!(d.at() >= 1.95 && d.at() <= 3.05, "inside 2–3 s: {:.2}", d.at());
+        }
+        d.send(C::Reloop);                                   // EXIT
+        d.send(C::HotCueTrigger { slot: 0, held: false });   // A: a plain jump
+        assert!(!d.audio.loop_active.load(Ordering::Relaxed));
+        d.run(0.6);
+        assert!(d.at() > 1.4, "A plays on: {:.2}", d.at());
+        // Served on to other players as loops too.
+        let served = served_cues(&d.hot_cues, &d.memory_cues, &d.cue_looks, SR, 2);
+        assert_eq!(served.iter().find(|c| c.hot == 3).and_then(|c| c.loop_end_ms), Some(3_000));
+        assert_eq!(served.iter().find(|c| c.hot == 0).and_then(|c| c.loop_end_ms), Some(6_000));
+        // Setting a new cue on C makes it a plain cue.
+        d.send(C::HotCueSet { slot: 2 });
+        assert_eq!(d.cue_looks.hot_loop_end[2], None);
+    }
+
+    #[test]
+    fn calling_a_memory_loop_makes_it_the_loop_reloop_enters() {
+        let mut d = with(analysed());
+        d.send(C::MemoryCueCall { next: true });
+        let at = |v: u64| v as f64 / (SR as f64 * 2.0);
+        assert!((d.at() - 5.0).abs() < 0.05, "cued at the memory loop: {:.2}", d.at());
+        assert!(!d.audio.loop_active.load(Ordering::Relaxed), "not looping yet");
+        assert_eq!((at(d.audio.loop_start.load(Ordering::Relaxed)), at(d.audio.loop_end.load(Ordering::Relaxed))), (5.0, 6.0));
+        d.send(C::PlayPause);
+        d.send(C::Reloop);
+        assert!(d.audio.loop_active.load(Ordering::Relaxed), "RELOOP enters it");
+    }
+}
+
+/// A linked player's stick, over NFS: the rekordbox analysis of a track a
+/// load asks the player's dbserver for (cues, loops, colours, phrases),
+/// which the player itself does not serve (#64).
+#[cfg(test)]
+mod player_anlz_tests {
+    use super::*;
+    use opendeck_rekordbox::fixtures::{anlz_file, pco2, pcob, pqtz, FxCue};
+
+    /// The demo export as a stick, its track 1 analysed with hot cue A at
+    /// 10 s, a hot loop on C (20–24 s), a memory point at 1.5 s, and the
+    /// demo's own phrases; served by our NFS server on free ports.
+    #[test]
+    fn a_players_track_brings_its_cues_loops_and_phrases_over_nfs() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::media::tests::copy_tree(&crate::media::tests::demo_export(), dir.path());
+        let export = opendeck_rekordbox::read_export(dir.path()).unwrap();
+        let t = export.tracks.iter().find(|t| t.id == 1).unwrap();
+        let dat_path = dir.path().join(t.analyze_rel.trim_start_matches('/'));
+        let ext_path = dat_path.with_extension("EXT");
+        let pssi = opendeck_rekordbox::anlz_section(&std::fs::read(&ext_path).unwrap(), b"PSSI").unwrap().to_vec();
+        let (memory, hot) = ([FxCue { ms: 1500, ..Default::default() }],
+                             [FxCue { hot: 1, ms: 10_000, ..Default::default() },
+                              FxCue { hot: 3, ms: 20_000, loop_end_ms: Some(24_000), ..Default::default() }]);
+        std::fs::write(&dat_path, anlz_file(&[pqtz(120.0, 0, 400), pcob(false, &memory), pcob(true, &hot)])).unwrap();
+        std::fs::write(&ext_path, anlz_file(&[pco2(false, &memory), pco2(true, &hot), pssi])).unwrap();
+
+        let scanned = opendeck_mediaserver::scan(dir.path(), "STICK").unwrap();
+        let server = opendeck_nfs::server::NfsServer::start(scanned.tree, "/C/", 0, 0).unwrap();
+        let mut nfs = opendeck_nfs::Nfs::connect_at(std::net::Ipv4Addr::LOCALHOST, server.portmap).unwrap();
+        let exports = nfs.exports().unwrap();
+        let want: Vec<u8> = "/C/".encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+
+        let (dat, ext) = player_anlz(&mut nfs, &exports, &want, std::net::Ipv4Addr::LOCALHOST, 1).expect("the analysis");
+        let a = DeckApp::grid_from_anlz_bytes(&dat, ext.as_deref(), 48_000, 2).expect("a grid");
+        let s = |secs: u64| secs * 48_000 * 2;
+        assert_eq!(a.hot_cues[0], Some(s(10)), "hot cue A");
+        assert_eq!(a.hot_cues[2], Some(s(20)), "hot cue C (a loop)");
+        assert_eq!(a.memory_cues, vec![s(3) / 2], "the memory point at 1.5 s");
+        assert!(!a.phrases.is_empty(), "the stick's phrases");
+        // The export is read once per player: a second track's lookup uses it.
+        assert!(export_cache().lock().unwrap().contains_key(&(std::net::Ipv4Addr::LOCALHOST, want.clone())));
+        assert!(player_anlz(&mut nfs, &exports, &want, std::net::Ipv4Addr::LOCALHOST, 999_999).is_none(), "no such track");
     }
 }
 
