@@ -113,6 +113,9 @@ jobs:
       - name: Rootfs
         run: CONTAINER_ENGINE=docker deploy/cdj3000/emu/build-rootfs.sh target/upd/rootfs.tar
 
+      - name: updpack checks
+        run: python3 tools/upd/test_updpack.py
+
       - name: ISO
         run: |
           python3 tools/upd/updpack.py emu --rootfs target/upd/rootfs.tar \

@@ -51,6 +51,12 @@ All notable changes to this project will be documented in this file.
   (`deploy/pi/cross/build.sh`) now includes it.
 
 ### Fixed
+- The CDJ-3000 emulator image installs again.  cdj3k-emu stopped with
+  "the provisioning guest did not hand back a rootfs" on the released
+  `.iso`: the image had no `/dev/console` (a container export leaves
+  `/dev` empty), so the emulator's install script ran with no console and
+  its "handed back" marker never reached the emulator.  The image now
+  carries the node; installed and booted in a fresh slot.
 - BROWSE on a linked CDJ-3000: the blue waveform previews in the track
   table now show each track's own shape.  The player's reply (400
   height / whiteness pairs, then a 100-byte tiny preview) was read as its

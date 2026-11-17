@@ -8,7 +8,7 @@ steps for a real deck are in [cdj-3000-install.md](cdj-3000-install.md).
 | Piece | State |
 |---|---|
 | Sub-CPU panel surface (`OPENDECK_SUBUCOM`, keys / jog / fader / rotary / LEDs) | built, unit-tested, not yet run on the device ([control surface](#the-panel-is-the-same-device-in-both)) |
-| Emulator UPD (`deploy/cdj3000/emu/`, `tools/upd/updpack.py emu`) | built; passes cdj3k-emu's install code (`tools/upd/emucheck`) and boots in QEMU with the emulator's kernel; not yet installed through the wizard |
+| Emulator UPD (`deploy/cdj3000/emu/`, `tools/upd/updpack.py emu`) | built; installs with `cdj3k-emu --provision` and boots to OpenDeck's screen (2026-11-17, after the `/dev/console` fix: releases up to 0.3.23 fail to install with "did not hand back a rootfs"); `tools/upd/test_updpack.py` and `tools/upd/emucheck` run in CI, neither boots the provisioning guest |
 | `make upd-deck` (deck overlay) | not built |
 | Release job (`.github/workflows/cdj3000.yml`, called by `release.yml`) | built: every `v*` release attaches the plaintext `.iso`, plus the encrypted `.UPD` when the `CDJ3000_UPD_KEY` secret is set |
 

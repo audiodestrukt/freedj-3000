@@ -240,6 +240,19 @@ def rootfs_cpio(tar_path, extra, out):
         elif m.isfifo():
             _newc(out, name, S_IFMT["fifo"] | m.mode, m.uid, m.gid, 1, m.mtime, b"", ino)
     dirs_seen = {m.name.lstrip("./").strip("/") for m in members if m.isdir()}
+    # /dev/console, as the firmware's own initramfs has it.  A container
+    # export leaves /dev empty, and with no console the kernel starts init
+    # with nothing on stdout: cdj3k-emu's provisioning guest then prints
+    # nothing, its "handed back" marker included, and the install fails
+    # with "the provisioning guest did not hand back a rootfs".
+    names = {m.name.lstrip("./").strip("/") for m in members}
+    if "dev/console" not in names:
+        if "dev" not in dirs_seen:
+            ino += 1
+            _newc(out, "dev", S_IFMT["dir"] | 0o755, 0, 0, 2, 0, b"", ino)
+            dirs_seen.add("dev")
+        ino += 1
+        _newc(out, "dev/console", S_IFMT["chr"] | 0o600, 0, 0, 1, 0, b"", ino, (5, 1))
     for src, dest, mode in extra:
         dest = dest.strip("/")
         parts = dest.split("/")[:-1]
