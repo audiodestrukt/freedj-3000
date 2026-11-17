@@ -292,3 +292,15 @@ is on by default on aarch64 (`=0` for all-f32); the aarch64 Pi build has
 split code on the 4 GB Pi 5 with no cooler: 393 s, **0.8x real time**, peak
 1.2 GB, the CPU at 1.5 GHz and 89 °C nearly throughout. A cool chunk takes
 6.0 s against 5.85 s of new audio, so a cooler is what makes it keep up.
+
+**With the Active Cooler (2026-11-17).** The same track and binary
+(`split_a_real_track`): **316 s, 1.0x real time** (309.5 s in the model
+over 54 chunks, 3.9 s loading it), peak 1.2 GB. The CPU held 2.4 GHz for
+the whole split, peaked at 63 °C with the fan at its second step, and
+nothing throttled. The supply stayed above 4.89 V (`get_throttled` still
+shows 0x50000, the past under-voltage and throttling from before the
+cooler). So the cooler takes it from 0.8x to real time and no further: it
+removed the throttling, and the model is now the limit. Splitting ahead of
+the playhead from the start of a track only keeps up with this, with no
+margin for the deck itself. 2x still needs a lighter model (the distilled
+Demucs).
