@@ -67,24 +67,48 @@ def enc_knob():
 def screen_frame():
     """The frame the display sits on (local frame: centred on the display,
     z = 0 underneath, top face = the display's back).  M2.5 screws come up
-    through it into the display's inserts; its four ears screw to bosses
-    under the top plate.  Print flat."""
+    through it into the display's inserts; its four ears slip over bosses
+    under the top plate and an M3 + washer from below pulls each up (the
+    bosses' bores are blind: nothing shows on top).  Print flat."""
     ow, oh = SCR_OUT
     f = box(-ow / 2, ow / 2, -oh / 2, oh / 2, 0, FRAME_T)
     for sx in (-1, 1):
-        x0, x1 = sorted((sx * (ow / 2 - 1.0), sx * (SCR_BOSS[0] + 6.0)))
-        f = f.fuse(box(x0, x1, -SCR_BOSS[1] - 6.0, SCR_BOSS[1] + 6.0, 0, FRAME_T))
+        x0, x1 = sorted((sx * (ow / 2 - 1.0), sx * (SCR_BOSS[0] + 7.5)))
+        f = f.fuse(box(x0, x1, -SCR_BOSS[1] - 7.5, SCR_BOSS[1] + 7.5, 0, FRAME_T))
     r = FRAME_RING
     cuts = [box(-ow / 2 + r, ow / 2 - r, -oh / 2 + r, oh / 2 - r, -OVS, FRAME_T + OVS)]
     for sx in (-1, 1):
         for sy in (-1, 1):
             cuts.append(cyl(sx * SCR_HOLES[0] / 2, sy * SCR_HOLES[1] / 2, -OVS, FRAME_T + OVS, M25_CLR))
-            cuts.append(cyl(sx * SCR_BOSS[0], sy * SCR_BOSS[1], -OVS, FRAME_T + OVS, M3_CLR))
+            cuts.append(cyl(sx * SCR_BOSS[0], sy * SCR_BOSS[1], -OVS, FRAME_T + OVS, 8.0 + 0.6))   # over the boss
     return f.cut(*cuts)
 
 
+def fader_bracket():
+    """The fader's hidden mount (local frame: centred on the fader, z = 0 on
+    the face that sits against the top plate's underside, body below).
+    The fader hangs under it on two countersunk M3 (heads flush in this
+    face); the ears slip over the plate's bosses and an M3 + washer from
+    below pulls each one up.  Print with the z = 0 face on the bed."""
+    ex, ey, ez = FADER_EAR
+    half = FADER_BODY[1] / 2 + 0.5
+    b = box(-ex / 2, ex / 2, -half, half, -FADER_BRACKET_T, 0)
+    for sy in (-1, 1):
+        y0, y1 = sorted((sy * (half - 0.5), sy * (half + ey)))
+        b = b.fuse(box(-ex / 2, ex / 2, y0, y1, -ez, 0))
+    slot = FADER_TRAVEL + FADER_LEVER[1] + 1.0
+    cuts = [box(-FADER_SLOT_W / 2 - 0.5, FADER_SLOT_W / 2 + 0.5, -slot / 2, slot / 2, -ez - OVS, OVS)]
+    h = (M3_CSK - M3_CLR) / 2
+    for sy in (-1, 1):
+        y = sy * FADER_PITCH / 2
+        cuts.append(cyl(0, y, -FADER_BRACKET_T - OVS, OVS, M3_CLR))
+        cuts.append(Pos(0, y, -h) * Cone(M3_CLR / 2, M3_CSK / 2 + 0.5, h + 0.5, align=(Align.CENTER, Align.CENTER, Align.MIN)))
+        cuts.append(cyl(0, sy * FADER_BOSS_Y, -ez - OVS, OVS, BOSS_D + 0.6))     # over the boss
+    return b.cut(*cuts)
+
+
 PARTS = {"cap_play_cue": big_cap, "cap_key": key_cap, "knob_fader": fader_knob,
-         "knob_encoder": enc_knob, "screen_frame": screen_frame}
+         "knob_encoder": enc_knob, "screen_frame": screen_frame, "fader_bracket": fader_bracket}
 
 if __name__ == "__main__":
     import trimesh

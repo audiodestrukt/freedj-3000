@@ -32,7 +32,51 @@ def parts():
         "cap_play_cue": (caps.big_cap(), True, 2), "cap_key": (caps.key_cap(), True, 6),
         "knob_fader": (caps.fader_knob(), True, 1), "knob_encoder": (caps.enc_knob(), True, 1),
         "screen_frame": (caps.screen_frame(), False, 1),
+        "fader_bracket": (caps.fader_bracket(), True, 1),
     }
+
+
+def allowed_openings():
+    """Every opening meant to go through the top surface, as (kind, ...)."""
+    g = 0.5   # tolerance at the edges
+    out = [("rect", SCR_CX, SCR_CY, SCR_OUT[0] + 2 * SCR_FIT + g, SCR_OUT[1] + 2 * SCR_FIT + g),
+           ("rect", FADER_X, FADER_CY, FADER_SLOT_W + g, FADER_TRAVEL + FADER_LEVER[1] + 1.0 + g),
+           ("circle", JOG_CX, JOG_CY, SHAFT_D + 1.0 + g),
+           ("circle", *ENC, ENC_HOLE + g)]
+    out += [("circle", x, y, BIG_CAP_D + CAP_CLR + g) for x, y in (PLAY, CUE)]
+    out += [("rect", x, KEY_Y, KEY[0] + CAP_CLR + g, KEY[1] + CAP_CLR + g) for x in KEY_XS]
+    return out
+
+
+def top_openings(ms, step=1.0):
+    """Fire rays down at the top surface; any point that is not top surface
+    (first hit lower than H - 0.3) must lie in an allowed opening.  Catches a
+    screw hole or an insert bore that breaks through where it shouldn't."""
+    xs = np.arange(EDGE_R + 2, W - EDGE_R - 2, step)
+    ys = np.arange(EDGE_R + 2, D - EDGE_R - 2, step)
+    X, Y = np.meshgrid(xs, ys)
+    pts = np.c_[X.ravel(), Y.ravel()]
+    pts = pts[np.abs(pts[:, 1] - Y_SEAM) > REVEAL[0] / 2 + 0.6]       # the reveal is meant
+    ok = np.zeros(len(pts), bool)
+    for kind, cx, cy, *dims in allowed_openings():
+        if kind == "rect":
+            ok |= (np.abs(pts[:, 0] - cx) <= dims[0] / 2) & (np.abs(pts[:, 1] - cy) <= dims[1] / 2)
+        else:
+            ok |= np.hypot(pts[:, 0] - cx, pts[:, 1] - cy) <= dims[0] / 2
+    origins = np.c_[pts, np.full(len(pts), H + 5.0)]
+    dirs = np.tile([0.0, 0.0, -1.0], (len(pts), 1))
+    top = trimesh.util.concatenate([ms["top_front"], ms["top_back"]])
+    hit = np.zeros(len(pts), bool)
+    loc, idx, _ = top.ray.intersects_location(origins, dirs, multiple_hits=False)
+    zfirst = np.full(len(pts), -np.inf)
+    zfirst[idx] = loc[:, 2]
+    open_ = zfirst < H - 0.3
+    stray = open_ & ~ok
+    print(f"top surface: {open_.sum()} open points, {stray.sum()} outside the allowed openings")
+    if stray.any():
+        for p in pts[stray][:: max(1, stray.sum() // 12)]:
+            print(f"  STRAY OPENING at x={p[0]:.1f} y={p[1]:.1f}")
+    return int(stray.sum())
 
 
 def main():
@@ -70,7 +114,8 @@ def main():
             clashes += 1
             print(f"CLASH {a} x {b}: {v:.1f} mm3")
     print(f"assembly: {len(ms)} parts, {clashes} clashes")
-    if bad or clashes:
+    stray = top_openings(ms)
+    if bad or clashes or stray:
         sys.exit(1)
 
 

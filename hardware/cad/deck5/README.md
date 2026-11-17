@@ -30,6 +30,15 @@ shell would be a 7 mm unsupported overhang when the shell prints face down.
 To take the display out, undo the four M2.5 and push it up through the
 frame's middle.
 
+**Nothing screws in from the top.**  The display sits only 4.9 mm below the
+surface, too shallow for an insert above its frame, so the frame's bosses
+hang down through clearance holes in its ears and an M3 + washer from below
+pulls the frame up; the fader hangs the same way on its bracket.  Every
+insert bore is blind, with at least 1.5 mm (`SKIN`) of plastic left over
+it.  `make deck5` fires a ray grid down at the top pieces and fails on any
+opening that is not on the list (screen, fader slot, caps, keys, encoder,
+jog shaft), so a bore that breaks through cannot slip by again.
+
 The display board also has a 3.3 V header marked "fan only": it is for a
 small fan on a Pi mounted on the display's back, the way these kits ship.
 Here the Pi sits on the base with its own Active Cooler on the Pi's fan
@@ -76,6 +85,7 @@ screen panel, where a seam reads as a design line, not a repair.
 | `cap_key.stl` | 6 | |
 | `knob_fader.stl`, `knob_encoder.stl` | 1 each | |
 | `screen_frame.stl` | 1 | The display sits on it. Flat. |
+| `fader_bracket.stl` | 1 | The fader hangs under it. Top face on the bed. |
 
 PLA or PETG, 0.2 mm layers, 4 walls; 15–20 % infill is plenty.
 
@@ -91,11 +101,11 @@ PLA or PETG, 0.2 mm layers, 4 walls; 15–20 % infill is plenty.
 | 8 mm rod, 50 mm (or an M8 bolt's plain shank) + 2 shaft collars | 1 | |
 | EC11 encoder, 6 mm D-shaft | 1 | |
 | 12 mm tact switches | 8 | Their board is the next step (below) |
-| M3 heat-set inserts (4.6 × 5.7) | 19 | 11 base bosses, 4 screen bosses, 4 tower |
+| M3 heat-set inserts (4.6 × 5.7) | 21 | 11 base bosses, 4 screen-frame bosses, 2 fader bosses, 4 tower |
 | M3 × 8 countersunk | 15 | base + tower |
-| M3 × 6 socket | 4 | screen frame to its bosses |
+| M3 × 10 socket + washer | 6 | screen frame (4) and fader bracket (2) up into their bosses |
 | M2.5 × 6 | 4 | up through the frame into the display's inserts |
-| M3 × 6 countersunk | 2 | fader, through the top |
+| M3 × 4 countersunk | 2 | fader to its bracket (heads flush in the bracket's top) |
 | M2.5 × 6 | 4 | Pi into the base standoffs |
 | M3 grub screw | 1 | platter onto the shaft |
 | Panel-mount USB-C (to the Pi's USB-C) | 1 | |
@@ -105,8 +115,9 @@ PLA or PETG, 0.2 mm layers, 4 walls; 15–20 % infill is plenty.
 
 1. Heat-set inserts into all the shell bosses (11 base, 4 screen) and the tower (4).
 2. Dry-fit the two top pieces; glue now if you want (thin CA in the groove).
-3. Upper 608 into the jog boss under the top plate.  Fader in through the
-   slot from below, two countersunk M3 from the top.
+3. Upper 608 into the jog boss under the top plate.  Fader onto its
+   bracket (two countersunk M3 down into its end plates), lever up through
+   the slot, the bracket's ears over their bosses, M3 + washer from below.
 4. Caps into their holes from below (the flange keeps them in).
 5. Screen frame onto its four bosses under the top plate (M3), the DSI
    cable through its middle; the display drops into its opening from the
@@ -160,7 +171,8 @@ hardware/cad/deck5/render.sh       # assembly GLBs + renders/ (Blender, GPU)
   exported as `build/deck5.glb`, `_cutaway`, `_exploded` and `_seam`.
   Open any of them in a glTF viewer (Blender, three.js, VS Code).
 - `make_print.py`: the check, which every change must pass. Every part
-  must be watertight, a single body and fit the bed, and no two parts of
-  the assembly may overlap.
+  must be watertight, a single body and fit the bed, no two parts of the
+  assembly may overlap, and the top surface may have no opening that is
+  not on the list.
 - `assets/screen.png`: the screen texture, a real OpenDeck frame (the
   bare CDJ-3000 screen at 800 × 480 through the fullscreen fill path).

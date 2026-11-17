@@ -84,7 +84,14 @@ SCR_SINK = 0.0                # glass this far below the top surface (0 = flush)
 SCR_Z_TOP = H - SCR_SINK                  # glass top
 SCR_Z_BOT = SCR_Z_TOP - SCR_T             # display back = frame top
 SCR_BOSS = (66.0, 28.0)       # frame bosses at (cx ± dx, cy ± dy)
+# The frame sits only SCR_T below the top surface, too shallow for an insert
+# above it, so its bosses hang down through clearance holes in the frame's
+# ears and an M3 + washer from below pulls the frame up: blind bores, no
+# screw shows on top.
+SKIN = 1.5                    # least plastic left over any blind bore, top surface
 FRAME_T = 3.0                 # screen frame thickness
+FRAME_BOSS_Z0 = SCR_Z_BOT - FRAME_T + 0.3  # boss bottom (0.3 inside the ear, so the washer clamps the ear)
+INSERT_DEPTH = 6.0            # an M3 insert's bore (5.7 long)
 FRAME_RING = 9.0              # frame ring width under the display's edges
 M25_CLR = 2.8
 
@@ -125,11 +132,19 @@ SHAFT_Z1 = JOG_Z0 + JOG_H - 4.0 - 2.0     # top, 2 mm under the platter's top fa
 
 # ── Pitch fader: 100 mm travel slide pot ⚠ VERIFY (Alps RS60 / Bourns PTA) ──
 FADER_TRAVEL = 100.0
-FADER_X, FADER_CY = 197.0, JOG_CY
+FADER_X, FADER_CY = 194.0, JOG_CY
 FADER_BODY = (9.0, 128.0, 8.0)
 FADER_PITCH = 120.0           # M3 mounting holes in the end plates
 FADER_SLOT_W = 3.0
 FADER_LEVER = (1.6, 5.0, 12.0)    # lever cross-section x, y, height above body ⚠
+# Hidden mount: the fader screws to a printed bracket (countersunk M3 down
+# into its end plates), whose two ears slip over bosses under the top plate
+# and are pulled up by M3 + washer from below.  No screw shows on top.
+FADER_BRACKET_T = 2.5         # bracket plate between the fader and the top plate
+FADER_EAR = (15.0, 11.5, 6.0) # ear blocks past each end: width (x), length (y), depth (z)
+FADER_BOSS_Y = FADER_BODY[1] / 2 + 6.0    # boss centres at FADER_CY ± this
+FADER_BOSS_H = 5.7            # boss height under the plate (one M3 insert deep)
+FADER_Z_TOP = Z_UNDER - FADER_BRACKET_T   # top of the fader body
 
 # ── Controls on the top ──────────────────────────────────────────────────────
 PLAY = (21.0, 32.0)

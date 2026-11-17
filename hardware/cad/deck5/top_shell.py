@@ -59,13 +59,16 @@ def whole():
     # Base-screw bosses, wall to top plate (welded 1 mm into the plate).
     for x, y in base_screws():
         adds.append(cyl(x, y, BASE_T, Z_UNDER + 1.0, BOSS_D))
+    # Fader bracket bosses (blind: nothing shows on top).
+    for sy in (-1, 1):
+        adds.append(cyl(FADER_X, FADER_CY + sy * FADER_BOSS_Y, Z_UNDER - FADER_BOSS_H, Z_UNDER + 1.0, BOSS_D))
     # Upper jog bearing boss.
     adds.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z - 1.0, Z_UNDER + 1.0, JOG_BOSS_D))
     # Screen frame bosses, down to the display's back (the frame's top).
     for sx in (-1, 1):
         for sy in (-1, 1):
             adds.append(cyl(SCR_CX + sx * SCR_BOSS[0], SCR_CY + sy * SCR_BOSS[1],
-                            SCR_Z_BOT, Z_UNDER + 1.0, 8.0))
+                            FRAME_BOSS_Z0, Z_UNDER + 1.0, 8.0))
     # Cap guide sleeves.
     for x, y in (PLAY, CUE):
         adds.append(cyl(x, y, Z_UNDER - GUIDE_L, Z_UNDER + 1.0, BIG_CAP_D + CAP_CLR + 2 * GUIDE_WALL))
@@ -82,15 +85,12 @@ def whole():
     # Jog: shaft through the plate, the bearing seat in the boss.
     cuts.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z, H + OVS, SHAFT_D + 1.0))
     cuts.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z - 1.0 - OVS, BRG_UP_Z + BRG[2], BRG[0] + BRG_FIT))
-    # Fader: lever slot and two countersunk M3 holes into its end plates.
+    # Fader: only the lever slot shows on top; the bracket's bosses are blind.
     slot = FADER_TRAVEL + FADER_LEVER[1] + 1.0
     cuts.append(box(FADER_X - FADER_SLOT_W / 2, FADER_X + FADER_SLOT_W / 2,
                     FADER_CY - slot / 2, FADER_CY + slot / 2, Z_UNDER - OVS, H + OVS))
-    for s in (-1, 1):
-        y = FADER_CY + s * FADER_PITCH / 2
-        cuts.append(cyl(FADER_X, y, Z_UNDER - OVS, H + OVS, M3_CLR))
-        cuts.append(Pos(FADER_X, y, H - (M3_CSK - M3_CLR) / 2) *
-                    Cone(M3_CLR / 2, M3_CSK / 2 + 0.5, (M3_CSK - M3_CLR) / 2 + 0.5, align=(Align.CENTER, Align.CENTER, Align.MIN)))
+    for sy in (-1, 1):
+        cuts.append(cyl(FADER_X, FADER_CY + sy * FADER_BOSS_Y, Z_UNDER - FADER_BOSS_H - OVS, Z_UNDER + 0.3, INSERT_D))
     # Cap holes, through plate and sleeve.
     for x, y in (PLAY, CUE):
         cuts.append(cyl(x, y, Z_UNDER - GUIDE_L - OVS, H + OVS, BIG_CAP_D + CAP_CLR))
@@ -110,11 +110,13 @@ def whole():
     # Heat-set insert bores in the base-screw bosses.
     for x, y in base_screws():
         cuts.append(cyl(x, y, BASE_T - OVS, BASE_T + INSERT_L, INSERT_D))
-    # Screen frame screws (M3 inserts).
+    # Screen frame screws (M3 inserts, blind).
+    assert FRAME_BOSS_Z0 + INSERT_DEPTH <= H - SKIN, "screen frame insert would break through the top"
+    assert Z_UNDER + 0.3 <= H - SKIN, "fader insert would break through the top"
     for sx in (-1, 1):
         for sy in (-1, 1):
             cuts.append(cyl(SCR_CX + sx * SCR_BOSS[0], SCR_CY + sy * SCR_BOSS[1],
-                            SCR_Z_BOT - OVS, SCR_Z_BOT + 6.0, INSERT_D))
+                            FRAME_BOSS_Z0 - OVS, FRAME_BOSS_Z0 + INSERT_DEPTH, INSERT_D))
     # Reveal line round the outside at the seam.
     rw, rd = REVEAL
     y0, y1 = Y_SEAM - rw / 2, Y_SEAM + rw / 2

@@ -62,10 +62,10 @@ def bought():
     # Fader: body under the plate, lever up through the slot (centred).
     fx, fl, fh = FADER_BODY
     s.append(("fader", box(FADER_X - fx / 2, FADER_X + fx / 2, FADER_CY - fl / 2, FADER_CY + fl / 2,
-                           Z_UNDER - fh, Z_UNDER), "alu"))
+                           FADER_Z_TOP - fh, FADER_Z_TOP), "alu"))
     lx, ly, lh = FADER_LEVER
     s.append(("fader_lever", box(FADER_X - lx / 2, FADER_X + lx / 2, FADER_CY - ly / 2, FADER_CY + ly / 2,
-                                 Z_UNDER, Z_UNDER + lh), "steel"))
+                                 FADER_Z_TOP, FADER_Z_TOP + lh), "steel"))
     # Jog bearings, shaft, AS5600 board.
     for z in (BRG_UP_Z, BRG_LO_Z):
         s.append((f"bearing{int(z)}", cyl(JOG_CX, JOG_CY, z, z + BRG[2], BRG[0]) -
@@ -92,6 +92,7 @@ def printed():
         s.append((f"cap_key{i}", Pos(x, KEY_Y, H) * caps.key_cap(), "cap"))
     s.append(("knob_fader", Pos(FADER_X, FADER_CY, H) * caps.fader_knob(), "knob"))
     s.append(("knob_encoder", Pos(*ENC, H) * caps.enc_knob(), "cap"))
+    s.append(("fader_bracket", Pos(FADER_X, FADER_CY, Z_UNDER) * caps.fader_bracket(), "clamp"))
     s.append(("screen_frame", Pos(SCR_CX, SCR_CY, SCR_Z_BOT - FRAME_T) * caps.screen_frame(), "clamp"))
     return s
 
@@ -134,7 +135,7 @@ def to_scene(items, extra=()):
 
 EXPLODE = {   # z lift per part (mm); the top halves also part along y
     "base_front": 0, "base_back": 0, "jog_tower": 25, "as5600": 12, "pi_": 25,
-    "display": 95, "screen_frame": 70, "fader": 120, "bearing": 60, "shaft": 45,
+    "display": 95, "screen_frame": 70, "fader": 120, "fader_bracket": 105, "bearing": 60, "shaft": 45,
     "top_front": 120, "top_back": 120, "cap_": 165, "knob_": 175, "jog_platter": 210, "jog_label": 225,
 }
 SPLIT_Y = {"top_front": -18.0, "top_back": 18.0}
