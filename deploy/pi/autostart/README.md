@@ -22,20 +22,39 @@ What it sets up:
   it is back 2 s later; five stops within a minute leave it stopped. The
   Pi boots to the console target, so a desktop does not start.
 - **Sound:** OpenDeck plays to ALSA's default device; the installer
-  points that at a USB interface in `/etc/asound.conf`. `--audio CARD`
+  points that at a USB interface in `/etc/asound.conf` (`pcm.!default` to
+  `hw:CARD` through `plug`). `--audio CARD`
   names it (the name in brackets in `aplay -l` / `cat /proc/asound/cards`;
   a Behringer UCA202 is `CODEC`); without it, the first USB sound card
   plugged in at install time. A USB card's name stays the same whichever
   port it is in.
-- **Boot splash:** `splash.png` (the app icon for now; replace it and
-  re-run to change it) from power on until the deck's first frame,
-  instead of the rainbow square and the boot text: Plymouth, `quiet
-  splash` on the kernel command line, `disable_splash=1` in `config.txt`
-  (both backed up as `*.before-opendeck`). The service takes the screen
-  from the splash without a black gap. `--no-splash` leaves boot as it was.
+- **Boot splash:** audiodestrukt's wordmark (`splash.png`, drawn by
+  `make_splash.py` in the brand of audiodestrukt.com: the transistor mark,
+  "audio" grey and "destrukt" lime, OPENDECK under it) from power on until
+  the deck's first frame, instead of the rainbow square and the boot text:
+  Plymouth, `quiet splash` on the kernel command line, `disable_splash=1`
+  in `config.txt` (both backed up as `*.before-opendeck`). The service
+  takes the screen from the splash without a black gap. Edit
+  `make_splash.py` (or drop in any `splash.png`) and re-run the installer to
+  change it; `--no-splash` leaves boot as it was.
+- **No mouse pointer:** `OPENDECK_HIDE_CURSOR=1` (a mouse still works,
+  unseen).
+- **One screen:** cage spreads the deck over every display connected at
+  boot. `--screen DSI-1` keeps it on that one (the official 7" panel) by
+  switching the others off on the kernel command line; leave it out if the
+  others are only plugged in now and then.
 - **Settings:** `/etc/default/opendeck` (`KEY=value`; the binary's path,
   `OPENDECK_FULLSCREEN=1`, and any other `OPENDECK_*` setting). Then
   `sudo systemctl restart opendeck`.
+
+See the screen over the network (no cost when unused):
+`XDG_RUNTIME_DIR=/run/user/$(id -u) WAYLAND_DISPLAY=wayland-0 grim -o DSI-1 shot.png`
+on the Pi (grim is in Raspberry Pi OS).
+
+An HDMI monitor plugged in at boot is not a mirror: cage lays it beside
+the panel and stretches the deck over both (the panel shows a corner, and
+the deck renders every pixel of both, 4640 × 2160 with a 4K monitor). Boot
+with it unplugged, or use `--screen`.
 
 Over the network: `journalctl -u opendeck -f` for the log,
 `sudo systemctl stop opendeck` to free the screen, `start` to bring it
@@ -53,6 +72,8 @@ desktop; settings in `~/.config/opendeck/autostart.env`, log in
 **Undo:** `install.sh --remove` takes either out and restores
 `asound.conf`, `cmdline.txt` and `config.txt`.
 
-Not tested on a Pi yet: the installer's steps, the restart loop and the
-splash image were checked on a desktop Linux; the service, cage and the
-splash handoff need a first boot on the real thing.
+Booted on a Pi 5 (Raspberry Pi OS trixie, the 7" DSI panel, a Behringer
+UCA202): about 15 s from power to the deck, 1 % of a core idle, sound at
+44.1 kHz on the UCA202, real-time audio threads.  Between the splash and the
+deck's first frame the screen is black for a few seconds (cage takes the
+display before the deck has drawn).

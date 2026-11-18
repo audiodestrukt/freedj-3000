@@ -2,13 +2,16 @@
 # Boot a Raspberry Pi straight into OpenDeck.  Run as the user who will play,
 # NOT with sudo; it asks for sudo itself.
 #
-#   deploy/pi/autostart/install.sh [--audio CARD] [--no-splash] [path/to/opendeck]
+#   deploy/pi/autostart/install.sh [--audio CARD] [--screen CONNECTOR] [--no-splash] [path/to/opendeck]
 #       The appliance (the default; Raspberry Pi OS Lite, no desktop): a
 #       systemd service runs OpenDeck fullscreen in cage, a one-app kiosk
 #       compositor, on the screen at boot, and restarts it if it stops.
 #       Sound goes to CARD (an ALSA card name, e.g. CODEC for a Behringer
 #       UCA202); without --audio, the first USB sound card plugged in.
 #       A boot splash (splash.png) shows from power on until the deck draws.
+#       --screen DSI-1 puts the deck on that display only (the official
+#       7" touch panel), switching the others off at boot; without it cage
+#       spreads the deck over every connected display.
 #
 #   deploy/pi/autostart/install.sh --desktop [path/to/opendeck]
 #       Keep the desktop: log it in automatically and start OpenDeck
@@ -26,12 +29,13 @@ cfg="${XDG_CONFIG_HOME:-$HOME/.config}"
 bindir="$HOME/.local/bin"
 user=$(id -un)
 
-mode=kiosk; card=""; bin=""; splash=1
+mode=kiosk; card=""; bin=""; splash=1; screen=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --desktop) mode=desktop ;;
         --remove)  mode=remove ;;
         --no-splash) splash=0 ;;
+        --screen)  screen="${2:?--screen needs a connector (ls /sys/class/drm: DSI-1, HDMI-A-1, ...)}"; shift ;;
         --audio)   card="${2:?--audio needs a card name (see: aplay -l)}"; shift ;;
         -*)        echo "unknown option $1"; exit 1 ;;
         *)         bin=$1 ;;
@@ -104,7 +108,10 @@ if [ -z "$card" ]; then
 fi
 if [ -n "$card" ]; then
     [ -e /etc/asound.conf ] && [ ! -e /etc/asound.conf.before-opendeck ] && sudo cp /etc/asound.conf /etc/asound.conf.before-opendeck
-    printf '# Written by OpenDeck deploy/pi/autostart/install.sh: the deck plays to this card.\ndefaults.pcm.card %s\ndefaults.ctl.card %s\n' "$card" "$card" \
+    # The default device itself, not defaults.pcm.card: alsa-lib on trixie
+    # refuses a card NAME there ("card is not a string"), and a number moves.
+    # plug converts the rate if a track's differs from what the card takes.
+    printf '# Written by OpenDeck deploy/pi/autostart/install.sh: the deck plays to this card.\npcm.!default { type plug; slave.pcm "hw:%s" }\nctl.!default { type hw; card %s }\n' "$card" "$card" \
         | sudo tee /etc/asound.conf >/dev/null
     sound="sound to ALSA card $card"
 else
@@ -113,10 +120,11 @@ fi
 
 # Settings the service reads (systemd's KEY=value; any OPENDECK_* works).
 if [ ! -e /etc/default/opendeck ]; then
-    printf '# Read by opendeck.service at every start (KEY=value, no quotes needed).\nOPENDECK_BIN=%s\nOPENDECK_FULLSCREEN=1\n' "$bin" \
+    printf '# Read by opendeck.service at every start (KEY=value, no quotes needed).\nOPENDECK_BIN=%s\nOPENDECK_FULLSCREEN=1\nOPENDECK_HIDE_CURSOR=1\n' "$bin" \
         | sudo tee /etc/default/opendeck >/dev/null
 else
     sudo sed -i "s|^OPENDECK_BIN=.*|OPENDECK_BIN=$bin|" /etc/default/opendeck
+    grep -q '^OPENDECK_HIDE_CURSOR=' /etc/default/opendeck || echo OPENDECK_HIDE_CURSOR=1 | sudo tee -a /etc/default/opendeck >/dev/null
 fi
 
 # A logind session for the service (cage needs a seat: the screen, the
@@ -125,6 +133,20 @@ fi
 printf 'auth    required pam_unix.so nullok\naccount required pam_unix.so\nsession required pam_unix.so\nsession required pam_limits.so\nsession required pam_systemd.so\n' \
     | sudo tee /etc/pam.d/opendeck >/dev/null
 sed "s|@USER@|$user|" "$here/opendeck.service" | sudo tee /etc/systemd/system/opendeck.service >/dev/null
+
+# One screen: cage has no option to pick an output, so switch the others off
+# for the kernel (video=<connector>:d on the command line).
+if [ -n "$screen" ]; then
+    [ -e /sys/class/drm/card*-"$screen" ] 2>/dev/null || ls /sys/class/drm/card*-"$screen" >/dev/null 2>&1 \
+        || { echo "no display connector $screen; there are: $(ls /sys/class/drm | sed -n 's/^card[0-9]*-//p' | grep -v Writeback | tr '\n' ' ')"; exit 1; }
+    boot=/boot/firmware; [ -e $boot/cmdline.txt ] || boot=/boot
+    [ -e $boot/cmdline.txt.before-opendeck ] || sudo cp $boot/cmdline.txt $boot/cmdline.txt.before-opendeck
+    line=$(sed 's/ video=[^ ]*:d//g' $boot/cmdline.txt)
+    for c in $(ls /sys/class/drm | sed -n 's/^card[0-9]*-//p' | grep -v -e Writeback -e "^$screen\$"); do
+        line="$line video=$c:d"
+    done
+    echo "$line" | sudo tee $boot/cmdline.txt >/dev/null
+fi
 
 # Boot splash: splash.png from power on until the deck's first frame, in
 # place of the rainbow square and the boot text (Plymouth; --no-splash skips).
@@ -151,6 +173,6 @@ sudo systemctl daemon-reload
 sudo systemctl enable opendeck.service
 # No desktop at boot: it would fight the deck for the screen.
 sudo systemctl set-default multi-user.target
-echo "installed: opendeck.service runs $bin fullscreen at boot ($sound)."
+echo "installed: opendeck.service runs $bin fullscreen at boot ($sound${screen:+, on $screen only})."
 echo "settings: /etc/default/opendeck   log: journalctl -u opendeck -f   stop for maintenance: sudo systemctl stop opendeck"
 echo "Q or a crash restarts the deck.  Reboot to try: sudo reboot"

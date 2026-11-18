@@ -1,10 +1,12 @@
-# The splash image centred, half the screen's height, on the image's own
-# background colour (21, 23, 27) so its square edge does not show.
-Window.SetBackgroundTopColor(21 / 255, 23 / 255, 27 / 255);
-Window.SetBackgroundBottomColor(21 / 255, 23 / 255, 27 / 255);
+# splash.png (audiodestrukt's wordmark, drawn by ../make_splash.py) centred
+# at 60 % of the screen's width, on the image's own ground (#0d0d0d) so its
+# edges do not show.
+Window.SetBackgroundTopColor(13 / 255, 13 / 255, 13 / 255);
+Window.SetBackgroundBottomColor(13 / 255, 13 / 255, 13 / 255);
 logo = Image("splash.png");
-size = Math.Int(Window.GetHeight() * 0.5);
-logo = logo.Scale(size, size);
+w = Math.Int(Window.GetWidth() * 0.6);
+h = Math.Int(logo.GetHeight() * w / logo.GetWidth());
+logo = logo.Scale(w, h);
 sprite = Sprite(logo);
-sprite.SetX(Window.GetX() + (Window.GetWidth() - size) / 2);
-sprite.SetY(Window.GetY() + (Window.GetHeight() - size) / 2);
+sprite.SetX(Window.GetX() + (Window.GetWidth() - w) / 2);
+sprite.SetY(Window.GetY() + (Window.GetHeight() - h) / 2);

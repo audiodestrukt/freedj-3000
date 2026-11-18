@@ -4401,6 +4401,12 @@ impl ApplicationHandler for DeckApp {
                 .create_window(attrs)
                 .expect("failed to create window"),
         );
+        // OPENDECK_HIDE_CURSOR=1: no mouse pointer over the deck (a Pi that
+        // boots into it, played on its touch screen and controls; a mouse
+        // still works, unseen).
+        if std::env::var("OPENDECK_HIDE_CURSOR").as_deref() == Ok("1") {
+            window.set_cursor_visible(false);
+        }
 
         // iOS claims a swipe that starts at the top edge (Control Center /
         // notifications) and at the bottom (home).  On the phone the BROWSE
