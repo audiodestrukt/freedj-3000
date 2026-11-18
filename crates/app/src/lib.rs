@@ -3823,6 +3823,11 @@ impl DeckApp {
         self.poll_stems();
         self.sync_stem_wave();
         self.browser.poll_media();   // USB inserted / removed → source rows
+        // The stick being browsed was pulled: back to SOURCE, as a CDJ does.
+        // A loaded track keeps playing (it is in memory).
+        if self.browser.take_browsed_gone() && self.screen_mode == ScreenMode::Browse {
+            self.screen_mode = ScreenMode::Source;
+        }
         if self.screen_mode == ScreenMode::Browse { self.browser.prefetch_meta(); }
         // Jog nudge snap-back: once the wheel has been still past the window,
         // return to the pitch-fader speed.

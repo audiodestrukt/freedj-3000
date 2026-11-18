@@ -27,6 +27,12 @@ All notable changes to this project will be documented in this file.
   frame, scaled to fit.
 
 ### Fixed
+- Pulling the USB stick you are browsing takes the deck back to SOURCE, as
+  a CDJ does, instead of leaving BROWSE on an empty local folder.  The
+  stick's row goes, a loaded track keeps playing (it is in memory; a track
+  still reading in when the stick goes plays up to where it got), and the
+  stick comes back when plugged in again.  Checked on the Pi 5 by switching
+  the stick's USB port off and on mid-browse.
 - Linux: OpenDeck starts without its sound interface (a USB card not
   plugged in, or dropped out in a power dip) instead of exiting: silent,
   keeping time, and playing to the interface within 2 s of it appearing.

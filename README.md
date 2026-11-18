@@ -340,7 +340,8 @@ stick is detected by its `PIONEER/rekordbox/export.pdb` and browses by
 rekordbox's categories (on the CDJ-3000 screen: ARTIST, ALBUM, TRACK, KEY,
 PLAYLIST, HISTORY, FOLDER, with BPM/KEY columns and each track's preview
 waveform), with rekordbox's grids and cues; anything else browses as
-folders. Pulling the stick is safe: the loaded track is already in memory.
+folders. Pulling the stick is safe: the loaded track is already in memory,
+and if you were browsing the stick the deck goes back to SOURCE.
 On a headless Pi install the appliance automount once
 (`sudo deploy/pi/usb-automount/install.sh`, udev + systemd, read-only mounts
 under `/media/usb`), see `docs/reference/raspberry-pi.md`.

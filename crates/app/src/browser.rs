@@ -480,6 +480,8 @@ pub struct Browser {
     /// Removable media seen at the last scan (USB rows at the top level).
     media:     Vec<Mount>,
     media_at:  Option<Instant>,
+    /// The stick being browsed was pulled (see `take_browsed_gone`).
+    browsed_gone: bool,
     /// Name of the dbserver folder/playlist/artist/album being shown (set on
     /// descend), and the source's own label ("3 USB: OPENDECK") for the root.
     db_title:  String,
@@ -588,6 +590,7 @@ impl Browser {
             db: None,
             media: media::mounts(),
             media_at: Some(Instant::now()),
+            browsed_gone: false,
             db_title: String::new(),
             db_label: String::new(),
             db_cats: Vec::new(),
@@ -1809,6 +1812,7 @@ impl Browser {
             {
                 self.stack.truncate(1);
                 self.selected = 0;
+                self.browsed_gone = true;
             }
             if matches!(&self.rb_source, Some(RbSource::Local(r)) if r.starts_with(&gone.path)) {
                 self.rb = None;
@@ -1823,6 +1827,11 @@ impl Browser {
         if matches!(self.stack.last(), Some(Loc::Fs(_))) { self.rebuild(); }
         true
     }
+
+    /// Whether the stick being browsed was pulled since the last call: the
+    /// deck then goes back to SOURCE, as a CDJ does, instead of leaving
+    /// BROWSE on the local folder.
+    pub fn take_browsed_gone(&mut self) -> bool { std::mem::take(&mut self.browsed_gone) }
 
     #[cfg(test)]
     fn force_media_rescan(&mut self) -> bool { self.media_at = None; self.poll_media() }
@@ -2431,6 +2440,37 @@ mod tests {
         assert_eq!((b.cat_focus(), b.selected), (false, 1));
     }
 
+    /// Pulling the stick being browsed puts the browser back at its root and
+    /// says so once (the deck then shows SOURCE); pulling one that is not
+    /// being browsed does not.
+    #[test]
+    fn pulling_the_browsed_stick_is_reported_once() {
+        let _env = MEDIA_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-pull-home");
+        let (root, stick) = crate::media::tests::fake_media_root("browser-pull-usb");
+        std::env::set_var("OPENDECK_MEDIA_DIRS", root.path());
+        let mut b = Browser::new(home.path(), crate::prodj::LinkState::new(1));
+        assert!(b.force_media_rescan() || !b.sources().is_empty());
+        let usb = b.sources().iter().position(|r| r.kind == SourceKind::Usb && r.path.as_deref() == Some(stick.as_path())).unwrap();
+        assert!(b.open_source(usb));
+        assert_eq!(b.title(), "ARTIST");
+
+        let empty = crate::media::tests::tempfile_like::Dir::new("browser-pull-gone");
+        std::env::set_var("OPENDECK_MEDIA_DIRS", empty.path());
+        assert!(b.force_media_rescan(), "the stick drops out");
+        assert!(b.take_browsed_gone(), "the browsed stick was pulled");
+        assert!(!b.take_browsed_gone(), "reported once");
+        assert!(b.sources().iter().all(|r| r.kind != SourceKind::Usb), "no USB row left");
+
+        // In again, browse home, pull it: not the browsed one.
+        std::env::set_var("OPENDECK_MEDIA_DIRS", root.path());
+        assert!(b.force_media_rescan());
+        assert!(b.open_source(0));
+        std::env::set_var("OPENDECK_MEDIA_DIRS", empty.path());
+        assert!(b.force_media_rescan());
+        assert!(!b.take_browsed_gone(), "home was being browsed");
+    }
+
     /// A stick inserted while browsing the home folder does not take the
     /// USB / BROWSE key over; each source keeps its own place, and a saved
     /// position (by names) puts a fresh browser back on the same row.
@@ -2473,6 +2513,8 @@ mod tests {
         b.open_source(usb);
         b.go_root();
         assert_eq!(b.title(), "TRACK");
+
+        assert!(!b.take_browsed_gone(), "nothing was pulled yet");
 
         // Saved by names, restored in a fresh browser (the next launch).
         let pos = b.position().expect("a local position");
