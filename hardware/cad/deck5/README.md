@@ -6,8 +6,9 @@ contactless AS5600 encoder, a 100 mm pitch fader, CUE / PLAY, six keys and
 a browse encoder.  214 × 280 × 46 mm (59.4 mm to the top of the jog).
 
 Small on purpose: every part fits a 220 × 220 bed, so a design change is a
-print overnight, not a weekend.  The full-size deck can grow out of the
-same parameters.
+print overnight, not a weekend.  The full-size deck,
+[deck7](../deck7/README.md) (200 mm jog, 7" display), grows out of the same
+code: it runs this folder's `jog.py` and `caps.py` with its own `params.py`.
 
 ![hero](renders/hero.jpg)
 
