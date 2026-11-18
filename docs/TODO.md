@@ -6,29 +6,17 @@ Dan's open list, newest first.  Topic lists: [TODO-cdj-3000.md](TODO-cdj-3000.md
 
 ## iOS
 
-- **iPad app starts up muted (reports keep coming).**  The deck runs, the
-  waveform scrolls, nothing is heard; mechanism not known.  Leads, from
-  the code (2026-11-18):
-  - *No recovery on iOS when the output stream dies.*  On Linux a failed
-    stream is rebuilt (`audio::supervise`); on iOS the stream is built once
-    (`StreamOwner::Inline`): if iOS stops the RemoteIO unit (an
-    interruption, a route change, a media-services reset, the session not
-    yet active), the deck logs `audio stream error` once and stays silent
-    until the app is relaunched.
-  - *Session activation can fail at launch* (another app holding
-    non-mixable audio, launched while not in the foreground) and the error
-    only goes to `NSLog`, not to `opendeck-log.txt`.
-  - *Interruption without an "ended" notification* (iOS does not promise
-    one): the session is never re-activated.
-  - Not handled at all: `AVAudioSessionMediaServicesWereResetNotification`,
-    route changes, becoming active again after the background.
-  - Next: write the session's activation result, category, route, sample
-    rate and every interruption / route change / reset into
-    `opendeck-log.txt`; ask a reporter for that file.  Then: supervise the
-    stream on iOS as on Linux (rebuild on failure), re-activate the session
-    and restart the stream on `didBecomeActive`, and handle media-services
-    reset.  A test: drive a failed stream through the stand-in device and
-    check it comes back.
+- **iPad app silent with the ring/silent switch on: fixed in 0.3.28.**  The
+  cause: no audio-session category, so iOS used SoloAmbient and the switch
+  muted the app (explained by the developer who fixed it; PR #50, the
+  Playback category in `ios/freedj/main.m`).  0.3.10 (live until 0.3.28,
+  2026-11-16) did not have it, so reports from 0.3.10 users fit.  If a
+  report comes from 0.3.28 or later, ask for the version and
+  `opendeck-log.txt`, and look at the hardening below.
+- Hardening, lower priority: iOS has no recovery when the output stream
+  dies (Linux rebuilds it, `audio::supervise`; iOS builds it once), session
+  activation errors only go to `NSLog` (not `opendeck-log.txt`), and
+  media-services reset / route changes / becoming active are not handled.
 - **CDJ-3000 skin on iPhone.**  The phone keeps the XDJ pages (the skin
   is not offered on a phone: `settings.phone`).  Needs a phone layout for
   the CDJ-3000 screen (the two-page SCREEN / CONTROLS model, 932 x 430
