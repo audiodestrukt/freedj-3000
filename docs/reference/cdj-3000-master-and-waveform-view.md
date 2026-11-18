@@ -51,12 +51,24 @@ should follow the master.
 
 ## OpenDeck as the master
 
-With OpenDeck (player 4) as master and playing, a CDJ-3000 showed the "4"
-badge but no waveform.  It had asked OpenDeck's dbserver for the track's
-metadata (`0x2002`) and nothing else: none of the analysis requests above.
-Something in what OpenDeck says about its loaded track (its status, or the
-metadata reply) makes the unit skip the fetch.  Open; to fix on OpenDeck's
-side so it shows up in other players' WAVEFORM views.
+With OpenDeck (player 4) as master and playing, a CDJ-3000 shows the "4"
+badge but no waveform: it never fetches OpenDeck's analysis.  What was
+tried (2026-11-18, both emulated units watching, traffic captured):
+
+| OpenDeck serving | The CDJs did | Analysis fetched |
+|---|---|---|
+| a plain folder | NFS LOOKUP `PIONEER` / `.PIONEER` (not found); dbserver setup + `0x3007`; at most one `0x2002` metadata | no |
+| a folder with an empty `PIONEER/rekordbox` | looked inside for `PIONEER/djprofile.nxs` and `PIONEER/CDP`; both asked `0x2002` metadata for the loaded track | no |
+| the same, with the title row's flag set to `0x0100_0000` as a CDJ sends it | the same | no |
+
+OpenDeck's status for its track has the layout a CDJ's has (source player
+4, USB slot, rekordbox type, track id, flags `0xe4` playing + master), and
+the CDJs connect to its dbserver the moment it becomes master, as they do
+to a master CDJ.  The difference left is the rekordbox export itself: a
+CDJ most likely decides from `PIONEER/rekordbox/export.pdb` (and its ANLZ
+files) whether a player's track has analysis to fetch.  Serving that, an
+export OpenDeck writes for its own library, is the likely fix, and a bigger
+job.  The title row's flag is kept (it is what a CDJ sends).
 
 ## Reproducing
 

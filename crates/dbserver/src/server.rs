@@ -133,6 +133,16 @@ fn row(parent: u32, id: u32, label: &str, label2: &str, item_type: u32, art: u32
          u(0), u(0), u(0), u(0), slen(""), s(""), u(0)]
 }
 
+/// The metadata reply's title row, with the flag a CDJ-3000 sets there
+/// (0x0100_0000, as on its track-list rows).  Without it another CDJ-3000
+/// fetched our loaded track's metadata but never its waveform and beat grid
+/// for the WAVEFORM view (docs/reference/cdj-3000-master-and-waveform-view.md).
+fn title_row(id: u32, title: &str, art: u32) -> Vec<Field> {
+    let mut r = row(id, id, title, "", 0x0004, art);
+    r[7] = u(0x0100_0000);
+    r
+}
+
 /// A track in a list, shaped as a CDJ-3000 lists the tracks on its stick
 /// (captured 2026-11-14, a CDJ-3000 3.22 browsing another's TRACK list):
 /// type 0x10004 with flag 0x0100_0000, then 1, 0x100, the key's id
@@ -311,7 +321,7 @@ fn menu_rows(lib: &Library, kind_: u16, args: &[Field]) -> Option<Vec<Vec<Field>
             let t = lib.track(arg(1))?;
             let art = if t.has_art { t.id } else { 0 };
             vec![
-                row(t.id, t.id, &t.title, "", 0x0004, art),
+                title_row(t.id, &t.title, art),
                 row(0, name_id(&t.artist), &t.artist, "", 0x0007, 0),
                 row(0, name_id(&t.album), &t.album, "", 0x0002, 0),
                 row(0, t.duration_s, "", "", 0x000b, 0),
