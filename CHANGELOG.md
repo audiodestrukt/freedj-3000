@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.33] — 2026-11-18
+
 ### Added
 - Tests for CUE and PLAY latency: a stand-in low-latency interface records
   every buffer, and CUE held, PLAY from paused, and CUE again after a CUE
