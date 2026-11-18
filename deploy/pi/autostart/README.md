@@ -65,8 +65,9 @@ Over the network: `journalctl -u opendeck -f` for the log,
 `sudo systemctl stop opendeck` to free the screen, `start` to bring it
 back. Ctrl+Alt+F2 on a keyboard reaches a console login.
 
-USB sticks: with no desktop nothing mounts them; install
-`../usb-automount` too. Real-time audio threads: `../rt-audio` (the
+USB sticks: with no desktop nothing mounts them, so the installer also
+installs `../usb-automount` (read-only mounts at `/media/usb/<LABEL>`;
+`journalctl -t opendeck-usb -f` to watch). Real-time audio threads: `../rt-audio` (the
 service's session applies its limits).
 
 **Keep the desktop instead:** `install.sh --desktop` logs the desktop in

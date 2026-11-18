@@ -178,6 +178,14 @@ if [ "$splash" = 1 ]; then
     sudo plymouth-set-default-theme -R opendeck   # -R rebuilds the initramfs (a minute)
 fi
 
+# USB sticks: with no desktop nothing mounts them; the shipped automount
+# does (read-only, /media/usb/<LABEL>, where the deck looks).
+if [ -x "$here/../usb-automount/install.sh" ]; then
+    sudo "$here/../usb-automount/install.sh" | tail -1
+else
+    echo "NOTE: no ../usb-automount next to this folder; USB sticks will not mount"
+fi
+
 sudo systemctl daemon-reload
 sudo systemctl enable opendeck.service
 # No desktop at boot: it would fight the deck for the screen.
