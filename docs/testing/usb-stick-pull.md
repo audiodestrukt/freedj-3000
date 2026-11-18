@@ -25,6 +25,27 @@ a vanished device) is a failure, handled as above.  The code:
 (lib.rs), `opendeck-usb-mount@.service` (bound to the device, so systemd
 unmounts on removal).
 
+## Automated (runs in CI with every `cargo test`)
+
+`crates/app/src/lib.rs`, module `stick_pull_tests`, on a whole test deck:
+
+| Test | Pulls the stick | Checks |
+|---|---|---|
+| `a_track_still_reading_plays_to_where_it_got` | while the deck's real loader is reading `amplificate.mp3` from it | the track closes off where reading stopped (about 68 s of 527), no COULD NOT LOAD, it plays on |
+| `a_track_pulled_before_it_plays_leaves_the_old_one` | before the first byte | COULD NOT LOAD THE TRACK; the loaded track is unchanged |
+| `pulling_the_browsed_stick_goes_to_source` | while BROWSE is inside it (a fake stick from the demo export) | SOURCE, the USB row gone; no jump when BROWSE is elsewhere |
+
+The stick is a `PulledStick` reader: every byte is there to open and seek
+(the MP3 decoder reads the end of the file at open), and once pulled,
+reads at or past a cut fail with EIO, as a vanished USB device's do.  It
+goes through `Prep::complete`, the path every load takes.  Plus
+`browser::tests::pulling_the_browsed_stick_is_reported_once` and
+`devscript::tests::parses_source`.
+
+What the automated tests do not reach: the automount (udev, systemd,
+the mount script) and a real device's behaviour.  That is the next
+section, on the Pi.
+
 ## Pulling it without touching it
 
 Switching the stick's USB port off in sysfs is, to the system, the stick
@@ -113,7 +134,6 @@ until that comes back (see `deploy/pi/autostart/README.md`).
   0.4 s later; `decoding stopped early, track ends at 17.2s: decode: codec
   error: Input/output error (os error 5)`; playhead 4.1 s → 9.0 s → 13.9 s
   over the next 10 s at 60 fps; 0 restarts; replug picked up.
-- Unit tests: `browser::tests::pulling_the_browsed_stick_is_reported_once`,
-  `devscript::tests::parses_source`.
+- Automated: the `stick_pull_tests` above, all passing.
 
 Not yet tested by hand on the real port (see above).

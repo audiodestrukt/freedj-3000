@@ -2732,6 +2732,16 @@ impl DeckApp {
         if self.transport.preview    { self.apply(Event::Deck(ControlEvent::Cue { pressed: false })); }
     }
 
+    /// Once a frame: USB sticks inserted / removed → SOURCE rows.  The stick
+    /// being browsed was pulled: back to SOURCE, as a CDJ does.  A loaded
+    /// track keeps playing (it is in memory).  docs/testing/usb-stick-pull.md
+    fn poll_media(&mut self) {
+        self.browser.poll_media();
+        if self.browser.take_browsed_gone() && self.screen_mode == ScreenMode::Browse {
+            self.screen_mode = ScreenMode::Source;
+        }
+    }
+
     /// What the loader thread needs to know about the deck to prepare a track.
     fn prep(&self) -> Prep {
         Prep {
@@ -3828,12 +3838,7 @@ impl DeckApp {
         }
         self.poll_stems();
         self.sync_stem_wave();
-        self.browser.poll_media();   // USB inserted / removed → source rows
-        // The stick being browsed was pulled: back to SOURCE, as a CDJ does.
-        // A loaded track keeps playing (it is in memory).
-        if self.browser.take_browsed_gone() && self.screen_mode == ScreenMode::Browse {
-            self.screen_mode = ScreenMode::Source;
-        }
+        self.poll_media();
         if self.screen_mode == ScreenMode::Browse { self.browser.prefetch_meta(); }
         // Jog nudge snap-back: once the wheel has been still past the window,
         // return to the pitch-fader speed.
@@ -4003,7 +4008,13 @@ impl CueLooks {
 /// A track fetched over the network by a background thread, ready to decode.
 /// The fetched audio: all of it, or a file still downloading that the decoder
 /// reads as it arrives.
-enum AudioSrc { Bytes(Vec<u8>), Stream(opendeck_decode::growing::Growing) }
+enum AudioSrc {
+    Bytes(Vec<u8>),
+    Stream(opendeck_decode::growing::Growing),
+    /// Tests: any source (one that fails like a pulled stick).
+    #[cfg(test)]
+    Source(Box<dyn opendeck_decode::MediaSource>),
+}
 struct Fetched { name: String, path: String, audio: AudioSrc, grid: FetchedGrid, t0: Instant,
     /// The serving library's title, artist, … (a player's database knows them
     /// when the file's own tags are missing or unread).
@@ -4176,6 +4187,8 @@ impl Prep {
         let mut dec = match f.audio {
             AudioSrc::Bytes(b) => opendeck_decode::SymphoniaDecoder::open_bytes(b, ext),
             AudioSrc::Stream(r) => opendeck_decode::SymphoniaDecoder::open_growing(r, ext),
+            #[cfg(test)]
+            AudioSrc::Source(r) => opendeck_decode::SymphoniaDecoder::open_source(r, ext),
         }.context("failed to open the fetched audio")?;
         // The file's own tags win; the library fills what they lack.
         if let Some(m) = f.meta {
@@ -6203,5 +6216,120 @@ mod keyboard_tests {
         assert_eq!(d.key_lock, kl, "K typed a letter, not MASTER TEMPO");
         d.key(KeyCode::Backspace);
         assert_eq!(d.browser.search_query().to_ascii_lowercase(), "kic");
+    }
+}
+
+/// Pulling the USB stick, end to end on a test deck (docs/testing/usb-stick-pull.md).
+/// A stick that disappears makes reads on its open files fail with EIO; the
+/// `growing` reader the LINK loader uses can fail the same way, through the
+/// same `Prep::complete` path every load takes.
+#[cfg(test)]
+mod stick_pull_tests {
+    use super::*;
+
+    /// A file on a stick that is pulled: every byte is there to open and
+    /// seek (the decoder reads the end of an MP3 at open), and once `pull`
+    /// is set every read at or past `cut` fails with EIO, as a vanished
+    /// USB device's reads do.
+    struct PulledStick { bytes: std::io::Cursor<Vec<u8>>, cut: u64, pull: Arc<AtomicBool> }
+    impl std::io::Read for PulledStick {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            let pos = self.bytes.position();
+            if self.pull.load(Ordering::Relaxed) && pos + out.len() as u64 > self.cut {
+                if pos >= self.cut { return Err(std::io::Error::from_raw_os_error(5)); }
+                let n = (self.cut - pos) as usize;
+                return self.bytes.read(&mut out[..n]);
+            }
+            self.bytes.read(out)
+        }
+    }
+    impl std::io::Seek for PulledStick {
+        fn seek(&mut self, to: std::io::SeekFrom) -> std::io::Result<u64> { self.bytes.seek(to) }
+    }
+    impl opendeck_decode::MediaSource for PulledStick {
+        fn is_seekable(&self) -> bool { true }
+        fn byte_len(&self) -> Option<u64> { Some(self.bytes.get_ref().len() as u64) }
+    }
+
+    /// Load `path` from a stick that is pulled once the decoder has read
+    /// past `cut` bytes (0: before anything plays).
+    fn load_then_pull(d: &mut DeckApp, path: std::path::PathBuf, cut: u64) {
+        let bytes = std::fs::read(&path).unwrap();
+        let pull = Arc::new(AtomicBool::new(cut == 0));
+        let pulled = Arc::clone(&pull);
+        let prep = d.prep();
+        d.start_fetch("pulled".into(), move |tx| {
+            let src = PulledStick { bytes: std::io::Cursor::new(bytes), cut, pull: pulled };
+            prep.complete(Fetched { name: "pulled".into(), path: path.display().to_string(), audio: AudioSrc::Source(Box::new(src)),
+                                    grid: FetchedGrid::None, t0: Instant::now(), meta: None }, tx)
+        }).unwrap();
+        // The stick goes a moment after the LOAD, with the read under way.
+        if cut > 0 { std::thread::sleep(Duration::from_millis(5)); pull.store(true, Ordering::Relaxed); }
+        let end = Instant::now() + Duration::from_secs(30);
+        while d.fetch_rx.is_some() && Instant::now() < end { d.poll_fetch(); d.run(0.02); }
+        assert!(d.fetch_rx.is_none(), "the load finished (failed) instead of hanging");
+    }
+
+    fn secs(d: &DeckApp) -> f64 { d.audio.len() as f64 / (d.audio.sample_rate as f64 * d.audio.channels as f64) }
+
+    /// Pulled mid-read: the deck plays what it read, the track ends there,
+    /// the deck keeps running.  An MP3, as on the Pi (Symphonia's WAV reader
+    /// looks past the audio for more chunks at open, so a WAV needs its
+    /// whole file before it plays; MP3 frames decode as they arrive).
+    #[test]
+    fn a_track_still_reading_plays_to_where_it_got() {
+        let mp3 = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../amplificate.mp3");
+        let whole = 527.3;   // seconds
+        let cut = std::fs::metadata(&mp3).unwrap().len() / 5;   // a fifth read when it goes
+        let mut d = deck_harness::deck(2.0);
+        load_then_pull(&mut d, mp3, cut);
+        assert!(d.audio.complete.load(Ordering::Relaxed), "the track is closed off, not waiting for more");
+        let len = secs(&d);
+        // Less than a fifth of the audio: the file opens with a large tag (art).
+        assert!(len > 20.0 && len < whole * 0.2, "the track ends where reading stopped: {len:.1}s of {whole}");
+        assert!(d.notice.is_none(), "it played: no COULD NOT LOAD");
+        d.send(ControlEvent::Play);
+        let p0 = d.audio.position.load(Ordering::Relaxed);
+        d.run(0.4);
+        assert!(d.audio.position.load(Ordering::Relaxed) > p0, "and plays on");
+    }
+
+    /// Pulled before anything was playable: COULD NOT LOAD, and the track
+    /// that was loaded stays.
+    #[test]
+    fn a_track_pulled_before_it_plays_leaves_the_old_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("t.wav");
+        super::stream_load_tests::wav(&wav, deck_harness::SR, 60.0, 0.0);
+        let mut d = deck_harness::deck(2.0);
+        let before = d.audio.len();
+        load_then_pull(&mut d, wav, 0);
+        assert_eq!(d.notice.as_ref().map(|n| n.0.as_str()), Some("COULD NOT LOAD THE TRACK"));
+        assert_eq!(d.audio.len(), before, "the old track is still there");
+        assert!(d.loading.is_none());
+    }
+
+    /// Pulled while BROWSE is inside it: SOURCE, without the USB row.
+    #[test]
+    fn pulling_the_browsed_stick_goes_to_source() {
+        let _env = crate::browser::tests::MEDIA_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let (root, stick) = crate::media::tests::fake_media_root("deck-pull-usb");
+        std::env::set_var("OPENDECK_MEDIA_DIRS", root.path());
+        let mut d = deck_harness::deck(2.0);
+        d.browser.force_media_rescan();
+        let usb = d.browser.sources().iter().position(|r| r.path.as_deref() == Some(stick.as_path())).expect("USB row");
+        assert!(d.browser.open_source(usb));
+        d.screen_mode = ScreenMode::Browse;
+
+        let empty = crate::media::tests::tempfile_like::Dir::new("deck-pull-gone");
+        std::env::set_var("OPENDECK_MEDIA_DIRS", empty.path());
+        d.browser.force_media_rescan();
+        d.poll_media();
+        assert_eq!(d.screen_mode, ScreenMode::Source);
+        assert!(d.browser.sources().iter().all(|r| r.path.as_deref() != Some(stick.as_path())), "the row is gone");
+        // Pulled again later with BROWSE on something else: no jump.
+        d.screen_mode = ScreenMode::Browse;
+        d.poll_media();
+        assert_eq!(d.screen_mode, ScreenMode::Browse);
     }
 }

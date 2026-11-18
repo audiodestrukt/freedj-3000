@@ -1834,7 +1834,7 @@ impl Browser {
     pub fn take_browsed_gone(&mut self) -> bool { std::mem::take(&mut self.browsed_gone) }
 
     #[cfg(test)]
-    fn force_media_rescan(&mut self) -> bool { self.media_at = None; self.poll_media() }
+    pub(crate) fn force_media_rescan(&mut self) -> bool { self.media_at = None; self.poll_media() }
 
     /// Tests: browse an in-memory export as if it were on local media at
     /// `root`, standing on its category list.
@@ -1975,7 +1975,7 @@ impl Browser {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// BPM on a CDJ-3000: the tempos, then a tempo's ranges (±0 … ±6), then
@@ -2258,7 +2258,8 @@ mod tests {
 
     /// Tests that point OPENDECK_MEDIA_DIRS at a fake stick run one at a
     /// time: the variable is process-wide and the tests run in parallel.
-    static MEDIA_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    /// Tests that set OPENDECK_MEDIA_DIRS hold this (one process, one env).
+    pub(crate) static MEDIA_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn library() -> RbExport {
         let t = |id: u32, title: &str, artist: &str, album: &str, key: &str| opendeck_rekordbox::RbTrack {

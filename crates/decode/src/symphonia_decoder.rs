@@ -140,6 +140,14 @@ impl SymphoniaDecoder {
         Self::from_source(mss, hint)
     }
 
+    /// Open any byte source (a test's reader that fails like a pulled stick).
+    pub fn open_source(src: Box<dyn symphonia::core::io::MediaSource>, ext: Option<&str>) -> Result<Self, DecodeError> {
+        let mss = MediaSourceStream::new(src, Default::default());
+        let mut hint = Hint::new();
+        if let Some(e) = ext { hint.with_extension(e); }
+        Self::from_source(mss, hint)
+    }
+
     /// Open a file that is still arriving (see [`crate::growing`]).
     pub fn open_growing(src: crate::growing::Growing, ext: Option<&str>) -> Result<Self, DecodeError> {
         let mss = MediaSourceStream::new(Box::new(src), Default::default());

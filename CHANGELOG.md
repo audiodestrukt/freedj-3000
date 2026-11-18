@@ -34,8 +34,9 @@ All notable changes to this project will be documented in this file.
   stick comes back when plugged in again.  Checked on the Pi 5 by switching
   the stick's USB port off and on mid-browse, and 0.4 s into a load from
   it (the track played to the 17.2 s it had read).  How to repeat it:
-  docs/testing/usb-stick-pull.md; `OPENDECK_SCRIPT` gained `source=<label>`
-  to open a SOURCE row.
+  docs/testing/usb-stick-pull.md, and automated in `stick_pull_tests`
+  (pulled mid-read, before the first byte, while browsing it);
+  `OPENDECK_SCRIPT` gained `source=<label>` to open a SOURCE row.
 - Linux: OpenDeck starts without its sound interface (a USB card not
   plugged in, or dropped out in a power dip) instead of exiting: silent,
   keeping time, and playing to the interface within 2 s of it appearing.

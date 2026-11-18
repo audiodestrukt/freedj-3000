@@ -111,3 +111,6 @@ fn decode_loop(
 pub fn open_decoder(path: &Path) -> Result<Box<dyn Decoder>, DecodeError> {
     Ok(Box::new(SymphoniaDecoder::open(path)?))
 }
+
+/// The byte-source trait the decoder reads (for `SymphoniaDecoder::open_source`).
+pub use symphonia::core::io::MediaSource;
