@@ -4386,6 +4386,12 @@ impl ApplicationHandler for DeckApp {
                 fit_to_monitor(event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next()), win_w as f64, win_h as f64)
             } else { (win_w as f64, win_h as f64) };
             attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(w, h));
+            // OPENDECK_FULLSCREEN=1: the deck fills the display with no
+            // window frame (a Pi that boots straight into OpenDeck; the SDL
+            // backend reads the same variable).  The layout aspect-fits.
+            if std::env::var("OPENDECK_FULLSCREEN").as_deref() == Ok("1") {
+                attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+            }
         }
         #[cfg(target_os = "ios")]
         let _ = (win_w, win_h);

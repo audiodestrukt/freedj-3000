@@ -19,7 +19,7 @@ install -m 755 "$bin" "$D/opendeck"
 cp README.md CHANGELOG.md "$D/"
 cp crates/app/surfaces/dj2go.toml docs/hardware/surfaces/generic-midi.toml "$D/surfaces/"
 cp amplificate.mp3 "$D/"
-cp -r deploy/pi/rt-audio deploy/pi/usb-automount "$D/pi/"
+cp -r deploy/pi/rt-audio deploy/pi/usb-automount deploy/pi/autostart "$D/pi/"
 cat > "$D/README-LINUX.txt" <<TXT
 OpenDeck for Linux ($arch)
 

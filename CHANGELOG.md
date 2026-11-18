@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- A Raspberry Pi can boot straight into OpenDeck: `deploy/pi/autostart/install.sh`
+  (also in the Linux tarball's `pi/autostart`) turns on desktop autologin,
+  turns off screen blanking and starts the deck fullscreen at login,
+  restarting it if it crashes (Q quits to the desktop).
+- `OPENDECK_FULLSCREEN=1` now works with the normal renderer too (it was
+  the SDL renderer's only): the deck fills the display with no window
+  frame, scaled to fit.
+
 ## [0.3.31] — 2026-11-17
 
 ### Added

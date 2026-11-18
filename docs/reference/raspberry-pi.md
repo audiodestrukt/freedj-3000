@@ -236,6 +236,14 @@ helps little: the cores wait on memory (2.8 GHz bought 7 % for 17 % more
 clock), so 3.0 GHz isn't worth the heat. More speed has to come from the
 model (the distilled Demucs).
 
+## Boot into the deck
+
+`deploy/pi/autostart/install.sh` (run as your user) makes the Pi come up as
+a deck at power on: desktop autologin, screen blanking off, and OpenDeck
+started fullscreen at login (`OPENDECK_FULLSCREEN=1`), restarted if it
+crashes. Q quits to the desktop. Details and undo:
+`deploy/pi/autostart/README.md`.
+
 ## Smaller boards
 
 The Pi Zero 2 W is out: its VideoCore IV stops at OpenGL ES 2.0 and wgpu

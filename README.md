@@ -344,6 +344,9 @@ folders. Pulling the stick is safe: the loaded track is already in memory.
 On a headless Pi install the appliance automount once
 (`sudo deploy/pi/usb-automount/install.sh`, udev + systemd, read-only mounts
 under `/media/usb`), see `docs/reference/raspberry-pi.md`.
+To have a Pi boot straight into the deck, fullscreen, run
+`deploy/pi/autostart/install.sh` once (desktop autologin, OpenDeck started
+at login and restarted if it crashes; `deploy/pi/autostart/README.md`).
 
 ### Touch screen
 

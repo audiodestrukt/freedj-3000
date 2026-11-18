@@ -1,0 +1,29 @@
+#!/bin/sh
+# Run OpenDeck as the desktop session's deck: fullscreen, restarted if it
+# crashes, left closed if it was quit on purpose (Q, exit status 0) so the
+# desktop is reachable.  Started by ~/.config/autostart/opendeck.desktop.
+#
+# Settings: ~/.config/opendeck/autostart.env (shell syntax, sourced here),
+# e.g. OPENDECK_BIN=/home/pi/OpenDeck/opendeck, OPENDECK_STRETCH=wsola.
+# Log: ~/.local/state/opendeck/session.log (the last run; the one before is .1).
+conf="${XDG_CONFIG_HOME:-$HOME/.config}/opendeck/autostart.env"
+[ -r "$conf" ] && . "$conf"
+: "${OPENDECK_BIN:=opendeck}"
+: "${OPENDECK_FULLSCREEN:=1}"
+export OPENDECK_FULLSCREEN
+
+state="${XDG_STATE_HOME:-$HOME/.local/state}/opendeck"
+mkdir -p "$state"
+fails=0
+while :; do
+    [ -f "$state/session.log" ] && mv -f "$state/session.log" "$state/session.log.1"
+    start=$(date +%s)
+    "$OPENDECK_BIN" "$@" >"$state/session.log" 2>&1
+    rc=$?
+    [ "$rc" = 0 ] && exit 0                       # quit on purpose
+    # A crash right at start, over and over (a missing library, no display),
+    # would spin: back off, and give up after 5 quick failures in a row.
+    if [ $(( $(date +%s) - start )) -lt 10 ]; then fails=$((fails + 1)); else fails=0; fi
+    [ "$fails" -ge 5 ] && { echo "opendeck-session: gave up after $fails quick failures (rc $rc), see $state/session.log" >&2; exit 1; }
+    sleep 2
+done
