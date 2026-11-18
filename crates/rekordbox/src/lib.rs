@@ -289,6 +289,26 @@ pub struct RbAnalysis {
     pub phrases:     Vec<u8>,
 }
 
+/// One tagged section of a rekordbox analysis file (`.DAT`, `.EXT`, `.2EX`),
+/// whole: its header and data, as a player serves it over Link for an
+/// ANLZ-tag request.  `None` when the file or the section is not there.
+/// The file is `PMAI`, a header length, then sections of fourcc, header
+/// length and total length (big-endian).  For example `PWV6` in the `.2EX`:
+/// the CDJ-3000's 3-band preview, 1 200 columns of low, mid, high.
+pub fn read_anlz_section(path: &Path, fourcc: &[u8; 4]) -> Option<Vec<u8>> {
+    let d = std::fs::read(path).ok()?;
+    if d.len() < 12 || &d[..4] != b"PMAI" { return None; }
+    let be = |i: usize| d.get(i..i + 4).map(|b| u32::from_be_bytes([b[0], b[1], b[2], b[3]]) as usize);
+    let mut at = be(4)?;
+    while at + 12 <= d.len() {
+        let total = be(at + 8)?;
+        if total < 12 || at + total > d.len() { return None; }
+        if &d[at..at + 4] == fourcc { return Some(d[at..at + total].to_vec()); }
+        at += total;
+    }
+    None
+}
+
 /// Read a rekordbox `ANLZ####.DAT` analysis file: beat grid, cue points and
 /// the small blue preview (the detailed waveforms are ignored: freedj renders
 /// its own). Missing sections are fine.  The `.EXT` beside it, when there is
@@ -501,4 +521,40 @@ mod tests {
                    "a hot cue with no colour and no comment parses");
     }
 
+}
+
+#[cfg(test)]
+mod section_tests {
+    use super::*;
+
+    fn section(fourcc: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut v = fourcc.to_vec();
+        v.extend_from_slice(&12u32.to_be_bytes());
+        v.extend_from_slice(&((12 + body.len()) as u32).to_be_bytes());
+        v.extend_from_slice(body);
+        v
+    }
+
+    /// A section is found by its fourcc past the others and returned whole;
+    /// a missing one, or a file that is not an analysis file, is None.
+    #[test]
+    fn reads_a_tagged_section() {
+        let mut f = b"PMAI".to_vec();
+        f.extend_from_slice(&28u32.to_be_bytes());
+        f.extend_from_slice(&0u32.to_be_bytes());
+        f.extend_from_slice(&[0; 16]);
+        f.extend(section(b"PWV7", &[1, 2, 3]));
+        f.extend(section(b"PWV6", &[9, 8, 7, 6, 5, 4]));
+        let dir = std::env::temp_dir().join(format!("anlz-section-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("ANLZ0000.2EX");
+        std::fs::write(&p, &f).unwrap();
+        let got = read_anlz_section(&p, b"PWV6").expect("found");
+        assert_eq!(&got[..4], b"PWV6");
+        assert_eq!(&got[12..], &[9, 8, 7, 6, 5, 4]);
+        assert!(read_anlz_section(&p, b"PSSI").is_none());
+        std::fs::write(&p, b"not an analysis file").unwrap();
+        assert!(read_anlz_section(&p, b"PWV6").is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

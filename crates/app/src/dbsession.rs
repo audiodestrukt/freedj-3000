@@ -326,7 +326,7 @@ fn parse_wave(b: &[u8]) -> Option<Arc<Vec<(u8, u8)>>> {
 
 /// PWV6: 1,200 columns of low, mid, high, behind whatever header the reply
 /// carries.  `None` when it is all silence.
-fn parse_bands(b: &[u8]) -> Option<Arc<Vec<[u8; 3]>>> {
+pub(crate) fn parse_bands(b: &[u8]) -> Option<Arc<Vec<[u8; 3]>>> {
     let d = if b.len() % 3 != 0 { &b[b.len() - b.len() / 3 * 3..] } else { b };
     let d = if d.len() > 3600 { &d[d.len() - 3600..] } else { d };
     Some(Arc::new(d.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect::<Vec<_>>())).filter(|w| w.iter().any(|c| c.iter().any(|&v| v > 0)))

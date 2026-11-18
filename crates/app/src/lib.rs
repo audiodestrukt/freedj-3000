@@ -1068,7 +1068,11 @@ impl DeckApp {
         let mut browser = browser;
         if let Some(l) = &loaded { browser.note_played(l); }
         let tag_list = taglist::TagList::open();
-        audio::set_output_gain_db(settings.output_gain_db);
+        {
+            #[cfg(test)]
+            let _gain = audio::GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+            audio::set_output_gain_db(settings.output_gain_db);
+        }
         let full_deck = settings.full_deck;
         let cue_point = std::env::var("OPENDECK_CUE").ok().and_then(|v| v.parse::<f64>().ok())
             .map(|secs| (secs * audio.sample_rate as f64 * audio.channels as f64) as u64).unwrap_or(0);
@@ -5545,13 +5549,34 @@ pub(crate) mod deck_harness {
             let v = if n % (SR as usize / 2) < 200 { 0.5 } else { 0.01 };
             [v, v]
         }).collect();
-        let audio = AudioHandle::open_test(samples, SR).unwrap();
+        deck_with(AudioHandle::open_test(samples, SR).unwrap(), dir.path())
+    }
+
+    /// The test track `deck` plays: a click every half second over a quiet
+    /// bed (never silent), `secs` long at [`SR`].
+    pub fn track(secs: f64) -> Vec<f32> {
+        let frames = (secs * SR as f64) as usize;
+        (0..frames).flat_map(|n| {
+            let v = if n % (SR as usize / 2) < 200 { 0.5 } else { 0.01 };
+            [v, v]
+        }).collect()
+    }
+
+    /// A deck on a given audio handle (a latency test's traced device).
+    pub fn deck_on(audio: AudioHandle) -> DeckApp {
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_DATA_HOME", dir.path());
+        let path = dir.keep();
+        deck_with(audio, &path)
+    }
+
+    fn deck_with(audio: AudioHandle, dir: &std::path::Path) -> DeckApp {
         let grid = BeatGrid::new_constant(0, 120.0);
         let (_tx, rx) = mpsc::channel();
         let mut settings = settings::Settings { quantize: false, ..Default::default() };
         settings.stems = false;
         let mut d = DeckApp::new(
-            dir.path().join("none.wav"), Some(dir.path().to_path_buf()),
+            dir.join("none.wav"), Some(dir.to_path_buf()),
             WaveformCache { columns: Vec::new(), sample_rate: SR, hop_size: 512 },
             audio, Some(grid.clone()),
             Arc::new(AtomicU32::new(1f32.to_bits())), Arc::new(AtomicU32::new(0)), Arc::new(AtomicU64::new(0)),
@@ -6343,5 +6368,91 @@ mod stick_pull_tests {
         d.screen_mode = ScreenMode::Browse;
         d.poll_media();
         assert_eq!(d.screen_mode, ScreenMode::Browse);
+    }
+}
+
+/// CUE and PLAY start the sound at once (the perf contract in the memory
+/// notes "CUE latency confirmed good": no fade-in on start, the processor
+/// woken when PLAY lands, a paused seek honoured, the ring flushed).  A
+/// stand-in low-latency interface (128 frames, ~2.9 ms at 44.1 kHz) records
+/// every buffer it takes; the time from the button's event to the first
+/// buffer with the track in it is the latency a DJ hears, less the real
+/// device's own buffer.
+#[cfg(test)]
+mod cue_latency_tests {
+    use super::*;
+    use crate::input::ControlEvent as C;
+
+    const SR: u32 = 44_100;
+    const PULL: usize = 128;                      // frames per device buffer
+    const PULL_US: u64 = 128 * 1_000_000 / 44_100;
+    /// What "at once" means here: a device buffer or two plus one block of
+    /// the time-stretcher (512 frames, 11.6 ms).  Measured 8.7 ms here (three
+    /// 2.9 ms buffers: the event lands mid-buffer, the flush, the first block).
+    const BUDGET_MS: f64 = 20.0;
+
+    fn traced_deck() -> (DeckApp, audio::Trace) {
+        let trace: audio::Trace = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let samples = vec![0.2f32; SR as usize * 2 * 20];   // 20 s, never silent
+        let audio = AudioHandle::open_test_traced(samples, SR, PULL, PULL_US, Arc::clone(&trace)).unwrap();
+        let mut d = deck_harness::deck_on(audio);
+        d.run(0.3);                                // settle, paused at the cue
+        (d, trace)
+    }
+
+    /// Milliseconds from `t0` to the first device buffer with sound in it.
+    fn ms_to_sound(trace: &audio::Trace, t0: Instant) -> Option<f64> {
+        let end = Instant::now() + Duration::from_millis(500);
+        while Instant::now() < end {
+            if let Some((t, _)) = trace.lock().unwrap().iter().find(|(t, p)| *t >= t0 && *p > 0.05) {
+                return Some(t.duration_since(t0).as_secs_f64() * 1000.0);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        None
+    }
+
+    fn silent_now(trace: &audio::Trace) -> bool {
+        trace.lock().unwrap().iter().rev().take(4).all(|(_, p)| *p < 0.001)
+    }
+
+    #[test]
+    fn cue_held_from_the_cue_point_sounds_at_once() {
+        let (mut d, trace) = traced_deck();
+        assert!(silent_now(&trace), "paused at the cue: silent");
+        let t0 = Instant::now();
+        d.send(C::Cue { pressed: true });
+        let ms = ms_to_sound(&trace, t0).expect("CUE held: the track plays");
+        eprintln!("CUE to sound: {ms:.1} ms");
+        assert!(ms < BUDGET_MS, "CUE to sound: {ms:.1} ms (budget {BUDGET_MS} ms)");
+        d.send(C::Cue { pressed: false });
+    }
+
+    #[test]
+    fn play_from_paused_sounds_at_once() {
+        let (mut d, trace) = traced_deck();
+        let t0 = Instant::now();
+        d.send(C::Play);
+        let ms = ms_to_sound(&trace, t0).expect("PLAY: the track plays");
+        eprintln!("PLAY to sound: {ms:.1} ms");
+        assert!(ms < BUDGET_MS, "PLAY to sound: {ms:.1} ms (budget {BUDGET_MS} ms)");
+    }
+
+    /// CUE while playing jumps back and stops: silence comes within the
+    /// stop fade (3 ms) plus a buffer, and a CUE held again sounds at once.
+    #[test]
+    fn cue_while_playing_stops_then_cue_again_sounds_at_once() {
+        let (mut d, trace) = traced_deck();
+        d.send(C::Play);
+        d.run(0.5);
+        d.send(C::Cue { pressed: true });
+        d.send(C::Cue { pressed: false });
+        d.run(0.1);
+        assert!(silent_now(&trace), "CUE while playing: back to the cue, paused, silent");
+        let t0 = Instant::now();
+        d.send(C::Cue { pressed: true });
+        let ms = ms_to_sound(&trace, t0).expect("CUE held again: plays");
+        eprintln!("second CUE to sound: {ms:.1} ms");
+        assert!(ms < BUDGET_MS, "second CUE to sound: {ms:.1} ms (budget {BUDGET_MS} ms)");
     }
 }

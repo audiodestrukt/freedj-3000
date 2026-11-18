@@ -5,6 +5,10 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Tests for CUE and PLAY latency: a stand-in low-latency interface records
+  every buffer, and CUE held, PLAY from paused, and CUE again after a CUE
+  while playing must reach sound within 20 ms (8.7 ms measured: three
+  2.9 ms device buffers).
 - A Raspberry Pi can boot straight into OpenDeck:
   `deploy/pi/autostart/install.sh` (also in the Linux tarball's
   `pi/autostart`) shows a boot splash from power on, then runs the deck
@@ -27,6 +31,17 @@ All notable changes to this project will be documented in this file.
   frame, scaled to fit.
 
 ### Fixed
+- Dropouts on a Raspberry Pi with a USB interface (a Behringer UCA202): the
+  deck kept its audio ring only half full, and an ALSA device whose
+  callback, woken late, asks for two periods at once (2 x 1 103 frames) ran
+  ~2.6 ms short every 200 ms.  The processor now waits only for room for
+  what a block puts out at the current speed, so at 1x the ring runs about
+  3/4 full; slow speeds keep the worst-case room.  Test: a stand-in device
+  taking two periods at once never starves (13 underruns in 2.5 s before).
+- BROWSE on a rekordbox stick in the deck: the PREVIEW column draws the
+  CDJ-3000's 3-band preview (PWV6, from each track's `.2EX`), as for a
+  linked player's tracks; it was the blue PWAV.  A stick exported without
+  `.2EX` files keeps the blue preview.
 - Linux: started with no track, the deck's own music folder is `~/Music`
   (or `OPENDECK_MUSIC`), for BROWSE and for serving over LINK.  A Pi that
   boots straight into the deck browsed the whole filesystem (`/`, 0 songs)

@@ -82,6 +82,19 @@ fn try_realtime(_name: &str, _prio: i32) {}
 /// Must be < RING_BUFFER_SAMPLES so back-pressure never permanently stalls.
 const BACK_PRESSURE_SLOTS: usize = BLOCK_FRAMES * 4 * 2; // = 4 096
 
+/// Free ring slots needed before the next block, at `speed`: room for twice
+/// what one block puts out at that speed (the stretcher's output comes in
+/// uneven chunks), up to the 0.25x worst case above.  At 1x that is 2 048
+/// samples, so the ring fills to about 3/4: enough for an ALSA device whose
+/// callback, woken late, asks for two periods at once (a UCA202 on a Pi:
+/// 2 x 1 103 frames = 4 412 samples).  The old fixed 4 096 kept the ring
+/// only half full, and every such request ran ~232 samples short (an
+/// underrun every 200 ms on the Pi appliance).
+fn back_pressure_slots(speed: f32, device_ch: usize) -> usize {
+    let per_block = (BLOCK_FRAMES as f32 / speed.clamp(0.25, 4.0)).ceil() as usize * device_ch;
+    (per_block * 2).min(BACK_PRESSURE_SLOTS)
+}
+
 /// If position jumps by more than this many source samples the processor
 /// treats it as a seek and resets the timestretch engine.
 /// Sentinel for `seek_request`: no seek pending.
@@ -321,6 +334,15 @@ impl AudioHandle {
     /// A deck for tests: the real processor thread, with a stand-in device
     /// (48 kHz stereo) that pulls the output at real time, 10 ms at a time,
     /// through the same [`OutputFill`] as the device callback.
+    /// A deck for latency tests: a stand-in device at `sr` taking `frames`
+    /// every `every_us` (a low-latency interface), recording what it heard.
+    #[cfg(test)]
+    pub fn open_test_traced(samples: Vec<f32>, sr: u32, frames: usize, every_us: u64, trace: Trace) -> Result<Self> {
+        let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), Output::TestPulls { sr, frames, every_us, trace: Some(trace) })?;
+        h.set_playing(false);
+        Ok(h)
+    }
+
     #[cfg(test)]
     pub fn open_test(samples: Vec<f32>, sr: u32) -> Result<Self> {
         let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), Output::Test)?;
@@ -351,6 +373,8 @@ impl AudioHandle {
         let (device_sr, device_ch) = match &output {
             Output::Device(_, c) => (c.sample_rate().0, c.channels() as usize),
             Output::Test => (48_000, 2),
+            #[cfg(test)]
+            Output::TestPulls { sr, .. } => (*sr, 2),
             // The rate a CD-sourced library plays at; a device that turns up
             // later is opened at this rate (ALSA's plug converts if it must).
             #[cfg(target_os = "linux")]
@@ -492,6 +516,27 @@ impl AudioHandle {
                 }).context("failed to spawn audio-test-out thread")?;
                 StreamOwner::Thread(Some(t))
             }
+            #[cfg(test)]
+            Output::TestPulls { frames, every_us, trace, .. } => {
+                let sd = Arc::clone(&shutdown);
+                let mut fill = OutputFill::new(&parts);
+                let t = thread::Builder::new().name("audio-test-pulls".into()).spawn(move || {
+                    let mut buf = vec![0f32; frames * device_ch];
+                    let t0 = std::time::Instant::now();
+                    let mut n = 0u32;
+                    while !sd.load(Ordering::Relaxed) {
+                        fill.fill(&mut buf);
+                        if let Some(t) = &trace {
+                            let peak = buf.iter().fold(0f32, |m, v| m.max(v.abs()));
+                            t.lock().unwrap().push((std::time::Instant::now(), peak));
+                        }
+                        n += 1;
+                        let due = t0 + Duration::from_micros(every_us) * n;
+                        if let Some(w) = due.checked_duration_since(std::time::Instant::now()) { thread::sleep(w); }
+                    }
+                }).context("failed to spawn audio-test-pulls thread")?;
+                StreamOwner::Thread(Some(t))
+            }
             Output::Device(device, _) => Self::open_device(device, parts, &shutdown)?,
             #[cfg(target_os = "linux")]
             Output::Waiting => {
@@ -616,6 +661,10 @@ enum StreamOwner {
     Inline(cpal::Stream),
 }
 
+/// Tests: what a stand-in device heard, pull by pull (time, loudest sample).
+#[cfg(test)]
+pub type Trace = Arc<Mutex<Vec<(std::time::Instant, f32)>>>;
+
 /// Where a deck's output goes.
 enum Output {
     /// The system's output device, at its default config.
@@ -623,6 +672,11 @@ enum Output {
     /// The tests' stand-in: pulls the output at real time, 48 kHz stereo.
     #[allow(dead_code)]
     Test,
+    /// Tests: a stand-in device at `sr` (stereo) that takes `frames` every
+    /// `every_ms`, as an ALSA device woken late takes two periods at once.
+    /// `trace`, when given, records each pull's time and loudest sample.
+    #[cfg(test)]
+    TestPulls { sr: u32, frames: usize, every_us: u64, trace: Option<Trace> },
     /// No device at start: silent at real time until one appears (Linux).
     #[cfg(target_os = "linux")]
     Waiting,
@@ -674,6 +728,12 @@ fn supervise(device: cpal::Device, parts: StreamParts, mut stream: cpal::Stream,
 /// against a hot output (an iPad at full volume) without touching the
 /// deck's own levels, meters or analysis.  Read once per output buffer.
 static OUTPUT_GAIN: AtomicU32 = AtomicU32::new(0x3f80_0000);   // 1.0
+
+/// Tests: OUTPUT_GAIN is one global, so the test that steps it holds this,
+/// and a test deck starting up takes it to apply its own setting; otherwise
+/// a deck built in parallel reset the gain under that test.
+#[cfg(test)]
+pub(crate) static GAIN_LOCK: Mutex<()> = Mutex::new(());
 
 /// Set the output trim in dB (0 or below; anything above is taken as 0).
 pub fn set_output_gain_db(db: f32) {
@@ -1311,7 +1371,8 @@ fn processor_loop(
         // avoids both glitches (sleeping too long when buffer drains fast) and
         // CPU spin (sleeping too little when buffer is comfortably full).
         let free = producer.slots();
-        if free < BACK_PRESSURE_SLOTS {
+        let need = back_pressure_slots(f32::from_bits(speed.load(Ordering::Relaxed)), device_ch);
+        if free < need {
             thread::sleep(Duration::from_millis(5));
             continue;
         }
@@ -1647,6 +1708,7 @@ mod output_gain_tests {
     /// and then holds at half amplitude; back to 0 dB ramps up again.
     #[test]
     fn output_gain_trims_the_output_without_a_jump() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (mut tx, rx) = rtrb::RingBuffer::<f32>::new(1 << 16);
         let parts = StreamParts {
             config: cpal::StreamConfig { channels: 2, sample_rate: cpal::SampleRate(48_000), buffer_size: cpal::BufferSize::Default },
@@ -1707,5 +1769,41 @@ mod no_device_tests {
         // (44 100 samples); allow the ring's slack either way.
         let d = p2 - p1;
         assert!(d > 10_000 && d < 60_000, "advanced {d} in 0.5 s");
+    }
+}
+
+#[cfg(test)]
+mod back_pressure_tests {
+    use super::*;
+
+    /// At normal speed the processor waits for room for two blocks, not the
+    /// 0.25x worst case, so the ring fills far enough for an ALSA device that
+    /// asks for two periods at once; slow speeds keep the worst-case room.
+    #[test]
+    fn the_ring_fills_further_at_normal_speed() {
+        assert_eq!(back_pressure_slots(1.0, 2), 2_048);
+        assert_eq!(back_pressure_slots(0.25, 2), BACK_PRESSURE_SLOTS, "worst case kept");
+        assert_eq!(back_pressure_slots(0.5, 2), BACK_PRESSURE_SLOTS);
+        assert!(back_pressure_slots(1.08, 2) < 2_048, "faster: smaller blocks out");
+        // At 1x a 93 ms ring then holds more than two of a UCA202's periods.
+        assert!(RING_BUFFER_SAMPLES - back_pressure_slots(1.0, 2) > 2 * 1_103 * 2);
+    }
+
+    /// The Pi's dropouts, end to end: a deck playing at 1x into a stand-in
+    /// UCA202 whose callback takes two of its 1 103-frame periods at once
+    /// (4 412 samples every 50 ms).  With the ring kept only half full this
+    /// starved by ~232 samples on every such pull; now it never runs dry.
+    #[test]
+    fn a_device_taking_two_periods_at_once_never_starves() {
+        let sr = 44_100;
+        let samples = vec![0.1f32; sr as usize * 2 * 8];   // 8 s stereo
+        let h = AudioHandle::start(Some((samples, sr, 2)), TrackTags::default(),
+                                   Output::TestPulls { sr, frames: 2 * 1_103, every_us: 50_000, trace: None }).unwrap();
+        h.set_playing(true);
+        std::thread::sleep(Duration::from_millis(700));    // past the start-up fill
+        let before = h.stats.underrun_events.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(2500));
+        let after = h.stats.underrun_events.load(Ordering::Relaxed);
+        assert_eq!(after - before, 0, "underruns while playing steadily: {}", after - before);
     }
 }

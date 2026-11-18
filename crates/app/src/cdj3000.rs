@@ -1997,6 +1997,19 @@ fn draw_rb_categories(ui: &Ui, lay: &Layout, names: &[String], open: Option<usiz
     }
 }
 
+/// A stick track's 3-band preview (the CDJ-3000's PWV6, from the `.2EX`
+/// beside its `.DAT`), read once and kept in egui memory; the same columns a
+/// linked player serves, so the PREVIEW cell draws them the same way.
+/// `None` for a stick exported without `.2EX` files (it keeps the blue one).
+fn rb_bands(ctx: &egui::Context, anlz: &std::path::Path) -> Option<std::sync::Arc<Vec<[u8; 3]>>> {
+    let id = Id::new(("cdj3k-rbbands", anlz));
+    if let Some(w) = ctx.data(|d| d.get_temp::<Option<std::sync::Arc<Vec<[u8; 3]>>>>(id)) { return w; }
+    let w = opendeck_rekordbox::read_anlz_section(&anlz.with_extension("2EX"), b"PWV6")
+        .and_then(|b| crate::dbsession::parse_bands(&b));
+    ctx.data_mut(|d| d.insert_temp(id, w.clone()));
+    w
+}
+
 /// A rekordbox track's blue preview (height 0–31, whiteness 0–7 per column),
 /// read from its analysis file once and kept in egui memory.
 fn rb_wave(ctx: &egui::Context, anlz: &std::path::Path) -> Option<std::sync::Arc<Vec<(u8, u8)>>> {
@@ -2093,7 +2106,9 @@ fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0
     if wave_on { p.rect_filled(wave, 0.0, Color32::BLACK); }
     let anlz = match e.load() { Some(crate::browser::Load::Local { analyze: Some(a), .. }) => Some(a.clone()), _ => None };
     let mode = WAVE_MODE.load(std::sync::atomic::Ordering::Relaxed);
-    let bands = if mode == 2 || !wave_on { None } else { e.load().and_then(|l| b.db_bands(l)) };
+    let bands = if mode == 2 || !wave_on { None } else {
+        e.load().and_then(|l| b.db_bands(l)).or_else(|| anlz.as_ref().and_then(|a| rb_bands(ui.ctx(), a)))
+    };
     let cols = (wave.width() / u).floor().max(1.0) as usize;   // one stroke per unit pixel
     let step = wave.width() / cols as f32;
     if let Some(w) = bands {
@@ -2788,6 +2803,42 @@ mod tick_tests {
             assert!((out - out.floor() - 0.5).abs() < 1e-3, "{x} → output {out} is a pixel centre");
         }
         assert!((px.width(1.0) * px.k - 1.0).abs() < 1e-6, "a 0.74 px tick is drawn one pixel wide");
+    }
+}
+
+#[cfg(test)]
+mod stick_band_preview_tests {
+    /// A stick track's PREVIEW is the 3-band one when its `.2EX` beside the
+    /// `.DAT` has a PWV6 section (as a CDJ-3000 draws it); a stick exported
+    /// without `.2EX` files has none, and the row keeps the blue preview.
+    #[test]
+    fn a_stick_tracks_preview_comes_from_its_2ex() {
+        let dir = tempfile::tempdir().unwrap();
+        let dat = dir.path().join("ANLZ0000.DAT");
+        std::fs::write(&dat, b"PMAI").unwrap();
+        let ctx = egui::Context::default();
+        assert!(super::rb_bands(&ctx, &dat).is_none(), "no .2EX: no 3-band preview");
+
+        // PMAI header, then a PWV6 section: 20-byte header, 1 200 columns.
+        let mut cols = Vec::new();
+        for i in 0..1200u32 { cols.extend_from_slice(&[(i % 90) as u8, 40, 10]); }
+        let mut sec = b"PWV6".to_vec();
+        sec.extend_from_slice(&20u32.to_be_bytes());
+        sec.extend_from_slice(&((20 + cols.len()) as u32).to_be_bytes());
+        sec.extend_from_slice(&[0, 0, 0, 3, 0, 0, 4, 176]);   // entry size 3, 1 200 entries
+        sec.extend_from_slice(&cols);
+        let mut f = b"PMAI".to_vec();
+        f.extend_from_slice(&28u32.to_be_bytes());
+        f.extend_from_slice(&((28 + sec.len()) as u32).to_be_bytes());
+        f.extend_from_slice(&[0; 16]);
+        f.extend(sec);
+        std::fs::write(dir.path().join("ANLZ0000.2EX"), &f).unwrap();
+
+        let ctx = egui::Context::default();   // a fresh cache
+        let bands = super::rb_bands(&ctx, &dat).expect("PWV6 read");
+        assert_eq!(bands.len(), 1200);
+        assert_eq!(bands[1], [1, 40, 10]);
+        assert_eq!(bands[89], [89, 40, 10]);
     }
 }
 
