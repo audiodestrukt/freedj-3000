@@ -31,6 +31,10 @@ All notable changes to this project will be documented in this file.
   under its FOLDER category, with the category column (ARTIST, TRACK …)
   beside it.  It came back as bare folders: plain file rows (no PREVIEW
   waveforms) and no way back to the rekordbox lists but the `rekordbox` row.
+- FOLDER on a rekordbox stick no longer lists a `rekordbox` row beside the
+  stick's own folders (Contents …): the rekordbox lists are already in the
+  category column.  The row stays where it is the way in (a stick's top
+  level from SOURCE, a local folder with its own export).
 - Pulling the USB stick you are browsing takes the deck back to SOURCE, as
   a CDJ does, instead of leaving BROWSE on an empty local folder.  The
   stick's row goes, a loaded track keeps playing (it is in memory; a track

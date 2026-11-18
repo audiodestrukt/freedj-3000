@@ -948,7 +948,8 @@ impl Browser {
             }
         }
         // A rekordbox export at this folder (the local root, or a stick entered
-        // from its USB row) adds the playlist tree as a "rekordbox" row.
+        // from its USB row) adds the playlist tree as a "rekordbox" row: the
+        // way into the stick's lists (ARTIST, TRACK …).
         if media::has_rekordbox(dir) {
             let need = !matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir);
             if self.rb.is_none() || need {
@@ -957,7 +958,10 @@ impl Browser {
                     Err(e)  => log::warn!("rekordbox export at {}: {e:#}", dir.display()),
                 }
             }
-            if matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir) {
+            // Not under the categories' FOLDER: the lists are already there,
+            // in the category column beside it (a CDJ has no such row).
+            let in_lists = self.stack.iter().any(|l| matches!(l, Loc::RbRoot));
+            if !in_lists && matches!(&self.rb_source, Some(RbSource::Local(r)) if r == dir) {
                 out.push(Entry { name: "rekordbox".into(), is_dir: true, artist: None, bpm: None, key: None, art: None,
                     kind: EntryKind::Descend(Loc::RbRoot) });
             }
@@ -2502,6 +2506,12 @@ pub(crate) mod tests {
         assert_eq!(b.title(), "Artist");
         assert_eq!(b.selected_entry().map(|e| e.name.as_str()), Some("a.mp3"));
         assert!(b.rb_categories().is_some(), "the category column is there");
+        // FOLDER at the stick's top: its folders, no "rekordbox" row (the
+        // lists are in the column beside it).
+        b.back();
+        b.back();
+        assert!(b.entries().iter().any(|e| e.name == "Contents"));
+        assert!(b.entries().iter().all(|e| e.name != "rekordbox"), "{:?}", b.entries().iter().map(|e| e.name.clone()).collect::<Vec<_>>());
     }
 
     /// A stick inserted while browsing the home folder does not take the
