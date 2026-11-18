@@ -125,10 +125,15 @@ would fix that; not done.
 ### 6. Two renderers, one picture
 
 The wgpu path (shader) and the SDL path (`waveform_cpu.rs`) must draw the
-same waveform, checked by `tools/render-parity.sh`.  Fill exists only on
-SDL, because only SDL has a fullscreen mode; the wgpu path on a Pi 5
-would need a winit fullscreen option first, then the same squeeze in its
-egui pass, the shader's viewports and its pointer mapping.
+same waveform, checked by `tools/render-parity.sh`.  Fill was SDL-only
+at first; since 2026-11-18 the wgpu path has it too (`renderer::fill_layout`):
+the host reports the layout's size, pointer and touch x are divided by the
+squeeze, and the renderer multiplies egui's vertices and clip rects and
+the shader's viewports by it.  With the CDJ keys along the top
+(`cdjface::top_layout`, 1280 × 830, the hardware deck's default, no
+rotary) the 7" panel is filled by a stretch of 1.08 across instead of the
+side layout's squeeze of 0.74: magnified text only softens, so the problem
+in 4. goes away.  `fill_layout` stretches as well as squeezes.
 
 ### 7. Vsync is the compositor's, not ours
 

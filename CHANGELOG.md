@@ -13,8 +13,14 @@ All notable changes to this project will be documented in this file.
   USB interface (`--audio CODEC` for a Behringer UCA202).  `--desktop`
   keeps the desktop and starts the deck in it instead.
   The splash is the audiodestrukt wordmark (`make_splash.py` draws it from
-  audiodestrukt.com's brand); the mouse pointer is hidden
-  (`OPENDECK_HIDE_CURSOR=1`); `--screen DSI-1` keeps the deck on one display.
+  audiodestrukt.com's brand); `--screen DSI-1` keeps the deck on one display.
+- `OPENDECK_APPLIANCE=1`: this is the hardware deck, not a desktop window.
+  Fullscreen; the deck fills a panel of another shape with no bars (the
+  normal GPU renderer now squeezes its layout to the panel, sharp, as the SDL
+  one did); the CDJ-3000's keys in one row along the top, as on the unit
+  (SOURCE … MENU, then BACK and TAG TRACK), the screen below at the panel's
+  full width, lists worked by touch; no mouse pointer.  Each part has its own switch too
+  (`OPENDECK_FULLSCREEN`, `OPENDECK_CDJ_KEYS=top|side`, `OPENDECK_HIDE_CURSOR`).
   Booted on a Pi 5 with the 7" panel and a Behringer UCA202.
 - `OPENDECK_FULLSCREEN=1` now works with the normal renderer too (it was
   the SDL renderer's only): the deck fills the display with no window

@@ -37,8 +37,13 @@ What it sets up:
   takes the screen from the splash without a black gap. Edit
   `make_splash.py` (or drop in any `splash.png`) and re-run the installer to
   change it; `--no-splash` leaves boot as it was.
-- **No mouse pointer:** `OPENDECK_HIDE_CURSOR=1` (a mouse still works,
-  unseen).
+- **The hardware deck:** `OPENDECK_APPLIANCE=1` in `/etc/default/opendeck`
+  tells OpenDeck it is the deck, not a window on a desktop: fullscreen,
+  filling the panel (laid out in its own shape and squeezed to the panel's,
+  sharp), the CDJ-3000's keys in one row along the top as on the unit (no
+  rotary: lists are worked by touch), and no mouse pointer.  cage also gets a transparent cursor theme
+  (`XCURSOR_THEME=opendeck-blank`), since it shows its own pointer until the
+  mouse first moves over the deck.  A mouse still works, unseen.
 - **One screen:** cage spreads the deck over every display connected at
   boot. `--screen DSI-1` keeps it on that one (the official 7" panel) by
   switching the others off on the kernel command line; leave it out if the

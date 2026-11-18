@@ -40,6 +40,25 @@ pub const DECK_ASPECT: Vec2 = Vec2::new(1255.0, 1721.0);
 /// The side layout: the 1280 × 720 screen with a key column each side.
 pub const SIDE_ASPECT: Vec2 = Vec2::new(1280.0 + 2.0 * SIDE_W, 720.0);
 const SIDE_W: f32 = 170.0;
+/// The top layout, for the hardware deck's panel: the screen with every
+/// key it needs in one row above it, as on the unit (SOURCE … MENU), then
+/// BACK and TAG TRACK.  No rotary: lists are worked by touch (tap selects,
+/// tap again loads) until the deck has physical controls.  1280 × 830 is
+/// close to a 7" panel's shape (1.54 against 1.67): it fills with a slight
+/// stretch across.
+pub const TOP_ASPECT: Vec2 = Vec2::new(1280.0, 720.0 + TOP_H);
+const TOP_H: f32 = 110.0;
+
+/// Use the top layout: on a fullscreen panel (`OPENDECK_FULLSCREEN=1`, or
+/// `OPENDECK_APPLIANCE=1`, the hardware deck) or
+/// asked for (`OPENDECK_CDJ_KEYS=top`; `side` keeps the side layout).
+pub fn top_keys() -> bool {
+    match std::env::var("OPENDECK_CDJ_KEYS").as_deref() {
+        Ok("top") => true,
+        Ok("side") => false,
+        _ => crate::fullscreen(),
+    }
+}
 /// The unit's own LCD.
 pub const SCREEN_ASPECT: Vec2 = Vec2::new(1280.0, 720.0);
 
@@ -487,6 +506,23 @@ pub fn side_layout(base: Rect) -> (Rect, CdjFace) {
     (screen, CdjFace { base, deck: None, keys, rotary, pads: None, captions: Vec::new(), text: 19.0 * u })
 }
 
+/// The screen with the key row above it and the right column, laid out in
+/// `base` (of `TOP_ASPECT`): (screen rect, faceplate).
+pub fn top_layout(base: Rect) -> (Rect, CdjFace) {
+    let u = base.height() / TOP_ASPECT.y;   // points per screen pixel
+    let at = |x: f32, y: f32| base.min + Vec2::new(x * u, y * u);
+    let r = |x0: f32, y0: f32, x1: f32, y1: f32| Rect::from_min_max(at(x0, y0), at(x1, y1));
+    let screen = r(0.0, TOP_H, 1280.0, TOP_H + 720.0);
+    let row = [Key::Source, Key::Browse, Key::TagList, Key::Playlist, Key::Search, Key::Menu, Key::Back, Key::TagTrack];
+    let gap = 14.0;
+    let w = (1280.0 - (row.len() as f32 + 1.0) * gap) / row.len() as f32;
+    let keys = row.into_iter().enumerate().map(|(i, k)| {
+        let x = gap + i as f32 * (w + gap);
+        (r(x, 14.0, x + w, TOP_H - 14.0), k)
+    }).collect();
+    (screen, CdjFace { base, deck: None, keys, rotary: Rect::NOTHING, pads: None, captions: Vec::new(), text: 19.0 * u })
+}
+
 /// Where a key takes touches: its own rect, grown for the small round keys
 /// (`sx` = points per reference px).
 fn hit_rect(r: Rect, k: Key, sx: f32) -> Rect {
@@ -535,10 +571,12 @@ pub fn draw(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, f: &CdjFace, scre
     let call_delete_held = draw_keys(ui, ctx, snap, &f.keys, |k| k.lamp(snap, view, sel_tagged), sx, t, out);
 
     // Rotary selector: the XDJ's browse knob sprite and behaviour.
-    crate::chrome::paint(p, ctx, chrome, Sprite::Round(RoundKind::Knob, None), f.rotary);
-    p.text(Pos2::new(f.rotary.center().x, f.rotary.max.y + t * 0.5), Align2::CENTER_TOP, "PUSH: LOAD",
-           FontId::proportional(t * 0.75), CAPTION);
-    screen::browse_knob(ui, f.rotary, out);
+if f.rotary.is_positive() {   // the top layout has none
+        crate::chrome::paint(p, ctx, chrome, Sprite::Round(RoundKind::Knob, None), f.rotary);
+        p.text(Pos2::new(f.rotary.center().x, f.rotary.max.y + t * 0.5), Align2::CENTER_TOP, "PUSH: LOAD",
+               FontId::proportional(t * 0.75), CAPTION);
+        screen::browse_knob(ui, f.rotary, out);
+    }
 
     if let Some(pads) = &f.pads {
         let cd = f.keys.iter().find(|(_, k)| *k == Key::CallDelete).map(|(r, _)| *r);
@@ -723,11 +761,13 @@ mod tests {
             ("deck", Rect::from_min_size(Pos2::ZERO, DECK_ASPECT), true),
             ("ipad", Rect::from_min_size(Pos2::ZERO, Vec2::new(1032.0, 1376.0)), true),
             ("side", Rect::from_min_size(Pos2::ZERO, SIDE_ASPECT), false),
+            ("top", Rect::from_min_size(Pos2::ZERO, TOP_ASPECT), false),
         ];
         for (name, base, deck) in bases {
-            let (screen, f) = if deck { deck_layout(base) } else { side_layout(base) };
+            let (screen, f) = if deck { deck_layout(base) } else if name == "top" { top_layout(base) } else { side_layout(base) };
             let sx = base.width() / DECK_ASPECT.x;
-            let mut all: Vec<(String, (Rect, bool))> = vec![("screen".into(), (screen, false)), ("rotary".into(), (f.rotary, true))];
+            let mut all: Vec<(String, (Rect, bool))> = vec![("screen".into(), (screen, false))];
+            if f.rotary.is_positive() { all.push(("rotary".into(), (f.rotary, true))); }
             for (r, k) in &f.keys {
                 all.push((format!("{k:?}"), (if deck { hit_rect(*r, *k, sx) } else { *r }, k.shape() == Shape::Round)));
             }
@@ -761,6 +801,11 @@ mod tests {
         let have: Vec<Key> = f.keys.iter().map(|(_, k)| *k).collect();
         for k in [Key::Source, Key::Browse, Key::TagList, Key::Search, Key::Menu, Key::Back, Key::TagTrack] {
             assert!(have.contains(&k), "{k:?} missing from the side layout");
+        }
+        let (_, f) = top_layout(Rect::from_min_size(Pos2::ZERO, TOP_ASPECT));
+        let have: Vec<Key> = f.keys.iter().map(|(_, k)| *k).collect();
+        for k in [Key::Source, Key::Browse, Key::TagList, Key::Playlist, Key::Search, Key::Menu, Key::Back, Key::TagTrack] {
+            assert!(have.contains(&k), "{k:?} missing from the top layout");
         }
     }
 

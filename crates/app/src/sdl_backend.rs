@@ -54,14 +54,14 @@ pub fn run(app: &mut DeckApp) -> Result<()> {
     // OPENDECK_FULLSCREEN=1: the appliance case.  A true fullscreen window
     // makes SDL pick the display mode closest to the design size (a 1024x600
     // panel gets its own mode; a 1080p monitor gets 1024x768).
-    if std::env::var("OPENDECK_FULLSCREEN").as_deref() == Ok("1") { wb.fullscreen(); }
+    if crate::fullscreen() { wb.fullscreen(); }
     let window = wb.build().context("SDL window")?;
 
     // Vsync paces the loop: present() blocks until the flip, so one frame per
     // refresh with no timer.  OPENDECK_PRESENT=immediate turns it off (then
     // the FRAME_INTERVAL timer below paces instead), as on the wgpu path.
     let vsync = !matches!(std::env::var("OPENDECK_PRESENT").ok().as_deref(), Some("immediate"));
-    let fullscreen = std::env::var("OPENDECK_FULLSCREEN").as_deref() == Ok("1");
+    let fullscreen = crate::fullscreen();
     let mut cb = window.into_canvas();
     if vsync { cb = cb.present_vsync(); }
     let mut canvas = cb.build().context("SDL renderer")?;

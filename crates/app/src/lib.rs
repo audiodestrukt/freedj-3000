@@ -597,14 +597,41 @@ impl Host {
     /// The drawable's size in pixels.
     fn size_px(&self) -> (u32, u32) {
         match self {
-            Host::Winit { window, .. } => { let s = window_px(window); (s.width, s.height) }
+            Host::Winit { window, .. } => {
+                // Under fill the layout is wider than the window (see
+                // renderer::fill_layout); publish the squeeze for this frame.
+                let s = window_px(window);
+                let (w, h, xs) = renderer::fill_layout(s.width, s.height);
+                renderer::set_squeeze_x(xs);
+                (w, h)
+            }
             #[cfg(feature = "renderer-sdl")]
             Host::Sdl(h) => h.size_px(),
         }
     }
     fn take_egui_input(&mut self) -> egui::RawInput {
         match self {
-            Host::Winit { window, egui_state } => egui_state.take_egui_input(window.as_ref()),
+            Host::Winit { window, egui_state } => {
+                let mut raw = egui_state.take_egui_input(window.as_ref());
+                // Fill: egui sees the layout's size; a touch or pointer at
+                // window x is at layout x / squeeze.
+                let s = window_px(window);
+                let (w, h, xs) = renderer::fill_layout(s.width, s.height);
+                if xs != 1.0 {
+                    let ppp = window.scale_factor() as f32;
+                    raw.screen_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO,
+                        egui::vec2(w as f32 / ppp, h as f32 / ppp)));
+                    for e in &mut raw.events {
+                        match e {
+                            egui::Event::PointerMoved(p) => p.x /= xs,
+                            egui::Event::PointerButton { pos, .. } => pos.x /= xs,
+                            egui::Event::Touch { pos, .. } => pos.x /= xs,
+                            _ => {}
+                        }
+                    }
+                }
+                raw
+            }
             #[cfg(feature = "renderer-sdl")]
             Host::Sdl(h) => h.take_egui_input(),
         }
@@ -3248,6 +3275,9 @@ impl DeckApp {
                              }
                              else if self.faceplate { (860u32, 1090u32) }
                              else if self.settings.skin == settings::Skin::Cdj3000 && cdjface::bare_screen() { (1280u32, 720u32) }
+                             else if self.settings.skin == settings::Skin::Cdj3000 && cdjface::top_keys() {
+                                 (cdjface::TOP_ASPECT.x as u32, cdjface::TOP_ASPECT.y as u32)
+                             }
                              else if self.settings.skin == settings::Skin::Cdj3000 { (cdjface::SIDE_ASPECT.x as u32, 720u32) }
                              else { (1024u32, 600u32) };
         std::env::var("OPENDECK_WINDOW").ok()
@@ -3649,7 +3679,8 @@ impl DeckApp {
                 let (s, f) = cdjface::deck_layout(b);
                 (s, Some(f))
             } else {
-                let (s, f) = cdjface::side_layout(fit_contain(cdjface::SIDE_ASPECT, win));
+                let (s, f) = if cdjface::top_keys() { cdjface::top_layout(fit_contain(cdjface::TOP_ASPECT, win)) }
+                             else { cdjface::side_layout(fit_contain(cdjface::SIDE_ASPECT, win)) };
                 (s, Some(f))
             }
         });
@@ -4389,8 +4420,11 @@ impl ApplicationHandler for DeckApp {
             // OPENDECK_FULLSCREEN=1: the deck fills the display with no
             // window frame (a Pi that boots straight into OpenDeck; the SDL
             // backend reads the same variable).  The layout aspect-fits.
-            if std::env::var("OPENDECK_FULLSCREEN").as_deref() == Ok("1") {
+            if fullscreen() {
                 attrs = attrs.with_fullscreen(Some(winit::window::Fullscreen::Borderless(None)));
+                // Fill a panel of another shape: lay out in the design's
+                // shape, draw squeezed (renderer::fill_layout).
+                renderer::set_fill_aspect(win_w as f32 / win_h as f32);
             }
         }
         #[cfg(target_os = "ios")]
@@ -4404,7 +4438,7 @@ impl ApplicationHandler for DeckApp {
         // OPENDECK_HIDE_CURSOR=1: no mouse pointer over the deck (a Pi that
         // boots into it, played on its touch screen and controls; a mouse
         // still works, unseen).
-        if std::env::var("OPENDECK_HIDE_CURSOR").as_deref() == Ok("1") {
+        if hide_cursor() {
             window.set_cursor_visible(false);
         }
 
@@ -4628,6 +4662,22 @@ impl ApplicationHandler for DeckApp {
 /// insets (0.2.0 on iPhone: CUE/PLAY and the MENU rows missed by up to 120 pt).
 /// `outer_size` is the view.  Desktop windows have decorations in their outer
 /// size, so they keep `inner_size`.
+/// `OPENDECK_APPLIANCE=1`: this is the hardware deck (a Pi in a case, the
+/// screen its own panel), not a window on a desktop.  It turns on everything
+/// the deck needs there: fullscreen with panel fill, the CDJ keys along the
+/// top, no mouse pointer.  Each also has its own switch
+/// (`OPENDECK_FULLSCREEN`, `OPENDECK_CDJ_KEYS`, `OPENDECK_HIDE_CURSOR`).
+/// deploy/pi/autostart/install.sh sets it; a desktop never does.
+pub fn appliance() -> bool { env_on("OPENDECK_APPLIANCE") }
+
+/// Fullscreen (and fill a panel of another shape).
+pub fn fullscreen() -> bool { env_on("OPENDECK_FULLSCREEN") || appliance() }
+
+/// No mouse pointer over the deck.
+pub fn hide_cursor() -> bool { env_on("OPENDECK_HIDE_CURSOR") || appliance() }
+
+fn env_on(name: &str) -> bool { std::env::var(name).as_deref() == Ok("1") }
+
 pub(crate) fn window_px(window: &winit::window::Window) -> winit::dpi::PhysicalSize<u32> {
     if cfg!(any(target_os = "ios", target_os = "android")) { window.outer_size() } else { window.inner_size() }
 }

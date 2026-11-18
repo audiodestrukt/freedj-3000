@@ -87,6 +87,31 @@ static SQUEEZE_X: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::n
 pub fn squeeze_x() -> f32 { f32::from_bits(SQUEEZE_X.load(std::sync::atomic::Ordering::Relaxed)) }
 pub fn set_squeeze_x(xs: f32) { SQUEEZE_X.store(xs.to_bits(), std::sync::atomic::Ordering::Relaxed) }
 
+/// Fullscreen fill on the wgpu path (`OPENDECK_FULLSCREEN=1`): the design's
+/// aspect, 0 = off.  As `sdl_backend::Fill`: a panel narrower than the
+/// design (the Pi 7" touch display, 1.67:1, under the CDJ side layout,
+/// 2.25:1) is laid out in the design's own shape at the panel's height and
+/// drawn squeezed sideways to fill it, sharp, at the panel's own pixels
+/// (geometry is squeezed, never a finished image).  See
+/// docs/design/display-fitting.md.
+static FILL_ASPECT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub fn set_fill_aspect(a: f32) { FILL_ASPECT.store(a.to_bits(), std::sync::atomic::Ordering::Relaxed) }
+
+/// The layout size for an output of `w` x `h` pixels, and the factor from
+/// layout to output pixels across: `(w, h, 1.0)` unless fill is on.  Then
+/// the layout is the design's shape at the output's height, squeezed (a
+/// narrower panel) or stretched (a wider one) across to fill it, no bars.
+pub fn fill_layout(w: u32, h: u32) -> (u32, u32, f32) {
+    let a = f32::from_bits(FILL_ASPECT.load(std::sync::atomic::Ordering::Relaxed));
+    if a <= 0.0 || h == 0 || w == 0 { return (w, h, 1.0); }
+    let lw = (h as f32 * a).round().max(1.0) as u32;
+    if lw == w { return (w, h, 1.0); }
+    (lw, h, w as f32 / lw as f32)
+}
+
+/// Squeeze a viewport `[x, y, w, h]` (layout pixels) to output pixels.
+fn squeeze_rect(r: [f32; 4], xs: f32) -> [f32; 4] { [r[0] * xs, r[1], r[2] * xs, r[3]] }
+
 /// Where the shader draws its two waveforms, in physical pixels.
 #[derive(Clone, Copy, Debug)]
 pub struct Viewports {
@@ -623,6 +648,11 @@ impl Renderer for WgpuRenderer {
         let egui_shapes      = full_output.shapes;
         let textures_delta   = full_output.textures_delta;
 
+        // Fill: the layout is wider than the surface; squeeze it across.
+        let xs = squeeze_x();
+        let vp_out = Viewports { wave: squeeze_rect(vp.wave, xs), overview: squeeze_rect(vp.overview, xs), ..*vp };
+        let vp = &vp_out;
+
         // ── Update waveform scroll params ─────────────────────────────────────
         let mut params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
                                                 self.num_cols, self.surface_config.width, self.surface_config.height);
@@ -687,7 +717,16 @@ impl Renderer for WgpuRenderer {
         }
 
         let _t_tess = std::time::Instant::now();
-        let primitives = egui_ctx.tessellate(egui_shapes, pixels_per_point);
+        let mut primitives = egui_ctx.tessellate(egui_shapes, pixels_per_point);
+        if xs != 1.0 {
+            for p in &mut primitives {
+                p.clip_rect.min.x *= xs;
+                p.clip_rect.max.x *= xs;
+                if let egui::epaint::Primitive::Mesh(m) = &mut p.primitive {
+                    for v in &mut m.vertices { v.pos.x *= xs; }
+                }
+            }
+        }
         crate::perf_accum("tessellate", _t_tess.elapsed());
         let _t_upl = std::time::Instant::now();
         self.egui_renderer.update_buffers(

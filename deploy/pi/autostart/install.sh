@@ -47,7 +47,7 @@ if [ "$mode" = remove ]; then
     rm -f "$cfg/autostart/opendeck.desktop" "$bindir/opendeck-session"
     if [ -e /etc/systemd/system/opendeck.service ]; then
         sudo systemctl disable opendeck.service 2>/dev/null || true
-        sudo rm -f /etc/systemd/system/opendeck.service /etc/pam.d/opendeck
+        sudo rm -f /etc/systemd/system/opendeck.service /etc/pam.d/opendeck; sudo rm -rf /usr/share/icons/opendeck-blank
         sudo systemctl daemon-reload
         for b in /boot/firmware /boot; do
             for f in cmdline.txt config.txt; do
@@ -120,12 +120,21 @@ fi
 
 # Settings the service reads (systemd's KEY=value; any OPENDECK_* works).
 if [ ! -e /etc/default/opendeck ]; then
-    printf '# Read by opendeck.service at every start (KEY=value, no quotes needed).\nOPENDECK_BIN=%s\nOPENDECK_FULLSCREEN=1\nOPENDECK_HIDE_CURSOR=1\n' "$bin" \
+    printf '# Read by opendeck.service at every start (KEY=value, no quotes needed).\nOPENDECK_BIN=%s\nOPENDECK_APPLIANCE=1\nXCURSOR_THEME=opendeck-blank\n' "$bin" \
         | sudo tee /etc/default/opendeck >/dev/null
 else
     sudo sed -i "s|^OPENDECK_BIN=.*|OPENDECK_BIN=$bin|" /etc/default/opendeck
-    grep -q '^OPENDECK_HIDE_CURSOR=' /etc/default/opendeck || echo OPENDECK_HIDE_CURSOR=1 | sudo tee -a /etc/default/opendeck >/dev/null
+    grep -q '^OPENDECK_APPLIANCE=' /etc/default/opendeck || echo OPENDECK_APPLIANCE=1 | sudo tee -a /etc/default/opendeck >/dev/null
+    grep -q '^XCURSOR_THEME=' /etc/default/opendeck || echo XCURSOR_THEME=opendeck-blank | sudo tee -a /etc/default/opendeck >/dev/null
 fi
+
+# No pointer: cage draws its own until the mouse first moves over the deck
+# (which may never happen on a touch screen), so give it a transparent
+# cursor theme.  A mouse still works, unseen.
+sudo install -d /usr/share/icons/opendeck-blank/cursors
+sudo install -m 644 "$here/blank-cursor/index.theme" /usr/share/icons/opendeck-blank/
+sudo install -m 644 "$here/blank-cursor/default" /usr/share/icons/opendeck-blank/cursors/default
+for c in left_ptr arrow pointer text xterm; do sudo ln -sf default /usr/share/icons/opendeck-blank/cursors/$c; done
 
 # A logind session for the service (cage needs a seat: the screen, the
 # input devices) without anyone logging in; pam_limits so the real-time
