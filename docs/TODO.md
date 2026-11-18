@@ -26,6 +26,16 @@ Dan's open list, newest first.  Topic lists: [TODO-cdj-3000.md](TODO-cdj-3000.md
 
 ## Pi deck (appliance)
 
+- **Jog (DJ2Go) in VINYL: waveform moves, no sound** (Dan, 2026-11-18).
+  Not reproduced: tests show a turn heard both paused and playing at a
+  hand-turned rate (`a_jog_turn_while_paused_scrubs_with_sound`).  It was
+  reported on the build with the dropout bug (ring starved every 200 ms,
+  fixed bc6a482), which would chop a scrub's small bursts to near silence.
+  Retest on the current build; if still muted, capture the log with
+  `RUST_LOG=opendeck_app=debug`.
+- Speed knob (VINYL SPEED ADJUST, touch / release): not built, see
+  TODO-cdj-3000.md.
+
 - **Black gap between the splash and the deck** (a few seconds while the
   deck starts): measure on the Pi, then close it (keep the splash up until
   the first frame, or draw the deck sooner).
@@ -58,6 +68,15 @@ Dan's open list, newest first.  Topic lists: [TODO-cdj-3000.md](TODO-cdj-3000.md
   unit's behaviour 2026-11-18; review and merge.
 
 ## Testing
+
+- **Run the test suite per platform on tagged releases** (Dan, 2026-11-18):
+  today only Linux runs it on every push, Windows on `win-v*` tags; the
+  macOS, iOS and Android workflows only build.  Add `cargo test` to the
+  macOS release workflow, and the suite on the iOS simulator / an Android
+  emulator at `ios-v*` / `android-v*` tags (their `cfg(target_os)` paths
+  differ: the iOS output is never rebuilt, Linux's is).
+- Heard-position estimate ignores a loop's wrap: for the time the ring holds
+  (~70 ms at 1x) after a wrap it reads just before the loop's start.
 
 - **UI regression tests per platform**: render each platform's screen
   headless (iPad faceplate, iPhone pages, desktop, Pi 800 x 480, XDJ) with

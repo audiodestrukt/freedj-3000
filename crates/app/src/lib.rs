@@ -2172,6 +2172,20 @@ impl DeckApp {
 
     /// A paused jog move: as `seek_to`, but the audio scrubs to the spot
     /// (audible, pitch following the wheel) instead of jumping there.
+    /// Once a frame: the wheel has been still past its window, so a nudge
+    /// snaps back to the pitch fader's speed.
+    fn jog_idle(&mut self) {
+        let now = Instant::now();
+        if let Some(until) = self.jog_until {
+            if now >= until {
+                self.jog_offset = 0.0;
+                self.jog_until  = None;
+                let f = self.fader_speed.load(Ordering::Relaxed);
+                self.audio.speed.store(f, Ordering::Relaxed);
+            }
+        }
+    }
+
     fn scrub_to(&mut self, from: u64, pos: u64) {
         let pos = pos.min(self.audio.len() as u64);
         if self.audio.loop_active.load(Ordering::Relaxed) {
@@ -3844,16 +3858,7 @@ impl DeckApp {
         self.sync_stem_wave();
         self.poll_media();
         if self.screen_mode == ScreenMode::Browse { self.browser.prefetch_meta(); }
-        // Jog nudge snap-back: once the wheel has been still past the window,
-        // return to the pitch-fader speed.
-        if let Some(until) = self.jog_until {
-            if Instant::now() >= until {
-                self.jog_offset = 0.0;
-                self.jog_until  = None;
-                let f = self.fader_speed.load(Ordering::Relaxed);
-                self.audio.speed.store(f, Ordering::Relaxed);
-            }
-        }
+        self.jog_idle();
 
         let platform_output = std::mem::take(&mut output.platform_output);
         let slip_shadow = self.slip_shadow().map(|v| v as u64);
@@ -5592,6 +5597,7 @@ pub(crate) mod deck_harness {
         /// What a frame does to the playhead, without drawing: follow the
         /// audible position.
         pub fn tick(&mut self) {
+            self.jog_idle();
             let raw = self.audio.position.load(Ordering::Relaxed);
             let fl = self.audio.in_flight.load(Ordering::Relaxed);
             self.smoothed_pos = self.heard_pos(raw, fl);
@@ -5978,7 +5984,11 @@ mod deck_tests {
         d.send(C::SlipToggle);                                // SLIP off
         d.send(C::Reloop);
         assert!(!looping(&d));
-        assert!(d.at() >= start - 0.1 && d.at() <= out + 0.1, "stays in the loop's span: {:.2}", d.at());
+        // Let the audio already in flight play out first: right after a
+        // wrap the heard-position estimate dips below the loop's start for
+        // as long as the ring holds (it ignores the wrap; ~70 ms at 1x).
+        d.run(0.15);
+        assert!(d.at() >= start - 0.1 && d.at() <= out + 0.3, "stays in the loop's span {start:.3}..{out:.3}: {:.3}", d.at());
     }
 
     /// IN/CUE: on a CDJ, IN pressed during playback also sets the cue point
@@ -6436,6 +6446,26 @@ mod cue_latency_tests {
         let ms = ms_to_sound(&trace, t0).expect("PLAY: the track plays");
         eprintln!("PLAY to sound: {ms:.1} ms");
         assert!(ms < BUDGET_MS, "PLAY to sound: {ms:.1} ms (budget {BUDGET_MS} ms)");
+    }
+
+    fn heard_since(trace: &audio::Trace, t0: Instant) -> f32 {
+        trace.lock().unwrap().iter().filter(|(t, _)| *t >= t0).map(|(_, p)| *p).fold(0.0, f32::max)
+    }
+
+    /// Paused, a jog turn scrubs: you hear the track under the moving
+    /// playhead (VINYL and CDJ alike).
+    #[test]
+    fn a_jog_turn_while_paused_scrubs_with_sound() {
+        let (mut d, trace) = traced_deck();
+        d.settings.jog_vinyl = true;
+        let t0 = Instant::now();
+        for _ in 0..75 {
+            d.send(C::JogDelta { delta: 1, velocity_rpm: 0.0 });
+            std::thread::sleep(Duration::from_millis(4));
+            d.tick();
+        }
+        assert!(heard_since(&trace, t0) > 0.05, "the scrub is heard");
+        assert!(!d.audio.playing.load(Ordering::Relaxed), "and the deck stays paused");
     }
 
     /// CUE while playing jumps back and stops: silence comes within the
