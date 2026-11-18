@@ -19,4 +19,4 @@ r back          build/deck7.glb          --res 1600 --resy 1000 --az 160 --el 22
 r cutaway       build/deck7_cutaway.glb  --res 1600 --resy 1000 --az 72  --el 20 --dist 2.7
 r exploded      build/deck7_exploded.glb --res 1300 --resy 1600 --az 32  --el 24 --dist 2.9
 r seams         build/deck7_seam.glb     --res 1500 --resy 1300 --az 20  --el 55 --dist 2.6
-r screen_mount  build/deck7_cutaway.glb  --res 1400 --resy 900  --az 70  --el 22 --dist 0.9 --target 0.1645,0.362,0.040 --lens 70
+r screen_mount  build/deck7_cutaway.glb  --res 1400 --resy 900  --az 70  --el 22 --dist 0.9 --target 0.1506,0.3168,0.040 --lens 70

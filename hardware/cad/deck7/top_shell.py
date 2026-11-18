@@ -4,7 +4,7 @@
 
 As deck5's top, but the shell is too big for one seam on a 256 mm bed, so
 it splits on a 2 x 2 grid: Y_SEAM across the depth and X_SEAM along it,
-both under the platter (the cross is hidden by it).  Each seam gets the
+missing every key and boss (the cross is under the platter).  Each seam gets the
 deck5 joint: a thickened band, a tongue on one side (the BACK pieces for
 Y_SEAM, the RIGHT pieces for X_SEAM) in a groove on the other, and a
 reveal line outside.  The tongues stop short of the cross so they never
@@ -49,7 +49,8 @@ def u_across_x(a, b, x0, x1, z0):
 
 
 def keys():
-    return [(x, y) for x, y, _ in KEYS]
+    """(x, y, w, h) per key: each key has its own cap size."""
+    return [(x, y, w, h) for x, y, _, (w, h) in KEYS]
 
 
 def whole():
@@ -68,8 +69,8 @@ def whole():
             adds.append(cyl(SCR_CX + sx * SCR_BOSS[0], SCR_CY + sy * SCR_BOSS[1], FRAME_BOSS_Z0, Z_UNDER + 1.0, 8.0))
     for x, y in (PLAY, CUE):
         adds.append(cyl(x, y, Z_UNDER - GUIDE_L, Z_UNDER + 1.0, BIG_CAP_D + CAP_CLR + 2 * GUIDE_WALL))
-    kx, ky = KEY[0] + CAP_CLR + 2 * GUIDE_WALL, KEY[1] + CAP_CLR + 2 * GUIDE_WALL
-    for x, y in keys():
+    for x, y, w, h in keys():
+        kx, ky = w + CAP_CLR + 2 * GUIDE_WALL, h + CAP_CLR + 2 * GUIDE_WALL
         adds.append(box(x - kx / 2, x + kx / 2, y - ky / 2, y + ky / 2, Z_UNDER - GUIDE_L, Z_UNDER + 1.0))
     body = body.fuse(*adds)
 
@@ -85,8 +86,8 @@ def whole():
         cuts.append(cyl(FADER_X, FADER_CY + sy * FADER_BOSS_Y, Z_UNDER - FADER_BOSS_H - OVS, Z_UNDER + 0.3, INSERT_D))
     for x, y in (PLAY, CUE):
         cuts.append(cyl(x, y, Z_UNDER - GUIDE_L - OVS, H + OVS, BIG_CAP_D + CAP_CLR))
-    hx, hy = KEY[0] + CAP_CLR, KEY[1] + CAP_CLR
-    for x, y in keys():
+    for x, y, w, h in keys():
+        hx, hy = w + CAP_CLR, h + CAP_CLR
         cuts.append(box(x - hx / 2, x + hx / 2, y - hy / 2, y + hy / 2, Z_UNDER - GUIDE_L - OVS, H + OVS))
     cuts.append(cyl(*ENC, Z_UNDER - OVS, H + OVS, ENC_HOLE))
     # Back wall: the Pi's USB / Ethernet window, the panel USB-C, vents.

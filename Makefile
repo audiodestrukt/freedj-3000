@@ -189,7 +189,7 @@ cad: ## Build the hardware CAD parts to STL (hardware/cad/build/)
 deck5: ## Check the 5" deck's parts (watertight, bed fit, no clashes) and export print/ STLs
 	cd hardware/cad/deck5 && python3 make_print.py
 
-deck7: ## Check the full-size deck's parts (200 mm jog, 7" display; 256 mm bed) and export print/ STLs
+deck7: ## Check the full-size deck's parts (XDJ-1000 size, 206 mm jog, 7" display; 256 mm bed) and export print/ STLs
 	cd hardware/cad/deck7 && python3 make_print.py
 
 ## ── Reference material ─────────────────────────────────────────────────────

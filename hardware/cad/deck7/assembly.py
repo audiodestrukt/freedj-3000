@@ -22,7 +22,7 @@ from PIL import Image
 from trimesh.visual.material import PBRMaterial
 from build123d import *
 from params import *
-import top_shell, base, jog, caps
+import top_shell, base, jog, caps, keycap
 from top_shell import box, cyl
 
 BUILD = os.path.join(HERE, "build")
@@ -92,8 +92,8 @@ def printed():
     s.append(("jog_tower", place(jog.tower(), jog.MATES["tower_foot"], jog.MATES["jog_world_tower"]), "base"))
     s.append(("cap_play", Pos(*PLAY, H) * caps.big_cap(), "play"))
     s.append(("cap_cue", Pos(*CUE, H) * caps.big_cap(), "cue"))
-    for i, (x, y, _) in enumerate(KEYS):
-        s.append((f"cap_key{i}", Pos(x, y, H) * caps.key_cap(), "cap"))
+    for x, y, name, size in KEYS:
+        s.append((f"cap_{name}", Pos(x, y, H) * keycap.key_cap(size), "cap"))
     s.append(("knob_fader", Pos(FADER_X, FADER_CY, H) * caps.fader_knob(), "knob"))
     s.append(("knob_encoder", Pos(*ENC, H) * caps.enc_knob(), "cap"))
     s.append(("fader_bracket", Pos(FADER_X, FADER_CY, Z_UNDER) * caps.fader_bracket(), "clamp"))

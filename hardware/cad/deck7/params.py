@@ -1,20 +1,26 @@
 """params.py — the full-size deck (ADK-1000): single source of truth.
 
-A CDJ-3000-sized deck (329 x 453 mm) around a 200 mm jog and the official
-Raspberry Pi 7" Touch Display (800 x 480, the panel the test Pi runs).
-Same world frame as deck5: x across (left -> right as you stand at it), y
-away from you (front edge y = 0), z up (floor z = 0).
+An XDJ-1000MK2-sized deck around a 206 mm jog and the official Raspberry Pi
+7" Touch Display (800 x 480, the panel the test Pi runs).  Same world frame
+as deck5: x across (left -> right as you stand at it), y away from you
+(front edge y = 0), z up (floor z = 0).
+
+The face comes from hardware/panel/layout.toml, the XDJ-1000MK2 face
+measured off photos (good to a few mm, `status` per control) that the panel
+PCB generator also reads, so plastic and copper agree.  That file is drawn
+y-DOWN from the face's top-left (the back of the deck); here y = D - y_face.
+A few controls move where the official display's wide glass or this deck's
+own parts need it: every move is in OVERRIDES below, with its reason.
 
 Shared code: deck5's jog.py (platter, tower, shaft) and caps.py (caps,
 knobs, screen frame, fader bracket) are used unchanged.  They read their
 dimensions with `from params import *`, and run from here that is THIS
-file, so the same code makes the 200 mm platter and the 7" frame.  This
-module puts deck5 on the import path (after deck7) for them.
+file.  This module puts deck5 on the import path (after deck7) for them.
 
 ⚠ VERIFY marks a dimension taken from a datasheet or a guess, not a
 caliper.  Measure the real part and change the number here.
 """
-import os, sys
+import os, sys, tomllib
 from build123d import Location, Pos, Rot
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -23,6 +29,10 @@ if DECK5 not in sys.path:
     sys.path.append(DECK5)      # after deck7: deck5's jog / caps, deck7's params and top_shell
 
 NAME = "deck7"
+LAYOUT_TOML = os.path.normpath(os.path.join(HERE, "..", "..", "panel", "layout.toml"))
+with open(LAYOUT_TOML, "rb") as _f:
+    LAYOUT = tomllib.load(_f)
+_CTRL = {c["name"]: c for c in LAYOUT["control"]}
 
 
 def place(solid, frm: Location, onto: Location):
@@ -34,7 +44,12 @@ def place(solid, frm: Location, onto: Location):
 BED = (256.0, 256.0)          # Bambu X1 / P1 / A1: every printed part must fit
 
 # ── Enclosure ────────────────────────────────────────────────────────────────
-W, D, H = 329.0, 453.0, 50.0  # CDJ-3000 footprint; flat top (the unit slopes)
+W, D = LAYOUT["face"]["width_mm"], LAYOUT["face"]["height_mm"]   # 305.7 x 387.5 (published depth 378.8: verify)
+H = 50.0                      # flat top (the unit slopes)
+
+def face(x, y_face):
+    """layout.toml (y down from the back) -> deck (y up from the front)."""
+    return (x, D - y_face)
 R_PLAN = 10.0
 WALL = 3.2
 TOP_T = 3.0
@@ -46,10 +61,10 @@ Z_UNDER = H - TOP_T
 # along it (X_SEAM).  Both run under the platter, so the cross is hidden;
 # they also miss every key, boss and the fader.  The base splits on its own
 # grid (half-laps) so its pieces bridge the top seams and clamp them.
-X_SEAM = 104.5                # top: between hot cues A-B and C (x 89.5 / 119.5)
-Y_SEAM = 252.0                # top: past the fader's bracket, under the platter
-X_BASE_SEAM = 220.0           # base: clear of the jog tower and the Pi
-Y_BASE_SEAM = 205.0
+X_SEAM = 110.0                # top: between RELOOP and the jog's bearing boss
+Y_SEAM = D - 158.0            # top: between the loop row and TRACK SEARCH / VINYL (face y 158)
+X_BASE_SEAM = 90.0            # base: clear of the jog tower and the Pi
+Y_BASE_SEAM = 200.0
 BASE_LAP = 10.0
 
 BAND_HALF = 8.0
@@ -70,8 +85,10 @@ def base_screws():
     (under the platter, where it ties the plate to the base)."""
     e = 7.5
     pts = [(e, e), (W - e, e), (e, D - e), (W - e, D - e), (W / 2, e), (W / 2, D - e)]
-    for y in (Y_BASE_SEAM, Y_SEAM - 10.0, Y_SEAM + 10.0):
-        pts += [(e, y), (W - e, y)]
+    pts += [(e, Y_BASE_SEAM), (W - e, Y_BASE_SEAM)]
+    es = 5.5      # the top seam's wall bosses sit deeper in the wall: LOOP IN's flange is near
+    for y in (Y_SEAM - 10.0, Y_SEAM + 10.0):
+        pts += [(es, y), (W - es, y)]
     for x in (X_BASE_SEAM, X_SEAM - 10.0, X_SEAM + 10.0):
         pts += [(x, e), (x, D - e)]
     pts.append((X_BASE_SEAM, Y_BASE_SEAM))
@@ -90,7 +107,8 @@ SCR_AA = (154.08, 85.92)
 SCR_T = 7.0                   # glass top to the metal frame's back ⚠
 SCR_HOLES = (126.2, 65.65)    # M3 in the display's metal frame ⚠
 SCR_BACK = (100.0, 62.0, 13.0)    # adapter board + standoffs under it: x, y, depth ⚠
-SCR_CX, SCR_CY = W / 2, 362.0
+_d = LAYOUT["display"]         # the XDJ panel's active area; the official 7" is centred on it
+SCR_CX, SCR_CY = face(_d["x"] + _d["width"] / 2, _d["y"] + _d["height"] / 2)
 SCR_FIT = 0.3
 SCR_SINK = 0.0
 SCR_Z_TOP = H - SCR_SINK
@@ -111,7 +129,8 @@ PI_STANDOFF = 6.0
 PI_COOLER_H = 14.0            # ⚠ VERIFY
 PI_PORT_H = 16.0
 PI_PORT_OVER = 2.5
-PI_X0 = 240.0                 # right of the base's x lap
+PI_X0 = 180.0                 # under the screen, ports out the back; clear of the base laps
+# (layout.toml's [pi] bolts it to the panel PCB under the jog; this printed deck puts it on the base)
 PI_Y0 = D - WALL - PI_PORT_OVER - 0.3 - PI[1]
 PI_Z0 = BASE_T + PI_STANDOFF
 
@@ -122,12 +141,12 @@ def pi_holes():
 
 # Back wall: panel USB-C (power, to the Pi) and exhaust vents.
 USBC_X, USBC_Z = 60.0, 18.0
-VENT_XS = [130.0 + i * 6.0 for i in range(12)]
+VENT_XS = [242.0 + i * 6.0 for i in range(8)]
 
 # ── Jog: 200 mm, same reference shape as deck5's, same bearings and sensor ──
-JOG_D = 200.0
-JOG_CX, JOG_CY = W / 2, 165.0
-JOG_H = 17.71                 # the reference platter at JOG_D (jog.py checks it)
+JOG_D = float(_CTRL["jog"]["platter_mm"])            # 206 ⚠ VERIFY
+JOG_CX, JOG_CY = face(_CTRL["jog"]["x"], _CTRL["jog"]["y"])
+JOG_H = 18.25                 # the reference platter at JOG_D (jog.py checks it)
 JOG_GAP = 1.0
 JOG_Z0 = H + JOG_GAP
 SHAFT_D = 8.0
@@ -148,7 +167,7 @@ GRUB_FLAT = 0.5
 
 # ── Pitch fader, right of the jog ⚠ VERIFY (Alps RS60 / Bourns PTA) ─────────
 FADER_TRAVEL = 100.0
-FADER_X, FADER_CY = 300.0, JOG_CY
+FADER_X, FADER_CY = face(_CTRL["fader"]["x"], _CTRL["fader"]["y"])
 FADER_BODY = (9.0, 128.0, 8.0)
 FADER_PITCH = 120.0
 FADER_SLOT_W = 3.0
@@ -159,28 +178,43 @@ FADER_BOSS_Y = FADER_BODY[1] / 2 + 6.0
 FADER_BOSS_H = 5.7
 FADER_Z_TOP = Z_UNDER - FADER_BRACKET_T
 
-# ── Controls (CDJ-3000 layout) ───────────────────────────────────────────────
-PLAY = (36.0, 40.0)
-CUE = (36.0, 82.0)
-BIG_CAP_D = 26.0
+# ── Controls: layout.toml, with the moves below ──────────────────────────────
+# Moved, and why (face coordinates, y down, as in layout.toml):
+OVERRIDES = {
+    # The official 7" glass is 193 mm wide (the XDJ's own panel is narrower):
+    "time_mode": (28.0, 50.0), "auto_cue": (28.0, 65.0), "shortcut": (28.0, 95.0),   # were x 60, under the glass
+    "back": (272.0, 22.0), "tag_track": (290.0, 22.0),    # were (250.4 / 264.6, 42.6): the glass and the frame's ear
+    "usb_stop": (282.0, 112.0),                           # was (235, 95), under the glass
+    # SYNC / MASTER were guesses at (110 / 135, 143): under the 206 mm platter's rim.
+    "sync": (258.0, 143.0), "master": (282.0, 143.0),
+    # MASTER TEMPO touched the fader bracket's ear; TEMPO RANGE (a guess) moves with it.
+    "master_tempo": (282.8, 214.0), "tempo_range": (282.8, 198.0),
+    # The search pairs (guesses) were 18 mm apart; their caps' flanges need 18.5.
+    "track_search_fwd": (41.0, 190.0), "search_fwd": (41.0, 205.0),
+}
+ENC_FACE = (280.0, 70.0)      # browse encoder, was (258.3, 79.4): its body cleared the frame's ear
+NOT_BUILT = {"jog_touch"}     # the top-plate switch lives in the jog (not designed yet)
+
+
+def _cap(c):
+    v = c["cap_mm"]
+    return (float(v), float(v)) if not isinstance(v, list) else (float(v[0]), float(v[1]))
+
+
+PLAY = face(_CTRL["play"]["x"], _CTRL["play"]["y"])
+CUE = face(_CTRL["cue"]["x"], _CTRL["cue"]["y"])
+BIG_CAP_D = 30.0              # layout.toml says 35: a 35 mm PLAY would cut into the edge fillet
 CAP_CLR = 0.5
-KEY = (20.0, 12.0)            # one key size for every key (caps.key_cap)
+KEY = (14.0, 10.0)            # caps.key_cap's default; each key below has its own size
 GUIDE_L = 8.0
 GUIDE_WALL = 2.0
 
-_ROW = [JOG_CX + (i - 3.5) * 30.0 for i in range(8)]   # 59.5 … 269.5
-KEYS = (
-    # Above the screen, as on the unit and the app's top layout.
-    [(x, 432.0, n) for x, n in zip(_ROW, ("SOURCE", "BROWSE", "TAG LIST", "PLAYLIST",
-                                          "SEARCH", "MENU", "BACK", "TAG TRACK"))]
-    # Hot cues A-H between the jog and the screen.
-    + [(x, 290.0, f"HOT CUE {c}") for x, c in zip(_ROW, "ABCDEFGH")]
-    # Left of the jog, over CUE: loops and track search.
-    + [(36.0, y, n) for y, n in ((130.0, "LOOP IN"), (152.0, "LOOP OUT"), (174.0, "RELOOP / EXIT"),
-                                 (205.0, "TRACK |<<"), (227.0, "TRACK >>|"))]
-    # Right of the jog: tempo keys under the fader, SYNC / MASTER over it.
-    + [(300.0, y, n) for y, n in ((50.0, "MASTER TEMPO"), (72.0, "TEMPO RANGE"),
-                                  (272.0, "MASTER"), (296.0, "BEAT SYNC"))]
-)
-ENC = (300.0, 362.0)          # browse encoder (EC11, push), right of the screen
+KEYS = []                     # (x, y, name, (w, h)) in deck coordinates
+for _c in LAYOUT["control"]:
+    if _c["kind"] != "button" or _c["name"] in ("play", "cue") or _c["name"] in NOT_BUILT:
+        continue
+    _x, _y = OVERRIDES.get(_c["name"], (_c["x"], _c["y"]))
+    KEYS.append((*face(_x, _y), _c["name"], _cap(_c)))
+
+ENC = face(*ENC_FACE)
 ENC_HOLE = 7.2

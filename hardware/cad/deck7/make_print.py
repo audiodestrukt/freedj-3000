@@ -17,7 +17,7 @@ import numpy as np
 import trimesh
 from build123d import *
 from params import *
-import top_shell, base, jog, caps
+import top_shell, base, jog, caps, keycap
 
 PRINT = os.path.join(HERE, "print")
 FLIP = Rot(180, 0, 0)   # top face down
@@ -29,11 +29,11 @@ def parts():
     return out | {
         "jog_platter": (jog.platter(), True, 1), "jog_tower": (jog.tower(), False, 1),
         "jog_shaft": (jog.shaft(), True, 1),
-        "cap_play_cue": (caps.big_cap(), True, 2), "cap_key": (caps.key_cap(), True, len(KEYS)),
+        "cap_play_cue": (caps.big_cap(), True, 2),
         "knob_fader": (caps.fader_knob(), True, 1), "knob_encoder": (caps.enc_knob(), True, 1),
         "screen_frame": (caps.screen_frame(), False, 1),
         "fader_bracket": (caps.fader_bracket(), True, 1),
-    }
+    } | {keycap.stem(sz): (keycap.key_cap(sz), True, n) for sz, n in keycap.sizes(KEYS).items()}
 
 
 def allowed_openings():
@@ -44,7 +44,7 @@ def allowed_openings():
            ("circle", JOG_CX, JOG_CY, SHAFT_D + 1.0 + g),
            ("circle", *ENC, ENC_HOLE + g)]
     out += [("circle", x, y, BIG_CAP_D + CAP_CLR + g) for x, y in (PLAY, CUE)]
-    out += [("rect", x, y, KEY[0] + CAP_CLR + g, KEY[1] + CAP_CLR + g) for x, y, _ in KEYS]
+    out += [("rect", x, y, w + CAP_CLR + g, h + CAP_CLR + g) for x, y, _, (w, h) in KEYS]
     return out
 
 
