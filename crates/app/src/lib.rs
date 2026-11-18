@@ -2309,6 +2309,12 @@ impl DeckApp {
                         None => log::warn!("script: no row {name:?}"),
                     }
                 }
+                A::Source(label) => {
+                    match self.browser.sources().iter().position(|r| r.label.starts_with(label.as_str())) {
+                        Some(i) if self.browser.open_source(i) => { self.screen_mode = ScreenMode::Browse; }
+                        _ => log::warn!("script: no source {label:?}"),
+                    }
+                }
                 A::Select(i) => self.browser.selected = i.min(self.browser.entries().len().saturating_sub(1)),
                 A::Category(i) => self.apply(Event::Ui(UiEvent::BrowseCategory(i))),
                 A::Search(text) => {

@@ -37,3 +37,5 @@ Choices worth knowing:
   this there or every stick mounts twice.
 - **Dry run** without touching the system:
   `OPENDECK_USB_DRYRUN=1 OPENDECK_USB_LABEL='CDJ 1' ./opendeck-usb-mount add sdz1`.
+
+Testing a pulled stick (software pulls on the Pi, the scripted mid-load test, what must happen): [docs/testing/usb-stick-pull.md](../../../docs/testing/usb-stick-pull.md).

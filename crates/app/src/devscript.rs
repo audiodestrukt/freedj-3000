@@ -14,6 +14,7 @@
 //! | `shiftsync` / `snapgrid` / `gridreset` | the GRID ADJUST actions |
 //! | `screen=browse` (`taglist`, `menu`, `source`, `history`, `perform`, `perform-stems`, `playback`) | open that screen (`perform-stems`: PERFORM with the STEMS pads) |
 //! | `stems=<drums>,<vocal>,<harmonics>` | set the stem levels (0..1) |
+//! | `source=<label>` | SOURCE: open the source whose label starts with it (`USB: CDJ2`, `USB`) and show BROWSE |
 //! | `open=<row name>` | BROWSE: highlight the row with that name (or the first starting with it) and enter it |
 //! | `select=<n>` | BROWSE: highlight row n |
 //! | `category=<n>` | BROWSE on rekordbox: open category n (0 = ARTIST) |
@@ -43,6 +44,8 @@ pub enum Action {
     GridReset,
     Screen(String),
     Open(String),
+    /// SOURCE: open the source row whose label starts with this.
+    Source(String),
     Select(usize),
     Category(usize),
     Search(String),
@@ -81,6 +84,7 @@ pub fn parse(src: &str) -> Result<Vec<(f64, Action)>, String> {
             "deckview" => Action::DeckView,
             _ if act.starts_with("screen=") => Action::Screen(act[7..].to_string()),
             _ if act.starts_with("open=") => Action::Open(act[5..].to_string()),
+            _ if act.starts_with("source=") => Action::Source(act[7..].to_string()),
             _ if act.starts_with("search=") => Action::Search(act[7..].to_string()),
             _ if act.starts_with("select=") => Action::Select(act[7..].parse().map_err(|_| format!("{entry:?}: bad row"))?),
             _ if act.starts_with("press=") => {
@@ -186,6 +190,14 @@ mod tests {
         ]);
         assert!(parse("1:select=x").is_err());
         assert!(parse("1:category=").is_err());
+    }
+
+    /// `source=` opens a SOURCE row by its label (a stick: `USB: CDJ2`); the
+    /// label keeps its spaces.  docs/testing/usb-stick-pull.md drives it.
+    #[test]
+    fn parses_source() {
+        let v: Vec<Action> = parse("3:source=USB: CDJ2; 3.5:open=Contents").unwrap().into_iter().map(|(_, a)| a).collect();
+        assert_eq!(v, vec![Action::Source("USB: CDJ2".into()), Action::Open("Contents".into())]);
     }
 
     #[test]
