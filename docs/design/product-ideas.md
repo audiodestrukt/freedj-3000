@@ -104,3 +104,42 @@ and may dip during a split.  Pick a bank that does 5 V / 5 A PD, or lower
 the overclock and keep splits off.  Measure on the deck before trusting
 the table: `vcgencmd pmic_read_adc` gives the board's rails, a USB-C
 meter the whole draw.
+
+## 5. Elektron-style encoders beside the screen (2026-11-18)
+
+Rotary encoders left and right of the screen, as on Elektron boxes, whose
+job follows the page: EQ on the playback screen, browsing in BROWSE, stem
+levels in STEMS, loop and beat-jump sizes in the loop panel.
+
+Proposal for the 5" deck (`hardware/cad/deck5/`): three push-encoders
+(EC11, as the browse encoder already is) each side of the panel, about
+22 mm apart, six in all.  The screen draws each knob's label on its edge,
+beside the knob, and the label changes with the page; a push is the knob's
+click (reset an EQ band, LOAD, mute a stem).
+
+| Page | Left, top to bottom | Right, top to bottom |
+|---|---|---|
+| Playback | EQ HIGH, MID, LOW | FILTER, GAIN, BROWSE (push: load) |
+| BROWSE | scroll (push: load), category | text size / preview |
+| STEMS | DRUMS, VOCAL, REST levels (push: mute) | |
+| Loops | loop length, beat jump size | move loop |
+
+What exists: `controllers.toml` maps encoders to deck actions over MIDI and
+I2C (`docs/hardware/surfaces/`); the panel board routes every control
+through an RP2350 hub (`docs/design/control-board.md`); OUTPUT GAIN and the
+stem levels are already deck settings a knob can drive.
+
+What it would take:
+- **EQ and filter**: none in the deck's engine yet.  A 3-band isolator EQ
+  and a one-knob filter (low-pass left of centre, high-pass right, as on a
+  DJ mixer) in the output stage after the key-lock stretcher; cheap on a Pi
+  beside the stretcher.
+- **Page-aware knobs**: a knob is a slot; the current screen decides its
+  action and draws its label.  `controllers.toml` gains slots
+  (`knob.left.1`) instead of fixed actions.
+- The faceplate and panel board with six encoders, and the screen layouts
+  with a label column each side (the top-row key layout leaves the sides
+  free).
+
+Pairs with idea 2: a bank switch plus these knobs is most of an MPC-style
+surface.
