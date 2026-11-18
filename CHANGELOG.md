@@ -20,6 +20,13 @@ All notable changes to this project will be documented in this file.
   the SDL renderer's only): the deck fills the display with no window
   frame, scaled to fit.
 
+### Fixed
+- Linux: OpenDeck starts without its sound interface (a USB card not
+  plugged in, or dropped out in a power dip) instead of exiting: silent,
+  keeping time, and playing to the interface within 2 s of it appearing.
+  On the Pi appliance the deck used to restart until systemd gave up,
+  leaving the console and a flashing pointer.
+
 ## [0.3.31] — 2026-11-17
 
 ### Added

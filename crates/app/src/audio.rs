@@ -323,29 +323,38 @@ impl AudioHandle {
     /// through the same [`OutputFill`] as the device callback.
     #[cfg(test)]
     pub fn open_test(samples: Vec<f32>, sr: u32) -> Result<Self> {
-        let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), None)?;
+        let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), Output::Test)?;
         h.set_playing(false);
         Ok(h)
     }
 
     fn open_inner(initial: Option<(Vec<f32>, u32, usize)>, tags: TrackTags) -> Result<Self> {
         // ── 2. Open cpal device ────────────────────────────────────────────────
-        let host   = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .context("no output audio device found")?;
-        let supported = device
-            .default_output_config()
-            .context("failed to get default output config")?;
-        Self::start(initial, tags, Some((device, supported)))
+        match default_device() {
+            Ok(out) => Self::start(initial, tags, Output::Device(out.0, out.1)),
+            // A deck that boots without its sound interface (a USB card not
+            // plugged in, or dropped in a supply dip) still comes up: silent,
+            // and on the interface as soon as it appears.  Linux only (the Pi
+            // appliance); elsewhere a missing device is still an error.
+            #[cfg(target_os = "linux")]
+            Err(e) => {
+                log::warn!("no audio output ({e:#}): starting silent, waiting for a device");
+                Self::start(initial, tags, Output::Waiting)
+            }
+            #[cfg(not(target_os = "linux"))]
+            Err(e) => Err(e),
+        }
     }
 
-    /// Everything after the device is chosen; `None` = the tests' stand-in.
-    fn start(initial: Option<(Vec<f32>, u32, usize)>, tags: TrackTags,
-             output: Option<(cpal::Device, cpal::SupportedStreamConfig)>) -> Result<Self> {
+    /// Everything after the device is chosen.
+    fn start(initial: Option<(Vec<f32>, u32, usize)>, tags: TrackTags, output: Output) -> Result<Self> {
         let (device_sr, device_ch) = match &output {
-            Some((_, c)) => (c.sample_rate().0, c.channels() as usize),
-            None => (48_000, 2),
+            Output::Device(_, c) => (c.sample_rate().0, c.channels() as usize),
+            Output::Test => (48_000, 2),
+            // The rate a CD-sourced library plays at; a device that turns up
+            // later is opened at this rate (ALSA's plug converts if it must).
+            #[cfg(target_os = "linux")]
+            Output::Waiting => (44_100, 2),
         };
 
         // ── 1. Initial track, or an empty deck.  Empty takes the device rate, in stereo
@@ -466,7 +475,7 @@ impl AudioHandle {
             scrub_live: Arc::clone(&scrub.live),
         };
         let stream = match output {
-            None => {
+            Output::Test => {
                 // The tests' device: 10 ms of output every 10 ms.
                 let sd = Arc::clone(&shutdown);
                 let mut fill = OutputFill::new(&parts);
@@ -483,7 +492,38 @@ impl AudioHandle {
                 }).context("failed to spawn audio-test-out thread")?;
                 StreamOwner::Thread(Some(t))
             }
-            Some((device, _)) => Self::open_device(device, parts, &shutdown)?,
+            Output::Device(device, _) => Self::open_device(device, parts, &shutdown)?,
+            #[cfg(target_os = "linux")]
+            Output::Waiting => {
+                // No device yet: keep time at real time, silently (the deck
+                // plays, its playhead moves), and look for the default device
+                // every 2 s; once it opens, it is supervised like any other.
+                let sd = Arc::clone(&shutdown);
+                let t = thread::Builder::new().name("audio-dev".into()).spawn(move || {
+                    let mut fill = OutputFill::new(&parts);
+                    let mut buf = vec![0f32; device_sr as usize / 100 * device_ch];
+                    let t0 = std::time::Instant::now();
+                    let mut n = 0u32;
+                    loop {
+                        if sd.load(Ordering::Relaxed) { return; }
+                        if n % 200 == 0 && n > 0 {
+                            if let Some((dev, st)) = default_device().ok()
+                                .and_then(|(d, _)| build_stream(&d, &parts).ok().map(|st| (d, st))) {
+                                log::info!("audio output appeared ({}): playing to it",
+                                           dev.name().unwrap_or_else(|_| "?".into()));
+                                drop(fill);
+                                supervise(dev, parts, st, &sd);
+                                return;
+                            }
+                        }
+                        fill.fill(&mut buf);
+                        n += 1;
+                        let due = t0 + Duration::from_millis(10) * n;
+                        if let Some(w) = due.checked_duration_since(std::time::Instant::now()) { thread::sleep(w); }
+                    }
+                }).context("failed to spawn audio-dev thread")?;
+                StreamOwner::Thread(Some(t))
+            }
         };
 
         log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
@@ -499,30 +539,11 @@ impl AudioHandle {
             let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
             let sd = Arc::clone(&shutdown);
             let supervisor = thread::Builder::new().name("audio-dev".into()).spawn(move || {
-                let mut stream = match build_stream(&device, &parts) {
+                let stream = match build_stream(&device, &parts) {
                     Ok(st) => { let _ = tx.send(Ok(())); st }
                     Err(e) => { let _ = tx.send(Err(e)); return; }
                 };
-                while !sd.load(Ordering::Relaxed) {
-                    thread::sleep(Duration::from_millis(100));
-                    if !parts.failed.load(Ordering::Relaxed) { continue; }
-                    log::warn!("audio stream failed — rebuilding the device stream");
-                    drop(stream);
-                    let mut wait = Duration::from_millis(100);
-                    stream = loop {
-                        match build_stream(&device, &parts) {
-                            Ok(st) => break st,
-                            Err(e) => {
-                                log::warn!("audio stream rebuild failed ({e:#}); retrying in {} ms", wait.as_millis());
-                                thread::sleep(wait);
-                                wait = (wait * 2).min(Duration::from_secs(2));
-                                if sd.load(Ordering::Relaxed) { return; }
-                            }
-                        }
-                    };
-                    parts.failed.store(false, Ordering::Relaxed);
-                    log::info!("audio stream rebuilt");
-                }
+                supervise(device, parts, stream, &sd);
             }).context("failed to spawn audio-dev thread")?;
             rx.recv().context("audio-dev thread died")??;
             StreamOwner::Thread(Some(supervisor))
@@ -593,6 +614,56 @@ enum StreamOwner {
     Thread(Option<thread::JoinHandle<()>>),
     #[allow(dead_code)]
     Inline(cpal::Stream),
+}
+
+/// Where a deck's output goes.
+enum Output {
+    /// The system's output device, at its default config.
+    Device(cpal::Device, cpal::SupportedStreamConfig),
+    /// The tests' stand-in: pulls the output at real time, 48 kHz stereo.
+    #[allow(dead_code)]
+    Test,
+    /// No device at start: silent at real time until one appears (Linux).
+    #[cfg(target_os = "linux")]
+    Waiting,
+}
+
+/// The default output device and its default config.
+fn default_device() -> Result<(cpal::Device, cpal::SupportedStreamConfig)> {
+    let device = cpal::default_host()
+        .default_output_device()
+        .context("no output audio device found")?;
+    let supported = device
+        .default_output_config()
+        .context("failed to get default output config")?;
+    Ok((device, supported))
+}
+
+/// Keep a device stream alive: when the callback reports a failure (an
+/// xrun storm, a USB card pulled and put back), rebuild it, backing off to
+/// one try every 2 s.  Returns at shutdown.
+#[cfg(target_os = "linux")]
+fn supervise(device: cpal::Device, parts: StreamParts, mut stream: cpal::Stream, sd: &AtomicBool) {
+    while !sd.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(100));
+        if !parts.failed.load(Ordering::Relaxed) { continue; }
+        log::warn!("audio stream failed — rebuilding the device stream");
+        drop(stream);
+        let mut wait = Duration::from_millis(100);
+        stream = loop {
+            match build_stream(&device, &parts) {
+                Ok(st) => break st,
+                Err(e) => {
+                    log::warn!("audio stream rebuild failed ({e:#}); retrying in {} ms", wait.as_millis());
+                    thread::sleep(wait);
+                    wait = (wait * 2).min(Duration::from_secs(2));
+                    if sd.load(Ordering::Relaxed) { return; }
+                }
+            }
+        };
+        parts.failed.store(false, Ordering::Relaxed);
+        log::info!("audio stream rebuilt");
+    }
 }
 
 /// The output callback's work, shared by the device stream and the tests'
@@ -1610,5 +1681,31 @@ mod output_gain_tests {
         set_output_gain_db(6.0);
         assert_eq!(output_gain(), 1.0);
         set_output_gain_db(0.0);
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod no_device_tests {
+    use super::*;
+
+    /// A deck that boots without its sound interface (the Pi appliance with
+    /// the USB card unplugged) still runs: silent, keeping real time, so the
+    /// screen comes up and a track plays on; before, the app exited and the
+    /// service restarted it until systemd gave up.
+    #[test]
+    fn starts_silent_without_a_device_and_keeps_time() {
+        let sr = 44_100;
+        let samples = vec![0.1f32; sr as usize * 2 * 4];   // 4 s stereo
+        let h = AudioHandle::start(Some((samples, sr, 2)), TrackTags::default(), Output::Waiting).unwrap();
+        h.set_playing(true);
+        std::thread::sleep(Duration::from_millis(300));
+        let p1 = h.position.load(Ordering::Relaxed);
+        std::thread::sleep(Duration::from_millis(500));
+        let p2 = h.position.load(Ordering::Relaxed);
+        assert!(p1 > 0, "the playhead moves with no device");
+        // Real time, not as fast as the CPU can go: 0.5 s is 22 050 frames
+        // (44 100 samples); allow the ring's slack either way.
+        let d = p2 - p1;
+        assert!(d > 10_000 && d < 60_000, "advanced {d} in 0.5 s");
     }
 }
