@@ -48,6 +48,9 @@ What it sets up:
   boot. `--screen DSI-1` keeps it on that one (the official 7" panel) by
   switching the others off on the kernel command line; leave it out if the
   others are only plugged in now and then.
+- **Music on the deck:** `~/Music` of the user it runs as is the deck's
+  own library (SOURCE's folder row, and what other players can load from it
+  over LINK); `OPENDECK_MUSIC=/path` in the settings picks another folder.
 - **Settings:** `/etc/default/opendeck` (`KEY=value`; the binary's path,
   `OPENDECK_FULLSCREEN=1`, and any other `OPENDECK_*` setting). Then
   `sudo systemctl restart opendeck`.

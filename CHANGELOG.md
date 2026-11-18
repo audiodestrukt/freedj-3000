@@ -27,6 +27,10 @@ All notable changes to this project will be documented in this file.
   frame, scaled to fit.
 
 ### Fixed
+- Linux: started with no track, the deck's own music folder is `~/Music`
+  (or `OPENDECK_MUSIC`), for BROWSE and for serving over LINK.  A Pi that
+  boots straight into the deck browsed the whole filesystem (`/`, 0 songs)
+  and served nothing.
 - BROWSE coming back inside a rekordbox stick's folders now comes back
   under its FOLDER category, with the category column (ARTIST, TRACK …)
   beside it.  It came back as bare folders: plain file rows (no PREVIEW

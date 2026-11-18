@@ -4839,7 +4839,19 @@ pub fn desktop_main() -> Result<()> {
 
     // Dev: OPENDECK_AUTOPLAY=0 boots paused at the cue, as the iOS app does.
     let autoplay = std::env::var("OPENDECK_AUTOPLAY").map(|v| v != "0").unwrap_or(true);
-    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root: None, autoplay, controllers })
+    let browse_root = music_dir(path.is_none());
+    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root, autoplay, controllers })
+}
+
+/// The deck's own music folder (BROWSE's local source, and what it serves
+/// over LINK): `OPENDECK_MUSIC`, else, when no track was given to start
+/// with, `~/Music` if it exists.  With a track and neither, its folder.
+/// Without this a Pi that boots straight into the deck browsed the whole
+/// filesystem ("/") and served nothing.
+fn music_dir(no_track: bool) -> Option<PathBuf> {
+    if let Some(d) = std::env::var_os("OPENDECK_MUSIC").map(PathBuf::from).filter(|d| d.is_dir()) { return Some(d); }
+    if !no_track { return None; }
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Music")).filter(|d| d.is_dir())
 }
 
 /// Start a deck and run the UI event loop.  Platform-agnostic: every entry point
