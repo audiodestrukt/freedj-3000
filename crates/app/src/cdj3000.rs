@@ -831,10 +831,11 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
                            Stroke::new(1.0_f32, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
         }
     }
-    else if snap.beat2_bpm > 0.0 && !snap.master {
-        // No waveform (the other player's data has not come, or this deck
-        // has no track yet): its grid from its live beats, as the phase
-        // meter has it, spaced on this deck's tempo when there is one.
+    else if snap.beat2_bpm > 0.0 && !snap.master && snap.master_player != 0 {
+        // No waveform yet (the master's data has not come, or this deck has
+        // no track): a grid from the live beats, as the phase meter has it,
+        // spaced on this deck's tempo when there is one.  With no master on
+        // the network the view stays empty, as on the unit.
         let spacing = snap.beat_grid.map_or(beat_px, |g| beat_px * (g.bpm as f32 * snap.fader_speed) / snap.beat2_bpm);
         let bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
         for i in -9..=9i32 {
