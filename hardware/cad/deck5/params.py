@@ -129,6 +129,10 @@ BRG_LO_Z = BASE_T + TOWER[2] - BRG[2]     # lower bearing bottom
 SENSOR_SLOT = (25.0, 4.5)     # AS5600 board slot under the shaft: width, height
 SHAFT_Z0 = BASE_T + SENSOR_SLOT[1] + 0.5  # shaft bottom (diametric magnet in its end)
 SHAFT_Z1 = JOG_Z0 + JOG_H - 4.0 - 2.0     # top, 2 mm under the platter's top face
+MAGNET = (6.0, 2.5)           # AS5600 diametric magnet: diameter, thickness ⚠ VERIFY (kits ship 6 x 2.5)
+MAGNET_FIT = 0.2              # pocket clearance on the diameter (glued in)
+SHAFT_PRINT_D = 7.9           # printed test shaft: a hair under 8 so it slides into the 608s
+GRUB_FLAT = 0.5               # flat the platter's grub screw bears on (printed shaft only)
 
 # ── Pitch fader: 100 mm travel slide pot ⚠ VERIFY (Alps RS60 / Bourns PTA) ──
 FADER_TRAVEL = 100.0

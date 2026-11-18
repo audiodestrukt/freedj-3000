@@ -81,6 +81,7 @@ screen panel, where a seam reads as a design line, not a repair.
 | `base_front.stl`, `base_back.stl` | 1 each | Flat. Countersinks are on the bed side (cones, no supports). |
 | `jog_platter.stl` | 1 | Top face down (the flat top on the bed). 140 mm. |
 | `jog_tower.stl` | 1 | Bearing seat up; the sensor slot bridges 25 mm. |
+| `jog_shaft.stl` | 1 | Optional, to test before the steel rod is cut: 45.4 mm, the magnet pocket (6.2 × 2.7) up, no supports. 7.9 mm across so it slides into the 608s; a flat at the platter end for the grub screw. PETG or PLA at 100 % infill. |
 | `cap_play_cue.stl` | 2 | One green, one orange (or paint). |
 | `cap_key.stl` | 6 | |
 | `knob_fader.stl`, `knob_encoder.stl` | 1 each | |
@@ -98,7 +99,7 @@ PLA or PETG, 0.2 mm layers, 4 walls; 15–20 % infill is plenty.
 | 100 mm travel slide pot (Alps RS60 / Bourns PTA, linear B) | 1 | ⚠ mounting-hole pitch |
 | AS5600 magnetic encoder board (23 × 23) + 6 × 2.5 mm diametric magnet | 1 | |
 | 608-2RS bearings | 2 | |
-| 8 mm rod, 50 mm (or an M8 bolt's plain shank) + 2 shaft collars | 1 | |
+| 8 mm rod, 45.4 mm (or an M8 bolt's plain shank) + 2 shaft collars | 1 | cut to 45.4 mm: magnet end 0.5 mm over the sensor slot, top 2 mm under the platter face |
 | EC11 encoder, 6 mm D-shaft | 1 | |
 | 12 mm tact switches | 8 | Their board is the next step (below) |
 | M3 heat-set inserts (4.6 × 5.7) | 21 | 11 base bosses, 4 screen-frame bosses, 2 fader bosses, 4 tower |

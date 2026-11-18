@@ -1,6 +1,6 @@
 """jog.py — the jog platter and the tower that carries its lower bearing.
 
-    python3 hardware/cad/deck5/jog.py  ->  build/jog_platter.stl, build/jog_tower.stl
+    python3 hardware/cad/deck5/jog.py  ->  build/jog_platter.stl, build/jog_tower.stl, build/jog_shaft.stl
 
 The platter rides on an 8 mm shaft held by two 608 bearings: one in the
 boss under the top plate, one in the tower screwed to the base.  A
@@ -104,6 +104,23 @@ def platter():
     return trimesh.Trimesh(o.vert_properties[:, :3], o.tri_verts, process=False)
 
 
+# Printed test shaft (local frame: magnet end at z = 0, axis on z)
+#
+# A stand-in for the 8 mm steel rod so the platter can be tried before the
+# rod is cut: same length (SHAFT_Z0..SHAFT_Z1), the magnet pocket in its
+# bottom end, and a flat where the platter's grub screw bears (a screw
+# only dents a round printed shaft).  Print standing, magnet pocket UP: a
+# round section for the bearings, and the pocket needs no bridge.
+def shaft():
+    L = SHAFT_Z1 - SHAFT_Z0
+    s = cyl(0, 0, 0, L, SHAFT_PRINT_D)
+    s = chamfer(s.edges().filter_by(GeomType.CIRCLE).group_by(Axis.Z)[-1], 0.5)
+    pocket = cyl(0, 0, -OVS, MAGNET[1] + 0.2, MAGNET[0] + MAGNET_FIT)
+    r = SHAFT_PRINT_D / 2
+    flat = box(r - GRUB_FLAT, r + 1, -r - 1, r + 1, JOG_Z0 + 1.0 - SHAFT_Z0, L + OVS)
+    return s.cut(pocket, flat)
+
+
 def place_mesh(m, frm: Location, onto: Location):
     """params.place() for a trimesh part."""
     import numpy as np
@@ -147,7 +164,7 @@ if __name__ == "__main__":
     import sys
     if "--ref" in sys.argv:
         make_ref()
-    for name, s in (("jog_platter", platter()), ("jog_tower", tower())):
+    for name, s in (("jog_platter", platter()), ("jog_tower", tower()), ("jog_shaft", shaft())):
         out = os.path.join(here, "build", f"{name}.stl")
         if isinstance(s, trimesh.Trimesh):
             s.export(out)
