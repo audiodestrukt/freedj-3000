@@ -1,0 +1,42 @@
+# OpenDeck as the Pi's only screen: cage (a one-app Wayland kiosk) on tty1,
+# started at boot without a login.  Installed by install.sh, which fills in
+# @USER@.  After cage's own "Starting Cage on boot with systemd" recipe.
+[Unit]
+Description=OpenDeck (fullscreen deck on the Pi's display)
+After=systemd-user-sessions.service getty@tty1.service
+# Not network-online: a deck with no network cable must still come up
+After=dbus.socket systemd-logind.service sound.target
+Wants=dbus.socket systemd-logind.service
+Conflicts=getty@tty1.service
+# The boot splash stays up until the deck takes the screen (as gdm does):
+# the service quits Plymouth itself, keeping its last frame, so there is no
+# black gap; the system's plymouth-quit is held off and only runs if the
+# deck fails.
+After=plymouth-start.service
+Conflicts=plymouth-quit.service
+OnFailure=plymouth-quit.service
+ConditionPathExists=/dev/tty0
+# A deck that cannot start (no display, a missing library) must not spin.
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+User=@USER@
+EnvironmentFile=/etc/default/opendeck
+ExecStartPre=-+/usr/bin/plymouth quit --retain-splash
+ExecStart=/usr/bin/cage -s -- ${OPENDECK_BIN}
+Restart=always
+RestartSec=2
+UtmpIdentifier=tty1
+UtmpMode=user
+TTYPath=/dev/tty1
+TTYReset=yes
+TTYVHangup=yes
+TTYVTDisallocate=yes
+StandardInput=tty-fail
+StandardOutput=journal
+StandardError=journal
+PAMName=opendeck
+
+[Install]
+WantedBy=multi-user.target

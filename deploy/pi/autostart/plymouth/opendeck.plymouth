@@ -1,0 +1,8 @@
+[Plymouth Theme]
+Name=OpenDeck
+Description=OpenDeck boot splash: the deck's platter on its own dark ground
+ModuleName=script
+
+[script]
+ImageDir=/usr/share/plymouth/themes/opendeck
+ScriptFile=/usr/share/plymouth/themes/opendeck/opendeck.script

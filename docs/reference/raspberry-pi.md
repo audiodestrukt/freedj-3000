@@ -239,10 +239,11 @@ model (the distilled Demucs).
 ## Boot into the deck
 
 `deploy/pi/autostart/install.sh` (run as your user) makes the Pi come up as
-a deck at power on: desktop autologin, screen blanking off, and OpenDeck
-started fullscreen at login (`OPENDECK_FULLSCREEN=1`), restarted if it
-crashes. Q quits to the desktop. Details and undo:
-`deploy/pi/autostart/README.md`.
+a deck at power on, with no desktop: a boot splash, then OpenDeck fullscreen
+in the cage kiosk compositor from a systemd service, restarted if it stops,
+and ALSA's default pointed at a USB interface (`--audio CODEC` for a
+Behringer UCA202). Raspberry Pi OS Lite is enough. Details, `--desktop`
+and undo: `deploy/pi/autostart/README.md`.
 
 ## Smaller boards
 

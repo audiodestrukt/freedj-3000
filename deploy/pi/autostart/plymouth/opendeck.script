@@ -1,0 +1,10 @@
+# The splash image centred, half the screen's height, on the image's own
+# background colour (21, 23, 27) so its square edge does not show.
+Window.SetBackgroundTopColor(21 / 255, 23 / 255, 27 / 255);
+Window.SetBackgroundBottomColor(21 / 255, 23 / 255, 27 / 255);
+logo = Image("splash.png");
+size = Math.Int(Window.GetHeight() * 0.5);
+logo = logo.Scale(size, size);
+sprite = Sprite(logo);
+sprite.SetX(Window.GetX() + (Window.GetWidth() - size) / 2);
+sprite.SetY(Window.GetY() + (Window.GetHeight() - size) / 2);
