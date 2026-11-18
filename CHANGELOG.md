@@ -27,6 +27,10 @@ All notable changes to this project will be documented in this file.
   frame, scaled to fit.
 
 ### Fixed
+- BROWSE coming back inside a rekordbox stick's folders now comes back
+  under its FOLDER category, with the category column (ARTIST, TRACK …)
+  beside it.  It came back as bare folders: plain file rows (no PREVIEW
+  waveforms) and no way back to the rekordbox lists but the `rekordbox` row.
 - Pulling the USB stick you are browsing takes the deck back to SOURCE, as
   a CDJ does, instead of leaving BROWSE on an empty local folder.  The
   stick's row goes, a loaded track keeps playing (it is in memory; a track

@@ -1929,7 +1929,16 @@ impl Browser {
         self.names.clear();
         self.selected = 0;
         self.rebuild();
-        for name in &pos.names {
+        // A rekordbox stick is browsed through its categories, folders under
+        // FOLDER.  A position saved inside its folders without that level
+        // (walked from the stick's own rows) comes back under FOLDER, so the
+        // category column is there to get to ARTIST, TRACK… again.
+        let on_rb_stick = pos.root != self.home
+            && self.entries.iter().any(|e| matches!(e.kind, EntryKind::Descend(Loc::RbRoot)));
+        let names: Vec<String> = if on_rb_stick && pos.names.first().is_some_and(|n| !n.is_empty()) {
+            ["".to_string(), "FOLDER".to_string()].into_iter().chain(pos.names.iter().cloned()).collect()
+        } else { pos.names.clone() };
+        for name in &names {
             if name.is_empty() {
                 // A level the browser opened on its own: a stick's categories.
                 if !matches!(self.stack.last(), Some(Loc::RbRoot)) { self.into_rb_root(); }
@@ -2470,6 +2479,29 @@ pub(crate) mod tests {
         std::env::set_var("OPENDECK_MEDIA_DIRS", empty.path());
         assert!(b.force_media_rescan());
         assert!(!b.take_browsed_gone(), "home was being browsed");
+    }
+
+    /// A position saved inside a rekordbox stick's folders without going
+    /// through its categories (walked from the stick's own rows) comes back
+    /// under FOLDER: the category column is there, ARTIST and TRACK one tap
+    /// away.  It used to come back as bare folders with no way to the
+    /// categories but the `rekordbox` row.
+    #[test]
+    fn a_folder_position_on_a_rekordbox_stick_comes_back_under_folder() {
+        let _env = MEDIA_ENV.lock().unwrap_or_else(|e| e.into_inner());
+        let home = crate::media::tests::tempfile_like::Dir::new("browser-rbfolder-home");
+        let (root, stick) = crate::media::tests::fake_media_root("browser-rbfolder-usb");
+        std::fs::create_dir_all(stick.join("Contents/Artist")).unwrap();
+        std::fs::write(stick.join("Contents/Artist/a.mp3"), b"").unwrap();
+        std::env::set_var("OPENDECK_MEDIA_DIRS", root.path());
+        let mut b = Browser::new(home.path(), crate::prodj::LinkState::new(1));
+        b.force_media_rescan();
+        let pos = BrowsePos { root: stick.clone(), names: vec!["Contents".into(), "Artist".into()], selected: "a.mp3".into() };
+        assert!(b.restore(&pos));
+        assert!(b.stack.iter().any(|l| matches!(l, Loc::RbRoot)), "through the categories");
+        assert_eq!(b.title(), "Artist");
+        assert_eq!(b.selected_entry().map(|e| e.name.as_str()), Some("a.mp3"));
+        assert!(b.rb_categories().is_some(), "the category column is there");
     }
 
     /// A stick inserted while browsing the home folder does not take the
