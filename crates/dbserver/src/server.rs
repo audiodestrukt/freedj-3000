@@ -1058,4 +1058,74 @@ mod tests {
             (0, 1_500,  "intro".to_string(), (2, None), 0x4c + 12),
         ]);
     }
+
+    /// The client reads the CDJ-3000's captured extended list back to the
+    /// cues it was made from (the default colours: hot cues green, the
+    /// loop orange; the memory cue none).
+    #[test]
+    fn client_parses_the_captured_extended_cue_list() {
+        let blob = unhex("54000000010001000000e8031c0d0000ffffffff000000000000000000000000ffffffffffffffffffffffffffffffffffffffff1a00000000000000f401000000000000000000000000040000000000ff00000054000000020001000000e80345180000ffffffff000000000000000000000000ffffffffffffffffffffffffffffffffffffffff1a000000000000009a02000000000000000000000000040000000000ff00000054000000030002000000e8039221000003290000000000000000000000000000ffffffffffffffffffffffffffffffffffffffff1a0000000000000047024d01000004000100000000000400000000ff8c0000004c000000000001000000e80314000000ffffffff000000000000000000000000ffffffffffffffffffffffffffffffffffffffff120000000000000000000000000000000000000000000000");
+        let got = crate::parse_ext_cue_list(&blob);
+        let mut want = captured_cues();
+        want.rotate_left(1);                       // hot cues first, as served
+        want[0].rgb = Some((0, 0xff, 0));
+        want[1].rgb = Some((0, 0xff, 0));
+        want[2].rgb = Some((0xff, 0x8c, 0));
+        assert_eq!(got, want);
+    }
+
+    /// Colours, comments and a hot loop survive our encoder and the
+    /// client's parser; a truncated blob ends the list without a panic.
+    #[test]
+    fn extended_cue_list_round_trips_through_the_client() {
+        let cues = vec![
+            Cue { hot: 1, ms: 10_000, rgb: Some((0xe6, 0x28, 0x28)), color_code: 0x2a, comment: "drop".into(), ..Default::default() },
+            Cue { hot: 3, ms: 20_000, loop_end_ms: Some(22_000), rgb: Some((0xff, 0x8c, 0)), ..Default::default() },
+            Cue { hot: 0, ms: 1_500, color_code: 2, comment: "intro".into(), ..Default::default() },
+            Cue { hot: 0, ms: 90_000, loop_end_ms: Some(94_000), ..Default::default() },
+        ];
+        let m = ext_cue_list(1, &cues).unwrap();
+        let Field::Blob(b) = &m.args[3] else { panic!() };
+        assert_eq!(crate::parse_ext_cue_list(b), cues);
+        assert_eq!(crate::parse_ext_cue_list(&b[..b.len() - 3]).len(), 3, "the cut entry is dropped");
+        assert!(crate::parse_ext_cue_list(&[]).is_empty());
+    }
+
+    /// The plain list (what a server without the extended one answers):
+    /// the ms pairs when sent, else the half-frames.
+    #[test]
+    fn plain_cue_list_round_trips_through_the_client() {
+        let m = cue_list(9, &captured_cues());
+        let mut want = captured_cues();
+        want.sort_by_key(|c| (c.hot != 0, c.hot));
+        assert_eq!(crate::parse_cue_list(&m.args), want, "from the ms pairs");
+        let got = crate::parse_cue_list(&m.args[..8]);
+        assert_eq!(got.len(), 4);
+        for (g, w) in got.iter().zip(&want) {
+            assert_eq!(g.hot, w.hot);
+            assert!(g.ms.abs_diff(w.ms) <= 7, "one half-frame (6.7 ms), floored: {} vs {}", g.ms, w.ms);
+            assert_eq!(g.loop_end_ms.is_some(), w.loop_end_ms.is_some());
+        }
+        assert!(crate::parse_cue_list(&empty_cue_list(1).args).is_empty());
+    }
+
+    /// Over a live session: a track with cues comes back through the
+    /// extended list; one without falls through "no data" to the empty
+    /// plain list.
+    #[test]
+    fn client_fetches_cues_from_a_live_server() {
+        let mut l = lib();
+        l.tracks[0].cues = vec![
+            Cue { hot: 0, ms: 25, ..Default::default() },
+            Cue { hot: 1, ms: 42_000, rgb: Some((0x30, 0x5a, 0xff)), color_code: 0x09, ..Default::default() },
+        ];
+        let srv = Server::start_on(l.shared(), Arc::new(|| 3), Ipv4Addr::LOCALHOST, 0, 0).unwrap();
+        let mut c = crate::Client::discover_at(Ipv4Addr::LOCALHOST, srv.query_port, 1).unwrap();
+        let got = c.cues(Slot::Collection, 1).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!((got[0].hot, got[0].ms, got[0].rgb), (1, 42_000, Some((0x30, 0x5a, 0xff))));
+        assert_eq!((got[1].hot, got[1].ms), (0, 25));
+        assert!(c.cues(Slot::Collection, 2).unwrap().is_empty(), "no cues: empty, and the session lives on");
+        assert!(c.cues(Slot::Collection, 1).is_ok());
+    }
 }

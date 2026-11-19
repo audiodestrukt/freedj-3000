@@ -23,6 +23,7 @@
 //! issue #44) reuses the same framing in the other direction.
 
 pub mod server;
+pub use server::Cue;
 
 use anyhow::{bail, Context, Result};
 use std::io::{BufReader, Read, Write};
@@ -548,6 +549,86 @@ impl Client {
         let ext_code = u32::from_be_bytes([0, ext[2], ext[1], ext[0]]);
         self.blob(kind::ANLZ_TAG, kind::ANLZ_TAG_BLOB, vec![d, Field::U32(id), Field::U32(tag_code), Field::U32(ext_code)])
     }
+
+    /// The track's hot and memory cues (and loops), with colours and
+    /// comments: the extended cue list (0x2b04 → 0x4e02), else the plain
+    /// list (0x2104 → 0x4702) when the server has no extended one ("no
+    /// data").  No cues: an empty list.  A LINK load from rekordbox gets its
+    /// cues only this way: there is no stick with ANLZ files to read.
+    pub fn cues(&mut self, slot: Slot, id: u32) -> Result<Vec<Cue>> {
+        let d = self.dmst(8, slot, TrackType::Rekordbox);
+        let ext = self.request(kind::CUES_EXT, vec![d, Field::U32(id), Field::U32(0)])?;
+        if ext.kind == kind::CUES_EXT_BLOB {
+            let cues = blob_arg(&ext.args).map(parse_ext_cue_list).unwrap_or_default();
+            if !cues.is_empty() { return Ok(cues); }
+        }
+        let d = self.dmst(8, slot, TrackType::Rekordbox);
+        let plain = self.request(kind::CUES, vec![d, Field::U32(id)])?;
+        if plain.kind != kind::CUES_BLOB { bail!("dbserver: 0x{:04x} answered with 0x{:04x}", kind::CUES, plain.kind); }
+        Ok(parse_cue_list(&plain.args))
+    }
+}
+
+fn blob_arg(args: &[Field]) -> Option<&[u8]> {
+    args.iter().find_map(|f| if let Field::Blob(b) = f { Some(&b[..]) } else { None })
+}
+
+fn le32(b: &[u8], o: usize) -> Option<u32> { b.get(o..o + 4).map(|x| u32::from_le_bytes([x[0], x[1], x[2], x[3]])) }
+fn le16(b: &[u8], o: usize) -> Option<u16> { b.get(o..o + 2).map(|x| u16::from_le_bytes([x[0], x[1]])) }
+
+/// Parse an extended cue list blob (`0x4e02`): variable-size entries, each
+/// its size (u32 LE at 0), hot cue number (0 = memory, at 4), kind (byte 6:
+/// 1 cue, 2 loop), start and loop end in ms (0x0c, 0x10), a memory cue's
+/// colour (0x22), the comment's byte length (u16 at 0x48) and UTF-16LE
+/// comment (0x4a, NUL-terminated), and after it a hot cue's colour code and
+/// RGB (0x4e + the comment's length).  Beat Link reads it the same way.
+/// A short or malformed entry ends the list.
+pub fn parse_ext_cue_list(blob: &[u8]) -> Vec<Cue> {
+    let mut out = Vec::new();
+    let mut off = 0;
+    while let Some(size) = le32(blob, off) {
+        let size = size as usize;
+        if size < 0x4a || off + size > blob.len() { break; }
+        let e = &blob[off..off + size];
+        let hot = e[4];
+        let ms = le32(e, 0x0c).unwrap_or(0);
+        let end = le32(e, 0x10).unwrap_or(u32::MAX);
+        let loop_end_ms = (e[6] == 2 && end != u32::MAX && end > ms).then_some(end);
+        let clen = le16(e, 0x48).unwrap_or(0) as usize;
+        let comment = e.get(0x4a..0x4a + clen).map(|c| {
+            let units: Vec<u16> = c.chunks_exact(2).map(|p| u16::from_le_bytes([p[0], p[1]])).take_while(|&u| u != 0).collect();
+            String::from_utf16_lossy(&units)
+        }).unwrap_or_default();
+        let (mut color_code, mut rgb) = (0u8, None);
+        if hot == 0 {
+            if e[0x22] != 0xff { color_code = e[0x22]; }
+        } else if let Some(c) = e.get(0x4e + clen..0x52 + clen) {
+            color_code = c[0];
+            if c[1..] != [0, 0, 0] { rgb = Some((c[1], c[2], c[3])); }
+        }
+        out.push(Cue { hot, ms, loop_end_ms, rgb, color_code, comment });
+        off += size;
+    }
+    out
+}
+
+/// Parse a plain cue list reply (`0x4702`) from its arguments: 36-byte
+/// entries in the blob at arg 3 (byte 0 loop flag, byte 2 hot cue number,
+/// start and loop end in half-frames, 1/150 s, at 12 and 16) and, when
+/// present, the same points again in ms as (start, loop end) pairs in the
+/// blob at arg 8 (a CDJ-3000 sends them; rekordbox may not).
+pub fn parse_cue_list(args: &[Field]) -> Vec<Cue> {
+    let Some(Field::Blob(entries)) = args.get(3) else { return Vec::new() };
+    let pairs = match args.get(8) { Some(Field::Blob(p)) => &p[..], _ => &[][..] };
+    let hf_ms = |hf: u32| (hf as u64 * 20 / 3) as u32;
+    entries.chunks_exact(36).enumerate().filter(|(_, e)| e[1] != 0).map(|(i, e)| {
+        let is_loop = e[0] != 0;
+        let (ms, end) = match (le32(pairs, i * 8), le32(pairs, i * 8 + 4)) {
+            (Some(ms), Some(end)) => (ms, end),
+            _ => (hf_ms(le32(e, 12).unwrap_or(0)), le32(e, 16).map(|h| if h == u32::MAX { h } else { hf_ms(h) }).unwrap_or(u32::MAX)),
+        };
+        Cue { hot: e[2], ms, loop_end_ms: (is_loop && end != u32::MAX && end > ms).then_some(end), ..Default::default() }
+    }).collect()
 }
 
 /// One beat from a dbserver beat-grid blob (`0x4602`).

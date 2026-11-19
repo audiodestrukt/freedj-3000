@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- A track loaded from rekordbox over LINK now brings its memory cues, hot
+  cues, hot loops, cue colours and comments.  Before, such a load got
+  rekordbox's beat grid and no cues at all: OpenDeck read cues only from a
+  stick's ANLZ files, and rekordbox has no stick.  It now asks rekordbox's
+  dbserver for the track's cue list (the extended list, else the plain one),
+  as a player does.  Loads from a USB stick or a player's stick were not
+  affected.  Tested against OpenDeck's own dbserver and the CDJ-3000's
+  captured cue list; not yet against a live rekordbox.
+
 ## [0.3.33] — 2026-11-18
 
 ### Added

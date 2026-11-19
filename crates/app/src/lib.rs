@@ -2227,6 +2227,23 @@ impl DeckApp {
         Self::anlz_to_grid(a, deck_sr, ch)
     }
 
+    /// A grid and cues from what a dbserver serves (rekordbox over LINK): its
+    /// beat grid and its cue list, as an ANLZ file would give them.  None
+    /// without a beat grid.
+    fn grid_from_db(beats: &[opendeck_dbserver::GridBeat], cues: &[opendeck_dbserver::Cue], deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
+        let rb = |c: &opendeck_dbserver::Cue| opendeck_rekordbox::RbCue {
+            time_ms: c.ms, is_loop: c.loop_end_ms.is_some(), loop_ms: c.loop_end_ms.unwrap_or(0),
+            hot_cue: (c.hot != 0).then_some(c.hot as u32), color_code: c.color_code, rgb: c.rgb, comment: c.comment.clone(),
+        };
+        let mut memory_cues: Vec<_> = cues.iter().filter(|c| c.hot == 0).map(rb).collect();
+        memory_cues.sort_by_key(|c| c.time_ms);
+        let a = opendeck_rekordbox::RbAnalysis {
+            beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
+            memory_cues, hot_cues: cues.iter().filter(|c| c.hot != 0).map(rb).collect(), preview: Vec::new(), phrases: Vec::new(),
+        };
+        Self::anlz_to_grid(a, deck_sr, ch)
+    }
+
     /// Same as `grid_from_anlz` but from ANLZ bytes read over the network.
     fn grid_from_anlz_bytes(bytes: &[u8], ext: Option<&[u8]>, deck_sr: u32, ch: u8) -> Option<AnlzLoad> {
         let mut a = opendeck_rekordbox::read_anlz_from(&mut std::io::Cursor::new(bytes.to_vec()))
@@ -2609,19 +2626,24 @@ impl DeckApp {
         let ports = self.link_ports;
         self.start_fetch(title.clone(), move |tx| {
             let t0 = Instant::now();
-            let (path, grid, meta) = match known {
-                Some((caller, meta)) => (caller.call(move |c, s| c.file_path(s, id))?, caller.call(move |c, s| c.beat_grid(s, id)), meta),
+            // rekordbox has no stick to read ANLZ files from: its cues come
+            // over dbserver (a player's come from its stick, below).
+            let (path, grid, meta, cues) = match known {
+                Some((caller, meta)) => (caller.call(move |c, s| c.file_path(s, id))?, caller.call(move |c, s| c.beat_grid(s, id)), meta,
+                                         if rekordbox { caller.call(move |c, s| c.cues(s, id)) } else { Ok(Vec::new()) }),
                 None => {
                     let mut db = Client::discover_at(ip, ports.query, device)?;
-                    (db.file_path(slot, id)?, db.beat_grid(slot, id), db.track_meta(slot, id).ok())
+                    (db.file_path(slot, id)?, db.beat_grid(slot, id), db.track_meta(slot, id).ok(),
+                     if rekordbox { db.cues(slot, id) } else { Ok(Vec::new()) })
                 }
             };
+            let cues = cues.unwrap_or_else(|e| { log::info!("LINK {ip} cues {id}: {e:#}"); Vec::new() });
             let path = path.ok_or_else(|| anyhow::anyhow!("LINK {ip}: no file path for track {id}"))?;
             let beats = match grid {
                 Ok(blob) => parse_beat_grid(&blob),
                 Err(e) => { log::info!("LINK {ip} beat grid {id}: {e:#}"); Vec::new() }
             };
-            log::info!("LINK {ip}: track {id} at {path:?}, {} grid beats ({:.0} ms)", beats.len(), t0.elapsed().as_secs_f64() * 1e3);
+            log::info!("LINK {ip}: track {id} at {path:?}, {} grid beats, {} cues ({:.0} ms)", beats.len(), cues.len(), t0.elapsed().as_secs_f64() * 1e3);
             let mut nfs = ports.nfs(ip, rekordbox)?;
             // A player exports its USB as "/C/" and its SD as "/B/"; rekordbox
             // exports "/".  Take the slot's export when listed, else the first.
@@ -2636,7 +2658,7 @@ impl DeckApp {
             // dbserver's beat grid is all there is.
             let grid = match (!rekordbox).then(|| player_anlz(&mut nfs, &exports, &utf16(want), ip, id)).flatten() {
                 Some((dat, ext)) => FetchedGrid::Anlz(dat, ext),
-                None => FetchedGrid::Beats(beats),
+                None => FetchedGrid::Beats(beats, cues),
             };
             // The download runs on its own thread while the decoder reads the
             // front of the file as it arrives: the deck is playable after the
@@ -4030,7 +4052,7 @@ struct Fetched { name: String, path: String, audio: AudioSrc, grid: FetchedGrid,
     meta: Option<opendeck_dbserver::TrackMeta> }
 /// `Anlz`: the `.DAT`, and the `.EXT` beside it when there is one (cue
 /// colours and comments).
-enum FetchedGrid { None, Anlz(Vec<u8>, Option<Vec<u8>>), Beats(Vec<opendeck_dbserver::GridBeat>) }
+enum FetchedGrid { None, Anlz(Vec<u8>, Option<Vec<u8>>), Beats(Vec<opendeck_dbserver::GridBeat>, Vec<opendeck_dbserver::Cue>) }
 
 /// Find a file a player's library names, over NFS.  The player's own export
 /// (`want`, "/C/" for its USB) goes first, then every other export it
@@ -4215,14 +4237,7 @@ impl Prep {
         let grid_cue = match f.grid {
             FetchedGrid::None => None,
             FetchedGrid::Anlz(bytes, ext) => DeckApp::grid_from_anlz_bytes(&bytes, ext.as_deref(), self.deck_sr, ch),
-            FetchedGrid::Beats(beats) if !beats.is_empty() => {
-                let a = opendeck_rekordbox::RbAnalysis {
-                    beats: beats.iter().map(|b| opendeck_rekordbox::RbBeat { time_ms: b.time_ms, bpm: b.bpm, beat_in_bar: b.beat_in_bar }).collect(),
-                    memory_cues: Vec::new(), hot_cues: Vec::new(), preview: Vec::new(), phrases: Vec::new(),
-                };
-                DeckApp::anlz_to_grid(a, self.deck_sr, ch)
-            }
-            FetchedGrid::Beats(_) => None,
+            FetchedGrid::Beats(beats, cues) => DeckApp::grid_from_db(&beats, &cues, self.deck_sr, ch),
         };
         self.stream(f.name, std::path::PathBuf::from(&f.path), dec, grid_cue, f.t0, tx, None)
     }
@@ -5345,6 +5360,81 @@ mod player_anlz_tests {
         // The export is read once per player: a second track's lookup uses it.
         assert!(export_cache().lock().unwrap().contains_key(&(std::net::Ipv4Addr::LOCALHOST, want.clone())));
         assert!(player_anlz(&mut nfs, &exports, &want, std::net::Ipv4Addr::LOCALHOST, 999_999).is_none(), "no such track");
+    }
+}
+
+/// A track loaded from rekordbox over LINK brings its cues: rekordbox has
+/// no stick to read ANLZ files from, so they come from its dbserver's cue
+/// list (before this, such a load got the beat grid and no cues at all).
+#[cfg(test)]
+mod rekordbox_link_cue_tests {
+    use super::deck_harness::*;
+    use super::*;
+    use opendeck_dbserver::server::{Library, Server, Track};
+    use opendeck_dbserver::Cue;
+
+    /// `secs` of 16-bit stereo silence-with-clicks as a WAV file.
+    fn wav(secs: f64) -> Vec<u8> {
+        let pcm: Vec<u8> = track(secs).iter().flat_map(|v| ((v * 32767.0) as i16).to_le_bytes()).collect();
+        let mut w = Vec::new();
+        w.extend(b"RIFF"); w.extend((36 + pcm.len() as u32).to_le_bytes()); w.extend(b"WAVEfmt ");
+        w.extend(16u32.to_le_bytes()); w.extend(1u16.to_le_bytes()); w.extend(2u16.to_le_bytes());
+        w.extend(SR.to_le_bytes()); w.extend((SR * 4).to_le_bytes()); w.extend(4u16.to_le_bytes()); w.extend(16u16.to_le_bytes());
+        w.extend(b"data"); w.extend((pcm.len() as u32).to_le_bytes()); w.extend(pcm);
+        w
+    }
+
+    /// rekordbox on loopback: its collection's track 5 (with `cues`) over
+    /// dbserver, the audio over NFS (export "/"); the deck LOADs it as it
+    /// would a track picked in rekordbox's LINK browse.
+    fn load_from_rekordbox(cues: Vec<Cue>) -> DeckApp {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Contents")).unwrap();
+        std::fs::write(dir.path().join("Contents/demo.wav"), wav(6.0)).unwrap();
+        let beats = (0..12).map(|i| ((i % 4 + 1) as u8, 120.0, 250 + i * 500)).collect();
+        let lib = Library { name: "rekordbox".into(), tracks: vec![Track {
+            id: 5, title: "Demo".into(), path: "/Contents/demo.wav".into(), beats, cues, ..Default::default()
+        }], ..Default::default() };
+        let db = Server::start_on(lib.shared(), Arc::new(|| 2), std::net::Ipv4Addr::LOCALHOST, 0, 0).unwrap();
+        let nfs = opendeck_nfs::server::NfsServer::start(opendeck_nfs::server::Tree::scan(dir.path()).unwrap(), "/", 0, 0).unwrap();
+        let mut d = deck(1.0);
+        d.link_ports = LinkPorts { query: db.query_port, portmap: Some(nfs.portmap) };
+        d.load_selected(crate::browser::Load::Db { ip: std::net::Ipv4Addr::LOCALHOST, id: 5, title: "Demo".into(), rekordbox: true, sd: false }).unwrap();
+        let end = Instant::now() + Duration::from_secs(30);
+        while d.fetch_rx.is_some() && Instant::now() < end { d.poll_fetch(); std::thread::sleep(Duration::from_millis(2)); }
+        assert!(d.fetch_rx.is_none(), "the load finished");
+        assert!(d.path.to_string_lossy().ends_with("demo.wav"), "the track loaded: {}", d.path.display());
+        d
+    }
+
+    #[test]
+    fn a_track_loaded_from_rekordbox_brings_its_memory_and_hot_cues() {
+        let blue = (0x30, 0x5a, 0xff);
+        let d = load_from_rekordbox(vec![
+            Cue { hot: 0, ms: 5_000, ..Default::default() },
+            Cue { hot: 0, ms: 250, color_code: 2, comment: "start".into(), ..Default::default() },
+            Cue { hot: 1, ms: 2_000, rgb: Some(blue), color_code: 0x09, comment: "drop".into(), ..Default::default() },
+            Cue { hot: 2, ms: 3_500, loop_end_ms: Some(4_000), rgb: Some((0xff, 0x8c, 0)), ..Default::default() },
+        ]);
+        let s = |ms: u64| ms * d.audio.sample_rate as u64 / 1000 * d.audio.channels as u64;
+        assert_eq!(d.memory_cues, vec![s(250), s(5_000)], "both memory points, in order");
+        assert_eq!(d.transport.cue_point, s(250), "the first memory point is the load cue");
+        assert_eq!(d.hot_cues[0], Some(s(2_000)), "hot cue A");
+        assert_eq!(d.hot_cues[1], Some(s(3_500)), "hot cue B");
+        assert!(d.hot_cues[2..].iter().all(Option::is_none));
+        assert_eq!(d.cue_looks.hot_rgb()[0], Some(blue), "A's colour");
+        assert_eq!(d.cue_looks.hot[0].comment, "drop");
+        assert_eq!(d.cue_looks.hot_loop_end[1], Some(s(4_000)), "B is a hot loop");
+        assert_eq!(d.cue_looks.memory_at(s(250)).map(|l| (l.code, l.comment.as_str())), Some((2, "start")));
+        assert!((d.beat_grid.as_ref().expect("a grid").bpm - 120.0).abs() < 0.01, "rekordbox's grid");
+    }
+
+    #[test]
+    fn a_track_without_cues_from_rekordbox_loads_with_its_grid() {
+        let d = load_from_rekordbox(Vec::new());
+        assert!(d.memory_cues.is_empty());
+        assert!(d.hot_cues.iter().all(Option::is_none));
+        assert!((d.beat_grid.as_ref().expect("a grid").bpm - 120.0).abs() < 0.01, "rekordbox's grid");
     }
 }
 
