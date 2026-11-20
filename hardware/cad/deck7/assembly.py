@@ -81,7 +81,14 @@ def bought():
     # or turned; a silk-PLA print stands in until then).
     s.append(("jog_label", cyl(JOG_CX, JOG_CY, JOG_Z0 + JOG_H - jog.REC_DEPTH, JOG_Z0 + JOG_H - 0.2,
                                jog.REC_D - 1.0), "alu"))
-    s.append(("as5600", box(JOG_CX - 11.5, JOG_CX + 11.5, JOG_CY - 11.5, JOG_CY + 11.5, BASE_T, BASE_T + 1.6), "blue"))
+    ex, ey, et = ENC_PCB      # in its cage under the boss, chip up under the shaft's magnet
+    s.append(("as5600", box(JOG_CX - ex / 2, JOG_CX + ex / 2, JOG_CY - ey / 2, JOG_CY + ey / 2, ENC_Z0, ENC_Z0 + et), "blue"))
+    s.append(("as5600_chip", box(JOG_CX - 2.5, JOG_CX + 2.5, JOG_CY - 3.0, JOG_CY + 3.0, ENC_Z0 + et, ENC_Z0 + et + ENC_CHIP_H), "black"))
+    # Shaft collar under the lower bearing; M8 washer between the platter's hub and the upper bearing.
+    cz = BRG_LO_Z - 0.5 - COLLAR[1]
+    s.append(("collar", cyl(JOG_CX, JOG_CY, cz, cz + COLLAR[1], COLLAR[0]) - cyl(JOG_CX, JOG_CY, cz - 1, cz + COLLAR[1] + 1, SHAFT_D), "steel"))
+    wz = BRG_UP_Z + BRG[2]
+    s.append(("washer", cyl(JOG_CX, JOG_CY, wz, wz + WASHER_T, 16.0) - cyl(JOG_CX, JOG_CY, wz - 1, wz + WASHER_T + 1, 8.4), "steel"))
     return s
 
 
@@ -89,14 +96,12 @@ def printed():
     s = [(f"top_{p}", t, "shell") for p, t in top_shell.parts().items()]
     s += [(f"base_{p}", b, "base") for p, b in base.parts().items()]
     s.append(("jog_platter", jog.place_mesh(jog.platter(), jog.MATES["platter_axis"], jog.MATES["jog_world_platter"]), "platter"))
-    s.append(("jog_tower", place(jog.tower(), jog.MATES["tower_foot"], jog.MATES["jog_world_tower"]), "base"))
     s.append(("cap_play", Pos(*PLAY, H) * caps.big_cap(), "play"))
     s.append(("cap_cue", Pos(*CUE, H) * caps.big_cap(), "cue"))
     for x, y, name, size in KEYS:
         s.append((f"cap_{name}", Pos(x, y, H) * keycap.key_cap(size), "cap"))
     s.append(("knob_fader", Pos(FADER_X, FADER_CY, H) * caps.fader_knob(), "knob"))
     s.append(("knob_encoder", Pos(*ENC, H) * caps.enc_knob(), "cap"))
-    s.append(("fader_bracket", Pos(FADER_X, FADER_CY, Z_UNDER) * caps.fader_bracket(), "clamp"))
     s.append(("screen_frame", Pos(SCR_CX, SCR_CY, SCR_Z_BOT - FRAME_T) * caps.screen_frame(), "clamp"))
     return s
 

@@ -27,12 +27,11 @@ def parts():
     out = {f"top_{p}": (t, True, 1) for p, t in top_shell.parts().items()}
     out.update({f"base_{p}": (b, False, 1) for p, b in base.parts().items()})
     return out | {
-        "jog_platter": (jog.platter(), True, 1), "jog_tower": (jog.tower(), False, 1),
+        "jog_platter": (jog.platter(), True, 1),
         "jog_shaft": (jog.shaft(), True, 1),
         "cap_play_cue": (caps.big_cap(), True, 2),
         "knob_fader": (caps.fader_knob(), True, 1), "knob_encoder": (caps.enc_knob(), True, 1),
         "screen_frame": (caps.screen_frame(), False, 1),
-        "fader_bracket": (caps.fader_bracket(), True, 1),
     } | {keycap.stem(sz): (keycap.key_cap(sz), True, n) for sz, n in keycap.sizes(KEYS).items()}
 
 
@@ -41,9 +40,10 @@ def allowed_openings():
     g = 0.5   # tolerance at the edges
     out = [("rect", SCR_CX, SCR_CY, SCR_OUT[0] + 2 * SCR_FIT + g, SCR_OUT[1] + 2 * SCR_FIT + g),
            ("rect", FADER_X, FADER_CY, FADER_SLOT_W + g, FADER_TRAVEL + FADER_LEVER[1] + 1.0 + g),
-           ("circle", JOG_CX, JOG_CY, SHAFT_D + 1.0 + g),
+           ("circle", JOG_CX, JOG_CY, BRG[0] + BRG_FIT + g),          # upper bearing, under the platter
            ("circle", *ENC, ENC_HOLE + g)]
     out += [("circle", x, y, BIG_CAP_D + CAP_CLR + g) for x, y in (PLAY, CUE)]
+    out += [("circle", FADER_X, FADER_CY + s * FADER_PITCH / 2, M3_CSK + 2.0 + g) for s in (-1, 1)]   # fader screws
     out += [("rect", x, y, w + CAP_CLR + g, h + CAP_CLR + g) for x, y, _, (w, h) in KEYS]
     return out
 

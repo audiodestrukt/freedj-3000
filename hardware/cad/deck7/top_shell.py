@@ -53,6 +53,49 @@ def keys():
     return [(x, y, w, h) for x, y, _, (w, h) in KEYS]
 
 
+def fader_pads():
+    """(y0, y1) of the two pads the fader's end plates sit on: from just past
+    the lever's travel to the body's end, around each screw."""
+    clear = FADER_TRAVEL / 2 + FADER_LEVER[1] / 2 + 1.0
+    end = FADER_BODY[1] / 2
+    assert clear + 1.5 < FADER_PITCH / 2 - M3_CLR / 2, "pad too short for the screw"
+    return [tuple(sorted((FADER_CY + s * clear, FADER_CY + s * end))) for s in (-1, 1)]
+
+
+def enc_cage():
+    """The AS5600's cage under the jog boss (see params): four corner posts,
+    each an L round a board corner with a stop over it, up into the top
+    plate; and two spring fingers on the y sides, hanging from the boss, each
+    with a lip under the board's edge and a lead-in to snap it in from below."""
+    cx, cy = JOG_CX, JOG_CY
+    a = ENC_PCB[0] / 2 + CAGE_CLR             # pocket half-width
+    b = a + CAGE_WALL
+    z_lo = ENC_Z0 - 0.8                       # bottom of the lips and posts (0.2 over the base)
+    z_top = ENC_Z0 + ENC_PCB[2] + 0.1         # underside of the stops over the board
+    out = []
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            x0, x1 = sorted((cx + sx * a, cx + sx * b))
+            y0, y1 = sorted((cy + sy * a, cy + sy * b))
+            xl0, xl1 = sorted((cx + sx * (a - CAGE_LEG), cx + sx * b))
+            yl0, yl1 = sorted((cy + sy * (a - CAGE_LEG), cy + sy * b))
+            out.append(box(x0, x1, yl0, yl1, z_lo, Z_UNDER + 1.0))        # leg along y
+            out.append(box(xl0, xl1, y0, y1, z_lo, Z_UNDER + 1.0))        # leg along x
+            # stop over the board's corner, outside the lower bearing's path
+            sx0, sx1 = sorted((cx + sx * (a - 3.0), cx + sx * b))
+            sy0, sy1 = sorted((cy + sy * (a - 3.0), cy + sy * b))
+            out.append(box(sx0, sx1, sy0, sy1, z_top, z_top + 2.0))
+    w, t, lip = FINGER
+    for sy in (-1, 1):
+        y0, y1 = sorted((cy + sy * a, cy + sy * (a + t)))
+        out.append(box(cx - w / 2, cx + w / 2, y0, y1, z_lo, BRG_LO_Z + 1.0))
+        # lip: flat on top (the board rests on it), 45 degree lead-in below
+        d = CAGE_CLR + lip                    # reaches `lip` under the board's edge
+        prof = Polygon((sy * (a + 0.5), z_lo), (sy * a, z_lo), (sy * (a - d), ENC_Z0), (sy * (a + 0.5), ENC_Z0), align=None)   # overlaps the finger
+        out.append(Pos(cx - w / 2, cy, 0) * extrude(Plane.YZ * prof, w))
+    return out
+
+
 def whole():
     body = outer() - rrect(WALL, BASE_T - OVS, Z_UNDER)
     adds = []
@@ -61,9 +104,10 @@ def whole():
     adds.append((outer() & box(X_SEAM - BAND_HALF, X_SEAM + BAND_HALF, -OVS, D + OVS, 0, H + OVS)) - inner)
     for x, y in base_screws():
         adds.append(cyl(x, y, BASE_T, Z_UNDER + 1.0, BOSS_D))
-    for sy in (-1, 1):
-        adds.append(cyl(FADER_X, FADER_CY + sy * FADER_BOSS_Y, Z_UNDER - FADER_BOSS_H, Z_UNDER + 1.0, BOSS_D))
-    adds.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z - 1.0, Z_UNDER + 1.0, JOG_BOSS_D))
+    for (y0, y1) in fader_pads():
+        adds.append(box(FADER_X - FADER_BODY[0] / 2, FADER_X + FADER_BODY[0] / 2, y0, y1, Z_UNDER - FADER_PAD_T, Z_UNDER + 1.0))
+    adds.append(cyl(JOG_CX, JOG_CY, BRG_LO_Z, Z_UNDER + 1.0, JOG_BOSS_D))
+    adds += enc_cage()
     for sx in (-1, 1):
         for sy in (-1, 1):
             adds.append(cyl(SCR_CX + sx * SCR_BOSS[0], SCR_CY + sy * SCR_BOSS[1], FRAME_BOSS_Z0, Z_UNDER + 1.0, 8.0))
@@ -77,13 +121,18 @@ def whole():
     cuts = []
     ow, oh = SCR_OUT[0] + 2 * SCR_FIT, SCR_OUT[1] + 2 * SCR_FIT
     cuts.append(box(SCR_CX - ow / 2, SCR_CX + ow / 2, SCR_CY - oh / 2, SCR_CY + oh / 2, SCR_Z_BOT - OVS, H + OVS))
-    cuts.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z, H + OVS, SHAFT_D + 1.0))
-    cuts.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z - 1.0 - OVS, BRG_UP_Z + BRG[2], BRG[0] + BRG_FIT))
+    bd = BRG[0] + BRG_FIT
+    cuts.append(cyl(JOG_CX, JOG_CY, BRG_UP_Z, H + OVS, bd))                          # upper seat, from above
+    cuts.append(cyl(JOG_CX, JOG_CY, BRG_LO_Z - OVS, BRG_UP_Z + OVS, BRG_MID_D))       # between the ledges
+    cuts.append(cyl(JOG_CX, JOG_CY, BRG_LO_Z - OVS, BRG_LO_Z + BRG[2], bd))           # lower seat, from below
     slot = FADER_TRAVEL + FADER_LEVER[1] + 1.0
     cuts.append(box(FADER_X - FADER_SLOT_W / 2, FADER_X + FADER_SLOT_W / 2,
                     FADER_CY - slot / 2, FADER_CY + slot / 2, Z_UNDER - OVS, H + OVS))
+    h = (M3_CSK - M3_CLR) / 2     # 90 degree countersink, head flush with the top
     for sy in (-1, 1):
-        cuts.append(cyl(FADER_X, FADER_CY + sy * FADER_BOSS_Y, Z_UNDER - FADER_BOSS_H - OVS, Z_UNDER + 0.3, INSERT_D))
+        y = FADER_CY + sy * FADER_PITCH / 2
+        cuts.append(cyl(FADER_X, y, Z_UNDER - FADER_PAD_T - OVS, H + OVS, M3_CLR))
+        cuts.append(Pos(FADER_X, y, H - h) * Cone(M3_CLR / 2, M3_CSK / 2 + OVS, h + OVS, align=(Align.CENTER, Align.CENTER, Align.MIN)))
     for x, y in (PLAY, CUE):
         cuts.append(cyl(x, y, Z_UNDER - GUIDE_L - OVS, H + OVS, BIG_CAP_D + CAP_CLR))
     for x, y, w, h in keys():
@@ -101,7 +150,6 @@ def whole():
     for x, y in base_screws():
         cuts.append(cyl(x, y, BASE_T - OVS, BASE_T + INSERT_L, INSERT_D))
     assert FRAME_BOSS_Z0 + INSERT_DEPTH <= H - SKIN, "screen frame insert would break through the top"
-    assert Z_UNDER + 0.3 <= H - SKIN, "fader insert would break through the top"
     for sx in (-1, 1):
         for sy in (-1, 1):
             cuts.append(cyl(SCR_CX + sx * SCR_BOSS[0], SCR_CY + sy * SCR_BOSS[1],

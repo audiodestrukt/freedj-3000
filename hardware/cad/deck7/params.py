@@ -152,18 +152,51 @@ JOG_Z0 = H + JOG_GAP
 SHAFT_D = 8.0
 BRG = (22.0, 8.0, 7.0)
 BRG_FIT = 0.1
-JOG_BOSS_D = 30.0
-BRG_UP_Z = Z_UNDER - 2.0 - BRG[2]
-TOWER = (42.0, 42.0, 20.0)
+TOWER = (42.0, 42.0, 20.0)    # deck5's tower: no longer used here (both bearings are in the top)
 TOWER_SCREW = 16.0
-BRG_LO_Z = BASE_T + TOWER[2] - BRG[2]
 SENSOR_SLOT = (25.0, 4.5)
-SHAFT_Z0 = BASE_T + SENSOR_SLOT[1] + 0.5
+SHAFT_Z0 = BASE_T + SENSOR_SLOT[1] + 0.5     # unchanged: the shaft and platter are printed
 SHAFT_Z1 = JOG_Z0 + JOG_H - 4.0 - 2.0
 MAGNET = (6.0, 2.5)           # ⚠ VERIFY
 MAGNET_FIT = 0.2
 SHAFT_PRINT_D = 7.9
 GRUB_FLAT = 0.5
+
+# Both 608s in one boss under the top plate, as on the freedj-esp mini deck.
+# The upper one drops in from above (the platter hides the opening) onto a
+# ledge; the lower one presses in from below up to a ledge.  The platter
+# rests on the upper inner race through an M8 washer; a shaft collar under
+# the lower inner race stops it lifting.  The tower on the base is not used.
+WASHER_T = 1.6                # DIN 125 M8 washer (8.4 x 16 x 1.6) under the platter's hub
+BRG_PROUD = 0.4               # the upper bearing stands this far above the top surface
+BRG_UP_Z = H + BRG_PROUD - BRG[2]
+assert abs(BRG_UP_Z + BRG[2] + WASHER_T - (JOG_Z0 + 1.0)) < 1e-6, "hub (JOG_Z0 + 1) must rest on the washer"
+COLLAR = (18.0, 9.0)          # 8 mm shaft collar: OD, width ⚠ VERIFY
+BRG_LO_Z = SHAFT_Z0 + 0.5 + COLLAR[1] + 1.0  # the collar fits between the shaft's end and the lower bearing
+BRG_MID_D = 19.0              # between the seats: the ledges bear on the outer races only
+JOG_BOSS_D = 32.0
+assert BRG_UP_Z - (BRG_LO_Z + BRG[2]) > 10.0, "bearings too close"
+
+# AS5600 board (WWZMDiB, 23.8 square, chip in the middle), hung from the
+# boss in a cage: four corner posts locate it and stop it above, two spring
+# fingers snap under its edges.  Everything sits outside the lower bearing's
+# 22 mm path, so the bearing still goes in from below past the cage.
+ENC_PCB = (23.8, 23.8, 1.6)
+ENC_CHIP_H = 1.5
+ENC_Z0 = BASE_T + 1.0         # board underside: 1 mm over the base
+ENC_AIR = SHAFT_Z0 + 0.2 - (ENC_Z0 + ENC_PCB[2] + ENC_CHIP_H)   # magnet (0.2 recessed) to chip top
+assert 0.5 <= ENC_AIR <= 3.0, ENC_AIR             # AS5600 working range
+CAGE_CLR = 0.3                # board edge to the posts
+CAGE_WALL = 2.0
+CAGE_LEG = 4.5                # each corner post's two legs, along the board's edges
+FINGER = (6.0, 1.6, 0.5)      # spring finger: width, thickness, lip under the board
+assert ENC_PCB[0] / 2 - FINGER[2] > (BRG[0] + BRG_FIT) / 2 + 0.3, "lips in the lower bearing's path"
+
+# Fader from the front: two countersunk M3 down through the top into the
+# fader's own end-plate holes (120 mm centres), on pads as thick as the old
+# bracket, so the fader and its knob sit where they did.
+FADER_PAD_T = 2.5
+FADER_SCREW = "M3 x 8 countersunk"
 
 # ── Pitch fader, right of the jog ⚠ VERIFY (Alps RS60 / Bourns PTA) ─────────
 FADER_TRAVEL = 100.0
@@ -172,11 +205,11 @@ FADER_BODY = (9.0, 128.0, 8.0)
 FADER_PITCH = 120.0
 FADER_SLOT_W = 3.0
 FADER_LEVER = (1.6, 5.0, 12.0)
-FADER_BRACKET_T = 2.5
+FADER_BRACKET_T = 2.5         # deck5's bracket (caps.fader_bracket): not used here any more
 FADER_EAR = (15.0, 11.5, 6.0)
 FADER_BOSS_Y = FADER_BODY[1] / 2 + 6.0
 FADER_BOSS_H = 5.7
-FADER_Z_TOP = Z_UNDER - FADER_BRACKET_T
+FADER_Z_TOP = Z_UNDER - FADER_PAD_T   # the fader's top, on its pads
 
 # ── Controls: layout.toml, with the moves below ──────────────────────────────
 # Moved, and why (face coordinates, y down, as in layout.toml):
