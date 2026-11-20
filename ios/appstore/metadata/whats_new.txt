@@ -1,13 +1,11 @@
-BROWSE A CDJ-3000 OVER PRO DJ LINK: every category the player lists (ARTIST, ALBUM, GENRE, KEY, BPM, PLAYLIST, HISTORY, FOLDER …) opens, in the unit's own track table with blue or 3-band waveform previews, cover art and an INFO pane. Tracks loaded from it come with their title, artist, key, hot cues in their colours, memory cues, loops and phrases. Browsing a player never freezes the deck, even if it leaves the network.
+STACKED WAVEFORM: on the CDJ-3000 screen the meter slot now starts in the WAVEFORM view, as the unit ships. It shows the tempo master's waveform and beat grid above your own, running to the right edge, so you can see whether the two tracks are in phase. Tap it for the phase meter.
 
-PHRASES on the CDJ-3000 screen: the track's intro, verses, choruses and outro in rekordbox's colours under the overall waveform (MENU → WAVEFORM DIVISIONS).
+AND THE OTHER WAY ROUND: with OpenDeck as tempo master, CDJ-3000s on the network now draw OpenDeck's waveform in their own WAVEFORM view.
 
-OUTPUT GAIN in MENU: turn the deck's output down when the iPad or your interface is too hot at the volume you want to leave it on. It never boosts and never clicks.
+INFO: a tab for each player on the network, with its track's title, artist, key, BPM and cover.
 
-LIGHT MODE in MENU: the screen on a white background, for bright rooms.
+MASTER like the unit: the deck takes tempo master by itself when it plays with no master on the network; MASTER pressed while you are master hands it to another playing player; the meter reads MASTER PLAYER while you are master.
 
-ABOUT, the last row of MENU: the version and the deck's network addresses.
+CUES: players loading tracks from OpenDeck's library now get every track's hot and memory cues (before, only the loaded track's), and tracks loaded from rekordbox over the network bring their cues and loops.
 
-STEMS: while a track splits, the screen shows which parts have their stems yet.
-
-MORE LIKE THE UNIT: rekordbox hot loops play as loops; IN sets the cue point too, as IN/CUE; TAG TRACK works from the playback screen; long titles scroll through their field; the source tile shows the stick's colour and player number; PLAY LIST opens the playlists of the source you're browsing.
+FIXED: CDJ-3000s no longer say "Linked to player with older firmware" when OpenDeck is on the network.

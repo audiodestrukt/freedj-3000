@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.34] — 2026-11-20
+
 ### Added
 - OpenDeck as a plugin: a VST3 / CLAP instrument (`crates/plugin`, `make
   plugin`) that runs the whole deck inside the host, its window beside the

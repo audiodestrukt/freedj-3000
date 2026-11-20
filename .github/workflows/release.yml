@@ -141,6 +141,12 @@ jobs:
           `…-linux-x86_64.tar.gz` for PCs, `…-linux-aarch64.tar.gz` for a Raspberry Pi 3 / 4 / 5 / Zero 2 W on a 64-bit OS. Unpack and run `./opendeck amplificate.mp3`. Needs `sudo apt install libasound2 libsdl2-2.0-0 mesa-vulkan-drivers` (Debian 12, Ubuntu 22.04, Raspberry Pi OS Bookworm or newer). Details in `README-LINUX.txt`.
           MD
           fi
+          if has 'OpenDeck-*-plugin-linux-*.tar.gz'; then cat >> $N <<'MD'
+
+          ### VST3 / CLAP plugin (Linux x86_64, experimental)
+          `…-plugin-linux-x86_64.tar.gz`: the whole deck inside a DAW, its audio on a track, its **Pitch** automatable. Copy `OpenDeck.vst3` into `~/.vst3` or `OpenDeck.clap` into `~/.clap` and rescan. One deck per DAW process; the deck opens its own window. Tested in REAPER 7.60. Details in `docs/design/plugin.md`.
+          MD
+          fi
           if has 'OpenDeck-*-windows-*.zip'; then cat >> $N <<'MD'
 
           ### Windows (x64)

@@ -113,6 +113,30 @@ jobs:
           path: ${{ steps.pkg.outputs.tarball }}
           if-no-files-found: error
 
+      # The deck as a VST3 / CLAP plugin (docs/design/plugin.md): one .so,
+      # bundled both ways.  Unzip into ~/.vst3 and ~/.clap.
+      - name: Build the plugin
+        env:
+          OPENDECK_VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          cargo build --release -p opendeck-plugin
+          V=${{ needs.version.outputs.version }}
+          d=OpenDeck-$V-plugin-linux-x86_64
+          mkdir -p $d/OpenDeck.vst3/Contents/x86_64-linux
+          strip -o $d/OpenDeck.clap target/release/libopendeck_plugin.so
+          cp $d/OpenDeck.clap $d/OpenDeck.vst3/Contents/x86_64-linux/OpenDeck.so
+          nm -D --defined-only $d/OpenDeck.clap | grep -q clap_entry
+          nm -D --defined-only $d/OpenDeck.clap | grep -q GetPluginFactory
+          tar czf $d.tar.gz $d
+          echo "PLUGIN_TARBALL=$d.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Upload the plugin
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenDeck-${{ needs.version.outputs.version }}-plugin-linux-x86_64
+          path: ${{ env.PLUGIN_TARBALL }}
+          if-no-files-found: error
+
   aarch64:
     needs: version
     runs-on: ubuntu-latest
