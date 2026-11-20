@@ -53,15 +53,6 @@ def keys():
     return [(x, y, w, h) for x, y, _, (w, h) in KEYS]
 
 
-def fader_pads():
-    """(y0, y1) of the two pads the fader's end plates sit on: from just past
-    the lever's travel to the body's end, around each screw."""
-    clear = FADER_TRAVEL / 2 + FADER_LEVER[1] / 2 + 1.0
-    end = FADER_BODY[1] / 2
-    assert clear + 1.5 < FADER_PITCH / 2 - M3_CLR / 2, "pad too short for the screw"
-    return [tuple(sorted((FADER_CY + s * clear, FADER_CY + s * end))) for s in (-1, 1)]
-
-
 def enc_cage():
     """The AS5600's cage under the jog boss (see params): four corner posts,
     each an L round a board corner with a stop over it, up into the top
@@ -104,8 +95,6 @@ def whole():
     adds.append((outer() & box(X_SEAM - BAND_HALF, X_SEAM + BAND_HALF, -OVS, D + OVS, 0, H + OVS)) - inner)
     for x, y in base_screws():
         adds.append(cyl(x, y, BASE_T, Z_UNDER + 1.0, BOSS_D))
-    for (y0, y1) in fader_pads():
-        adds.append(box(FADER_X - FADER_BODY[0] / 2, FADER_X + FADER_BODY[0] / 2, y0, y1, Z_UNDER - FADER_PAD_T, Z_UNDER + 1.0))
     adds.append(cyl(JOG_CX, JOG_CY, BRG_LO_Z, Z_UNDER + 1.0, JOG_BOSS_D))
     adds += enc_cage()
     for sx in (-1, 1):
@@ -131,7 +120,7 @@ def whole():
     h = (M3_CSK - M3_CLR) / 2     # 90 degree countersink, head flush with the top
     for sy in (-1, 1):
         y = FADER_CY + sy * FADER_PITCH / 2
-        cuts.append(cyl(FADER_X, y, Z_UNDER - FADER_PAD_T - OVS, H + OVS, M3_CLR))
+        cuts.append(cyl(FADER_X, y, Z_UNDER - OVS, H + OVS, M3_CLR))
         cuts.append(Pos(FADER_X, y, H - h) * Cone(M3_CLR / 2, M3_CSK / 2 + OVS, h + OVS, align=(Align.CENTER, Align.CENTER, Align.MIN)))
     for x, y in (PLAY, CUE):
         cuts.append(cyl(x, y, Z_UNDER - GUIDE_L - OVS, H + OVS, BIG_CAP_D + CAP_CLR))

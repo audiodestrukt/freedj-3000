@@ -9,7 +9,8 @@ All notable changes to this project will be documented in this file.
   `top_fr.stl`, the only part that changes): both jog bearings now sit in
   the top's boss, so the base tower is not needed; the AS5600 board snaps
   into a cage under the boss; and the pitch fader screws down from the face
-  into its own M3 holes (120 mm centres) instead of hanging on a bracket.
+  into its own M3 holes (120 mm centres), straight against the top, instead
+  of hanging on a bracket.
 
 ### Fixed
 - A track loaded from rekordbox over LINK now brings its memory cues, hot

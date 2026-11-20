@@ -118,10 +118,12 @@ part is as printed.
   base.  The cage stays outside the lower bearing's path, so the bearing
   still goes in past it.  The two open sides give the collar's grub screw
   and the wires a way out.
-- **The fader mounts from the front.**  Two M3 × 8 countersunk screws go
+- **The fader mounts from the front.**  Two M3 × 6 countersunk screws go
   down through the top into the fader's end plates (M3, 120 mm centres),
-  and the fader sits on two 2.5 mm pads.  That puts it, and the knob, where
-  the bracket did.  **`fader_bracket` is no longer used.**
+  and the fader's top sits straight against the underside of the plate.
+  That is 2.5 mm higher than on the bracket: the lever now goes 7 mm into
+  the printed knob's 8 mm socket (it was 4.5), and the knob sits at the
+  same height.  **`fader_bracket` is no longer used.**
 
 Assembly:
 
@@ -133,8 +135,8 @@ Assembly:
 4. Top face down: slide the collar up the shaft to the lower bearing and
    tighten it through the cage's open side.  Then snap the AS5600 in, chip
    up, with its wires out the open side.
-5. Fader: hold it under its pads and drive the two countersunk M3 down from
-   the face.
+5. Fader: hold it up against the underside and drive the two countersunk
+   M3 down from the face.
 
 The renders in `renders/` predate this change.
 
@@ -166,7 +168,8 @@ As deck5's list (same bearings, sensor, fader, encoder), except:
 | M8 washer, DIN 125 (8.4 × 16 × 1.6) | 1 | between the platter's hub and the upper bearing |
 | 12 mm tact switches | 20 | 18 keys + CUE + PLAY; their boards are not designed yet |
 | M3 heat-set inserts (4.6 × 5.7) | 23 | 19 base bosses, 4 screen-frame bosses |
-| M3 × 8 countersunk | 21 | base (19) + fader (2), from the face into its end plates |
+| M3 × 8 countersunk | 19 | base |
+| M3 × 6 countersunk | 2 | fader, from the face into its end plates |
 | M3 × 10 socket + washer | 4 | screen frame up into its bosses |
 | M3 × 6 | 4 | up through the frame into the display's metal frame |
 

@@ -193,10 +193,10 @@ FINGER = (6.0, 1.6, 0.5)      # spring finger: width, thickness, lip under the b
 assert ENC_PCB[0] / 2 - FINGER[2] > (BRG[0] + BRG_FIT) / 2 + 0.3, "lips in the lower bearing's path"
 
 # Fader from the front: two countersunk M3 down through the top into the
-# fader's own end-plate holes (120 mm centres), on pads as thick as the old
-# bracket, so the fader and its knob sit where they did.
-FADER_PAD_T = 2.5
-FADER_SCREW = "M3 x 8 countersunk"
+# fader's own end-plate holes (120 mm centres); its top sits against the
+# plate's underside (2.5 mm higher than on the old bracket: the lever goes
+# 7 mm into the knob's 8 mm socket instead of 4.5).
+FADER_SCREW = "M3 x 6 countersunk"
 
 # ── Pitch fader, right of the jog ⚠ VERIFY (Alps RS60 / Bourns PTA) ─────────
 FADER_TRAVEL = 100.0
@@ -209,7 +209,9 @@ FADER_BRACKET_T = 2.5         # deck5's bracket (caps.fader_bracket): not used h
 FADER_EAR = (15.0, 11.5, 6.0)
 FADER_BOSS_Y = FADER_BODY[1] / 2 + 6.0
 FADER_BOSS_H = 5.7
-FADER_Z_TOP = Z_UNDER - FADER_PAD_T   # the fader's top, on its pads
+FADER_Z_TOP = Z_UNDER       # the fader's top, against the plate
+_lever_in_knob = FADER_Z_TOP + FADER_LEVER[2] - H - 2.0      # caps.fader_knob: socket from 2 to 10 over the top
+assert 4.0 <= _lever_in_knob <= 8.0, ("lever vs the printed knob's socket", _lever_in_knob)
 
 # ── Controls: layout.toml, with the moves below ──────────────────────────────
 # Moved, and why (face coordinates, y down, as in layout.toml):
