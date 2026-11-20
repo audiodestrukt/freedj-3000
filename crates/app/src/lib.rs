@@ -8,6 +8,7 @@
 //!   Esc / Q  — quit
 
 mod audio;
+pub use audio::{HostOutput, HostSlot};
 mod browser;
 mod dbsession;
 pub mod chrome;
@@ -45,7 +46,8 @@ use audio::AudioHandle;
 use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_types::{BeatAnalyzer, BeatGrid};
 use renderer::{Renderer, WgpuRenderer};
-use input::{ControlEvent, Event, PerformMode, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
+pub use input::{ControlEvent, Event};
+use input::{PerformMode, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
 use browser::{Browser, Enter, Load};
 use snapshot::DeckSnapshot;
 use transport::Transport;
@@ -1530,7 +1532,8 @@ impl DeckApp {
                 let s = input::fader_to_speed(position, self.settings.tempo_range);
                 self.fader_speed.store(s.to_bits(), Ordering::Relaxed);
                 self.audio.speed_store(s);
-                log::info!("tempo {:+.2}%", (s - 1.0) * 100.0);
+                // debug: host automation moves the fader every few ms.
+                log::debug!("tempo {:+.2}%", (s - 1.0) * 100.0);
             }
             Event::Deck(ControlEvent::KeyShift { semitones }) => {
                 // KEY SHIFT: the key moves, the tempo does not (CDJ-3000:
@@ -4846,6 +4849,20 @@ pub struct Config {
     /// merge over the built-in presets; `None` = the data dir's
     /// `controllers.toml` if present.
     pub controllers:  Option<PathBuf>,
+    /// Running inside a plugin host (VST3 / CLAP); `None` = the system's
+    /// sound card.
+    pub host:         Option<PluginHost>,
+}
+
+/// What a deck inside a plugin host shares with the plugin.
+pub struct PluginHost {
+    /// The host's sample rate: the deck runs at it.
+    pub sample_rate: u32,
+    /// Where the deck leaves its output for the host's audio callback.
+    pub output:      HostSlot,
+    /// Where the deck leaves a sender into its input bus, so the host's
+    /// parameters (automation) move the deck as a controller would.
+    pub events:      Arc<Mutex<Option<mpsc::Sender<Event>>>>,
 }
 
 fn init_logging() {
@@ -4933,7 +4950,7 @@ pub fn desktop_main() -> Result<()> {
     // Dev: OPENDECK_AUTOPLAY=0 boots paused at the cue, as the iOS app does.
     let autoplay = std::env::var("OPENDECK_AUTOPLAY").map(|v| v != "0").unwrap_or(true);
     let browse_root = music_dir(path.is_none());
-    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root, autoplay, controllers })
+    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root, autoplay, controllers, host: None })
 }
 
 /// Whose waveform the CDJ-3000 WAVEFORM view shows: the tempo master's, as
@@ -4948,6 +4965,9 @@ fn wave_view_player(link: &prodj::LinkState) -> Option<u8> {
 /// with, `~/Music` if it exists.  With a track and neither, its folder.
 /// Without this a Pi that boots straight into the deck browsed the whole
 /// filesystem ("/") and served nothing.
+/// The music folder a deck with no startup track browses (see `music_dir`).
+pub fn default_music_dir() -> Option<PathBuf> { music_dir(true) }
+
 fn music_dir(no_track: bool) -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("OPENDECK_MUSIC").map(PathBuf::from).filter(|d| d.is_dir()) { return Some(d); }
     if !no_track { return None; }
@@ -4981,9 +5001,14 @@ pub fn run(cfg: Config) -> Result<()> {
     let link_send    = cfg.link_send;
 
     // ── 1. Decode audio (or boot to an empty deck when no track is given) ─────
-    let audio = match &track {
-        Some(p) => AudioHandle::open(p)?,
-        None => {
+    let host = cfg.host.is_some();
+    let audio = match (&track, &cfg.host) {
+        (_, Some(h)) => {
+            log::info!("plugin host output at {} Hz", h.sample_rate);
+            AudioHandle::open_host(h.sample_rate, &h.output, track.as_deref())?
+        }
+        (Some(p), None) => AudioHandle::open(p)?,
+        (None, None) => {
             log::info!("no track given — booting to an empty deck (browse + LOAD to play)");
             AudioHandle::open_empty()?
         }
@@ -5110,6 +5135,7 @@ pub fn run(cfg: Config) -> Result<()> {
     // ── 5. Input bus: control surfaces (MIDI, I2C) forward controls into this
     //       channel; deck state goes back to their LEDs through `indicators`.
     let (event_tx, event_rx) = mpsc::channel::<Event>();
+    if let Some(h) = &cfg.host { *h.events.lock().unwrap() = Some(event_tx.clone()); }
     let indicators = Arc::new(surface::Indicators::default());
     let deck = if deck_channel == 0 { surface::config::Deck::A } else { surface::config::Deck::B };
     log::info!("controller: deck {deck:?}");
@@ -5154,7 +5180,19 @@ pub fn run(cfg: Config) -> Result<()> {
     #[cfg(not(feature = "renderer-sdl"))]
     if want_sdl { log::warn!("OPENDECK_RENDERER=sdl but this build has no SDL backend (cargo feature renderer-sdl); using wgpu"); }
 
-    #[cfg(not(target_os = "android"))]
+    // In a plugin host the deck's window runs on a thread of the host's, not
+    // the process's main thread.
+    #[cfg(all(unix, not(any(target_os = "android", target_os = "ios", target_os = "macos"))))]
+    let event_loop = {
+        let mut b = EventLoop::builder();
+        if host {
+            use winit::platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11};
+            EventLoopBuilderExtX11::with_any_thread(&mut b, true);
+            EventLoopBuilderExtWayland::with_any_thread(&mut b, true);
+        }
+        b.build().context("failed to create event loop")?
+    };
+    #[cfg(not(any(target_os = "android", all(unix, not(any(target_os = "ios", target_os = "macos"))))))]
     let event_loop = EventLoop::new().context("failed to create event loop")?;
     #[cfg(target_os = "android")]
     let event_loop = {
@@ -5626,7 +5664,7 @@ pub extern "C" fn freedj_ios_main() {
         Some(t) => log::info!("track: {}", t.display()),
         None => log::info!("no audio in Documents — booting to an empty deck; add tracks via the Files app"),
     }
-    if let Err(e) = run(Config { track, player, default_player, deck_channel: 0, link_send: true, browse_root: Some(docs), autoplay: false, controllers: None }) {
+    if let Err(e) = run(Config { track, player, default_player, deck_channel: 0, link_send: true, browse_root: Some(docs), autoplay: false, controllers: None, host: None }) {
         log::error!("freedj_ios_main: {e:#}");
     }
 }

@@ -19,6 +19,7 @@ members = [
     "crates/demucs",
     "crates/ui",
     "crates/app",
+    "crates/plugin",
 ]
 resolver = "2"
 

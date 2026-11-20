@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- OpenDeck as a plugin: a VST3 / CLAP instrument (`crates/plugin`, `make
+  plugin`) that runs the whole deck inside the host, its window beside the
+  host's and its audio into the host's mixer at the host's rate.  The
+  Pitch parameter moves the tempo fader, so host automation plays the deck
+  (`make reaper-demo`: an automated ramp and LFO in REAPER).  One deck per
+  process; tested in REAPER 7.60 on Linux.  docs/design/plugin.md.
 - CDJ-3000 screen, WAVEFORM view: tapping the phase meter switches its slot
   to the tempo master's scrolling waveform, as on the unit (checked on two
   emulated CDJ-3000s, docs/reference/cdj-3000-master-and-waveform-view.md).  It is drawn

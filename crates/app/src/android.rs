@@ -90,7 +90,7 @@ fn android_main(app: AndroidApp) {
     let _ = APP.set(app);
     // Player 3 by default, like the iPad: "deck 3" next to CDJs 1-2.
     let cfg = Config { track, player, default_player: 3, deck_channel: 0, link_send: true,
-                       browse_root: Some(music), autoplay: false, controllers: None };
+                       browse_root: Some(music), autoplay: false, controllers: None, host: None };
     if let Err(e) = run(cfg) {
         log::error!("android_main: {e:#}");
     }

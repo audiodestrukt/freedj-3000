@@ -331,6 +331,19 @@ impl AudioHandle {
         Self::open_inner(None, TrackTags::default())
     }
 
+    /// Open a deck whose output is pulled by a plugin host instead of a
+    /// sound card: stereo at the host's rate `sr`, with `track` loaded or
+    /// empty.  The host's audio callback takes the [`HostOutput`] left in
+    /// `slot` and calls its `fill` once per block, exactly as the device
+    /// callback would.
+    pub fn open_host(sr: u32, slot: &HostSlot, track: Option<&Path>) -> Result<Self> {
+        let (initial, tags) = match track {
+            Some(p) => { let (d, fsr, ch, tags) = decode_file(p)?; (Some((d, fsr, ch as usize)), tags) }
+            None => (None, TrackTags::default()),
+        };
+        Self::start(initial, tags, Output::Host { sr, slot: Arc::clone(slot) })
+    }
+
     /// A deck for tests: the real processor thread, with a stand-in device
     /// (48 kHz stereo) that pulls the output at real time, 10 ms at a time,
     /// through the same [`OutputFill`] as the device callback.
@@ -373,6 +386,7 @@ impl AudioHandle {
         let (device_sr, device_ch) = match &output {
             Output::Device(_, c) => (c.sample_rate().0, c.channels() as usize),
             Output::Test => (48_000, 2),
+            Output::Host { sr, .. } => (*sr, 2),
             #[cfg(test)]
             Output::TestPulls { sr, .. } => (*sr, 2),
             // The rate a CD-sourced library plays at; a device that turns up
@@ -538,6 +552,11 @@ impl AudioHandle {
                 StreamOwner::Thread(Some(t))
             }
             Output::Device(device, _) => Self::open_device(device, parts, &shutdown)?,
+            Output::Host { slot, .. } => {
+                // The host's callback owns the pulling; nothing to run here.
+                *slot.lock().unwrap() = Some(HostOutput { fill: OutputFill::new(&parts) });
+                StreamOwner::Thread(None)
+            }
             #[cfg(target_os = "linux")]
             Output::Waiting => {
                 // No device yet: keep time at real time, silently (the deck
@@ -665,8 +684,23 @@ enum StreamOwner {
 #[cfg(test)]
 pub type Trace = Arc<Mutex<Vec<(std::time::Instant, f32)>>>;
 
+/// A plugin host's audio callback, standing in for the sound card's: the
+/// deck's output, interleaved stereo at the rate the deck was opened at.
+pub struct HostOutput { fill: OutputFill }
+
+impl HostOutput {
+    /// One block of output (interleaved stereo), from the RT thread: no
+    /// allocation, no blocking.  Silence where the deck has nothing ready.
+    pub fn fill(&mut self, out: &mut [f32]) { self.fill.fill(out) }
+}
+
+/// Where [`AudioHandle::open_host`] leaves the deck's [`HostOutput`].
+pub type HostSlot = Arc<Mutex<Option<HostOutput>>>;
+
 /// Where a deck's output goes.
 enum Output {
+    /// A plugin host pulls it (`open_host`).
+    Host { sr: u32, slot: HostSlot },
     /// The system's output device, at its default config.
     Device(cpal::Device, cpal::SupportedStreamConfig),
     /// The tests' stand-in: pulls the output at real time, 48 kHz stereo.
@@ -1805,5 +1839,49 @@ mod back_pressure_tests {
         std::thread::sleep(Duration::from_millis(2500));
         let after = h.stats.underrun_events.load(Ordering::Relaxed);
         assert_eq!(after - before, 0, "underruns while playing steadily: {}", after - before);
+    }
+}
+
+/// Inside a plugin host (VST3 / CLAP): the host's audio callback pulls the
+/// deck's output instead of a sound card.
+#[cfg(test)]
+mod host_output_tests {
+    use super::*;
+
+    /// A host pulling 512-frame blocks at real time, as Reaper does.
+    fn pull(out: &mut HostOutput, blocks: usize) -> f32 {
+        let mut buf = vec![0f32; 512 * 2];
+        let mut peak = 0f32;
+        for _ in 0..blocks {
+            out.fill(&mut buf);
+            peak = buf.iter().fold(peak, |m, v| m.max(v.abs()));
+            thread::sleep(Duration::from_micros(512 * 1_000_000 / 44_100));
+        }
+        peak
+    }
+
+    /// Load a track into a host-pulled deck and press PLAY: the host hears
+    /// it, at the host's rate; pause: the host hears silence.
+    #[test]
+    fn a_plugin_host_hears_the_deck_it_hosts() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let slot: HostSlot = Arc::new(Mutex::new(None));
+        let deck = AudioHandle::open_host(44_100, &slot, None).unwrap();
+        assert_eq!(deck.sample_rate, 44_100, "the deck runs at the host's rate");
+        let mut out = slot.lock().unwrap().take().expect("the deck leaves its output for the host");
+        assert_eq!(pull(&mut out, 10), 0.0, "an empty deck is silent");
+
+        let tone: Vec<f32> = (0..44_100 * 4).flat_map(|i| {
+            let s = 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin();
+            [s, s]
+        }).collect();
+        deck.load_samples(Arc::new(tone), 44_100, 2).unwrap();
+        deck.set_playing(true);
+        assert!(pull(&mut out, 40) > 0.3, "PLAY: the host hears the track");
+
+        deck.set_playing(false);
+        pull(&mut out, 10);   // the stop fade and what the ring held
+        assert_eq!(pull(&mut out, 10), 0.0, "paused: silence");
     }
 }

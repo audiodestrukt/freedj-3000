@@ -1,0 +1,15 @@
+[package]
+name        = "opendeck-plugin"
+description = "OpenDeck as a VST3 / CLAP instrument: the deck's audio into the host's mixer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+opendeck-app = { path = "../app" }
+nih_plug     = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
+log          = { workspace = true }
+env_logger   = { workspace = true }

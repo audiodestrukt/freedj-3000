@@ -120,6 +120,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Raspberry Pi 5 (60 fps, ~0.6 of a core playing) | ✅ |
 | Raspberry Pi Zero W (SDL renderer on KMSDRM, WSOLA, 49 fps) | ✅ |
 | Running on a CDJ-3000 itself | 📋 designed, not built |
+| VST3 / CLAP plugin: the deck inside a DAW, its audio into the mixer, Pitch automatable; one deck per process, own window (docs/design/plugin.md) | 🧪 REAPER 7.60 on Linux |
 
 ## Planned
 
