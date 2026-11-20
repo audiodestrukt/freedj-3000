@@ -2,7 +2,7 @@
 # Needs sdcc (brew install sdcc) and pyusb; see README.md.
 SDCC = sdcc -mmcs51 --code-size 0x3e00 --xram-loc 0x3e00 --xram-size 0x100
 
-all: ring.ihx blink.ihx bootlog.ihx
+all: ring.ihx blink.ihx bootlog.ihx runwrite.ihx
 %.ihx: %.c
 	$(SDCC) $< -o $@
 load-%: %.ihx

@@ -333,6 +333,14 @@ the attempts: a bit write to a port reads the pins back (read-modify-write),
 so an open-drain pin's latch must be re-cleared after writing a neighbour,
 and the 0xA0 RAM upload returns junk while the CPU runs (halt it first).
 
+Writing into a running deck (`runwrite.c`: every 4th frame for 2 s, starting
+the instant BUSY falls, ~27 µs ahead of the main board) does what two masters
+on one bus do: each reply starts right (`81 00 00 00`, the bytes clocked
+before the main board joins in) and is scrambled after, BUSY rises on the
+combined clocks, and nothing visible changes (the main board's next frame
+rewrites every lamp 3 ms later anyway). The deck was unharmed by the ~50 ms
+of output-against-output overlap, but this is not a way to drive the panel.
+
 ## Route A: speak to the panel CPU (recommended)
 
 Unplug the two FFCs between LCDB and PNLB and plug in an interposer board
