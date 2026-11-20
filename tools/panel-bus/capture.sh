@@ -19,8 +19,16 @@ secs=${2:-5}
 rate=${3:-16M}
 out=captures/panel-bus
 mkdir -p "$out"
-exec sigrok-cli -d fx2lafw \
+sigrok-cli -d fx2lafw \
   --config "samplerate=$rate" \
   --channels D0=SCK,D1=RXD,D2=TXD,D3=BUSY,D4=RST,D5=CNVSS \
   --time "$((secs * 1000))" \
-  -o "$out/$name.sr"
+  -o "$out/$name.sr" &
+pid=$!
+# An fx2 clone that drops samples can stall sigrok forever, holding the
+# device; stop it once it overruns (the .sr written so far stays readable).
+( sleep $((secs + 15)); kill -INT $pid 2>/dev/null; sleep 3; kill -9 $pid 2>/dev/null ) &
+dog=$!
+wait $pid; status=$?
+kill $dog 2>/dev/null
+exit $status

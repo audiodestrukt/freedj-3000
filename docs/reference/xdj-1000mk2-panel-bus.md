@@ -59,6 +59,22 @@ on the unit with a meter before wiring.
 | 9 | USB_ILM_R | 19 | PNL_SCK |
 | 10 | USB_ILM_B | 20 | GND |
 
+**The two ends are numbered opposite ways.** The DDD1787 is reverse face, so
+CN8002 pin *n* is LCDB CN2602 pin 21−*n* (RRV4661 §10.1): PNL_SCK is CN8002
+19 but CN2602 **2**, GND is CN8002 20 but CN2602 1. A breakout or header
+numbered from the LCDB side puts "pin 20" on V+5R2, so count from the PNLB
+socket and confirm with a meter (GND beeps to chassis, V+5R2 reads 5 V) before
+clipping anything. On the LCDB side the signals are CN2602 2 SCK, 3 BUSY, 4
+RXD, 6 TXD, 7 CNVSS, 8 RST, 9 PWR_SW; GND on 1, 10, 16, 17, 19.
+
+**Tapping without a passthrough.** The cable cannot just be unplugged and
+probed: PWR_SW (pin 12) rides on it, so the deck will not power on, and with
+the two CPUs apart nothing talks anyway. On PNLB (§10.14) each link line has a
+series resistor with a test pad between it and the M16C, so the analyser can
+clip there with the stock cable in: BUSY pin 34 → **R8070** 100 Ω (out),
+SCK pin 33 → **R8071** 22 Ω (in), RXD pin 32 → **R8102** 22 Ω (in), TXD pin 31
+→ **R8072** 220 Ω (out).
+
 ### CN8001 (PNLB ↔ LCDB CN2601), 20-pin FFC
 
 | Pin | Signal | Pin | Signal |
@@ -117,6 +133,152 @@ face does not matter) for CN8001/CN8002, plus a 16-way 1.0 mm socket if the
 jog VFD link is taken over. Buy both *same-face* and *reverse-face* 20-way
 cables: which one mates CN8001's horizontal socket depends on which side its
 contacts are on, and the schematic does not say.
+
+## Frame format (captured 2026-11-19)
+
+Tapped at CN8002's solder legs with the stock cable in, deck running, 16 MHz
+fx2 analyser (`tools/panel-bus/capture.sh`).
+
+- **Clock** ~842 kHz, idles high. Sample on the **rising** edge, **LSB first**
+  (the M16C UART default).
+- **One 32-byte frame each way per transfer**, full duplex, 256 clocks with no
+  gaps, every ~3.0 ms (~333 Hz; 2.5–2.8 ms between frames).
+- **BUSY is the panel's "ready", active low, and the panel sets the pace.**
+  BUSY idles high; the panel pulls it low when its reply is loaded, the main
+  board starts clocking ~27 µs later, clocks all 256 bits in 318 µs, and BUSY
+  goes high again 2.4 µs after the last clock. The next low comes ~2.65 ms
+  later. A master just waits for BUSY low, then clocks one frame.
+- **Byte 30 = checksum**: 8-bit ones'-complement sum (add, fold the carry back
+  in) of bytes 0–29. Held on 1666/1666 frames each way. **Byte 31 = 0x8F**.
+  An all-0xFF frame (the panel not driving TXD, the line idling high) also
+  passes this sum, so check the header too: panel byte 0 is 0x81.
+
+Main → panel at idle is one fixed frame (bytes 0–29):
+`30 df 00 00 00 00 00 00 58 00 00 10 00 00 00 00 00 00 00 00 00 00 02 02 02 00 00 00 00 00`.
+A one-frame blip of byte 1 = 0x1E recurs every few seconds, not tied to
+input; byte 0 blipped to 0xB0 once. Byte 1 bit 2 cleared (0xDF → 0xDB) and
+stayed clear after the button at panel byte 20 bits 1–2 was pressed: the first
+lamp/mode output seen. The rest of the LED fields are still unknown.
+
+### Power-on (captured with the deck switched on mid-capture)
+
+No handshake. RST/CNVSS were not on the analyser, so whether the main board
+pulses the panel's reset is not known. The capture is kept in
+`reference/panel-bus/xdj-1000mk2-boot-2026-11-19.sr` (raw, sigrok) and `.log`
+(every burst decoded, from power-on to 40 steady frames after the byte-wise
+stretch).
+
+1. Power on: the panel CPU comes up and holds **BUSY low** (ready).
+2. ~7 s of silence while the main board boots.
+3. First two frames from the main board, likely a lamp test (bytes 7, 9, 10,
+   12, 18 set, never seen in steady state):
+   `73 18 00 00 00 00 00 33 40 3f 28 10 01 00 00 00 00 00 20 00 00 00 02 02 02 00 00 00 00 00`.
+4. **The panel's first reply is one bit late**: the normal reply shifted right
+   one bit (header 0x40, not 0x81) with a bad trailer. Its receiver is not in
+   step until a frame has gone by. Drop it.
+5. One frame of all-zero lamps (`00 18 00 … 00 10 …`), then steady polling;
+   every reply from the second on is valid.
+6. ~1.8 s later the main board sends the same frames **one byte at a time**,
+   80 µs or more between bytes and some frames in pieces (its own driver
+   changing hands). The panel does not mind: a frame is delimited by BUSY, not
+   by clock gaps.
+
+To start the panel ourselves: CNVSS low, release RST, wait for BUSY low, clock
+frames, drop the first reply (optionally send the lamp test first).
+
+### Buttons (panel → main, 1 = pressed)
+
+Each named by pressing it twice in a known order (`tools/panel-bus/bits.py`).
+
+| Bit | Button |
+|---|---|
+| 16.0 | PLAY |
+| 16.1 | CUE |
+| 18.0 | TRACK SEARCH ◀ |
+| 18.1 | TRACK SEARCH ▶ |
+| 18.2 | SEARCH ◀◀ |
+| 18.3 | SEARCH ▶▶ |
+| 16.4 | LOOP IN (order not yet confirmed by the presser) |
+| 16.3 | LOOP OUT (ditto) |
+| 16.2 | RELOOP/EXIT (ditto) |
+| 16.7 | REV |
+| 20.0 | VINYL (jog mode) |
+| 20.1 | TEMPO RANGE |
+| 20.2 | MASTER TEMPO (by elimination) |
+| 19.0 | QUANTIZE |
+| 19.1 | TIME MODE |
+| 19.2 | BACK |
+| 19.3 | TAG TRACK |
+| 19.4 | SHORTCUT |
+| 19.5 | seen in the first sweep, not named: USB STOP by elimination |
+| 17.0 | browse rotary push |
+
+There is no BEAT SYNC or MASTER key: the schematic's only key labels are PLAY,
+CUE, LOOP IN/OUT, RELOOP, REV, VINYL, M.TEMPO, T.RANGE, the jog touch, and on
+LCDB BACK, TAG TRACK, TIME MODE, SHORTCUT, QUANTIZE, USB STOP and the rotary
+(turn + push). Sync and master are on the touch screen.
+
+**Ladder keys glitch.** 20.1 and 20.2 share an analog key ladder, and a press
+passes through the neighbouring code for 30–90 ms (TEMPO RANGE shows brief
+20.2s, MASTER TEMPO a brief 20.1 first). Accept a ladder key only after it has
+read the same for ~100 ms. Panel byte 15 bit 1 dropped to 0 exactly while REV
+was held; meaning unknown.
+
+### Lamps (main → panel), provisional
+
+Seen to follow the deck's own state; names are inferred. The full map wants a
+bit walk once we drive the panel ourselves (one bit set per frame, note what
+lights).
+
+| Bit | Followed |
+|---|---|
+| 0.0, 0.1 | PLAY: alternate every 0.5 s while paused (two bits: maybe two levels) |
+| 0.4, 0.5 | CUE: blink, 300 ms on / 300 ms off |
+| 0.2 | REV on |
+| 0.6 | set by LOOP OUT (loop active?) |
+| 1.2 | toggled with MASTER TEMPO, and also during TEMPO RANGE presses |
+| 1.3 | QUANTIZE on |
+| 1.1, 1.7, 8.3, 8.4 | VINYL on |
+| 7.1–7.6 | LOOP IN / LOOP OUT / RELOOP states |
+| 8.5 | CUE (0x58 → 0x78) |
+| 1.0, 1.6, 1.7 | single-frame blips every ~50 ms or few seconds; not a lamp |
+| 22–24 bits 1, 3, 5 | alternate every 0.5 s, always; unknown |
+
+With a track playing (not analysed in rekordbox, so no waveform):
+
+| Main → panel byte | Meaning |
+|---|---|
+| 9 | **jog ring playhead**, 0x01–0x87 = 135 positions; +1 every ~13.3 ms, wraps every 1.80 s (one turn at 33⅓ rpm); holds while paused. The panel CPU draws it on the jog VFD; the main board only sends the position |
+| 22, 24 | toggle together 0x02 ↔ 0x28 every 0.5 s while playing (a blinking lamp or the beat; the track was ~120 BPM, so not yet told apart) |
+| 0, 8 | changed with the CUE/PLAY presses (byte 8 0x58 → 0x78 → 0x58): lamps, unnamed |
+
+The jog VFD itself (JFLB §10.16, V9201 DEL1074-A) is a chip-in-glass FL with a
+shift-register input (SI, CLK, LAT, BK, VDD, VH), fed from the panel CPU over
+CN8004 4 J_SCLK, 5 J_DSO (M16C pin 30 via R8134), 6 J_LAT, 7 J_BK_N. Driving
+it directly instead of through byte 9 would give arbitrary patterns, at the
+cost of splitting CN8004 (it also carries the jog sensor to PNLB).
+
+Panel → main, decoded so far:
+
+| Byte | Meaning |
+|---|---|
+| 0–1 | `81 00`, constant: byte 0 = 0x81 is the header to check |
+| 2 | slow ±1 drift between a few values per session (0x00, 0x7A, 0xAC, 0xB2/0xB3); not a control; unknown |
+| 3, 12, 13, 21, 26–29 | always 0x00 in every capture |
+| 4–5 | **tempo fader**, 16-bit big-endian, 0x00xx at one end, 0xFFxx at the other, 0x80xx at centre; low byte is noise |
+| 6–7 | a second analog channel, 0x80xx at rest; not the touch panel; unknown |
+| 14 | **browse rotary**, 8-bit wrapping counter, +1 per detent clockwise (0xFE → 0xFF → 0x00 → 0x01) |
+| 16, 18, 19, 20 | **button bits**, 1 = pressed; see *Buttons* below |
+| 8–9 | **jog position**, signed 16-bit big-endian, free-running (~600 counts for a part turn) |
+| 10–11 | **jog speed**: period between pulses, 0xFFFF stopped, smaller = faster |
+| 15 | bit 7 **jog moving**, bit 6 **jog direction** (1 = counting up, held after stop), bits 4–5 probably **jog touch** (1 = released) |
+| 16 | bit 0 **PLAY** (1 = pressed) |
+| 22–23 | **LCD touch X**, 16-bit big-endian, 10-bit range, counted from the **right** edge: ~55 at the right, ~950 at the left |
+| 24–25 | **LCD touch Y**, 16-bit big-endian, from the top: ~85 at the top, ~900 at the bottom |
+
+No touch reads X and Y as 0–3 (the low bytes flicker; treat both under ~16
+as released). Corners measured: top-left (0x3B5, 0x057), top-right (0x037,
+0x053), bottom-right (0x03B, 0x380), bottom-left (0x3B6, 0x38A).
 
 ## Route A: speak to the panel CPU (recommended)
 

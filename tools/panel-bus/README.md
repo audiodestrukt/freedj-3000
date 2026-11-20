@@ -6,8 +6,19 @@ Background and pinout: `docs/reference/xdj-1000mk2-panel-bus.md`.
 1. `sudo apt install sigrok-cli sigrok-firmware-fx2lafw pulseview`, then
    replug the analyser (the package installs the udev rule that makes it
    usable without root).  `sigrok-cli --scan` must list `fx2lafw`.
-2. Wire the analyser to the breakout on CN8002 as in `capture.sh`.
-   Check with a meter first that pin 19 (SCK) idles at 0 or 3.3 V.
+   macOS: `brew install sigrok-cli` (no udev step).  The clone shows up as
+   0925:3881 ("2341:14465" in `ioreg`, which prints decimal).  After a replug
+   the first capture uploads the firmware and then fails with "Device has been
+   disconnected"; run it again and it captures.  An unwired fx2 clone reads
+   every channel as constant high.
+2. Fit the breakout between PNLB CN8002 and LCDB CN2602, **deck unplugged**,
+   and check continuity before any power: header 20 and 11 beep to chassis,
+   header 1 and 3 (V+5R2) do not, and 1 does not beep to 20.  The stock
+   DDD1787 is *reverse face*; the wrong face on either breakout cable puts
+   pin n on pin 21-n, which shorts V+5R2 to GND and breaks PWR_SW (pin 12),
+   so the deck will not even power on.  Then wire the analyser as in
+   `capture.sh`, GND last, and check with a meter that pin 19 (SCK) idles at
+   0 or 3.3 V.
 3. Captures, deck powered, in this order:
    - `capture.sh idle 5` : nothing touched.  Is the bus polled continuously or
      only on events?  Clock rate, burst length, BUSY behaviour.
