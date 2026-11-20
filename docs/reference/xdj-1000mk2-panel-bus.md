@@ -265,7 +265,7 @@ Panel → main, decoded so far:
 | 0–1 | `81 00`, constant: byte 0 = 0x81 is the header to check |
 | 2 | slow ±1 drift between a few values per session (0x00, 0x7A, 0xAC, 0xB2/0xB3); not a control; unknown |
 | 3, 12, 13, 21, 26–29 | always 0x00 in every capture |
-| 4–5 | **tempo fader**, 16-bit big-endian, 0x00xx at one end, 0xFFxx at the other, 0x80xx at centre; low byte is noise |
+| 4–5 | **tempo fader**, 16-bit big-endian, 0x00xx at the top (slow), 0xFFxx at the bottom, 0x80xx at centre; low byte is noise |
 | 6–7 | a second analog channel, 0x80xx at rest; not the touch panel; unknown |
 | 14 | **browse rotary**, 8-bit wrapping counter, +1 per detent clockwise (0xFE → 0xFF → 0x00 → 0x01) |
 | 16, 18, 19, 20 | **button bits**, 1 = pressed; see *Buttons* below |
@@ -279,6 +279,37 @@ Panel → main, decoded so far:
 No touch reads X and Y as 0–3 (the low bytes flicker; treat both under ~16
 as released). Corners measured: top-left (0x3B5, 0x057), top-right (0x037,
 0x053), bottom-right (0x03B, 0x380), bottom-left (0x3B6, 0x38A).
+
+## In OpenDeck
+
+`crates/app/src/surface/xdjpanel.rs` decodes panel frames into the same
+events as the CDJ-3000's `subucom` (keys by their cdj3k-emu names, jog,
+fader, rotary, LCD touch). `OPENDECK_XDJPANEL=sniff` listens to a stock unit
+through the fx2 analyser (`sigrok-cli` streaming 4 MHz to the app), so the
+deck's own controls drive OpenDeck while its main board keeps the panel and
+the lamps. Checked on the unit 2026-11-19: keys, rotary, fader (direction
+fixed), jog (CDJ bend / VINYL scrub). Jog counts per turn and the jog touch
+polarity are still guesses. REV has no action: OpenDeck has no reverse play.
+
+## Driving the panel (master side), first attempts
+
+The fx2 analyser can drive its pins (no input buffer on this one), so
+`tools/panel-bus/fx2/` holds 8051 firmware that bit-bangs the master side.
+With the main board still connected the only free time is the power-on
+window (the main board first clocks ~7 s after power-on), so `bootlog.c`
+sends only between the panel's ready (~0.4 s) and 4 s, and logs to RAM.
+
+- The panel answers our clock: the first reply is a valid frame (header,
+  fields, checksum). So mode 3 / LSB first / BUSY are right for a master too.
+- Then it falls out of step: the end of the reply is one bit early (the panel
+  counted one clock more than was sent), BUSY never rises again, TXD idles.
+  Most likely ringing: D0 drives a sharp edge into the whole SCK net, which
+  runs back through the ribbon, LCDB and the 60-way to the main board, and
+  one edge reads as two. Next try: 100-330 Ω in series with D0 (and D1) at
+  the analyser.
+- No lamp change has been seen yet. The real master (Pi or RP2350 on a
+  passthrough with 17 and 19 left out) does not share the net with the main
+  board and should not see this.
 
 ## Route A: speak to the panel CPU (recommended)
 

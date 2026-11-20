@@ -19,6 +19,7 @@ pub mod lanhid;
 pub mod map;
 pub mod midi;
 pub mod subucom;
+pub mod xdjpanel;
 
 use crate::input::Event;
 use config::{Deck, Indicator, SurfaceFile};
@@ -143,6 +144,8 @@ pub fn start(file: SurfaceFile, deck: Deck, tx: Sender<Event>, ind: Arc<Indicato
     lanhid::spawn_from_env(tx.clone(), Arc::clone(&ind));
     // The CDJ-3000's own panel over its sub-CPU SPI device, if OPENDECK_SUBUCOM is set.
     subucom::spawn_from_env(tx.clone(), Arc::clone(&ind));
+    // The XDJ-1000MK2's own panel, if OPENDECK_XDJPANEL is set.
+    xdjpanel::spawn_from_env(tx.clone());
 
     let mut midis = Vec::new();
     for s in file.surface {
