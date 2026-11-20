@@ -473,6 +473,13 @@ impl ProDjLink {
         let mut p = self.build_status(f);
         p[0x20] = 0x08;
         p[0x22..0x24].copy_from_slice(&((N - 0x24) as u16).to_be_bytes());
+        // 0xf3 as a CDJ-3000 (fw 3.22) sends it; the XDJ-1000MK2 template
+        // has 0x03.  With 0x03 no CDJ-3000 fetched our waveform, grid or
+        // cues for its WAVEFORM view (Pioneer's "stacked waveform") while we
+        // were master; with 0xf3 both emulated units fetch on every track we
+        // load (bisected byte by byte against a captured master's status,
+        // 2026-11-20, #66).
+        p[0xcd] = 0xf3;
         p.extend_from_slice(&X);
         if let Some(l) = lp {
             p[0x1b0..0x1b4].copy_from_slice(&[0x01, 0xff, 0x8c, 0x00]);
@@ -1128,9 +1135,75 @@ mod cdj3000_status_tests {
         let (short, long) = (l.build_status(&fields()), l.build_status_cdj3000(&fields(), None));
         assert_eq!((short.len(), long.len()), (0x124, 1152));
         assert_eq!((long[0x20], u16::from_be_bytes([long[0x22], long[0x23]])), (0x08, 0x045c));
-        assert_eq!(&long[0x24..0x124], &short[0x24..], "common fields unchanged");
+        assert_eq!(&long[0x24..0xcd], &short[0x24..0xcd], "common fields unchanged");
+        assert_eq!(&long[0xce..0x124], &short[0xce..], "common fields unchanged");
         assert_eq!(&long[0x124..], &crate::status_template_cdj3000::STATUS_CDJ3000_EXT[..]);
         assert_eq!(&long[0x1b0..0x1f0], &[0u8; 0x40][..], "no loop");
+    }
+
+    /// Byte 0xcd is 0xf3 in a CDJ-3000's status (captured from a master
+    /// unit, fw 3.22); the XDJ-1000MK2 template has 0x03.  It is the one
+    /// byte that decides whether the other CDJ-3000s fetch our waveform,
+    /// beat grid and cues for their WAVEFORM view while we are master:
+    /// bisected over every byte where our status differed from the
+    /// master's, on two emulated units, each step loading a fresh track
+    /// (2026-11-20, #66).  The short (XDJ) status keeps the XDJ's value.
+    #[test]
+    fn cdj3000_status_lets_peers_fetch_our_waveform() {
+        let l = ProDjLink::new(4);
+        for master in [false, true] {
+            let f = StatusFields { master, ..fields() };
+            assert_eq!(l.build_status_cdj3000(&f, None)[0xcd], 0xf3, "master {master}");
+            assert_eq!(l.build_status(&f)[0xcd], 0x03, "XDJ status unchanged");
+        }
+    }
+
+    /// Our CDJ-3000 status, built from the live values a master CDJ-3000
+    /// sent (player 2, its own USB track 0x44, 128 BPM, beat 223 of bar 3,
+    /// playing and master), against that unit's captured packet.  Every
+    /// byte must match except the few listed in `KNOWN`, each with its
+    /// reason.  Three bugs came from template bytes no CDJ-3000 sends: 0x1f
+    /// (an XDJ refused to hand us master, Aug 2026), the keep-alive's
+    /// 0x21/0x35 ("Linked to player with older firmware") and 0xcd (no CDJ
+    /// fetched our waveform as master); each took days to find by hand.  A
+    /// new difference fails here instead.
+    #[test]
+    fn cdj3000_status_matches_a_captured_master_byte_for_byte() {
+        let cap: &[u8] = include_bytes!("testdata/cdj3000_master_status.bin");
+        let f = StatusFields {
+            track: Some(TrackRef { player: 2, slot: 3, kind: 1, id: 0x44 }), serving: true, playing: true, track_loaded: true,
+            master: true, sync: false, on_air: false, pitch: 1.0, bpm: Some(128.0), beat: Some(0xdf), beat_in_bar: Some(3),
+            handoff_to: None, counter: 0x4b4, sync_counter: 5,
+        };
+        let ours = ProDjLink::new(2).build_status_cdj3000(&f, None);
+        assert_eq!(ours.len(), cap.len());
+        // (first offset, last offset + 1, why it may differ)
+        // "No gate" = bisected on 2026-11-20: copying the CDJ's value did
+        // not change whether peers fetch our waveform.  "Untested" = never
+        // checked for any effect.
+        const KNOWN: &[(usize, usize, &str)] = &[
+            (0x0b, 0x1f, "model name: ours is freedj-3000"),
+            (0x33, 0x34, "track source detail, XDJ template value; no gate"),
+            (0x37, 0x38, "track source detail, XDJ template value; no gate"),
+            (0x3b, 0x3c, "track source detail, XDJ template value; no gate"),
+            (0x3f, 0x40, "track source detail, XDJ template value; no gate"),
+            (0x47, 0x48, "track source detail, XDJ template value; no gate"),
+            (0x74, 0x76, "we serve our USB over Link (LINK media flags); no gate"),
+            (0x7c, 0x80, "firmware string: ours is 0.1, not a Pioneer release; no gate"),
+            (0x94, 0x98, "after the BPM: XDJ template 7fffffff, CDJ 80003200; untested"),
+            (0x9d, 0x9e, "play mode: XDJ value 0x0d (vinyl) vs CDJ 0x09; no gate"),
+            (0xb7, 0xb8, "XDJ template value; no gate"),
+            (0xbb, 0xbc, "XDJ template value; no gate"),
+            (0xd0, 0xd4, "XDJ template 12345678, CDJ zeros; no gate"),
+            (0xd7, 0xdb, "XDJ template value; no gate"),
+            (0xf9, 0xfe, "XDJ template value; no gate"),
+            (0x116, 0x120, "CDJ-3000 region: changes with the track and position; untested"),
+            (0x14d, 0x15f, "CDJ-3000 region: changes with the track (template zeroes 0x14d..0x152); untested"),
+            (0x170, 0x1b0, "CDJ-3000 region: our template capture's state vs this one's; untested"),
+        ];
+        let diffs: Vec<usize> = (0..cap.len()).filter(|&i| ours[i] != cap[i] && !KNOWN.iter().any(|&(a, b, _)| (a..b).contains(&i))).collect();
+        for &i in &diffs { eprintln!("{i:#05x}: ours {:#04x} cdj {:#04x}", ours[i], cap[i]); }
+        assert!(diffs.is_empty(), "{} unexplained differences from a CDJ-3000's status", diffs.len());
     }
 
     /// With a loop, the loop block is what a CDJ-3000 sent with a one-beat

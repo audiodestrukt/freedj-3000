@@ -13,6 +13,14 @@ All notable changes to this project will be documented in this file.
   of hanging on a bracket.
 
 ### Fixed
+- With OpenDeck as tempo master, CDJ-3000s now draw its waveform in their
+  WAVEFORM view (Pioneer's "stacked waveform": the master's waveform and
+  beat grid above the unit's own).  They never fetched it before: one byte
+  of OpenDeck's CDJ-3000 status (0xcd) kept the XDJ-1000MK2's value, and a
+  CDJ-3000 does not fetch from a master that sends it.  Now each new track
+  OpenDeck loads as master is fetched by every CDJ-3000 within a second.
+  Found by bisecting OpenDeck's status against a master CDJ's on two
+  emulated CDJ-3000s; not yet seen on a real unit.
 - A player loading a track from OpenDeck's library now gets that track's
   rekordbox cues (hot cues, memory cues, loops, colours, comments) when
   the served folder holds a rekordbox stick.  Before, only the track

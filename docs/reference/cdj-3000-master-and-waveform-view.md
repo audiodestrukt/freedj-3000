@@ -51,6 +51,20 @@ should follow the master.
 
 ## OpenDeck as the master
 
+**Solved 2026-11-20: status byte `0xcd`.**  A CDJ-3000 sends `0xf3` there;
+OpenDeck sent `0x03`, the XDJ-1000MK2 template's value.  With `0xf3` both
+emulated units fetch OpenDeck's PWV7, PWV5, detail waveform, beat grid,
+PQT2 and cues the moment OpenDeck loads a track as master (even paused),
+and draw it in the WAVEFORM view, as from a master CDJ.  Found by giving
+OpenDeck a captured master CDJ's status bytes everywhere but the live
+fields (that fetched), then halving the 29 differing regions inside one
+OpenDeck session, a fresh track per step (restarting OpenDeck between
+steps left the units' state unreliable after ~25 restarts: they stopped
+asking even for metadata; `restart` on the control API clears it).
+Fix in `build_status_cdj3000`; test `cdj3000_status_lets_peers_fetch_our_waveform`.
+
+The history of the hunt follows.
+
 With OpenDeck (player 4) as master and playing, a CDJ-3000 shows the "4"
 badge but no waveform: it never fetches OpenDeck's analysis.  What was
 tried (2026-11-18, both emulated units watching, traffic captured):
