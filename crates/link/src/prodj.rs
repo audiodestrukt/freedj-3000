@@ -285,8 +285,12 @@ pub struct Beat {
 impl ProDjLink {
     pub fn new(player_num: u8) -> Self {
         let mut device_name = [0u8; 20];
-        let name = b"freedj-3000";
-        device_name[..name.len()].copy_from_slice(name);
+        // Dev hook: OPENDECK_LINK_NAME overrides the announced model name,
+        // to test which behaviours a CDJ keys on the name (up to 20 bytes).
+        let custom = std::env::var("OPENDECK_LINK_NAME").ok();
+        let name = custom.as_deref().map(str::as_bytes).unwrap_or(b"freedj-3000");
+        let n = name.len().min(20);
+        device_name[..n].copy_from_slice(&name[..n]);
         Self { player_num, device_name }
     }
 
@@ -298,7 +302,10 @@ impl ProDjLink {
         pkt[0x0a] = PKT_ANNOUNCE;
         pkt[announce::NAME..announce::NAME + 20].copy_from_slice(&self.device_name);
         pkt[0x20] = 0x01;
-        pkt[0x21] = 0x02;
+        // 0x03 as a CDJ-3000 sends it (fw 3.22, cdj3k-emu 2026-11-20); the
+        // XDJ-1000MK2's 0x02 made every CDJ-3000 on the network show
+        // "Linked to player with older firmware".
+        pkt[0x21] = 0x03;
         pkt[announce::LEN..announce::LEN + 2].copy_from_slice(&(announce::SIZE as u16).to_be_bytes());
         pkt[announce::DEVICE] = self.player_num;
         pkt[0x25] = 0x01;                       // device type: CDJ
@@ -307,6 +314,7 @@ impl ProDjLink {
         // Trailer per the analysis: 01 00 00 00 01 00
         pkt[0x30] = 0x01;
         pkt[0x34] = 0x01;
+        pkt[0x35] = 0x64;                       // as a CDJ-3000 sends it
         pkt
     }
 
@@ -515,7 +523,13 @@ impl ProDjLink {
             (true, true) => 0x03,
             (true, false) => 0x05,
         };
-        p[status::FIRMWARE..status::FIRMWARE + 4].copy_from_slice(b"0.1 ");
+        // Dev hook: OPENDECK_LINK_FW overrides the 4-byte firmware string
+        // (with OPENDECK_LINK_NAME, to test what a CDJ gates on).
+        let mut fw = *b"0.1 ";
+        if let Ok(v) = std::env::var("OPENDECK_LINK_FW") {
+            for (d, s) in fw.iter_mut().zip(v.bytes().chain(std::iter::repeat(b' '))) { *d = s; }
+        }
+        p[status::FIRMWARE..status::FIRMWARE + 4].copy_from_slice(&fw);
         p[status::FLAGS] = 0x84
             | if f.playing { 0x40 } else { 0 }
             | if f.master  { 0x20 } else { 0 }
@@ -1001,6 +1015,27 @@ mod tests {
         assert_eq!(pkt[0x0a], PKT_ANNOUNCE);
         assert_eq!(pkt[0x24], 2);
         assert_eq!(&pkt[0x2c..0x30], &[192, 168, 68, 64]);
+    }
+
+    /// Our announce matches a CDJ-3000's byte for byte (same player number,
+    /// MAC and IP) outside the model name and the peer count.  With 0x21 = 0x02 and 0x35 = 0
+    /// (an XDJ-1000MK2's values) every CDJ-3000 showed "Linked to player
+    /// with older firmware.  Please update to latest version."
+    #[test]
+    fn announce_matches_a_cdj_3000() {
+        // Captured from cdj3k-emu (fw 3.22, player 1 at 169.254.5.55), 2026-11-20.
+        let cdj: [u8; 0x36] = [
+            0x51, 0x73, 0x70, 0x74, 0x31, 0x57, 0x6d, 0x4a, 0x4f, 0x4c, 0x06, 0x00,
+            0x43, 0x44, 0x4a, 0x2d, 0x33, 0x30, 0x30, 0x30, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            0x01, 0x03, 0x00, 0x36, 0x01, 0x01, 0x32, 0xf6, 0x68, 0x84, 0x25, 0x10,
+            0xa9, 0xfe, 0x05, 0x37, 0x03, 0x00, 0x00, 0x00, 0x01, 0x64,
+        ];
+        let ours = ProDjLink::new(1).build_announce(Ipv4Addr::new(169, 254, 5, 55), [0x32, 0xf6, 0x68, 0x84, 0x25, 0x10]);
+        assert_eq!(ours.len(), cdj.len());
+        for i in 0..cdj.len() {
+            let ignored = (0x0c..0x20).contains(&i) || i == 0x30;   // name, peer count
+            if !ignored { assert_eq!(ours[i], cdj[i], "byte {i:#04x}"); }
+        }
     }
 
     #[test]

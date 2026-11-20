@@ -13,6 +13,11 @@ All notable changes to this project will be documented in this file.
   of hanging on a bracket.
 
 ### Fixed
+- CDJ-3000s on the same LINK network no longer show "Linked to player
+  with older firmware.  Please update to latest version."  OpenDeck's
+  keep-alive announced itself with an XDJ-1000MK2's protocol byte; it now
+  sends the bytes a CDJ-3000 on firmware 3.22 sends.  Tested on two emulated
+  CDJ-3000s (cdj3k-emu); not yet on a real unit.
 - A track loaded from rekordbox over LINK now brings its memory cues, hot
   cues, hot loops, cue colours and comments.  Before, such a load got
   rekordbox's beat grid and no cues at all: OpenDeck read cues only from a

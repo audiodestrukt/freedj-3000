@@ -60,6 +60,8 @@ tried (2026-11-18, both emulated units watching, traffic captured):
 | a plain folder | NFS LOOKUP `PIONEER` / `.PIONEER` (not found); dbserver setup + `0x3007`; at most one `0x2002` metadata | no |
 | a folder with an empty `PIONEER/rekordbox` | looked inside for `PIONEER/djprofile.nxs` and `PIONEER/CDP`; both asked `0x2002` metadata for the loaded track | no |
 | the same, with the title row's flag set to `0x0100_0000` as a CDJ sends it | the same | no |
+| a real rekordbox stick (227 tracks, `export.pdb` + ANLZ, 2026-11-20), OpenDeck going paused → playing as master while slot 1 played | LOOKUP `PIONEER`, `djprofile.nxs` (found), `CDP` (not found); `0x2002` metadata only; `export.pdb` never opened | no |
+| the same, announcing as `CDJ-3000` with status firmware `3.22` (`OPENDECK_LINK_NAME`, `OPENDECK_LINK_FW`) | the same | no |
 
 OpenDeck's status for its track has the layout a CDJ's has (source player
 4, USB slot, rekordbox type, track id, flags `0xe4` playing + master), and
@@ -67,8 +69,18 @@ the CDJs connect to its dbserver the moment it becomes master, as they do
 to a master CDJ.  The difference left is the rekordbox export itself: a
 CDJ most likely decides from `PIONEER/rekordbox/export.pdb` (and its ANLZ
 files) whether a player's track has analysis to fetch.  Serving that, an
-export OpenDeck writes for its own library, is the likely fix, and a bigger
-job.  The title row's flag is kept (it is what a CDJ sends).
+export OpenDeck writes for its own library, looked like the likely fix, and
+a bigger job.  **Ruled out 2026-11-20:** with a real rekordbox stick served,
+and even posing as a CDJ-3000 on 3.22, the CDJs never opened `export.pdb`
+and fetched nothing.  What is left differs in OpenDeck's status packet
+itself (its track id is the media server's, not the stick's `export.pdb`
+id; and the rest of the 0x480-byte layout), so the next step is a
+byte-for-byte diff of OpenDeck's status against a master CDJ's.
+
+Found on the way: OpenDeck's keep-alive carried an XDJ-1000MK2's byte
+0x21 = 0x02 (and 0x35 = 0).  Every CDJ-3000 then showed *Linked to player
+with older firmware.  Please update to latest version.*  A CDJ-3000 sends
+0x03 and 0x64; OpenDeck now does too, and the message is gone.  The title row's flag is kept (it is what a CDJ sends).
 
 ## Reproducing
 
