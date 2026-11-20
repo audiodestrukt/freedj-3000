@@ -666,8 +666,17 @@ pub fn info_player(ctx: &egui::Context, own: u8) -> u8 {
 /// The meter slot shows the waveform view (the phase meter is switched off).
 pub fn waveform_view(ctx: &egui::Context) -> bool { !meter_shown(ctx) }
 
+/// The phase meter instead of the WAVEFORM view.  Off by default: a
+/// CDJ-3000's [WAVEFORM/PHASE METER] setting lists "PHASE METER, WAVEFORM*"
+/// in its manual, * marking the default, so the stacked waveform shows
+/// without a tap; tapping the slot toggles, as on the unit.
 fn meter_shown(ctx: &egui::Context) -> bool {
-    !ctx.data(|d| d.get_temp::<bool>(Id::new("cdj3k-meter-off"))).unwrap_or(false)
+    ctx.data(|d| d.get_temp::<bool>(Id::new("cdj3k-meter-on"))).unwrap_or(false)
+}
+
+fn toggle_meter(ctx: &egui::Context) {
+    let on = meter_shown(ctx);
+    ctx.data_mut(|d| d.insert_temp(Id::new("cdj3k-meter-on"), !on));
 }
 
 /// The master's player number in an orange badge beside the Bars rows, and
@@ -695,10 +704,7 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
         return;
     }
     let resp = ui.interact(r, Id::new("cdj3k-meter"), egui::Sense::click());
-    if resp.clicked() {
-        let off = !meter_shown(ui.ctx());
-        ui.ctx().data_mut(|d| d.insert_temp(Id::new("cdj3k-meter-off"), !off));
-    }
+    if resp.clicked() { toggle_meter(ui.ctx()); }
     // Shown once there is another player to follow; the meter of a deck
     // alone has nothing to measure against.
     if !(snap.linked || snap.beat2_bpm > 0.0) { return; }
@@ -876,6 +882,20 @@ fn ahead_x(w: Rect, cols_ahead: f64, cols: f64) -> f32 {
 #[cfg(test)]
 mod helper_tests {
     use super::*;
+
+    /// The meter slot starts in the WAVEFORM view (the stacked waveform), a
+    /// CDJ-3000's default; a tap switches to the phase meter and back.
+    /// With the phase meter first, OpenDeck fetched and drew the master's
+    /// waveform only after a tap (Dan, 2026-11-20: "I had to click").
+    #[test]
+    fn the_meter_slot_starts_on_the_waveform_view() {
+        let ctx = egui::Context::default();
+        assert!(waveform_view(&ctx), "WAVEFORM by default, as a CDJ-3000");
+        toggle_meter(&ctx);
+        assert!(!waveform_view(&ctx), "a tap: the phase meter");
+        toggle_meter(&ctx);
+        assert!(waveform_view(&ctx), "and back");
+    }
 
     /// The WAVEFORM view zooms with the main waveform, also with no track
     /// loaded (a beat of the other player's tempo then): fewer columns
