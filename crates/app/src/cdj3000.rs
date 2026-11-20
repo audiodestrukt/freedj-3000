@@ -708,7 +708,7 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
     // Shown once there is another player to follow; the meter of a deck
     // alone has nothing to measure against.
     if !(snap.linked || snap.beat2_bpm > 0.0) { return; }
-    if !meter_shown(ui.ctx()) { return draw_wave_view(ui, snap, r, lay.wave.width(), u); }
+    if !meter_shown(ui.ctx()) { return draw_wave_view(ui, snap, wave_view_rect(lay), lay.wave.center().x, lay.wave.width(), u); }
     let beat_px = 73.0 * u;
     let cx = r.center().x;
     let master_bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
@@ -750,7 +750,15 @@ fn zoom_beat_px(wave_w: f32, cols: f32, sample_rate: u32, bpm: f32) -> f32 {
 /// The looped span's shade, as the main waveform's (renderer `loop_bg`, CDJ style).
 const REMOTE_LOOP_BG: Color32 = Color32::from_rgb(72, 52, 10);
 
-fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
+/// Where the WAVEFORM view draws: from the slot's left (past the badge and
+/// the Bars labels) to the right edge of the enlarged waveform, as on the
+/// unit (emulator, fw 3.22: x 274..1279 of 1280, its playhead on the main
+/// waveform's at x 639).  The phase meter keeps the narrower slot.
+fn wave_view_rect(lay: &Layout) -> Rect {
+    Rect::from_min_max(lay.meter.min, Pos2::new(lay.wave.max.x, lay.meter.max.y))
+}
+
+fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, cx: f32, wave_w: f32, u: f32) {
     let p = ui.painter().with_clip_rect(r);
     // The same zoom as the main waveform: its columns across its width set how
     // wide a beat is, of this deck's grid, or with no track loaded of the
@@ -763,7 +771,6 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
         Some(bpm) => zoom_beat_px(wave_w, snap.cols_visible, snap.sample_rate, bpm),
         None => 73.0 * u,
     };
-    let cx = r.center().x;
     if let Some(w) = &snap.remote_wave {
         let (mid, half) = (r.center().y, 24.0 * u);
         // Points per 1/150 s of the other track: its media seconds pass at
@@ -887,6 +894,23 @@ mod helper_tests {
     /// CDJ-3000's default; a tap switches to the phase meter and back.
     /// With the phase meter first, OpenDeck fetched and drew the master's
     /// waveform only after a tap (Dan, 2026-11-20: "I had to click").
+    /// The WAVEFORM view runs from the slot's left to the right edge of the
+    /// screen, as the unit draws it (x 274..1279 of 1280 on the emulator),
+    /// and its playhead is the enlarged waveform's (x 639): the strip was
+    /// the phase meter's 272..1008 (Dan: "goes all the way to the right
+    /// edge").
+    #[test]
+    fn the_waveform_view_reaches_the_right_edge() {
+        for panel_open in [false, true] {
+            let lay = layout(Rect::from_min_size(Pos2::ZERO, Vec2::new(1280.0, 720.0)), panel_open);
+            let r = wave_view_rect(&lay);
+            assert_eq!((r.min.x, r.max.x), (272.0, 1280.0));
+            assert_eq!((r.min.y, r.max.y), (lay.meter.min.y, lay.meter.max.y));
+            assert_eq!(lay.wave.center().x, 640.0, "the strip's playhead is the main waveform's");
+            assert_eq!((lay.meter.min.x, lay.meter.max.x), (272.0, 1008.0), "the phase meter keeps its slot");
+        }
+    }
+
     #[test]
     fn the_meter_slot_starts_on_the_waveform_view() {
         let ctx = egui::Context::default();

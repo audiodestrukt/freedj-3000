@@ -23,7 +23,9 @@ All notable changes to this project will be documented in this file.
   album, key, BPM, length, cover and the stick's colour and player number.
   Tracks stay fetched as tabs switch.
 - The meter slot starts in the WAVEFORM view (the stacked waveform), as a
-  CDJ-3000 ships; a tap switches to the phase meter and back.
+  CDJ-3000 ships; a tap switches to the phase meter and back.  The
+  waveform runs to the right edge of the screen, as on the unit, with its
+  playhead on the enlarged waveform's.
 - CDJ-3000 screen: the meter slot reads MASTER PLAYER while this deck is
   the tempo master.
 - OpenDeck takes tempo master by itself when it plays with no master on
