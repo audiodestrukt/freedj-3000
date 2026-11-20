@@ -9,4 +9,4 @@ license.workspace = true
 rekordcrate = { version = "0.3", default-features = false }
 anyhow      = { workspace = true }
 log         = { workspace = true }
-binrw       = "0.14"
+binrw       = "0.15"

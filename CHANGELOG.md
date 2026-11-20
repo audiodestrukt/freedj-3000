@@ -5,12 +5,38 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- CDJ-3000 screen, WAVEFORM view: tapping the phase meter switches its slot
+  to the tempo master's scrolling waveform, as on the unit (checked on two
+  emulated CDJ-3000s, docs/reference/cdj-3000-master-and-waveform-view.md).  It is drawn
+  thin above our own, with the other player's beat grid (red on the first
+  beat of each bar) moving with it past a line at its playhead, at this
+  deck's tempo: tracks in phase line their beats up with our grid, tracks
+  that are not drift.  The waveform is read from the other player's
+  database (its detail waveform, and its 3-band or RGB colour detail, as
+  MENU → WAVEFORM COLOR), follows our zoom, and its playhead is smoothed
+  against Wi-Fi packet bursts.  Before the track's waveform arrives, a grid
+  from the player's live beats shows the phase.  The other player's active
+  loop is shaded amber, as our own is on the main waveform, and the zoom
+  works with no track loaded on this deck.
+- CDJ-3000 INFO screen: a tab per player on the network (playing, master
+  and loaded marks), showing the selected player's track: title, artist,
+  album, key, BPM, length, cover and the stick's colour and player number.
+  Tracks stay fetched as tabs switch.
+- CDJ-3000 screen: the meter slot reads MASTER PLAYER while this deck is
+  the tempo master.
 - OpenDeck takes tempo master by itself when it plays with no master on
   the network, as a CDJ does: after two seconds (long enough to hear an
   existing master), without MASTER pressed.  With a master present nothing
   changes; MASTER still asks for the role.  Only when LINK sending is on.
 
 ### Changed
+- MASTER pressed while this deck is master hands the role to a player that
+  is playing, as a CDJ-3000 does (it did nothing); with no other player
+  playing it stays master.
+- CDJ-3000 screen: pressing the browse encoder on the playback screen does
+  nothing, as on the unit (it opened BROWSE, which has its own key).
+- binrw 0.15 for the rekordbox export reader, and explicit `f32` literals
+  where Rust is phasing out the fallback (a future hard error).
 - The full-size deck's front-right top piece (`hardware/cad/deck7`,
   `top_fr.stl`, the only part that changes): both jog bearings now sit in
   the top's boss, so the base tower is not needed; the AS5600 board snaps

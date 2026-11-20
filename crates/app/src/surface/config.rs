@@ -59,10 +59,12 @@ pub enum Chip {
 pub struct I2cTransport {
     /// Linux bus device; the Pi's header bus is `/dev/i2c-1`.
     #[serde(default = "default_bus")]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]   // read by the Linux I2C thread
     pub bus: String,
     /// 7-bit address (PCF8574: 0x20–0x27; PCF8574A: 0x38–0x3F).
     pub address: u8,
     #[serde(default = "default_chip")]
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub chip: Chip,
     /// How often the pins are read.  Buttons are happy at 200 Hz; a browse
     /// encoder wants 1000.

@@ -100,6 +100,8 @@ pub struct LinkState {
     /// Each player's latest Absolute Position (a CDJ-3000 or an OpenDeck,
     /// ~33 a second, sent straight to us) and when it came.
     pub positions:     Mutex<HashMap<u8, (AbsPosition, Instant)>>,
+    /// Each player's latest status (its loaded track, tempo, …).
+    pub peer_status:   Mutex<HashMap<u8, Status>>,
     /// Tracks we serve as a Link media source (0 = not serving).  Non-zero
     /// answers media queries and flags our USB slot loaded in status.
     pub serve_tracks:  AtomicU32,
@@ -232,6 +234,7 @@ impl LinkState {
             peers: Mutex::new(HashMap::new()),
             peer_names: Mutex::new(HashMap::new()),
             positions: Mutex::new(HashMap::new()),
+            peer_status: Mutex::new(HashMap::new()),
             serve_tracks: AtomicU32::new(0),
             peer_media: Mutex::new(HashMap::new()),
             beat2_beat_ms: AtomicU64::new(0),
@@ -279,6 +282,29 @@ impl LinkState {
             .map(|(_, (info, _))| info.clone()).collect()).unwrap_or_default();
         v.sort_by_key(|m| std::cmp::Reverse(m.slot));
         v
+    }
+
+    /// MASTER pressed while master: hand the role to another player, as a
+    /// CDJ-3000 does (docs/reference/cdj-3000-master-and-waveform-view.md).
+    /// The unit names its successor in its status (the handoff byte) and
+    /// drops the flag once that player claims it; it only hands to a player
+    /// that is playing, and with none it stays master.  Which of several
+    /// playing players it picks is not known yet: the lowest number here.
+    /// Returns the player handed to.
+    pub fn hand_off_master(&self, why: &str) -> Option<u8> {
+        let me = self.player();
+        let to = self.peer_status.lock().ok()?.iter()
+            .filter(|(p, st)| **p != me && st.playing)
+            .map(|(p, _)| *p).min();
+        match to {
+            Some(p) => {
+                self.want_master.store(false, Ordering::Relaxed);
+                self.handoff_to.store(p as u32, Ordering::Relaxed);
+                log::info!("ProDJ Link: handing master to player {p} ({why})");
+            }
+            None => log::info!("ProDJ Link: keeping master ({why}): no other player is playing"),
+        }
+        to
     }
 
     /// Assert the master role with a sync counter newer than anything seen.
@@ -993,6 +1019,7 @@ impl LinkState {
     /// A player's playhead in ms now, from its latest position packet run
     /// forward at its pitch while it plays; None without a recent one (1 s).
     /// `playing` comes from its status.
+    #[cfg(test)]   // superseded in the app by RemoteWave::smooth_playhead
     pub fn playhead_ms(&self, player: u8, playing: bool, now: Instant) -> Option<f64> {
         let (p, at) = self.positions.lock().ok()?.get(&player).copied()?;
         let age = now.checked_duration_since(at)?;
@@ -1176,6 +1203,7 @@ impl StatusRx {
             return out;
         }
         let Some(st) = ProDjLink::parse_status(data) else { return out };
+        if let Ok(mut m) = link.peer_status.lock() { m.insert(st.player, st); }
         if st.player == link.player() { return out; }
 
         let changed = last.get(&st.player).map_or(true, |p| {
@@ -2622,6 +2650,35 @@ mod listener_tests {
         rx.on_packet(&status(2, fields(false, 128.0, 1.0, None, 9)), from(CDJ, PORT_STATUS));
         assert!(link.master.load(Ordering::Relaxed));
         assert_eq!(link.master_player.load(Ordering::Relaxed), 0);
+    }
+
+    /// MASTER pressed while we are master, as a CDJ-3000 does it (seen on two
+    /// emulated units): the role goes to a playing player through the
+    /// handoff byte, and we drop it once that player claims it.  With no
+    /// other player playing, we stay master.
+    #[test]
+    fn master_pressed_while_master_hands_the_role_to_a_playing_player() {
+        let link = LinkState::new(ME);
+        link.master.store(true, Ordering::Relaxed);
+        let mut rx = status_rx(&link);
+        let stopped = |p| StatusFields { playing: false, ..fields(false, 128.0, 1.0, None, 1) };
+        rx.on_packet(&status(2, stopped(2)), from(CDJ, PORT_STATUS));
+        assert_eq!(link.hand_off_master("test"), None, "nobody playing: keep it");
+        assert!(link.master.load(Ordering::Relaxed));
+        assert_eq!(link.handoff_to.load(Ordering::Relaxed), 0);
+
+        // Two players playing: the role goes to one of them (the lowest
+        // number; which one the unit picks is not known yet).
+        rx.on_packet(&status(4, fields(false, 126.0, 1.0, None, 1)), from(XDJ, PORT_STATUS));
+        rx.on_packet(&status(2, fields(false, 128.0, 1.0, None, 1)), from(CDJ, PORT_STATUS));
+        assert_eq!(link.hand_off_master("test"), Some(2));
+        assert_eq!(link.handoff_to.load(Ordering::Relaxed), 2, "our status names it");
+        assert!(link.master.load(Ordering::Relaxed), "we keep the flag until it claims the role");
+
+        rx.on_packet(&status(2, fields(true, 128.0, 1.0, None, 2)), from(CDJ, PORT_STATUS));
+        assert!(!link.master.load(Ordering::Relaxed), "handed over");
+        assert_eq!(link.handoff_to.load(Ordering::Relaxed), 0);
+        assert_eq!(link.master_player.load(Ordering::Relaxed), 2);
     }
 
     #[test]

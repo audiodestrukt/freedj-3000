@@ -658,6 +658,14 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
 /// Whether the phase-meter slot shows the meter (the unit's PHASE METER view)
 /// or is left to the waveform view. Screen state, like the panels; a tap on
 /// the slot switches, as on the unit.
+/// The INFO screen's selected player tab (our own number until another is tapped).
+pub fn info_player(ctx: &egui::Context, own: u8) -> u8 {
+    ctx.data(|d| d.get_temp::<u8>(Id::new("cdj3k-info-player"))).unwrap_or(own)
+}
+
+/// The meter slot shows the waveform view (the phase meter is switched off).
+pub fn waveform_view(ctx: &egui::Context) -> bool { !meter_shown(ctx) }
+
 fn meter_shown(ctx: &egui::Context) -> bool {
     !ctx.data(|d| d.get_temp::<bool>(Id::new("cdj3k-meter-off"))).unwrap_or(false)
 }
@@ -679,6 +687,13 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
         label(ui, b.center(), Align2::CENTER_CENTER, snap.master_player, 17.0, u, Color32::BLACK);
     }
     let r = lay.meter;
+    // This deck is the sync master: the slot says so (both views).
+    if snap.master {
+        let t = Rect::from_center_size(r.center(), Vec2::new(190.0 * u, 32.0 * u));
+        p.rect_filled(t, 2.0, BARS_ORANGE);
+        label(ui, t.center(), Align2::CENTER_CENTER, "MASTER PLAYER", 18.0, u, Color32::BLACK);
+        return;
+    }
     let resp = ui.interact(r, Id::new("cdj3k-meter"), egui::Sense::click());
     if resp.clicked() {
         let off = !meter_shown(ui.ctx());
@@ -686,7 +701,8 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
     }
     // Shown once there is another player to follow; the meter of a deck
     // alone has nothing to measure against.
-    if !meter_shown(ui.ctx()) || !(snap.linked || snap.beat2_bpm > 0.0) { return; }
+    if !(snap.linked || snap.beat2_bpm > 0.0) { return; }
+    if !meter_shown(ui.ctx()) { return draw_wave_view(ui, snap, r, lay.wave.width(), u); }
     let beat_px = 73.0 * u;
     let cx = r.center().x;
     let master_bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
@@ -709,6 +725,132 @@ fn draw_phase_meter(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32) {
         }
     }
     p.line_segment([Pos2::new(cx, r.min.y + 6.0 * u), Pos2::new(cx, r.max.y - 4.0 * u)], Stroke::new(3.0 * u, TEXT));
+}
+
+/// The meter slot's WAVEFORM view (photographed off a CDJ-3000, zoomed with the
+/// main waveform): the other
+/// player's waveform, thin, above the main waveform, with its own beat grid
+/// (ticks along both edges, red on the first beat of a bar) moving with it
+/// past a white line at its playhead.  The scale is this deck's tempo, so
+/// when the other track is at the same tempo and in phase its beats line up
+/// with this deck's grid on the main waveform, and when it is not they drift.
+/// How wide one beat at `bpm` is across `wave_w` at the main waveform's zoom
+/// (`cols` analysis columns across it).
+fn zoom_beat_px(wave_w: f32, cols: f32, sample_rate: u32, bpm: f32) -> f32 {
+    let sr = if sample_rate > 0 { sample_rate } else { 44_100 } as f32;
+    wave_w / cols.max(1.0) * sr * 60.0 / (bpm * opendeck_analysis::waveform::HOP_SIZE as f32)
+}
+
+/// The looped span's shade, as the main waveform's (renderer `loop_bg`, CDJ style).
+const REMOTE_LOOP_BG: Color32 = Color32::from_rgb(72, 52, 10);
+
+fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, wave_w: f32, u: f32) {
+    let p = ui.painter().with_clip_rect(r);
+    // The same zoom as the main waveform: its columns across its width set how
+    // wide a beat is, of this deck's grid, or with no track loaded of the
+    // other player's tempo (so zooming works before anything is loaded);
+    // with neither, the phase meter's width.
+    let tempo = snap.beat_grid.filter(|g| g.bpm > 0.0).map(|g| g.bpm as f32)
+        .or_else(|| snap.remote_wave.as_ref().map(|w| w.bpm * w.pitch).filter(|b| *b > 0.0))
+        .or_else(|| (snap.beat2_bpm > 0.0).then_some(snap.beat2_bpm));
+    let beat_px = match tempo {
+        Some(bpm) => zoom_beat_px(wave_w, snap.cols_visible, snap.sample_rate, bpm),
+        None => 73.0 * u,
+    };
+    let cx = r.center().x;
+    if let Some(w) = &snap.remote_wave {
+        let (mid, half) = (r.center().y, 24.0 * u);
+        // Points per 1/150 s of the other track: its media seconds pass at
+        // its pitch, and a beat of this deck is `beat_px` wide.
+        let our_bpm = snap.beat_grid.map_or(w.bpm * w.pitch, |g| g.bpm as f32 * snap.fader_speed);
+        let per_entry = beat_px * our_bpm / 60.0 / w.pitch / 150.0;
+        let per_sec = per_entry * 150.0;
+        let head = w.playhead_s as f32;
+        let bytes = &w.data.bytes;
+        let n = bytes.len();
+        let first = head * 150.0;
+        // Its active loop: the looped span shaded amber behind the waveform,
+        // as the main waveform shades ours (the unit draws no in/out lines).
+        if let Some((a, b)) = w.active_loop {
+            let (xa, xb) = (cx + (a as f32 - head) * per_sec, cx + (b as f32 - head) * per_sec);
+            if xb > r.min.x && xa < r.max.x {
+                p.rect_filled(Rect::from_min_max(Pos2::new(xa.max(r.min.x), r.min.y), Pos2::new(xb.min(r.max.x), r.max.y)), 0.0, REMOTE_LOOP_BG);
+            }
+        }
+        let mode = WAVE_MODE.load(std::sync::atomic::Ordering::Relaxed);
+        let bands = &w.data.bands;
+        let rgb = &w.data.rgb;
+        let coloured = (mode == 0 && !rgb.is_empty()) || (mode == 1 && !bands.is_empty());
+        let draw_rgb = mode == 0 && !rgb.is_empty();
+        let mut x = r.min.x;
+        while x < r.max.x {
+            let (a, b) = (first + (x - cx) / per_entry, first + (x + 1.0 - cx) / per_entry);
+            let (a, b) = ((a.floor().max(0.0)) as usize, (b.ceil().max(0.0)) as usize);
+            if draw_rgb {
+                if a < rgb.len() {
+                    let m = rgb[a..b.max(a + 1).min(rgb.len())].iter().fold([0u8; 4], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2]), m[3].max(v[3])]);
+                    if m[3] > 0 {
+                        let col = Color32::from_rgb(m[0] * 36, m[1] * 36, m[2] * 36);
+                        let hh = half * m[3] as f32 / 31.0;
+                        p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0_f32, col));
+                    }
+                }
+            } else if coloured {
+                if a < bands.len() {
+                    let m = bands[a..b.max(a + 1).min(bands.len())].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])]);
+                    if let Some((col, frac)) = band_style(mode, m) {
+                        let hh = half * frac;
+                        p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0_f32, col));
+                    }
+                }
+            } else if a < n {
+                let (h, wh) = bytes[a..b.max(a + 1).min(n)].iter().fold((0u8, 0u8), |m, &v| {
+                    let (h, wh) = (v & 0x1f, v >> 5);
+                    if h > m.0 { (h, wh) } else { m }
+                });
+                if h > 0 {
+                    let k = wh as f32 / 7.0;
+                    let col = Color32::from_rgb((18.0 + 190.0 * k) as u8, (96.0 + 120.0 * k) as u8, (151.0 + 80.0 * k) as u8);
+                    let hh = half * h as f32 / 31.0;
+                    p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0_f32, col));
+                }
+            }
+            x += 1.0;
+        }
+        // Its beat grid, drawn where its beats are in the track.
+        let span = (r.width() / per_sec) * 0.6;
+        for b in w.data.beats.iter().filter(|b| ((b.time_ms as f32 / 1000.0) - head).abs() < span) {
+            let x = cx + (b.time_ms as f32 / 1000.0 - head) * per_sec;
+            if x < r.min.x || x > r.max.x { continue; }
+            let bar = b.beat_in_bar == 1;
+            let col = if bar { RED } else { TEXT };
+            let len = if bar { 12.0 } else { 8.0 } * u;
+            p.line_segment([Pos2::new(x, r.min.y + 2.0 * u), Pos2::new(x, r.min.y + 2.0 * u + len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.max.y - 2.0 * u), Pos2::new(x, r.max.y - 2.0 * u - len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.min.y + 14.0 * u), Pos2::new(x, r.max.y - 14.0 * u)],
+                           Stroke::new(1.0_f32, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
+        }
+    }
+    else if snap.beat2_bpm > 0.0 && !snap.master && snap.master_player != 0 {
+        // No waveform yet (the master's data has not come, or this deck has
+        // no track): a grid from the live beats, as the phase meter has it,
+        // spaced on this deck's tempo when there is one.  With no master on
+        // the network the view stays empty, as on the unit.
+        let spacing = snap.beat_grid.map_or(beat_px, |g| beat_px * (g.bpm as f32 * snap.fader_speed) / snap.beat2_bpm);
+        let bib = if snap.beat2_beat_in_bar > 0 { snap.beat2_beat_in_bar as i32 } else { 1 };
+        for i in -9..=9i32 {
+            let x = cx + (i as f32 - snap.beat2_phase_beats) * spacing;
+            if x < r.min.x || x > r.max.x { continue; }
+            let bar = (i + bib - 1).rem_euclid(4) == 0;
+            let col = if bar { RED } else { TEXT };
+            let len = if bar { 12.0 } else { 8.0 } * u;
+            p.line_segment([Pos2::new(x, r.min.y + 2.0 * u), Pos2::new(x, r.min.y + 2.0 * u + len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.max.y - 2.0 * u), Pos2::new(x, r.max.y - 2.0 * u - len)], Stroke::new(2.0 * u, col));
+            p.line_segment([Pos2::new(x, r.min.y + 14.0 * u), Pos2::new(x, r.max.y - 14.0 * u)],
+                           Stroke::new(1.0_f32, if bar { Color32::from_rgb(110, 40, 40) } else { Color32::from_rgb(60, 60, 60) }));
+        }
+    }
+    p.line_segment([Pos2::new(cx, r.min.y + 2.0 * u), Pos2::new(cx, r.max.y - 2.0 * u)], Stroke::new(2.5 * u, TEXT));
 }
 
 /// Which GRID ADJUST keys are lit: SNAP GRID, SHIFT GRID, ◀◀ 1/2, ▶▶ 1/2,
@@ -734,6 +876,17 @@ fn ahead_x(w: Rect, cols_ahead: f64, cols: f64) -> f32 {
 #[cfg(test)]
 mod helper_tests {
     use super::*;
+
+    /// The WAVEFORM view zooms with the main waveform, also with no track
+    /// loaded (a beat of the other player's tempo then): fewer columns
+    /// across, wider beats; a faster tempo, narrower ones.
+    #[test]
+    fn the_waveform_view_zooms_without_a_track() {
+        let w = zoom_beat_px(1000.0, 400.0, 44_100, 128.0);
+        assert!((zoom_beat_px(1000.0, 200.0, 44_100, 128.0) - 2.0 * w).abs() < 1e-3, "zoomed in: twice as wide");
+        assert!((zoom_beat_px(1000.0, 400.0, 44_100, 256.0) - w / 2.0).abs() < 1e-3, "twice the tempo: half as wide");
+        assert_eq!(zoom_beat_px(1000.0, 400.0, 0, 128.0), w, "no track: 44.1 kHz assumed");
+    }
 
     /// The 16 / 32 marks: 16 and 32 beats right of the centred playhead,
     /// 32 twice as far as 16, wherever the playhead is (they are computed
@@ -1256,46 +1409,67 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
     p.line_segment([xi.left_top(), xi.right_bottom()], xs);
     p.line_segment([xi.right_top(), xi.left_bottom()], xs);
 
-    // Player tabs.
+    // Player tabs: ours, and every player heard (bright, with a green mark
+    // while it plays); tap one to read what it has loaded.
+    let sel_tab = if snap.info_player == 0 { snap.player } else { snap.info_player };
     for n in 1..=6u8 {
         let y = 92.0 + 64.0 * (n - 1) as f32;
         let t = r(0.0, y, 100.0, y + 62.0);
-        let me = n == snap.player;
-        p.rect_filled(t, 0.0, if me { KEY_LIT } else { Color32::from_rgb(25, 25, 25) });
-        let c = if me { TEXT } else { Color32::from_rgb(80, 80, 80) };
+        let peer = snap.peers.iter().find(|q| q.player == n);
+        let present = n == snap.player || peer.is_some();
+        let sel = n == sel_tab;
+        p.rect_filled(t, 0.0, if sel { KEY_LIT } else { Color32::from_rgb(25, 25, 25) });
+        let c = if present { TEXT } else { Color32::from_rgb(80, 80, 80) };
         label(ui, Pos2::new(t.center().x, t.min.y + 15.0 * u), Align2::CENTER_CENTER, "PLAYER", 12.0, u, c);
         label(ui, Pos2::new(t.center().x, t.min.y + 40.0 * u), Align2::CENTER_CENTER, n, 28.0, u, c);
+        if let Some(q) = peer {
+            if q.playing { p.circle_filled(Pos2::new(t.max.x - 12.0 * u, t.min.y + 12.0 * u), 5.0 * u, Color32::from_rgb(0, 220, 60)); }
+            else if q.loaded { p.circle_stroke(Pos2::new(t.max.x - 12.0 * u, t.min.y + 12.0 * u), 5.0 * u, Stroke::new(1.5 * u, LABEL)); }
+            if q.master { label(ui, Pos2::new(t.max.x - 12.0 * u, t.max.y - 12.0 * u), Align2::CENTER_CENTER, "M", 13.0, u, BARS_ORANGE); }
+        }
+        if present && tap(ui, t, &format!("cdj-info-tab-{n}")).0 {
+            ctx.data_mut(|d| d.insert_temp(Id::new("cdj3k-info-player"), n));
+        }
     }
+    // What the page shows: our own track, or the selected player's.
+    let remote = sel_tab != snap.player;
+    let rv = snap.remote_info.as_ref().filter(|_| remote);
+    let empty_tags = opendeck_decode::TrackTags::default();
+    let tags_ref: &opendeck_decode::TrackTags = if remote { rv.map_or(&empty_tags, |v| &v.tags) } else { snap.tags };
+    let title_text: String = if remote { rv.and_then(|v| v.tags.title.clone()).unwrap_or_default() } else { snap.title.to_string() };
 
     p.rect_filled(r(102.0, 92.0, 1280.0, 475.0), 0.0, BODY);
-    let t = &snap.tags;
+    let t = tags_ref;
     let dash = |o: &Option<String>| o.clone().unwrap_or_default();
 
     // Source + artwork, rating, then BPM / key / length / colour.
     let src = r(132.0, 112.0, 222.0, 202.0);
-    p.rect_filled(src, 0.0, SOURCE_TILE);
-    label(ui, Pos2::new(src.center().x, src.min.y + 64.0 * u), Align2::CENTER_CENTER, if snap.source_link { "LINK" } else { "USB" }, 18.0, u, TEXT);
-    draw_art(ui, ctx, snap.tags, "deck", r(222.0, 112.0, 312.0, 202.0));
+    let tile = if remote {
+        match rv { Some(v) => Tile { kind: crate::browser::SourceTile::Link, badge: v.badge }, None => Tile { kind: crate::browser::SourceTile::None, badge: None } }
+    } else { loaded_tile() };
+    draw_source_tile(ui, snap, src, tile, u);
+    draw_art(ui, ctx, t, if remote { "deck-remote" } else { "deck" }, r(222.0, 112.0, 312.0, 202.0));
     for i in 0..5 { star(ui, at(155.0 + 33.0 * i as f32, 237.0), 13.0 * u, u); }
     for y in [262.0, 313.0, 364.0, 415.0] {
-        p.line_segment([at(140.0, y), at(312.0, y)], Stroke::new(1.0, RULE));
+        p.line_segment([at(140.0, y), at(312.0, y)], Stroke::new(1.0_f32, RULE));
     }
     boxed(ui, "BPM", at(159.0, 288.0), u);
-    if let Some(g) = snap.beat_grid {
-        label(ui, at(185.0, 288.0), Align2::LEFT_CENTER, format!("{:.1}", g.bpm), 24.0, u, TEXT);
+    let bpm_shown = if remote { rv.and_then(|v| v.bpm) } else { snap.beat_grid.map(|g| g.bpm as f32) };
+    if let Some(b) = bpm_shown {
+        label(ui, at(185.0, 288.0), Align2::LEFT_CENTER, format!("{b:.1}"), 24.0, u, TEXT);
     }
     boxed(ui, "b#", at(159.0, 338.0), u);
     label(ui, at(185.0, 338.0), Align2::LEFT_CENTER, dash(&t.key), 24.0, u, TEXT);
     icon(ui, Icon::Clock, at(159.0, 390.0), u);
-    if snap.total_samples > 0 {
-        let secs = snap.total_secs().round() as u64;
+    let len_s = if remote { rv.and_then(|v| v.length_s).map(|l| l as u64) } else { (snap.total_samples > 0).then(|| snap.total_secs().round() as u64) };
+    if let Some(secs) = len_s {
         label(ui, at(180.0, 390.0), Align2::LEFT_CENTER, format!("{:02}:{:02}", secs / 60, secs % 60), 30.0, u, TEXT);
     }
     p.circle_filled(at(159.0, 441.0), 11.0 * u, SOURCE_TILE);
 
     // Title, album, artist across the page.
     let rows: [(Option<Icon>, String); 3] = [
-        (None, snap.title.to_string()),
+        (None, title_text),
         (Some(Icon::Disc), dash(&t.album)),
         (Some(Icon::Person), dash(&t.artist)),
     ];
@@ -1307,7 +1481,7 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
             None => { label(ui, at(379.0, y), Align2::CENTER_CENTER, "♪", 30.0, u, TEXT); }
         }
         clip.text(at(400.0, y), Align2::LEFT_CENTER, text, FontId::proportional(30.0 * u), TEXT);
-        p.line_segment([at(362.0, y + 25.0), at(1228.0, y + 25.0)], Stroke::new(1.0, RULE));
+        p.line_segment([at(362.0, y + 25.0), at(1228.0, y + 25.0)], Stroke::new(1.0_f32, RULE));
     }
 
     // Detail columns: genre / label / remixer / original artist; bitrate,
@@ -1316,18 +1490,18 @@ fn draw_info(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, lay: &Layout, u:
                       (390.0, Icon::Person, String::new()), (441.0, Icon::Person, String::new())] {
         icon(ui, k, at(379.0, y), u);
         label(ui, at(400.0, y), Align2::LEFT_CENTER, v, 24.0, u, TEXT);
-        p.line_segment([at(362.0, y + 25.0), at(650.0, y + 25.0)], Stroke::new(1.0, RULE));
+        p.line_segment([at(362.0, y + 25.0), at(650.0, y + 25.0)], Stroke::new(1.0_f32, RULE));
     }
     boxed(ui, "bps", at(716.0, 288.0), u);
-    p.line_segment([at(700.0, 313.0), at(860.0, 313.0)], Stroke::new(1.0, RULE));
+    p.line_segment([at(700.0, 313.0), at(860.0, 313.0)], Stroke::new(1.0_f32, RULE));
     icon(ui, Icon::Bubble, at(716.0, 340.0), u);
     p.with_clip_rect(r(740.0, 320.0, 1228.0, 360.0))
         .text(at(740.0, 338.0), Align2::LEFT_CENTER, dash(&t.comment), FontId::proportional(22.0 * u), TEXT);
     icon(ui, Icon::Calendar, at(907.0, 288.0), u);
-    p.line_segment([at(893.0, 313.0), at(1003.0, 313.0)], Stroke::new(1.0, RULE));
+    p.line_segment([at(893.0, 313.0), at(1003.0, 313.0)], Stroke::new(1.0_f32, RULE));
     icon(ui, Icon::Calendar, at(1067.0, 288.0), u);
     label(ui, at(1090.0, 288.0), Align2::LEFT_CENTER, dash(&t.year), 22.0, u, TEXT);
-    p.line_segment([at(1050.0, 313.0), at(1228.0, 313.0)], Stroke::new(1.0, RULE));
+    p.line_segment([at(1050.0, 313.0), at(1228.0, 313.0)], Stroke::new(1.0_f32, RULE));
 }
 
 // ── List screens (BROWSE, TAG LIST, UTILITY) ─────────────────────────────────
@@ -1700,7 +1874,7 @@ fn draw_source(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, b: &Browser, cursor: 
                 };
                 label(ui, right, Align2::RIGHT_CENTER, v, 28.0, u, TEXT);
             }
-            ui.painter().line_segment([at(949.0, y + 22.0), at(1260.0, y + 22.0)], Stroke::new(1.0, Color32::BLACK));
+            ui.painter().line_segment([at(949.0, y + 22.0), at(1260.0, y + 22.0)], Stroke::new(1.0_f32, Color32::BLACK));
         };
         line(120.0, "Songs", Some((songs, "")));
         line(166.0, "Playlists", Some((lists, "")));
@@ -1922,7 +2096,7 @@ fn draw_browse_info(ui: &Ui, b: &Browser, e: &crate::browser::Entry, sc: Rect, r
     let artist = tags.artist.clone().or_else(|| e.artist.clone()).unwrap_or_default();
     let bpm = tags.bpm.or(e.bpm).map(|b| format!("{b:.1}")).unwrap_or_default();
     let at = |x: f32, y: f32| Pos2::new(sc.min.x + x * u, sc.min.y + y * u);
-    let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0, Color32::from_rgb(70, 70, 70)));
+    let rule = |y: f32, x1: f32| ui.painter().line_segment([at(742.0, y), at(x1, y)], Stroke::new(1.0_f32, Color32::from_rgb(70, 70, 70)));
     let time = dur.map(|d| format!("{:02}:{:02}", d / 60, d % 60)).unwrap_or_default();
     let rows: [(&str, String); 7] = [
         ("person", artist),
@@ -2097,6 +2271,26 @@ fn three_band_stack(m: [u8; 3], height: f32) -> [f32; 3] {
     let mid = lo + 0.5 * m[1] as f32;
     let hi = mid + 0.54 * m[2] as f32;
     [lo, mid, hi].map(|v| (height * v / FULL).min(height))
+}
+
+/// A waveform column of 3 band levels (low, mid, high) in the colour mode of
+/// the main waveform (0 RGB, 1 3-band): its colour and height as a fraction.
+fn band_style(mode: u8, m: [u8; 3]) -> Option<(Color32, f32)> {
+    let top = *m.iter().max().unwrap_or(&0) as f32;
+    if top <= 0.0 { return None; }
+    let col = if mode == 0 {
+        // RGB: bass red, mid green, high blue, scaled to full brightness.
+        let k = 255.0 / top;
+        Color32::from_rgb((m[0] as f32 * k) as u8, (m[1] as f32 * k) as u8, (m[2] as f32 * k) as u8)
+    } else {
+        // 3-band: the loudest band's colour (blue low, amber mid, white high).
+        match m.iter().position(|&v| v as f32 == top) {
+            Some(0) => Color32::from_rgb(58, 123, 240),
+            Some(1) => Color32::from_rgb(240, 160, 48),
+            _ => Color32::from_rgb(235, 235, 235),
+        }
+    };
+    Some((col, (top / 127.0).min(1.0)))
 }
 
 fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0: f32, u: f32, wave_on: bool) {
@@ -2608,7 +2802,7 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
                     label(ui, Pos2::new(x - 4.0 * u, ru.center().y), Align2::RIGHT_CENTER, format!("{}:00", half / 2), 14.0, u, LABEL);
                 }
             } else {
-                p.line_segment([Pos2::new(x, ru.min.y + 2.0 * u), Pos2::new(x, ru.max.y - 5.0 * u)], Stroke::new(1.0, DIM));
+                p.line_segment([Pos2::new(x, ru.min.y + 2.0 * u), Pos2::new(x, ru.max.y - 5.0 * u)], Stroke::new(1.0_f32, DIM));
             }
             half += 1;
         }

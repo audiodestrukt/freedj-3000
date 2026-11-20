@@ -708,6 +708,10 @@ impl Browser {
 
     /// Lookups still under way (the app keeps drawing at full rate so their
     /// answers show as they land).
+    /// A way onto the open dbserver session for other threads (the other
+    /// players' waveform and INFO fetches), so they don't open a second one.
+    pub fn db_handle(&self) -> Option<crate::dbsession::Handle> { self.db.as_ref().map(|d| d.handle()) }
+
     pub fn db_pending(&self) -> bool { !self.meta_asked.is_empty() || self.peek_asked.is_some() || self.list_wait.is_some() || self.connecting() }
 
     fn selected_peek(&self) -> Option<Peek> {

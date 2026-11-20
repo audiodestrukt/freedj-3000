@@ -17,6 +17,7 @@ mod input;
 mod media;
 mod surface;
 mod prodj;
+mod remotewave;
 mod renderer;
 mod screen;
 mod cdj3000;
@@ -907,6 +908,8 @@ struct DeckApp {
     last_input: Instant,
     /// Whether the iOS auto-lock is currently held off (see `AWAKE_IDLE`).
     keep_awake: bool,
+    /// The other player's waveform for the CDJ-3000 screen's waveform meter.
+    remote: remotewave::Remote,
     /// Last-seen audio glitch counters, to log only on change.
     prev_underruns: u64,
     prev_drops:     u64,
@@ -1004,6 +1007,7 @@ fn make_snapshot<'a>(
         ip_line:       String::new(),
         link_peers:    String::new(),
         cols_visible:  ZOOM_LEVELS[ZOOM_DEFAULT],
+        local_wave: None, remote_wave: None, peers: Vec::new(), info_player: 0, remote_info: None,
         beat_grid,
         beat2_bpm,
         beat2_phase_beats,
@@ -1247,6 +1251,7 @@ impl DeckApp {
             full_rate:      true,
             last_input:     Instant::now(),
             keep_awake:     true,
+            remote:         remotewave::Remote::default(),
         }
     }
 
@@ -1578,7 +1583,9 @@ impl DeckApp {
                     return;
                 }
                 if self.link.master.load(Ordering::Relaxed) {
-                    log::info!("already master");
+                    // MASTER again hands the role to a playing player, as
+                    // the unit does (it stays master when no one plays).
+                    self.link.hand_off_master("MASTER pressed while master");
                 } else {
                     // Enable Link sending: you can't lead without broadcasting
                     // beats/status. Off by default (pure follower) until MASTER.
@@ -1645,6 +1652,9 @@ impl DeckApp {
                     }
                     // In MENU the selector's press steps the highlighted setting.
                     ScreenMode::Menu => self.cycle_setting(settings::MENU[self.menu_cursor].0),
+                    // On a CDJ-3000 the press does nothing on the playback
+                    // screen (BROWSE is its own key).
+                    ScreenMode::Playback if self.settings.skin == settings::Skin::Cdj3000 => {}
                     _ => {
                         self.screen_mode = ScreenMode::Browse;
                         self.browser.refresh();
@@ -3345,6 +3355,63 @@ impl DeckApp {
     /// CDJ-3000's waveform spans the whole screen and its default view is
     /// about 34 s wide (18 px per beat at 128 BPM on the unit), about 5.3× the
     /// XDJ's, so the same steps are scaled for it.
+    /// The waveform meter's data: this deck's waveform, and the other
+    /// player's (fetched from its database while the meter slot shows
+    /// WAVEFORM, positioned from its Absolute Position packets).
+    fn fill_waves<'a>(snap: &mut snapshot::DeckSnapshot<'a>, wave: &'a opendeck_analysis::waveform::WaveformCache,
+                      link: &prodj::LinkState, remote: &remotewave::Remote, db: Option<dbsession::Handle>,
+                      ctx: &egui::Context, info_open: bool) {
+        snap.local_wave = Some(wave);
+        // INFO's tabs: who is on the network, and what the selected one has loaded.
+        if info_open {
+            let statuses = link.peer_status.lock().map(|m| m.clone()).unwrap_or_default();
+            let heard: Vec<u8> = link.peers.lock().map(|m| m.keys().copied().collect()).unwrap_or_default();
+            snap.peers = heard.iter().map(|&p| match statuses.get(&p) {
+                Some(s) => snapshot::PeerBrief { player: p, playing: s.playing, master: s.master, loaded: s.track_loaded },
+                None => snapshot::PeerBrief { player: p, playing: false, master: false, loaded: false },
+            }).collect();
+            let sel = cdj3000::info_player(ctx, snap.player);
+            snap.info_player = sel;
+            if sel != snap.player {
+                if let (Some(st), Some(ip)) = (statuses.get(&sel), link.peers.lock().ok().and_then(|m| m.get(&sel).copied())) {
+                    if let Some(d) = remote.infos.get(ip, link.player(), st.track, db.clone(), remotewave::fetch_info) {
+                        let m = &d.meta;
+                        let color = link.media(st.track.player).into_iter().find(|x| x.slot == st.track.slot).map_or(0, |x| x.color);
+                        let length_s = link.positions.lock().ok().and_then(|p| p.get(&sel).map(|(a, _)| a.track_len_s)).filter(|l| *l > 0);
+                        snap.remote_info = Some(snapshot::RemoteInfoView {
+                            tags: opendeck_decode::TrackTags {
+                                title: m.title.clone(), artist: m.artist.clone(), album: m.album.clone(), genre: m.genre.clone(),
+                                key: m.key.clone(), bpm: m.bpm, comment: m.comment.clone(),
+                                year: m.year.clone().or_else(|| m.added.clone()),
+                                artwork: d.art.as_ref().map(|b| (if b.starts_with(&[0x89, b'P']) { "image/png" } else { "image/jpeg" }.to_string(), b.clone())),
+                                ..Default::default()
+                            },
+                            bpm: st.bpm, length_s,
+                            badge: (st.track.player != 0).then_some((st.track.player, color)),
+                        });
+                    }
+                }
+            }
+        }
+        // WAVEFORM view: the tempo master's waveform, as on the unit (which
+        // fetches it as soon as that player is master).  None when there is
+        // no master, or when we are it (the slot reads MASTER PLAYER).
+        if !cdj3000::waveform_view(ctx) { return; }
+        let Some(p) = wave_view_player(link) else { return };
+        let Some(st) = link.peer_status.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
+        let Some(ip) = link.peers.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
+        let Some(data) = remote.waves.get(ip, link.player(), st.track, db, remotewave::fetch_wave) else { return };
+        let Some(bpm) = st.bpm.filter(|b| *b > 0.0) else { return };
+        let Some((pos, at)) = link.positions.lock().ok().and_then(|m| m.get(&p).copied()) else { return };
+        // Between packets (about 30 ms apart) the playhead runs on at the pitch.
+        let run = if st.playing { at.elapsed().as_secs_f64() * pos.pitch as f64 } else { 0.0 };
+        snap.remote_wave = Some(snapshot::RemoteWaveView {
+            data, bpm, pitch: pos.pitch.max(0.1),
+            playhead_s: remote.smooth_playhead(p, pos.playhead_ms as f64 / 1000.0 + run, pos.pitch as f64, st.playing),
+            active_loop: st.active_loop.filter(|l| l.end_ms > l.start_ms).map(|l| (l.start_ms / 1000.0, l.end_ms / 1000.0)),
+        });
+    }
+
     fn cols_visible(&self) -> f32 { Self::cols_for(self.settings.skin, self.zoom_level) }
 
     fn cols_for(skin: settings::Skin, zoom_level: usize) -> f32 {
@@ -3676,6 +3743,7 @@ impl DeckApp {
         }
         snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
+        Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote, self.browser.db_handle(), &self.egui_ctx, self.screen_mode == ScreenMode::Info);
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = self.stems_view();
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
@@ -3931,6 +3999,7 @@ impl DeckApp {
         }
         snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
+        Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote, self.browser.db_handle(), &self.egui_ctx, self.screen_mode == ScreenMode::Info);
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = stems_view;
         if self.indicators.cdj.active() { Self::feed_cdj(&self.indicators.cdj, &self.waveform, &snap); }
@@ -4865,6 +4934,13 @@ pub fn desktop_main() -> Result<()> {
     let autoplay = std::env::var("OPENDECK_AUTOPLAY").map(|v| v != "0").unwrap_or(true);
     let browse_root = music_dir(path.is_none());
     run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root, autoplay, controllers })
+}
+
+/// Whose waveform the CDJ-3000 WAVEFORM view shows: the tempo master's, as
+/// on the unit; none with no master or when we are it.
+fn wave_view_player(link: &prodj::LinkState) -> Option<u8> {
+    let p = link.master_player.load(Ordering::Relaxed) as u8;
+    (p != 0 && p != link.player() && !link.master.load(Ordering::Relaxed)).then_some(p)
 }
 
 /// The deck's own music folder (BROWSE's local source, and what it serves
@@ -6574,5 +6650,24 @@ mod cue_latency_tests {
         let ms = ms_to_sound(&trace, t0).expect("CUE held again: plays");
         eprintln!("second CUE to sound: {ms:.1} ms");
         assert!(ms < BUDGET_MS, "second CUE to sound: {ms:.1} ms (budget {BUDGET_MS} ms)");
+    }
+}
+
+#[cfg(test)]
+mod wave_view_tests {
+    use super::*;
+
+    /// The WAVEFORM view follows the tempo master (docs/reference/
+    /// cdj-3000-master-and-waveform-view.md), not the player whose beats
+    /// came last; nothing with no master, nothing while we are master.
+    #[test]
+    fn the_waveform_view_follows_the_master() {
+        let link = prodj::LinkState::new(3);
+        assert_eq!(wave_view_player(&link), None, "no master");
+        link.master_player.store(2, Ordering::Relaxed);
+        assert_eq!(wave_view_player(&link), Some(2));
+        link.master_player.store(3, Ordering::Relaxed);
+        link.master.store(true, Ordering::Relaxed);
+        assert_eq!(wave_view_player(&link), None, "we are master: MASTER PLAYER");
     }
 }

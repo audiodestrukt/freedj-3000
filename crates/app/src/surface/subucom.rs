@@ -27,6 +27,9 @@
 //!   OPENDECK_SUBUCOM = /dev/subucom_spi1.0
 //! Linux only.
 
+// Used by the Linux (Pi) build only; dead on other targets.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code))]
+
 use crate::cdjface::{Key, Lamp};
 use crate::input::{ControlEvent as CE, Event, UiEvent};
 use crate::screen::ScreenView;
