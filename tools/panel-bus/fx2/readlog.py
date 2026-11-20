@@ -17,6 +17,8 @@ TICK_MS = 65536 / 4e6 * 1e3
 h = peek(0x2000, 16)
 print(f"magic {h[:4]!r} stage {h[4]} events {h[5]} frames logged {h[7]} "
       f"sent {h[8] | h[9] << 8} BUSY rose after {h[10] | h[11] << 8}")
+w = h[12] | h[13] << 8
+print(f"SCK rise after a test release: {'never (no pull-up?)' if w == 0xffff else f'{w} polls'}")
 ev = peek(0x2010, 4 * h[5])
 for i in range(h[5]):
     t = (ev[4 * i] | ev[4 * i + 1] << 8) * TICK_MS + ev[4 * i + 2] * 256 / 4e3

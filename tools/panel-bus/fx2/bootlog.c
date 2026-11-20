@@ -15,7 +15,9 @@
  *           an event with bit 7 set = a frame after which BUSY did not rise
  *   0x2010  events: 64 x (tick u16, TH0, state: bit0 TXD, bit1 BUSY)
  *   0x2110  frames: 48 x (BUSY-low wait in ticks, BUSY-rose flag, tick u16, 32 reply bytes)
- * D0 = SCK out, D1 = RXD out, D2 = TXD in, D3 = BUSY in; D5 high while sending.
+ * D0 = SCK and D1 = RXD, driven push-pull at the stock ~842 kHz (an
+ * open-drain SCK on the deck's pull-up does not rise fast enough).  hdr[12..13] = polls for SCK to rise after a
+ * test release (0xFFFF = it never did: no pull-up, nothing is sent).  D2 = TXD in, D3 = BUSY in; D5 high while sending.
  * SPI mode 3, LSB first, byte 30 = ones'-complement sum, byte 31 = 0x8F. */
 __sfr __at (0x90) IOB;
 __sfr __at (0xB3) OEB;
@@ -48,33 +50,130 @@ static __data unsigned char rx[32];
 static __data unsigned int ticks;
 
 static void tick(void) { if (TF0) { TF0 = 0; ticks++; } }
+#define SCK_LOW()  (OEB |= 0x01)
+#define SCK_REL()  (OEB &= ~0x01)
+
+/* One frame in about 300 us, as the stock main board clocks it: ~857 kHz,
+ * no gap inside a byte.  A bit is 14 cycles at 48 MHz (83 ns each): SCK low
+ * for 7, high for 7, both driven (an open-drain SCK on the deck's pull-up
+ * does not rise in 7 cycles).  RXD is driven too.  One rotate through the
+ * carry sends a bit and keeps the one just received, so a byte is 8 of those
+ * and one more rotate.  tx[] and rx[] are in __data. */
+static void shift_frame(void) __naked {
+    __asm
+    mov r1,#_tx
+    mov r0,#_rx
+    mov r2,#32
+00001$:
+    mov a,@r1
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    rrc a               ; the last bit in
+    mov @r0,a
+    inc r0
+    inc r1
+    djnz r2,00003$      ; the loop is too long for a relative jump back
+    ret
+00003$:
+    ljmp 00001$
+    __endasm;
+}
 
 static void frame(void) {
-    unsigned char i, n, b, r;
+    unsigned char i;
     unsigned int s = 0;
     for (i = 0; i < 30; i++) { s += tx[i]; s = (s & 0xff) + (s >> 8); }
     tx[30] = (unsigned char)s;
     tx[31] = 0x8f;
-    for (i = 0; i < 32; i++) {
-        b = tx[i]; r = 0;
-        for (n = 0; n < 8; n++) {
-            SCK = 0;
-            MOSI = b & 1;
-            b >>= 1;
-            r >>= 1;
-            __asm nop
- nop
- nop
- nop __endasm;
-            SCK = 1;                         /* the panel samples here */
-            __asm nop
- nop
- nop __endasm;
-            if (MISO) r |= 0x80;
-        }
-        rx[i] = r;
-        tick();
-    }
+    shift_frame();
+}
+
+/* ~28 us: the stock main board's pause between BUSY falling and the clock. */
+static void pause28(void) __naked {
+    __asm
+    mov r7,#112         ; 112 x 3 cycles = 336 cycles = 28 us
+00002$:
+    djnz r7,00002$
+    ret
+    __endasm;
 }
 
 void main(void) {
@@ -82,7 +181,7 @@ void main(void) {
     unsigned int sent = 0, rose = 0, t0;
     CPUCS = 0x10;                            /* 48 MHz; timer 0 at CLKOUT/12 = 4 MHz */
     IFCONFIG = 0x80;
-    IOB = 0x03;
+    IOB = 0x00;
     OEB = 0x00;
     for (i = 0; i < 16; i++) hdr[i] = 0;
     hdr[0] = 'X'; hdr[1] = 'D'; hdr[2] = 'J'; hdr[3] = 'L'; hdr[4] = 1;
@@ -107,8 +206,18 @@ void main(void) {
     }
 
     hdr[4] = 3;
-    IOB = 0x23;
-    OEB = 0x23;                              /* drive SCK, RXD; D5 = sending */
+    IOB = 0x22;                              /* SCK released for the pull-up test, RXD high */
+    OEB = 0x22;                              /* D5 = sending, RXD driven */
+    { unsigned int w = 0;                    /* is there a pull-up? time one release */
+      SCK_LOW(); __asm nop
+ nop
+ nop
+ nop __endasm; SCK_REL();
+      while (!SCK && ++w < 0xffff) ;
+      hdr[12] = w & 0xff; hdr[13] = w >> 8;
+      if (w == 0xffff) goto done; }
+    IOB = 0x23;                              /* SCK idles high, now driven */
+    OEB = 0x23;
     while (ticks < T_SEND_END) {
         on = (sent / 33) & 1 ? 0 : 1;            /* ~0.1 s on, ~0.1 s off */
         for (i = 0; i < 30; i++) tx[i] = on ? LAMPS_ON[i] : 0;
@@ -118,6 +227,7 @@ void main(void) {
         t0 = ticks;
         while (BUSY && ticks < T_SEND_END) tick();
         if (ticks >= T_SEND_END) break;
+        pause28();
         frame();
         sent++;
         t0 = ticks - t0;
@@ -136,8 +246,8 @@ void main(void) {
         hdr[8] = sent & 0xff; hdr[9] = sent >> 8; hdr[10] = rose & 0xff; hdr[11] = rose >> 8;
     }
 
+done:
     OEB = 0x00;                              /* release the bus */
-    IOB = 0x03;
     hdr[4] = 4;
     for (;;) ;
 }

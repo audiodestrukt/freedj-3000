@@ -311,6 +311,28 @@ sends only between the panel's ready (~0.4 s) and 4 s, and logs to RAM.
   passthrough with 17 and 19 left out) does not share the net with the main
   board and should not see this.
 
+Later runs ruled out the signal itself:
+
+| Master clock | Reached the panel | Panel finished the frame (BUSY rose) |
+|---|---|---|
+| ~300 kHz push-pull | yes: valid first reply | no |
+| ~300 kHz open-drain on the deck's pull-up | yes: first reply one bit late, as stock | no |
+| ~857 kHz push-pull, 28 µs after BUSY falls (stock timing) | yes: first reply as stock | no |
+| ~857 kHz open-drain | no: the pull-up cannot raise SCK in 0.6 µs | n/a |
+
+So the analyser clocks the panel fine; what differs from the main board is
+the panel's state in the power-on window. The stock boot capture shows the
+main board **restarting the panel ~0.7 s before its first frame** (TXD shows
+the panel's start-up pulses from 14.77 s, BUSY goes high at 15.4467 s and low
+at 15.4523 s, the first clock 28 µs later), and it probably asserts EUP_CON
+(pin 16) too; the panel's first reply after that restart is also one bit late
+and it still raises BUSY. Neither can be reproduced or seen from the analyser
+in the window. Next: send after a normal boot, with the main board kept off
+SCK and RXD (passthrough), or with no main board at all. Two FX2 notes from
+the attempts: a bit write to a port reads the pins back (read-modify-write),
+so an open-drain pin's latch must be re-cleared after writing a neighbour,
+and the 0xA0 RAM upload returns junk while the CPU runs (halt it first).
+
 ## Route A: speak to the panel CPU (recommended)
 
 Unplug the two FFCs between LCDB and PNLB and plug in an interposer board
