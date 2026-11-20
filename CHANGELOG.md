@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- OpenDeck takes tempo master by itself when it plays with no master on
+  the network, as a CDJ does: after two seconds (long enough to hear an
+  existing master), without MASTER pressed.  With a master present nothing
+  changes; MASTER still asks for the role.  Only when LINK sending is on.
+
 ### Changed
 - The full-size deck's front-right top piece (`hardware/cad/deck7`,
   `top_fr.stl`, the only part that changes): both jog bearings now sit in

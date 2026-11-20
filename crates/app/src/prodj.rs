@@ -1346,6 +1346,33 @@ impl Handoff {
     }
 }
 
+/// A CDJ takes master by itself when it plays with no master on the
+/// network (seen on two emulated CDJ-3000s, 2026-11-20: a unit that started
+/// playing alone lit MASTER PLAYER; Dan's tester saw the same on a real
+/// one).  We do the same: sending, playing a loaded track, nobody master
+/// and no handoff under way for [`AUTO_MASTER_AFTER`] (long enough to hear
+/// an existing master's status, which comes every 200 ms), take the role.
+/// With a master on the network nothing happens; MASTER asks for it.
+const AUTO_MASTER_AFTER: Duration = Duration::from_secs(2);
+
+#[derive(Default)]
+struct AutoMaster { since: Option<Instant> }
+
+impl AutoMaster {
+    fn tick(&mut self, link: &LinkState, now: Instant, send_full: bool, playing: bool, track_loaded: bool) {
+        let free = send_full && playing && track_loaded
+            && !link.master.load(Ordering::Relaxed)
+            && link.master_player.load(Ordering::Relaxed) == 0
+            && link.yielded_from.load(Ordering::Relaxed) == 0;
+        if !free { self.since = None; return; }
+        let since = *self.since.get_or_insert(now);
+        if now.duration_since(since) >= AUTO_MASTER_AFTER {
+            link.take_master("playing with no master on the network");
+            self.since = None;
+        }
+    }
+}
+
 /// Our status to every peer, each in its generation's form: a CDJ-3000's
 /// long status (with the loop) to all but older players, which get `short`.
 fn status_replies(link: &LinkState, short: &[u8], long: &[u8]) -> Vec<Reply> {
@@ -1495,6 +1522,7 @@ impl ProDjSender {
                 // master's status yet (it arrives every ~200 ms, announces
                 // every 1.5 s).  Wait before concluding nobody is master.
                 let mut handoff = Handoff::default();
+                let mut auto_master = AutoMaster::default();
                 let mut counter: u32  = 0;
                 let mut last_sent = Instant::now();
                 // Audible-position estimate.  The decoder cursor advances a
@@ -1707,6 +1735,8 @@ impl ProDjSender {
                     // ── Master handoff ───────────────────────────────────────
                     let req = handoff.tick(&link, now, send_full, player);
                     send_replies(Some(&sock), req.into_iter().collect());
+                    let has_track = cur_grid.is_some() || !st.samples.load().is_empty();
+                    auto_master.tick(&link, now, send_full, st.playing.load(Ordering::Relaxed), has_track);
 
                     // ── SYNC follow ──────────────────────────────────────────
                     let sync = link.sync.load(Ordering::Relaxed) && !link.master.load(Ordering::Relaxed);
@@ -2846,6 +2876,56 @@ mod sender_tests {
             assert!(h.tick(&link, t0 + Duration::from_millis(ms), true, ME).is_none());
         }
         assert!(!link.master.load(Ordering::Relaxed));
+    }
+
+    /// Playing alone on the network: master after two seconds, as a CDJ
+    /// takes it, without MASTER pressed.
+    #[test]
+    fn playing_with_no_master_takes_it_after_two_seconds() {
+        let link = LinkState::new(ME);
+        let mut a = AutoMaster::default();
+        let t0 = Instant::now();
+        a.tick(&link, t0, true, true, true);
+        a.tick(&link, t0 + Duration::from_millis(1900), true, true, true);
+        assert!(!link.master.load(Ordering::Relaxed), "a master's status may not have come yet");
+        a.tick(&link, t0 + Duration::from_millis(2000), true, true, true);
+        assert!(link.master.load(Ordering::Relaxed));
+        assert!(link.our_sync.load(Ordering::Relaxed) > link.largest_sync.load(Ordering::Relaxed), "a newer sync counter than any seen");
+    }
+
+    /// Not taken while paused, without a track, receive-only, with another
+    /// master on the network, or mid-handoff; and pausing restarts the wait.
+    #[test]
+    fn auto_master_only_when_playing_alone() {
+        let t0 = Instant::now();
+        let later = t0 + Duration::from_secs(3);
+        for (send, playing, track) in [(true, false, true), (true, true, false), (false, true, true)] {
+            let link = LinkState::new(ME);
+            let mut a = AutoMaster::default();
+            a.tick(&link, t0, send, playing, track);
+            a.tick(&link, later, send, playing, track);
+            assert!(!link.master.load(Ordering::Relaxed), "send {send} playing {playing} track {track}");
+        }
+        let link = LinkState::new(ME);
+        link.master_player.store(2, Ordering::Relaxed);
+        let mut a = AutoMaster::default();
+        a.tick(&link, t0, true, true, true);
+        a.tick(&link, later, true, true, true);
+        assert!(!link.master.load(Ordering::Relaxed), "another deck is master: ask with MASTER");
+        let link = LinkState::new(ME);
+        link.yielded_from.store(2, Ordering::Relaxed);
+        let mut a = AutoMaster::default();
+        a.tick(&link, t0, true, true, true);
+        a.tick(&link, later, true, true, true);
+        assert!(!link.master.load(Ordering::Relaxed), "a handoff is under way");
+        let link = LinkState::new(ME);
+        let mut a = AutoMaster::default();
+        a.tick(&link, t0, true, true, true);
+        a.tick(&link, t0 + Duration::from_millis(1500), true, false, true);
+        a.tick(&link, t0 + Duration::from_millis(2500), true, true, true);
+        assert!(!link.master.load(Ordering::Relaxed), "the pause restarted the wait");
+        a.tick(&link, t0 + Duration::from_millis(4600), true, true, true);
+        assert!(link.master.load(Ordering::Relaxed));
     }
 
     #[test]
