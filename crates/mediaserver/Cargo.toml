@@ -17,9 +17,13 @@ path = "src/lib.rs"
 opendeck-link     = { workspace = true }
 opendeck-nfs      = { path = "../nfs" }
 opendeck-dbserver = { path = "../dbserver" }
+opendeck-rekordbox = { path = "../rekordbox" }
 opendeck-decode   = { workspace = true }
 opendeck-analysis = { workspace = true }
 opendeck-types    = { workspace = true }
 anyhow     = { workspace = true }
 log        = { workspace = true }
 env_logger = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

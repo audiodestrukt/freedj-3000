@@ -51,14 +51,19 @@ pub fn scan(root: &Path, name: &str) -> Result<Scanned> {
     let tree = Tree::scan(root).with_context(|| format!("scan {}", root.display()))?;
     let mut tracks = Vec::new();
     let mut files = Vec::new();
+    let mut rb_cues = rekordbox_cues(root);
+    let mut with_cues = 0;
     for (i, (nfs_path, local)) in tree.files().into_iter().enumerate() {
         let ext = local.extension().and_then(|e| e.to_str()).unwrap_or("").to_ascii_lowercase();
         if !AUDIO_EXTS.contains(&ext.as_str()) { continue; }
         let id = i as u32 + 1;
         let title = local.file_stem().and_then(|s| s.to_str()).unwrap_or("?").to_string();
-        tracks.push(Track { id, title, path: nfs_path, ..Default::default() });
+        let cues = rb_cues.remove(&canonical(&local)).unwrap_or_default();
+        if !cues.is_empty() { with_cues += 1; }
+        tracks.push(Track { id, title, path: nfs_path, cues, ..Default::default() });
         files.push((id, local));
     }
+    if with_cues > 0 { log::info!("media: rekordbox cues for {with_cues} of {} tracks", tracks.len()); }
     let by_id: Arc<Vec<(u32, PathBuf)>> = Arc::new(files.clone());
     let art = Arc::new(move |id: u32| -> Option<Vec<u8>> {
         let (_, path) = by_id.iter().find(|(i, _)| *i == id)?;
@@ -66,6 +71,50 @@ pub fn scan(root: &Path, name: &str) -> Result<Scanned> {
     });
     let library = Library { tracks, name: name.to_string(), art: Some(art), history: Vec::new() }.shared();
     Ok(Scanned { tree, library, files })
+}
+
+fn canonical(p: &Path) -> PathBuf { std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()) }
+
+/// The cues rekordbox stored for each file under `root`, by canonical path:
+/// from every rekordbox export (`PIONEER/rekordbox/export.pdb`) at the root
+/// or one folder down (a folder of mounted sticks), each track's ANLZ hot
+/// and memory cues and loops, with the `.EXT`'s colours and comments.  A
+/// player loading the track from us asks for exactly these (its cue list),
+/// as it would from the stick itself.  A missing or unreadable export or
+/// ANLZ file just means no cues.
+pub fn rekordbox_cues(root: &Path) -> std::collections::HashMap<PathBuf, Vec<opendeck_dbserver::server::Cue>> {
+    let mut out = std::collections::HashMap::new();
+    let mut stick_roots = vec![root.to_path_buf()];
+    if let Ok(rd) = std::fs::read_dir(root) {
+        stick_roots.extend(rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()));
+    }
+    for stick in stick_roots {
+        if !stick.join("PIONEER/rekordbox/export.pdb").is_file() { continue; }
+        let export = match opendeck_rekordbox::read_export(&stick) {
+            Ok(e) => e,
+            Err(e) => { log::warn!("media: rekordbox export in {}: {e:#}", stick.display()); continue; }
+        };
+        for t in &export.tracks {
+            if t.analyze_rel.is_empty() { continue; }
+            let Ok(a) = opendeck_rekordbox::read_anlz(&stick.join(t.analyze_rel.trim_start_matches('/'))) else { continue };
+            let cues = served_cues(&a);
+            if !cues.is_empty() { out.insert(canonical(&stick.join(t.rel_path.trim_start_matches('/'))), cues); }
+        }
+    }
+    out
+}
+
+/// rekordbox's cues as our dbserver serves them.  Both number hot cues from
+/// 1 (A); a loop is a cue whose end lies after its start.
+fn served_cues(a: &opendeck_rekordbox::RbAnalysis) -> Vec<opendeck_dbserver::server::Cue> {
+    a.memory_cues.iter().chain(&a.hot_cues).map(|c| opendeck_dbserver::server::Cue {
+        hot:         c.hot_cue.unwrap_or(0) as u8,
+        ms:          c.time_ms,
+        loop_end_ms: (c.is_loop && c.loop_ms > c.time_ms).then_some(c.loop_ms),
+        rgb:         c.rgb,
+        color_code:  c.color_code,
+        comment:     c.comment.clone(),
+    }).collect()
 }
 
 /// One track's analysis, as served and as cached.
@@ -509,6 +558,66 @@ pub fn start_analysis(lib: SharedLibrary, files: Vec<(u32, PathBuf)>, cache_dir:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A CDJ loads a track from OpenDeck's library (not the deck's loaded
+    /// track) and asks for its cue list: it gets the hot cues, memory cues
+    /// and loops rekordbox stored on the stick, with colours and comments.
+    /// Before, every served track but the deck's loaded one answered an
+    /// empty list (the scan never read the ANLZ cues), and nothing tested
+    /// this path: the only cue test fed the server cues by hand.
+    #[test]
+    fn a_player_gets_rekordbox_cues_for_any_track_in_the_library() {
+        use opendeck_dbserver::{server::Server, Client, Slot};
+        use opendeck_rekordbox::fixtures::{dat_and_ext, pqtz, FxCue};
+        // A folder of sticks, as OPENDECK_MUSIC=/media/<user> would be: one
+        // stick, rekordbox's demo export, with an (empty) file per track.
+        let root = tempfile::tempdir().unwrap();
+        let stick = root.path().join("CDJ1");
+        let demo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../third_party/rekordcrate/data/complete_export/demo_tracks");
+        copy_tree(&demo, &stick);
+        let export = opendeck_rekordbox::read_export(&stick).unwrap();
+        for t in &export.tracks {
+            let f = stick.join(t.rel_path.trim_start_matches('/'));
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(&f, b"").unwrap();
+        }
+        // Cues set in rekordbox on the first track: a memory cue, hot cue A
+        // with a colour and a comment, and hot loop B.
+        let first = &export.tracks[0];
+        let memory = [FxCue { ms: 1_000, code: 3, ..Default::default() }];
+        let hot = [
+            FxCue { hot: 1, ms: 32_000, code: 0x09, rgb: (0x30, 0x5a, 0xff), comment: "drop", ..Default::default() },
+            FxCue { hot: 2, ms: 64_000, loop_end_ms: Some(68_000), ..Default::default() },
+        ];
+        let (dat, ext) = dat_and_ext(pqtz(128.0, 50, 64), &memory, &hot);
+        let anlz = stick.join(first.analyze_rel.trim_start_matches('/'));
+        std::fs::write(&anlz, dat).unwrap();
+        std::fs::write(anlz.with_extension("EXT"), ext).unwrap();
+
+        let scanned = scan(root.path(), "OpenDeck").unwrap();
+        let id_of = |rel: &str| scanned.library.read().unwrap().tracks.iter()
+            .find(|t| t.path.ends_with(rel.trim_start_matches('/'))).map(|t| t.id).expect("served");
+        let srv = Server::start_on(Arc::clone(&scanned.library), Arc::new(|| 4), std::net::Ipv4Addr::LOCALHOST, 0, 0).unwrap();
+        let mut cdj = Client::discover_at(std::net::Ipv4Addr::LOCALHOST, srv.query_port, 1).unwrap();
+
+        let mut got = cdj.cues(Slot::Usb, id_of(&first.rel_path)).unwrap();
+        got.sort_by_key(|c| (c.hot, c.ms));
+        let brief: Vec<_> = got.iter().map(|c| (c.hot, c.ms, c.loop_end_ms, c.rgb, c.comment.as_str())).collect();
+        assert_eq!(brief, vec![
+            (0, 1_000, None, None, ""),
+            (1, 32_000, None, Some((0x30, 0x5a, 0xff)), "drop"),
+            (2, 64_000, Some(68_000), Some((0xff, 0x8c, 0)), ""),   // a loop with no colour: orange, as a CDJ draws it
+        ]);
+        assert_eq!(got[1].color_code, 0x09, "hot cue A keeps its pad colour");
+    }
+
+    fn copy_tree(from: &Path, to: &Path) {
+        std::fs::create_dir_all(to).unwrap();
+        for ent in std::fs::read_dir(from).unwrap().flatten() {
+            let (src, dst) = (ent.path(), to.join(ent.file_name()));
+            if src.is_dir() { copy_tree(&src, &dst); } else { std::fs::copy(&src, &dst).unwrap(); }
+        }
+    }
 
     #[test]
     fn cache_round_trips() {

@@ -13,6 +13,15 @@ All notable changes to this project will be documented in this file.
   of hanging on a bracket.
 
 ### Fixed
+- A player loading a track from OpenDeck's library now gets that track's
+  rekordbox cues (hot cues, memory cues, loops, colours, comments) when
+  the served folder holds a rekordbox stick.  Before, only the track
+  loaded on OpenDeck's own deck carried cues; every other track answered
+  an empty cue list, because the library scan never read the stick's ANLZ
+  cues.  The scan now reads every rekordbox export at the served folder or
+  one level down (a folder of sticks).  New end-to-end test: a player asks
+  OpenDeck's dbserver for a stick track's cue list.  Cues set on OpenDeck
+  for tracks other than the loaded one are still not saved (#65).
 - CDJ-3000s on the same LINK network no longer show "Linked to player
   with older firmware.  Please update to latest version."  OpenDeck's
   keep-alive announced itself with an XDJ-1000MK2's protocol byte; it now
