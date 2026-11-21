@@ -204,3 +204,31 @@ def assembly():
     z1 = HUB_TOP - LIP_T
     s.append(("display", cyl(0, 0, z1 - thick, z1 - 0.05, glass), "black"))
     return s
+
+
+def encoder_check(ring_mesh):
+    """Cast each interrupter's beam across its gap while turning the ring mesh
+    through two slot pitches; the A/B states must step through the quadrature
+    cycle one state at a time, in one direction, 4 per slot.  Returns the
+    number of failures."""
+    import numpy as np, trimesh
+    zb = OPTO_TOP - OPTO_AXIS
+
+    def blocked(m, a):
+        c, s = math.cos(math.radians(a)), math.sin(math.radians(a))
+        loc, _, _ = m.ray.intersects_location([[(CODE_R - 3) * c, (CODE_R - 3) * s, zb]], [[c, s, 0]])
+        return any(np.hypot(*l[:2]) < CODE_R + 3 for l in loc)
+
+    sub = 16
+    seq = []
+    for i in range(2 * sub + 1):
+        m = ring_mesh.copy()
+        m.apply_transform(trimesh.transformations.rotation_matrix(math.radians(i * 360.0 / CODE_N / sub), [0, 0, 1]))
+        seq.append((int(blocked(m, OPTO_A)), int(blocked(m, OPTO_B))))
+    states = [s for i, s in enumerate(seq) if i == 0 or s != seq[i - 1]]
+    gray = {(0, 0): 0, (0, 1): 1, (1, 1): 2, (1, 0): 3}
+    steps = [(gray[b] - gray[a]) % 4 for a, b in zip(states, states[1:])]
+    ok = len(steps) == 8 and len(set(steps)) == 1 and steps[0] in (1, 3)
+    print(f"encoder pioneer: {' '.join(f'{a}{b}' for a, b in states)} -> "
+          f"{'quadrature, ' + str(4 * CODE_N) + ' counts a turn' if ok else 'NOT QUADRATURE'}")
+    return 0 if ok else 1

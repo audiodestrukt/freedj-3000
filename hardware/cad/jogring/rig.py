@@ -513,6 +513,8 @@ def main():
                 print(f"CLASH [{variant}] {a} x {b}: {v:.1f} mm3")
         print(f"assembly {variant}: {len(items)} parts, {c} clashes")
         c += held(variant, items)
+        if variant == "pioneer":
+            c += pioneer.encoder_check(next(m for n, m, _ in items if n == "pioneer/ring"))
         clashes += c
         scene(items).export(os.path.join(BUILD, f"jogring_{variant}.glb"))
         cut = []

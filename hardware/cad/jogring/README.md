@@ -52,8 +52,10 @@ deck's top, which stops it lifting.  Everything fastens from inside.
   (3.1 mm gap, 0.73 mm clear on each side) standing in pockets on the plate.
   The second sits 10¼ slots on from the first, so the two beams are a
   quarter-slot apart: **quadrature, 720 counts a turn, with direction**.
-  The build proves it by casting each beam across its gap while it turns the
-  ring mesh: the states run 00 → 10 → 11 → 01, one step at a time.  For more
+  `make jogring` proves it on every build by casting each beam across its
+  gap while it turns the ring mesh: the states run 00 → 10 → 11 → 01, one
+  step at a time.  With the sensors in phase the build fails, which shows
+  the check bites.  For more
   counts, a finer laser-cut code ring is the next step (360 slots in 0.5 mm
   black film would give 1440).
 - **Window.** A **laser-cut clear disc, Ø84 × 3 mm**, is glued into a
