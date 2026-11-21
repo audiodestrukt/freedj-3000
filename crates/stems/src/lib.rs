@@ -19,6 +19,7 @@
 
 pub mod decimate;
 pub mod index;
+pub mod live;
 pub mod media;
 pub mod pgz;
 pub mod synth;
