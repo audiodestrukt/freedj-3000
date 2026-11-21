@@ -15,8 +15,10 @@ All notable changes to this project will be documented in this file.
   44.1 → 96 kHz filter (ported, MIT), so the deck's rebuilt drums cancel.
   On whenever this device serves live stems (a model, not a Pi);
   `OPENDECK_STEMD=0` turns it off.  The deck's own split comes first.
-  Real model: a 3:00 track in 65 s.  Not yet tried against a deck running
-  cdj3k-mods.  docs/design/stemd-server.md.
+  Real model: a 3:00 track in 65 s.  Working on an emulated CDJ-3000
+  running cdj3k-mods v0.1.1: it found OpenDeck over mDNS, sent the track,
+  and its STEMS row played OpenDeck's split (muting drums took them out of
+  the waveform).  docs/design/stemd-server.md.
 - Live stems between OpenDecks: a deck that loaded a track from another
   OpenDeck, with no prepared stems for it, gets its stems from that
   OpenDeck when its STEMS panel opens.  The source splits the track with

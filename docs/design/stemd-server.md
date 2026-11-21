@@ -1,8 +1,9 @@
 # OpenDeck as a stemd server
 
-Status: **built 2026-11-21** (`crates/stemd`, `crates/app/src/stemdsrv.rs`),
-tested over HTTP the way the CDJ-3000's client talks; not yet tried against a
-deck running cdj3k-mods.
+Status: **built and working 2026-11-21** (`crates/stemd`,
+`crates/app/src/stemdsrv.rs`): an emulated CDJ-3000 running cdj3k-mods
+v0.1.1 found OpenDeck over mDNS, sent it a track and played the stems
+OpenDeck split (see "On the emulator").
 
 ## Why
 
@@ -76,6 +77,34 @@ f32le up, FLAC at 96 kHz via mode 1 back): split and encoded in 65 s (2.8x
 real time), model residual −31 dB (lands on the rebuilt drums, as with
 stemd's Fast preset), stem gains 0.90 (peaks past full scale scaled to fit).
 
+## On the emulator (2026-11-21)
+
+cdj3k-emu slot 2 (CDJ-3000, firmware 3.22) booted with nsaintot's
+`cdj3k-mods-v0.1.1-modloader.tgz` (digest checked against GitHub's record of
+the release asset) as a launch-only mod, on the private bridge `djlink0`.
+OpenDeck on the host: release build, `separate-native`, the stemd server on
+port 8420.
+
+1. The deck's avahi saw the advert: `OpenDeck opendeck._stemd._tcp`,
+   `169.254.77.1:8420`, TXT `v=1 path=/v1 model=…`.
+2. UTILITY showed `Ver.3.22-m`; MOD SETTINGS → ENABLE STEMS → ON (server
+   location AUTO).
+3. Loading "Heard It Like This" (3:40) from the deck's own USB, the deck
+   uploaded it: job `6171ceb4c313-1`, 9,723,756 frames at 44.1 kHz.
+   OpenDeck split it in 78.9 s.
+4. The STEMS row came up live (DRUMS, HARMONICS, VOCALS in colour, not
+   grey), and the spool in `/dev/shm` was empty again: the mod had taken
+   the stems in.
+5. Holding DRUMS muted it: the waveform lost its drum transients, the label
+   read MUTED and the STEMS button showed its "not as it came in" dot.
+
+![The STEMS row live on the emulated CDJ-3000 with stems from OpenDeck](img/stemd-cdj3000-stems-row.png)
+![DRUMS held: muted, the waveform without its drums](img/stemd-cdj3000-drums-muted.png)
+
+The audio itself wasn't listened to (the emulator's output goes nowhere
+here); the waveform following the faders is drawn from the stems' own
+levels, which is the evidence.
+
 ## Tests
 
 `crates/stemd/src/tests.rs` drives the server exactly as the deck's
@@ -89,7 +118,7 @@ the bank's levels and gives way to the deck.
 
 ## Next
 
-- Try it against a CDJ-3000 running cdj3k-mods (the emulator can boot it).
+- Try it on a real CDJ-3000 running cdj3k-mods, and listen.
 - A real FLAC encoder.
 - Sessions (stems near the needle first) if a client wants them.
 - OpenDeck as a stemd **client**: split on a GPU machine running stemd.
