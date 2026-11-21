@@ -83,6 +83,20 @@ pub struct WaveformParams {
 /// panel of another shape (`sdl_backend::Fill`), which draws the layout
 /// squeezed sideways.  The UI reads it to put thin moving lines (the beat
 /// ticks) on whole output pixels.
+/// Ask wgpu for the primary backends only (Vulkan / Metal / DX12), not GL:
+/// set for decks hosted in a plugin, where an unused EGL instance panicked in
+/// its drop at the host's quit (EGL already torn down) and crashed the host.
+static PRIMARY_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn primary_backends_only() { PRIMARY_ONLY.store(true, std::sync::atomic::Ordering::Relaxed); }
+
+/// The backends to ask for: WGPU_BACKEND if set (the CDJ-3000 emulator
+/// needs GL), else the primary ones in a plugin host, else all.
+fn backends() -> wgpu::Backends {
+    wgpu::util::backend_bits_from_env().unwrap_or(
+        if PRIMARY_ONLY.load(std::sync::atomic::Ordering::Relaxed) { wgpu::Backends::PRIMARY } else { wgpu::Backends::all() })
+}
+
 static SQUEEZE_X: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0x3f80_0000);
 pub fn squeeze_x() -> f32 { f32::from_bits(SQUEEZE_X.load(std::sync::atomic::Ordering::Relaxed)) }
 pub fn set_squeeze_x(xs: f32) { SQUEEZE_X.store(xs.to_bits(), std::sync::atomic::Ordering::Relaxed) }
@@ -285,7 +299,7 @@ impl WgpuRenderer {
 
         // ── wgpu instance / surface ───────────────────────────────────────────
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends:              wgpu::util::backend_bits_from_env().unwrap_or(wgpu::Backends::all()),
+            backends:              backends(),
             dx12_shader_compiler:  wgpu::Dx12Compiler::default(),
             gles_minor_version:    wgpu::Gles3MinorVersion::Automatic,
             flags:                 wgpu::InstanceFlags::default(),

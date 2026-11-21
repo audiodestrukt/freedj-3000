@@ -34,13 +34,28 @@ process:
   track.  The direction back, a track loaded in the deck's own browser
   updating the field, is not done yet.
 - **Quit.**  The library pins itself in memory (dlopen RTLD_NODELETE), so a
-  host that unloads it at quit no longer pulls the code out from under the
-  deck loop's thread.  REAPER crashed on every quit before.
+  host that unloads it doesn't pull the code out from under the deck loop's
+  thread.  An exit hook closes the decks before the process's destructors
+  run.  Hosted decks ask wgpu for the primary backends only (Vulkan /
+  Metal), unless `WGPU_BACKEND` says otherwise: an unused EGL instance
+  panicked in its drop at REAPER's quit, because EGL was already gone.
+  **Still open:** REAPER can still segfault at quit, after it has removed
+  the first deck, with no Rust panic.  That points into the graphics driver
+  or REAPER's own teardown.  The session itself is unaffected.
 - **Pro DJ Link** as on the desktop: receive-only unless
   `OPENDECK_LINK_SEND=1`.
-- **Parameters.**  *Pitch* (−16 … +16 %, the default TEMPO RANGE) moves
-  the tempo fader through the input bus, as a MIDI fader does, so host
-  automation, LFOs and parameter modulation play the deck.
+- **Parameters.**  All of these go through the input bus, as a controller
+  does, so host automation, LFOs and parameter modulation play the deck:
+  - *Pitch* (−16 … +16 %, the default TEMPO RANGE) moves the tempo fader.
+  - *Play* is a level: on plays, off pauses.
+  - *Cue* is the momentary CUE button.  Pressed while playing, it jumps
+    back to the cue and stops: the back-cue a juggle needs.
+  - *Platter touch* is a hand on the record (VINYL: it holds a playing deck).
+  - *Platter* is the record's position in seconds (±8).  Moving it turns
+    the jog by exactly that much (`JOG_SECS_PER_TICK`, with the remainder
+    kept), so drawing it scratches, with the scrub audio.
+  The parameters are read once a host block (11.6 ms at 512 frames), so
+  button edges need about 12 ms between them.
 
 ## Limits of this cut
 
@@ -87,6 +102,34 @@ REAPER can also run a plugin in its own process ("Run as → Dedicated
 process", per plugin, from the FX browser).  That isn't needed for OpenDeck
 any more, and a script can't set it: it isn't in the project chunk.
 
+## A beat-juggle and scratch routine
+
+```sh
+make reaper-routine TRACK=~/Music/a.mp3 BPM=130
+```
+
+`tools/reaper/opendeck_routine.lua` puts the same track on both decks, at
+its cue, with the crossfader on its Cut curve.  It's 16 bars, all envelopes:
+- **Bars 1–4:** deck A plays the intro.
+- **Bars 5–8:** a loop juggle on the first beats, A and B taking turns, each
+  back-cued while the other plays: half-bars, then beats, then half-beats.
+- **Bars 9–12:** A plays, and B scratches over it from its cue: baby
+  scratches, a transformer (crossfader cuts every eighth of a beat), chirps.
+- **Bars 13–16:** B is let go and plays; over to B; A stops.
+- **The end:** both back to their cues, and the project loops.
+
+Measured (2026-11-21, 130 BPM): the meters follow each section: A alone,
+A and B alternating through the juggle, B sounding in bursts over A, then B
+alone, then looping.  The timing of a deck's moves is only as fine as the
+host block plus a 1 ms poll, a few milliseconds.
+
+`make reaper-mixer-check TRACK_A=… TRACK_B=…` runs the two-deck mixer for
+60 s and checks it with `tools/reaper/check_meters.py`.  It reads the
+decks' log first, for the cause (did two decks start, load and play?), and
+then the meters, for the result (does the Mixer follow the crossfader?).
+REAPER's exit status is reported too.  It needs a display and an audio
+device, and refuses to start while another REAPER holds the device.
+
 ## Try it
 
 ```sh
@@ -113,7 +156,13 @@ REAPER notes:
   A play sent ahead of the load hit the empty deck and stopped at its end,
   which is why deck A stayed silent in the first two-deck run.
 - `host_load_tests::the_deck_loop_wakes_for_the_soonest_deck`.
-- `opendeck-plugin` `decks_take_the_lowest_free_number`.
+- `opendeck-plugin` `decks_take_the_lowest_free_number`,
+  `platter_moves_turn_the_jog_by_the_distance_drawn`,
+  `button_parameters_press_on_their_edges`, and
+  `the_saved_track_has_the_shape_the_reaper_script_writes` (pins the state
+  shape the REAPER scripts write).
+- `cue_latency_tests::a_touched_scratch_moves_the_record_by_the_ticks_and_plays_on`.
+- `audio::host_output_tests::two_host_decks_each_fill_their_own_output`.
 
 - `audio::host_output_tests::a_plugin_host_hears_the_deck_it_hosts`: a
   host pulling 512-frame blocks hears a loaded track on PLAY and silence

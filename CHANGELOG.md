@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- Plugin parameters for **juggling and scratching** from host automation:
+  Play, Cue (back-cue), Platter touch, and Platter (the record's position,
+  so drawing it scratches).  `make reaper-routine TRACK=… BPM=…` plays a
+  16-bar beat-juggle and scratch routine on two decks, all automation.
+  `make reaper-mixer-check` runs the two-deck mixer and checks it from the
+  decks' log and the meters.
 - The plugin runs **any number of decks** in one host: two OpenDeck
   instances in REAPER are two decks, each with its own window, output and
   Pitch, sharing one event loop.  Each instance saves its track in its
@@ -140,8 +146,12 @@ All notable changes to this project will be documented in this file.
   of hanging on a bracket.
 
 ### Fixed
-- REAPER no longer crashes on quit with OpenDeck loaded (the plugin pins
-  its library in memory).
+- REAPER crashes less on quit with OpenDeck loaded: the plugin pins its
+  library in memory, closes its decks at exit, and no longer creates an
+  unused EGL instance, whose drop panicked.  One segfault at quit is still
+  open (docs/design/plugin.md).
+- The REAPER make targets keep track paths with spaces whole (`abspath`
+  split them, so the decks booted empty).
 - With OpenDeck as tempo master, CDJ-3000s now draw its waveform in their
   WAVEFORM view (Pioneer's "stacked waveform": the master's waveform and
   beat grid above the unit's own).  They never fetched it before: one byte

@@ -49,7 +49,7 @@ use audio::AudioHandle;
 use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_types::{BeatAnalyzer, BeatGrid};
 use renderer::{Renderer, WgpuRenderer};
-pub use input::{ControlEvent, Event};
+pub use input::{ControlEvent, Event, JOG_SECS_PER_TICK};
 use input::{PerformMode, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
 use browser::{Browser, Enter, Load};
 use snapshot::DeckSnapshot;
@@ -5258,6 +5258,8 @@ pub enum HostCmd {
     Add(u64, Config),
     /// Close the deck and drop it (its plugin instance went away).
     Remove(u64),
+    /// Close every deck and end the loop (the process is exiting).
+    Quit,
 }
 
 /// One event loop hosting any number of decks, each with its own window: the
@@ -5267,18 +5269,36 @@ pub enum HostCmd {
 pub struct DeckHost {
     tx:    mpsc::Sender<HostCmd>,
     proxy: Mutex<winit::event_loop::EventLoopProxy<()>>,
+    /// Signalled when the loop has ended and its decks are dropped.
+    done:  Arc<(Mutex<bool>, std::sync::Condvar)>,
 }
+
+static DECK_HOST: std::sync::OnceLock<std::result::Result<DeckHost, String>> = std::sync::OnceLock::new();
 
 impl DeckHost {
     /// The process's deck loop, started on first use.
     pub fn get() -> Result<&'static DeckHost> {
-        static HOST: std::sync::OnceLock<std::result::Result<DeckHost, String>> = std::sync::OnceLock::new();
-        HOST.get_or_init(|| DeckHost::start().map_err(|e| format!("{e:#}"))).as_ref().map_err(|e| anyhow::anyhow!("{e}"))
+        DECK_HOST.get_or_init(|| DeckHost::start().map_err(|e| format!("{e:#}"))).as_ref().map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    /// The process is exiting: close every deck and end the loop, waiting
+    /// up to `wait` for it, so no deck thread is still drawing or playing
+    /// while the process's destructors (the GPU driver's among them) run.
+    /// Does nothing if no deck was ever started.
+    pub fn shutdown(wait: Duration) {
+        let Some(Ok(h)) = DECK_HOST.get() else { return };
+        h.send(HostCmd::Quit);
+        let (lock, cv) = &*h.done;
+        let g = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = cv.wait_timeout_while(g, wait, |done| !*done);
     }
 
     fn start() -> Result<DeckHost> {
+        renderer::primary_backends_only();
         let (tx, rx) = mpsc::channel::<HostCmd>();
         let (ptx, prx) = mpsc::channel();
+        let done = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+        let done2 = Arc::clone(&done);
         std::thread::Builder::new().name("opendeck-ui".into()).spawn(move || {
             let built = (|| -> Result<EventLoop<()>> {
                 #[cfg(all(unix, not(any(target_os = "android", target_os = "ios", target_os = "macos"))))]
@@ -5299,9 +5319,13 @@ impl DeckHost {
             event_loop.set_control_flow(ControlFlow::Wait);
             let mut multi = MultiDeck { decks: Vec::new(), rx };
             if let Err(e) = event_loop.run_app(&mut multi) { log::error!("deck loop: {e:#}"); }
+            multi.decks.clear();
+            let (lock, cv) = &*done2;
+            *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+            cv.notify_all();
         }).context("could not start the deck loop's thread")?;
         let proxy = prx.recv().context("the deck loop's thread died")??;
-        Ok(DeckHost { tx, proxy: Mutex::new(proxy) })
+        Ok(DeckHost { tx, proxy: Mutex::new(proxy), done })
     }
 
     fn send(&self, cmd: HostCmd) {
@@ -5352,6 +5376,11 @@ impl ApplicationHandler for MultiDeck {
                 HostCmd::Remove(id) => {
                     self.decks.retain(|(i, _)| *i != id);
                     log::info!("deck loop: deck {id} closed ({} left)", self.decks.len());
+                }
+                HostCmd::Quit => {
+                    log::info!("deck loop: closing {} deck(s), the process is exiting", self.decks.len());
+                    self.decks.clear();
+                    event_loop.exit();
                 }
             }
         }
@@ -7062,6 +7091,34 @@ mod cue_latency_tests {
         }
         assert!(heard_since(&trace, t0) > 0.05, "the scrub is heard");
         assert!(!d.audio.playing.load(Ordering::Relaxed), "and the deck stays paused");
+    }
+
+    /// A scratch on a playing deck, as the plugin's Platter draws it: touch
+    /// holds the record, the jog moves it by exactly the ticks turned, and
+    /// letting go plays on from where it landed.
+    #[test]
+    fn a_touched_scratch_moves_the_record_by_the_ticks_and_plays_on() {
+        let (mut d, _trace) = traced_deck();
+        d.settings.jog_vinyl = true;
+        d.send(C::Play);
+        d.run(1.5);
+        d.send(C::JogTouch { touched: true });
+        assert!(!d.audio.playing.load(Ordering::Relaxed), "a hand on the record holds it");
+        // Let the held deck settle (the processor finishes what was in
+        // flight) before measuring from it.
+        d.run(0.2);
+        let before = d.audio.position.load(Ordering::Relaxed) as f64;
+        for _ in 0..25 {                                     // back 25 ticks = 0.5 s, in small turns
+            d.send(C::JogDelta { delta: -1, velocity_rpm: 0.0 });
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        let moved = (d.audio.position.load(Ordering::Relaxed) as f64 - before) / (SR as f64 * 2.0);
+        assert!((moved + 25.0 * crate::input::JOG_SECS_PER_TICK).abs() < 0.01, "moved {moved:.3} s for 25 ticks back");
+        d.send(C::JogTouch { touched: false });
+        assert!(d.audio.playing.load(Ordering::Relaxed), "let go: it plays on");
+        let landed = d.audio.position.load(Ordering::Relaxed);
+        d.run(0.3);
+        assert!(d.audio.position.load(Ordering::Relaxed) > landed, "from where it landed");
     }
 
     /// CUE while playing jumps back and stops: silence comes within the

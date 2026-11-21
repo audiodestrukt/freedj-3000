@@ -13,7 +13,7 @@
 //! loaded.
 
 use nih_plug::prelude::*;
-use opendeck_app::{ControlEvent, DeckHost, Event, HostSlot};
+use opendeck_app::{ControlEvent, DeckHost, Event, HostSlot, JOG_SECS_PER_TICK};
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -22,6 +22,35 @@ use std::time::Duration;
 
 /// The Pitch parameter's reach, in percent: the deck's default TEMPO RANGE.
 const PITCH_RANGE: f32 = 16.0;
+
+/// The Platter parameter's reach, in seconds of record either way.
+const PLATTER_RANGE: f32 = 8.0;
+
+/// Platter moves (seconds of record) to jog ticks, keeping the remainder so
+/// that many small moves add up to exactly the distance the host drew.
+#[derive(Default)]
+pub struct PlatterTicks { last: Option<f32>, rest: f64 }
+
+impl PlatterTicks {
+    /// The ticks to send for the Platter now at `secs` (none on the first call).
+    pub fn ticks(&mut self, secs: f32) -> i32 {
+        let Some(last) = self.last.replace(secs) else { return 0 };
+        self.rest += f64::from(secs - last);
+        let t = (self.rest / JOG_SECS_PER_TICK).trunc();
+        self.rest -= t * JOG_SECS_PER_TICK;
+        t as i32
+    }
+}
+
+/// The host's button parameters: what an edge of each one presses.
+pub fn button_edges(was: [bool; 3], now: [bool; 3]) -> Vec<ControlEvent> {
+    let [play, cue, touch] = now;
+    let mut out = Vec::new();
+    if play != was[0] { out.push(if play { ControlEvent::Play } else { ControlEvent::Pause }); }
+    if cue != was[1] { out.push(ControlEvent::Cue { pressed: cue }); }
+    if touch != was[2] { out.push(ControlEvent::JogTouch { touched: touch }); }
+    out
+}
 
 /// Pitch in percent (+ = faster) to the deck's tempo fader position, on the
 /// default ±16 % range (DJ convention: the bottom of the fader is fastest).
@@ -50,8 +79,12 @@ pub struct OpenDeck {
     scratch: Vec<f32>,
     /// This deck's output, filled once it is up.
     slot: HostSlot,
-    /// The Pitch this instance's host is asking for (f32 bits).
+    /// What this instance's host is asking for, as the audio thread last
+    /// saw it: Pitch, Platter (f32 bits) and the buttons (bit 0 Play, 1 Cue,
+    /// 2 Touch).
     pitch: Arc<AtomicU32>,
+    platter: Arc<AtomicU32>,
+    buttons: Arc<AtomicU32>,
     /// This deck, once started: its id in the deck loop and its number.
     deck: Option<(u64, u8)>,
     /// Tells this instance's parameter thread to stop.
@@ -63,6 +96,21 @@ struct DeckParams {
     /// The tempo fader, in percent: automatable from the host.
     #[id = "pitch"]
     pitch: FloatParam,
+    /// PLAY as a level: on plays, off pauses (an edge presses the key).
+    #[id = "play"]
+    play: BoolParam,
+    /// CUE, momentary: pressed while playing it jumps back to the cue and
+    /// stops (a back-cue, as a juggle needs).
+    #[id = "cue"]
+    cue: BoolParam,
+    /// The platter touched (VINYL mode: holds a playing deck, as a hand on
+    /// the record does).
+    #[id = "touch"]
+    touch: BoolParam,
+    /// The platter's position in seconds of record: moving it turns the jog
+    /// by that much, so drawing it scratches.
+    #[id = "platter"]
+    platter: FloatParam,
     /// The track this deck loads (saved with the project).  A host or script
     /// that writes it (the plugin's state) loads that track.
     #[persist = "track"]
@@ -76,6 +124,12 @@ impl Default for DeckParams {
                 .with_step_size(0.01)
                 .with_unit(" %")
                 .with_value_to_string(Arc::new(|v| format!("{v:+.2}"))),
+            play: BoolParam::new("Play", false),
+            cue: BoolParam::new("Cue", false),
+            touch: BoolParam::new("Platter touch", false),
+            platter: FloatParam::new("Platter", 0.0, FloatRange::Linear { min: -PLATTER_RANGE, max: PLATTER_RANGE })
+                .with_unit(" s")
+                .with_value_to_string(Arc::new(|v| format!("{v:+.3}"))),
             track: Arc::new(RwLock::new(String::new())),
         }
     }
@@ -83,12 +137,35 @@ impl Default for DeckParams {
 
 /// One instance's link to its deck: the host's Pitch as fader moves (up to
 /// 200 Hz), and a newly saved track path as a load, until told to stop.
-fn follow_params(id: u64, events: Arc<Mutex<Option<mpsc::Sender<Event>>>>, pitch: Arc<AtomicU32>,
-                 track: Arc<RwLock<String>>, mut loaded: String, stop: Arc<AtomicBool>) {
+struct Follow {
+    id: u64,
+    events: Arc<Mutex<Option<mpsc::Sender<Event>>>>,
+    pitch: Arc<AtomicU32>,
+    platter: Arc<AtomicU32>,
+    buttons: Arc<AtomicU32>,
+    track: Arc<RwLock<String>>,
+    loaded: String,
+    stop: Arc<AtomicBool>,
+}
+
+fn follow_params(f: Follow) {
+    let Follow { id, events, pitch, platter, buttons, track, mut loaded, stop } = f;
     let mut last = f32::NAN;
+    let mut was = [false; 3];
+    let mut jog = PlatterTicks::default();
     while !stop.load(Ordering::Relaxed) {
-        std::thread::sleep(Duration::from_millis(5));
+        // 1 ms: a scratch drawn in automation turns the jog in small steps.
+        std::thread::sleep(Duration::from_millis(1));
         let Some(tx) = events.lock().unwrap().clone() else { continue };   // the deck is booting
+        let b = buttons.load(Ordering::Relaxed);
+        let now = [b & 1 != 0, b & 2 != 0, b & 4 != 0];
+        for e in button_edges(was, now) {
+            log::debug!("plugin deck {id}: {e:?}");
+            if tx.send(Event::Deck(e)).is_err() { return; }
+        }
+        was = now;
+        let ticks = jog.ticks(f32::from_bits(platter.load(Ordering::Relaxed)));
+        if ticks != 0 && tx.send(Event::Deck(ControlEvent::JogDelta { delta: ticks, velocity_rpm: 0.0 })).is_err() { return; }
         let pct = f32::from_bits(pitch.load(Ordering::Relaxed));
         if pct != last {
             if tx.send(Event::Deck(ControlEvent::TempoFader { position: pitch_to_fader(pct) })).is_err() { return; }
@@ -117,18 +194,30 @@ impl Default for OpenDeck {
             scratch: Vec::new(),
             slot: Arc::new(Mutex::new(None)),
             pitch: Arc::new(AtomicU32::new(0)),
+            platter: Arc::new(AtomicU32::new(0)),
+            buttons: Arc::new(AtomicU32::new(0)),
             deck: None,
             stop: Arc::new(AtomicBool::new(false)),
         }
     }
 }
 
+/// At exit: close the decks and end their loop before the process's
+/// destructors run (a deck thread still drawing while the GPU driver tears
+/// down crashed REAPER's quit with SIGSEGV / SIGILL).
+extern "C" fn shutdown_decks() {
+    DeckHost::shutdown(Duration::from_secs(2));
+}
+
 /// Keep this library mapped until the process exits.  The deck loop's thread
 /// outlives any one instance; a host that unloads the library at quit would
-/// otherwise pull its code out from under it (REAPER crashed on quit).
+/// otherwise pull its code out from under it (REAPER crashed on quit).  And
+/// close the decks at exit (`shutdown_decks`): registered after the GPU
+/// driver has loaded, it runs before the driver's destructors.
 fn pin_library() {
     static PINNED: std::sync::Once = std::sync::Once::new();
     PINNED.call_once(|| unsafe {
+        libc::atexit(shutdown_decks);
         let mut info: libc::Dl_info = std::mem::zeroed();
         if libc::dladdr(pin_library as *const libc::c_void, &mut info) != 0 && !info.dli_fname.is_null() {
             let h = libc::dlopen(info.dli_fname, libc::RTLD_NOW | libc::RTLD_NODELETE);
@@ -153,10 +242,14 @@ impl OpenDeck {
             .or_else(|| (number == 1).then(|| std::env::var_os("OPENDECK_TRACK").map(PathBuf::from)).flatten().filter(|p| p.is_file()));
         let events = Arc::new(Mutex::new(None));
         {
-            let (ev, pitch, tr, stop) = (Arc::clone(&events), Arc::clone(&self.pitch), Arc::clone(&self.params.track), Arc::clone(&self.stop));
-            let loaded = track.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or(saved);
-            let _ = std::thread::Builder::new().name(format!("opendeck-params-{id}"))
-                .spawn(move || follow_params(id, ev, pitch, tr, loaded, stop));
+            let f = Follow {
+                id, events: Arc::clone(&events),
+                pitch: Arc::clone(&self.pitch), platter: Arc::clone(&self.platter), buttons: Arc::clone(&self.buttons),
+                track: Arc::clone(&self.params.track),
+                loaded: track.as_ref().map(|p| p.to_string_lossy().into_owned()).unwrap_or(saved),
+                stop: Arc::clone(&self.stop),
+            };
+            let _ = std::thread::Builder::new().name(format!("opendeck-params-{id}")).spawn(move || follow_params(f));
         }
         let cfg = opendeck_app::Config {
             track,
@@ -212,7 +305,10 @@ impl Plugin for OpenDeck {
 
     fn process(&mut self, buffer: &mut Buffer, _aux: &mut AuxiliaryBuffers, _ctx: &mut impl ProcessContext<Self>) -> ProcessStatus {
         let frames = buffer.samples();
-        self.pitch.store(self.params.pitch.value().to_bits(), Ordering::Relaxed);
+        let p = &self.params;
+        self.pitch.store(p.pitch.value().to_bits(), Ordering::Relaxed);
+        self.platter.store(p.platter.value().to_bits(), Ordering::Relaxed);
+        self.buttons.store(u32::from(p.play.value()) | u32::from(p.cue.value()) << 1 | u32::from(p.touch.value()) << 2, Ordering::Relaxed);
         // Silence until this deck is up.
         let slot = Arc::clone(&self.slot);
         let mut slot = slot.try_lock();
@@ -250,6 +346,45 @@ nih_export_vst3!(OpenDeck);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A scratch drawn as many small Platter moves turns the jog by exactly
+    /// the distance drawn: no ticks lost to rounding, either way.
+    #[test]
+    fn platter_moves_turn_the_jog_by_the_distance_drawn() {
+        let mut j = PlatterTicks::default();
+        assert_eq!(j.ticks(0.0), 0, "the first reading only sets the origin");
+        let total: i32 = (1..=1000).map(|i| j.ticks(i as f32 * 0.0013)).sum();   // 1.3 s forward in 1000 steps
+        let want = f64::from(1000.0f32 * 0.0013) / JOG_SECS_PER_TICK;     // the distance drawn, in f32 as the host draws it
+        assert!((f64::from(total) - want).abs() < 1.0, "{total} ticks for {want} (a part tick waits for the next move)");
+        let back: i32 = (0..=1000).rev().map(|i| j.ticks(i as f32 * 0.0013)).sum();
+        assert_eq!(back, -total, "and back to where it started");
+    }
+
+    /// Play is a level, Cue and Touch press while held.
+    #[test]
+    fn button_parameters_press_on_their_edges() {
+        use ControlEvent as C;
+        assert!(button_edges([false; 3], [false; 3]).is_empty());
+        assert!(matches!(button_edges([false; 3], [true, false, false]).as_slice(), [C::Play]));
+        assert!(matches!(button_edges([true, false, false], [false; 3]).as_slice(), [C::Pause]));
+        assert!(matches!(button_edges([true, false, false], [true, true, false]).as_slice(), [C::Cue { pressed: true }]));
+        assert!(matches!(button_edges([true, true, false], [true, false, false]).as_slice(), [C::Cue { pressed: false }]));
+        assert!(matches!(button_edges([false; 3], [false, false, true]).as_slice(), [C::JogTouch { touched: true }]));
+    }
+
+    /// tools/reaper/opendeck_mixer.lua writes each deck's track into the
+    /// saved state as `"fields":{"track":"\"<path>\""}`: pin that shape.
+    #[test]
+    fn the_saved_track_has_the_shape_the_reaper_script_writes() {
+        let p = DeckParams::default();
+        *p.track.write().unwrap() = "/music/a b.mp3".into();
+        let fields = p.serialize_fields();
+        assert_eq!(fields.get("track").map(String::as_str), Some("\"/music/a b.mp3\""));
+        let mut q = DeckParams::default();
+        q.deserialize_fields(&fields);
+        assert_eq!(*q.track.read().unwrap(), "/music/a b.mp3", "and it reads back");
+        let _ = &mut q;
+    }
 
     /// Decks take the lowest free number, and a closed deck's number is free again.
     #[test]

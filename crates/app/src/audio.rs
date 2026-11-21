@@ -1884,4 +1884,33 @@ mod host_output_tests {
         pull(&mut out, 10);   // the stop fade and what the ring held
         assert_eq!(pull(&mut out, 10), 0.0, "paused: silence");
     }
+
+    /// Two plugin decks in one process each fill their own output: the host
+    /// hears deck A on A's track and silence on empty deck B (the first cut
+    /// kept one process-wide slot, so a second deck had nowhere to play).
+    #[test]
+    fn two_host_decks_each_fill_their_own_output() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let (sa, sb): (HostSlot, HostSlot) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
+        let a = AudioHandle::open_host(44_100, &sa, None).unwrap();
+        let b = AudioHandle::open_host(44_100, &sb, None).unwrap();
+        let (mut oa, mut ob) = (sa.lock().unwrap().take().unwrap(), sb.lock().unwrap().take().unwrap());
+        let tone: Vec<f32> = (0..44_100 * 4).flat_map(|i| {
+            let s = 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin();
+            [s, s]
+        }).collect();
+        a.load_samples(Arc::new(tone), 44_100, 2).unwrap();
+        a.set_playing(true);
+        b.set_playing(true);
+        let (mut pa, mut pb) = (0f32, 0f32);
+        let mut buf = vec![0f32; 512 * 2];
+        for _ in 0..40 {
+            oa.fill(&mut buf); pa = buf.iter().fold(pa, |m, v| m.max(v.abs()));
+            ob.fill(&mut buf); pb = buf.iter().fold(pb, |m, v| m.max(v.abs()));
+            thread::sleep(Duration::from_micros(512 * 1_000_000 / 44_100));
+        }
+        assert!(pa > 0.3, "deck A's output carries A's track ({pa})");
+        assert_eq!(pb, 0.0, "deck B's output carries nothing of A's");
+    }
 }
