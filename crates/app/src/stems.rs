@@ -691,6 +691,19 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
     if !media.exists("/CDJMODS/live")? { return Ok(None); }
     let t0 = Instant::now();
     let dir = oc::live::dir(id);
+    // Where the deck is, as a live page: looking it up tells the source
+    // (and asks it for the track), so its split starts there.
+    let from = oc::live::RATE;
+    let src_page = || job.playhead.as_ref().map_or(0, |p| {
+        (p.load(Ordering::Relaxed) as usize / 2) * from as usize / deck_sr as usize / oc::live::PAGE_FRAMES
+    });
+    let mut told = src_page();
+    let mut tell = |media: &mut NfsMedia, page: usize| {
+        let at = crate::livestems::at_path(id, page);
+        media.forget(&at);
+        let _ = media.exists(&at);
+    };
+    tell(media, told);
     let reader = loop {
         media.forget(&dir);
         if let Some(r) = oc::live::LiveReader::open(media, id)? { break r; }
@@ -698,7 +711,6 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
         if t0.elapsed() > start_wait { log::info!("stems: no live bank for track {id} after {:.0}s", start_wait.as_secs_f32()); return Ok(None); }
         std::thread::sleep(Duration::from_millis(200));
     };
-    let from = oc::live::RATE;
     log::info!("stems: live bank for track {id}, {} pages, started in {:.2}s", reader.map.pages(), t0.elapsed().as_secs_f32());
     let mut pages = LivePages { r: reader, cache: Default::default() };
     let mut bank = StemBank::filling(track);
@@ -724,6 +736,9 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
         let p = at();
         let next = (p..steps).chain(0..p).find(|&k| !done[k] && { let (_, _, s0, s1) = span(k); pages.have(s0, s1) });
         let Some(k) = next else {
+            // Waiting: if the deck has jumped somewhere not split yet, say so.
+            let now = src_page();
+            if now != told && !pages.r.map.done.get(now).copied().unwrap_or(true) { told = now; tell(media, now); }
             if pages.r.refresh(media)?.state == oc::live::State::Failed {
                 log::warn!("stems: the source gave up on track {id}; {n_done} of {steps} steps have stems");
                 return Ok(Some(bank));

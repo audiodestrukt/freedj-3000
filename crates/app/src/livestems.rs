@@ -33,17 +33,52 @@ pub struct LiveStems {
     /// Waiting requests, and the track being split now.
     queue: Mutex<(VecDeque<u32>, Option<u32>)>,
     wake: Condvar,
+    /// Where each asking player is in the track (interleaved samples at
+    /// 44.1 kHz), for the split to start there and follow its jumps.
+    playheads: Mutex<HashMap<u32, Arc<std::sync::atomic::AtomicU64>>>,
     split: SplitFn,
+    /// Bytes of live banks kept; the oldest finished ones go first.
+    cap: u64,
+}
+
+/// How much the cache keeps by default (`OPENDECK_LIVE_STEMS_MB`
+/// overrides): about 12 four-minute tracks on iOS, 24 elsewhere.
+fn default_cap() -> u64 {
+    let mb = std::env::var("OPENDECK_LIVE_STEMS_MB").ok().and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(if cfg!(any(target_os = "ios", target_os = "android")) { 2048 } else { 4096 });
+    mb << 20
+}
+
+/// What a live bank of `frames` takes on disk.
+fn bank_bytes(frames: u64) -> u64 { 4 * (44 + frames * 4) }
+
+fn dir_bytes(d: &std::path::Path) -> u64 {
+    std::fs::read_dir(d).map(|rd| rd.flatten().filter_map(|e| e.metadata().ok()).map(|m| m.len()).sum()).unwrap_or(0)
 }
 
 /// The track ID a live-bank path names (`/CDJMODS/live/12`, or a file in it).
-pub fn requested_id(nfs: &str) -> Option<u32> {
-    nfs.strip_prefix("/CDJMODS/live/")?.split('/').next()?.parse().ok().filter(|id| *id > 0)
+pub fn requested_id(nfs: &str) -> Option<u32> { requested(nfs).map(|r| r.0) }
+
+/// The track ID a live-bank path names and the page the player is at, when
+/// it says (`/CDJMODS/live/12@40`: track 12, page 40).  A player tells the
+/// source where it is by looking that name up; the lookup always misses.
+pub fn requested(nfs: &str) -> Option<(u32, Option<usize>)> {
+    let name = nfs.strip_prefix("/CDJMODS/live/")?.split('/').next()?;
+    let (id, at) = match name.split_once('@') { Some((i, p)) => (i, Some(p.parse().ok()?)), None => (name, None) };
+    Some((id.parse().ok().filter(|id| *id > 0)?, at))
 }
+
+/// The name a player looks up to say it is at `page` of track `id`.
+pub fn at_path(id: u32, page: usize) -> String { format!("{}@{page}", live::dir(id)) }
 
 impl LiveStems {
     /// Serve live stems of `files` (track ID → local file) from `cdjmods`.
     pub fn start(cdjmods: PathBuf, files: &[(u32, PathBuf)], split: SplitFn) -> Result<Arc<LiveStems>> {
+        Self::start_capped(cdjmods, files, split, default_cap())
+    }
+
+    /// [`start`](Self::start) keeping at most `cap` bytes of banks.
+    pub fn start_capped(cdjmods: PathBuf, files: &[(u32, PathBuf)], split: SplitFn, cap: u64) -> Result<Arc<LiveStems>> {
         std::fs::create_dir_all(cdjmods.join("live"))?;
         // Track IDs follow the folder's scan order, so a bank cached under an
         // ID may now be another track's: keep only those still matching.
@@ -54,7 +89,7 @@ impl LiveStems {
                 .is_some_and(|p| std::fs::read_to_string(e.path().join(SOURCE)).ok() == Some(source_key(p)));
             if !keep { let _ = std::fs::remove_dir_all(e.path()); }
         }
-        let me = Arc::new(LiveStems { cdjmods, files: files.iter().cloned().collect(), queue: Mutex::new((VecDeque::new(), None)), wake: Condvar::new(), split });
+        let me = Arc::new(LiveStems { cdjmods, files: files.iter().cloned().collect(), queue: Mutex::new((VecDeque::new(), None)), wake: Condvar::new(), playheads: Mutex::new(HashMap::new()), split, cap });
         let w = Arc::clone(&me);
         std::thread::Builder::new().name("live-stems".into()).spawn(move || w.run())?;
         Ok(me)
@@ -63,7 +98,20 @@ impl LiveStems {
     /// The NFS server's lookup-miss hook.
     pub fn hook(self: &Arc<Self>) -> opendeck_nfs::server::MissHook {
         let me = Arc::clone(self);
-        Arc::new(move |p: &str| if let Some(id) = requested_id(p) { me.request(id) })
+        Arc::new(move |p: &str| if let Some((id, at)) = requested(p) {
+            if let Some(page) = at { me.player_at(id, page); }
+            me.request(id)
+        })
+    }
+
+    /// A player of track `id` is at live page `page`.
+    pub fn player_at(&self, id: u32, page: usize) {
+        if !self.files.contains_key(&id) { return; }
+        self.playhead(id).store((page * PAGE_FRAMES * 2) as u64, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    fn playhead(&self, id: u32) -> Arc<std::sync::atomic::AtomicU64> {
+        Arc::clone(self.playheads.lock().unwrap().entry(id).or_default())
     }
 
     /// Split track `id` next (a served track with no live bank yet).
@@ -105,10 +153,11 @@ impl LiveStems {
         }
         let track = Arc::new(decode_44k1(path)?);
         let frames = track.len() / 2;
+        self.make_room(id, bank_bytes(frames as u64));
         let mut w = LiveWriter::create(&self.cdjmods, id, frames as u64, HEADROOM_DB)?;
         std::fs::write(w.dir.join(SOURCE), source_key(path))?;
         let bank = Arc::new(StemBank::filling_split(&track));
-        let job = Job::default();
+        let job = Job { playhead: Some(self.playhead(id)), ..Default::default() };
         let done = std::sync::atomic::AtomicBool::new(false);
         let res = std::thread::scope(|s| {
             let h = s.spawn(|| { let r = (self.split)(&track, &job, &bank); done.store(true, std::sync::atomic::Ordering::Release); r });
@@ -126,6 +175,28 @@ impl LiveStems {
         let pages = w.map().pages();
         w.finish()?;
         Ok(pages)
+    }
+}
+
+impl LiveStems {
+    /// Delete the oldest finished banks (not `id`'s) until `need` more bytes
+    /// fit under the cap.
+    fn make_room(&self, id: u32, need: u64) {
+        let live = self.cdjmods.join("live");
+        let mut banks: Vec<(std::time::SystemTime, u64, PathBuf)> = std::fs::read_dir(&live).map(|rd| rd.flatten()
+            .filter(|e| e.file_name().to_string_lossy().parse::<u32>().is_ok_and(|n| n != id))
+            .map(|e| {
+                let t = std::fs::metadata(e.path().join("pages")).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                (t, dir_bytes(&e.path()), e.path())
+            }).collect()).unwrap_or_default();
+        let mut used: u64 = banks.iter().map(|b| b.1).sum();
+        banks.sort();
+        for (_, bytes, path) in banks {
+            if used + need <= self.cap { break; }
+            log::info!("live stems: cache full, removing {}", path.display());
+            let _ = std::fs::remove_dir_all(&path);
+            used -= bytes;
+        }
     }
 }
 
@@ -263,10 +334,92 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_secs(1));
     }
 
+    /// The source splits from where the player is: STEMS opened 6 s in,
+    /// the split starts at that page; the player jumps back to 2 s and that
+    /// page is split next, not after the rest of the track.
+    #[test]
+    fn the_source_splits_from_the_players_playhead_and_follows_its_jumps() {
+        let music = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let frames = 44_100 * 30;
+        let pcm: Vec<i16> = (0..frames * 2).map(|i| (((i / 2) as f32 * 0.02).sin() * 8_000.0) as i16).collect();
+        let mut wav = opendeck_stems::pgz::wav_header(frames as u32 * 4).to_vec();
+        wav.extend(pcm.iter().flat_map(|v| v.to_le_bytes()));
+        let file = music.path().join("t.wav");
+        std::fs::write(&file, wav).unwrap();
+        // A stand-in that splits as the real one does: the page at the
+        // playhead (or the next unsplit one after it) each time round.
+        let order = Arc::new(Mutex::new(Vec::<usize>::new()));
+        let o = Arc::clone(&order);
+        let split: SplitFn = Arc::new(move |t, job, bank| {
+            let ps = PAGE_FRAMES * 2;
+            let n = t.len().div_ceil(ps);
+            let mut done = vec![false; n];
+            while let Some(p) = {
+                let at = job.playhead.as_ref().unwrap().load(std::sync::atomic::Ordering::Relaxed) as usize / ps;
+                (at.min(n - 1)..n).chain(0..at.min(n - 1)).find(|&p| !done[p])
+            } {
+                let (a, b) = (p * ps, ((p + 1) * ps).min(t.len()));
+                let st: Vec<i16> = t[a..b].iter().map(|v| to_i16(v / 3.0)).collect();
+                bank.write(a, [&st, &st, &st]);
+                done[p] = true;
+                o.lock().unwrap().push(p);
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            Ok(())
+        });
+        let mods = cache.path().join("cdjmods");
+        let live = LiveStems::start(mods.clone(), &[(1, file.clone())], split).unwrap();
+        let srv = opendeck_nfs::server::NfsServer::start(opendeck_nfs::server::Tree::scan(music.path()).unwrap(), "/C/", 0, 0).unwrap();
+        srv.tree.overlay("CDJMODS", &mods).unwrap();
+        srv.tree.on_miss(live.hook());
+
+        let track = Arc::new(pcm.iter().map(|v| *v as f32 / 32768.0).collect::<Vec<f32>>());
+        let head = Arc::new(std::sync::atomic::AtomicU64::new(44_100 * 2 * 6));
+        let job = Arc::new(Job { playhead: Some(Arc::clone(&head)), ..Default::default() });
+        let (j, t) = (Arc::clone(&job), Arc::clone(&track));
+        let mut m = crate::stems::NfsMedia::mount_at(std::net::Ipv4Addr::LOCALHOST, srv.portmap, "/C/").unwrap();
+        let reader = std::thread::spawn(move || crate::stems::live_from(&mut m, 1, &t, 44_100, &j, Duration::from_secs(10)));
+        let t0 = std::time::Instant::now();
+        while order.lock().unwrap().len() < 4 { assert!(t0.elapsed() < Duration::from_secs(10)); std::thread::sleep(Duration::from_millis(5)); }
+        head.store(44_100 * 2 * 2, std::sync::atomic::Ordering::Relaxed);   // the player jumps back to 2 s
+        let bank = reader.join().unwrap().unwrap().expect("live stems");
+        assert!(bank.complete());
+        let order = order.lock().unwrap().clone();
+        let page_of = |secs: usize| secs * 44_100 / PAGE_FRAMES;
+        assert_eq!(order[0], page_of(6), "the split starts where the player is: {order:?}");
+        let jumped = order.iter().position(|p| *p == page_of(2)).unwrap();
+        assert!(jumped < 12, "the page jumped to is split soon after the jump, not at the end: {order:?}");
+        assert!(order[..4].iter().all(|p| *p >= page_of(6)), "{order:?}");
+    }
+
+    /// The cache keeps the newest banks under its cap.
+    #[test]
+    fn a_full_cache_drops_the_oldest_banks() {
+        let music = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let frames = 44_100;
+        let mut wav = opendeck_stems::pgz::wav_header(frames as u32 * 4).to_vec();
+        wav.extend(std::iter::repeat(0u8).take(frames * 4));
+        let files: Vec<(u32, PathBuf)> = (1..=3).map(|i| { let p = music.path().join(format!("{i}.wav")); std::fs::write(&p, &wav).unwrap(); (i, p) }).collect();
+        let split: SplitFn = Arc::new(|t, _, bank| { let z = vec![0i16; t.len()]; bank.write(0, [&z, &z, &z]); Ok(()) });
+        let mods = cache.path().join("cdjmods");
+        // Room for two banks.
+        let live = LiveStems::start_capped(mods.clone(), &files, split, 2 * bank_bytes(frames as u64) + 4096).unwrap();
+        for id in 1..=3 {
+            live.split_one(id).unwrap();
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let kept: Vec<bool> = (1..=3).map(|i| mods.join(format!("live/{i}/pages")).exists()).collect();
+        assert_eq!(kept, vec![false, true, true], "the oldest went");
+    }
+
     #[test]
     fn a_live_request_is_a_track_id() {
         assert_eq!(requested_id("/CDJMODS/live/12"), Some(12));
         assert_eq!(requested_id("/CDJMODS/live/12/pages"), Some(12));
+        assert_eq!(requested(&at_path(12, 40)), Some((12, Some(40))));
+        assert_eq!(requested("/CDJMODS/live/12@x"), None);
         for p in ["/CDJMODS/live/0", "/CDJMODS/live/x", "/CDJMODS/index.json", "/live/3"] { assert_eq!(requested_id(p), None, "{p}"); }
     }
 

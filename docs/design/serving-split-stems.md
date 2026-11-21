@@ -146,17 +146,28 @@ in the app's cache, served as `/CDJMODS` or, inside a stick's own
 bank is kept only while its track ID still names the same file (IDs follow
 the folder's scan order).
 
+**Where the player is.**  The player tells the source its position the
+same way, by a lookup that always misses: `/CDJMODS/live/<id>@<page>`
+(live page numbers, at 44.1 kHz).  It does so when it first asks and
+again whenever its playhead lands on a page not split yet; the source's
+split starts at that page and follows (the device split's own
+playhead-following, `separate::Job::playhead`).
+
+**Cache.**  The banks stay for the next load (a finished bank is served
+at once), up to 2 GB on iOS and Android, 4 GB elsewhere
+(`OPENDECK_LIVE_STEMS_MB`); the oldest finished ones go first.
+
 **Tests** (loopback, a stand-in model): a player reads the first pages
 while the split is still running, then the rest, each as split; a deck
 plays them at 44.1 and 48 kHz, the start before the split is done; a
 source with no live stems costs no wait; damaged pages and maps are
-refused; a renumbered track's bank is dropped.
+refused; a renumbered track's bank is dropped; the split starts at the
+player's page and follows a jump back; a full cache drops the oldest.
 
 **Not done yet:** a run between two real devices (iPad source, desktop
-deck); the source splitting from the *player's* playhead (it splits from
-the top; the player's position is in its status packets); writing the
-finished bank into the served index under our IDs (A.2, A.3), so a second
-load needs no split; eviction of the cache.
+deck); writing the finished bank into the served index under our IDs
+(A.2, A.3), which only OverCue-format readers would need now (an OpenDeck
+reads the finished live bank at once).
 
 **For an ESP32 client** (B): look up `/CDJMODS/live/<id>`, poll `pages`,
 read 128 KiB pages of raw PCM near the playhead into PSRAM, check each

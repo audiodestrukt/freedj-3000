@@ -15,7 +15,10 @@ All notable changes to this project will be documented in this file.
   the source serves `CDJMODS/live/<track id>/` with OverCue's page size
   and `wav-44k1` role files plus a page map, so small players need no
   decoder (format in `crates/stems/src/live.rs`).  Tested over loopback
-  only.  docs/design/serving-split-stems.md.
+  only.  The source splits from where the player is (the player says by
+  looking up `CDJMODS/live/<id>@<page>`) and follows its jumps, and keeps
+  finished splits for the next load, up to 2 GB on iOS / Android and 4 GB
+  elsewhere (`OPENDECK_LIVE_STEMS_MB`).  docs/design/serving-split-stems.md.
 
 ### Changed
 - The NFS server sees files made while it runs, and a file's current
