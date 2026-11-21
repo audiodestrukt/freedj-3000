@@ -1,5 +1,8 @@
 # XDJ-1000MK2: driving the real panel from OpenDeck
 
+The bench setup (analyser, wiring, procedures, troubleshooting) is in
+[docs/hardware/xdj-1000mk2-analyser.md](../hardware/xdj-1000mk2-analyser.md).
+
 Notes from the unit's service schematic (Pioneer order no. RRV4661, Aug 2016;
 Dan's own copy, **not** in this repo — it is Pioneer's document, these notes
 are ours). Goal: use the XDJ's own jog, buttons, LEDs, tempo fader, browse
