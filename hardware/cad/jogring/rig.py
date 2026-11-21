@@ -88,15 +88,70 @@ def ring_edge():
     return s
 
 
-def hub(disp="210"):
+def ring_crossed():
+    """The crossed variant's ring: a diamond ridge around the skirt, a 3 mm
+    land on each flank for the tilted 608s."""
+    r_out = JOG_D / 2
+    s = tube(RING_BORE / 2, r_out, X_TOP_Z0, X_TOP_Z1)
+    s += tube(r_out - RIM_W, r_out, X_TOP_Z0 - RIM_DROP, X_TOP_Z0 + 0.5)
+    s += tube(SKIRT_RI, SKIRT_R, X_SKIRT_Z0, X_TOP_Z0 + 0.5)
+    k = math.sqrt(0.5)
+    pts = []
+    for sgn in (-1, 1):            # lower flank, then upper (reversed below)
+        base = (SKIRT_R, RIDGE_Z + sgn * RIDGE_H)
+        mid = (SKIRT_R + RIDGE_H / 2, RIDGE_Z + sgn * RIDGE_H / 2)
+        u = (k, -sgn * k)          # along the flank, base -> tip
+        n = (k, sgn * k)           # out of the flank
+        a = (mid[0] - LAND_W / 2 * u[0], mid[1] - LAND_W / 2 * u[1])
+        b = (mid[0] + LAND_W / 2 * u[0], mid[1] + LAND_W / 2 * u[1])
+        f = [(SKIRT_R - 0.5, base[1]), base, a, (a[0] + LAND_H * n[0], a[1] + LAND_H * n[1]),
+             (b[0] + LAND_H * n[0], b[1] + LAND_H * n[1]), b]
+        pts += f if sgn < 0 else f[::-1]
+    pts.insert(6, (RIDGE_TIP_R, RIDGE_Z))
+    s += revolve_rz(pts)
+    return s
+
+
+def x_frame(c, up):
+    """Bearing-local frame of a crossed 608 (station at angle 0): its centre,
+    its axis tilted 45° (outward-up for the lower row, inward-up for the upper)."""
+    return Pos(c[0], 0, c[1]) * Rot(0, -45 if up else 45, 0)
+
+
+def x_post(c, up, x0, x1, cap=None):
+    """A post under a tilted 608: a block cut square to the axis, with the Ø11
+    boss and the pin's hole."""
+    f = x_frame(c, up)
+    blk = box(x0, x1, -X_POST_W / 2, X_POST_W / 2, PLATE_TOP - 0.1, c[1] + 15)
+    blk -= f * Pos(0, 0, -X_POST_FACE) * Box(200, 200, 100, align=(Align.CENTER, Align.CENTER, Align.MIN))
+    blk += f * Pos(0, 0, -X_POST_FACE) * Cylinder(RACE_D / 2, 1.0, align=(Align.CENTER, Align.CENTER, Align.MIN))
+    if cap is not None:
+        blk -= box(x0 - OVS, x1 + OVS, -X_POST_W, X_POST_W, cap, cap + 100)
+    blk -= f * Pos(0, 0, -X_POST_FACE - X_PIN_DEPTH) * Cylinder(PIN_FIT / 2, X_PIN_DEPTH + 1.0 + OVS, align=(Align.CENTER, Align.CENTER, Align.MIN))
+    return blk
+
+
+def holddown():
+    """An upper (hold-down) post, at station angle 0: its flange's slots let it
+    slide ± SLIDE radially; push it in until the play is gone, tighten."""
+    r0, r1, hw, t = X_UP_FLANGE
+    s = x_post(X_UP_C, True, *X_UP_BLOCK)
+    s += box(r0, r1, -hw, hw, PLATE_TOP, PLATE_TOP + t)
+    for x, y in X_UP_SCREWS:
+        s -= Pos(0, y, 0) * slot_x(x - SLIDE, x + SLIDE, M3_CLR, PLATE_TOP - OVS, PLATE_TOP + t + OVS)
+    return s - box(-200, 200, -200, 200, PLATE_TOP - 5, PLATE_TOP)     # it stands on the plate
+
+
+def hub(disp="210", top=TOP_Z1):
     glass, window, thick = DISPLAYS[disp]
+    TOP_Z1_ = top
     big = DISPLAYS["210"][0] + 2 * HUB_FIT
-    s = tube(big / 2, HUB_OD / 2, PLATE_TOP, TOP_Z1)
-    s += tube(window / 2, big / 2 + 0.5, TOP_Z1 - LIP_T, TOP_Z1)
+    s = tube(big / 2, HUB_OD / 2, PLATE_TOP, TOP_Z1_)
+    s += tube(window / 2, big / 2 + 0.5, TOP_Z1_ - LIP_T, TOP_Z1_)
     s += tube(big / 2 - 0.5, HUB_FLANGE[0] / 2, PLATE_TOP, PLATE_TOP + HUB_FLANGE[1])
     if disp != "210":
         # A locating ring under the lip for the smaller module.
-        z1 = TOP_Z1 - LIP_T
+        z1 = TOP_Z1_ - LIP_T
         s += tube(glass / 2 + HUB_FIT, big / 2 + 0.5, z1 - thick, z1 + 0.2)
     for a in (0.0, 120.0, 240.0):
         x, y = polar(HUB_SCREW_R, a)
@@ -137,6 +192,12 @@ def plate(variant="vwheel"):
             c += Pos(x0, 0, SUP_ZC) * Rot(0, 90, 0) * Cylinder(RACE_D / 2, x1 - x0, align=(Align.CENTER, Align.CENTER, Align.MIN))
         c -= Pos(SUP_R0 - OVS, 0, SUP_ZC) * Rot(0, 90, 0) * Cylinder(PIN_FIT / 2, PIN[1] + 2 * OVS, align=(Align.CENTER, Align.CENTER, Align.MIN))
         s += Rot(0, 0, a) * c
+    for a in X_LOW_ANGLES if variant == "crossed" else ():
+        s += Rot(0, 0, a) * x_post(X_LOW_C, False, *X_LOW_BLOCK, cap=X_LOW_CAP)
+    for a in X_UP_ANGLES if variant == "crossed" else ():
+        for x, y in X_UP_SCREWS:
+            px, py = x * math.cos(math.radians(a)) - y * math.sin(math.radians(a)), x * math.sin(math.radians(a)) + y * math.cos(math.radians(a))
+            s -= cyl(px, py, PLATE_TOP - INSERT[1], PLATE_TOP + OVS, INSERT[0])
     # The roller arm: a pad under its foot (the arm floats 1 mm up), two
     # inserts, a recess under the AS5600 board and a hole for its wires.
     x0, x1, y0, y1 = FOOT
@@ -240,6 +301,11 @@ def printed():
         "edge/plate": (plate("edge"), False, 1),
         "edge/spacer": (spacer608(GUIDE_FOOT_D), False, 3),
         "edge/race_spacer": (race_spacer(), False, 3),
+        "crossed/ring": (ring_crossed(), True, 1),
+        "crossed/plate": (plate("crossed"), False, 1),
+        "crossed/holddown": (holddown(), False, 3),
+        "crossed/hub_210": (hub("210", X_TOP_Z1), True, 1),
+        "crossed/hub_128": (hub("128", X_TOP_Z1), True, 1),
         "hub_210": (hub("210"), True, 1),
         "hub_128": (hub("128"), True, 1),
         "arm": (arm(), False, 1),
@@ -295,6 +361,17 @@ def bought(variant="vwheel"):
         s.append((f"support{n}", rot * b, "steel"))
         pin = Pos(SUP_R0, 0, SUP_ZC) * Rot(0, 90, 0) * Cylinder(PIN_FIT / 2, PIN[1], align=(Align.CENTER, Align.CENTER, Align.MIN))
         s.append((f"pin{n}", rot * pin, "steel"))
+    if variant == "crossed":
+        b = Cylinder(B608[0] / 2, B608[2]) - Cylinder(B608[1] / 2, B608[2])
+        pin = Pos(0, 0, B608[2] / 2 - X_ROD[1]) * Cylinder(PIN_FIT / 2, X_ROD[1], align=(Align.CENTER, Align.CENTER, Align.MIN))
+        for angles, c, up in ((X_LOW_ANGLES, X_LOW_C, False), (X_UP_ANGLES, X_UP_C, True)):
+            for a in angles:
+                n = int(a)
+                f = Rot(0, 0, a) * x_frame(c, up)
+                s.append((f"x608_{n}", f * b, "steel"))
+                s.append((f"xpin{n}", f * pin, "steel"))
+                if up:
+                    s.append((f"holddown{n}", Rot(0, 0, a) * holddown(), "arm"))
     for i in range(2):
         z = BRG1_Z0 + i * BRG[2]
         s.append((f"mr105_{i}", tube(BRG[1] / 2, BRG[0] / 2, z, z + BRG[2], 0, ROLL_R), "steel"))
@@ -306,7 +383,7 @@ def bought(variant="vwheel"):
     oring = Pos(0, ROLL_R, TYRE_ZC) * Torus((ROLL_ROOT_D + ORING_CS) / 2, ORING_CS / 2)
     s.append(("oring", oring, "rubber"))
     glass, window, thick = DISPLAYS["210"]
-    z1 = TOP_Z1 - LIP_T
+    z1 = (X_TOP_Z1 if variant == "crossed" else TOP_Z1) - LIP_T
     s.append(("display", cyl(0, 0, z1 - thick, z1 - 0.05, glass), "black"))
     return s
 
@@ -320,7 +397,7 @@ MAT = {
     "black": ((0.02, 0.02, 0.022, 1), 0.0, 0.2), "rubber": ((0.03, 0.03, 0.03, 1), 0.0, 0.8),
     "magnet": ((0.4, 0.4, 0.42, 1), 1.0, 0.4), "tyre": ((0.10, 0.45, 0.20, 1), 0.0, 0.5),
 }
-KEY = {"ring": "ring", "edge/ring": "ring", "vwheel/plate": "plate", "608/plate": "plate", "edge/plate": "plate", "hub_210": "hub", "arm": "arm", "roller": "arm", "magnet_cup": "arm"}
+KEY = {"ring": "ring", "edge/ring": "ring", "crossed/ring": "ring", "crossed/plate": "plate", "crossed/hub_210": "hub", "vwheel/plate": "plate", "608/plate": "plate", "edge/plate": "plate", "hub_210": "hub", "arm": "arm", "roller": "arm", "magnet_cup": "arm"}
 
 
 def mesh(solid, path):
@@ -339,6 +416,39 @@ def scene(items):
     sc.apply_transform(np.diag([1e-3, 1e-3, 1e-3, 1.0]))
     sc.apply_transform(trimesh.transformations.rotation_matrix(-np.pi / 2, [1, 0, 0]))
     return sc
+
+
+SPRUNG = {"oring", "roller", "arm", "magnet_cup", "axle", "magnet", "as5600", "as5600_chip", "mr105_0", "mr105_1"}
+
+
+def held(variant, items):
+    """Nudge the ring 0.4 mm along each axis and tilt it 0.5° each way: every
+    nudge must run it into a bearing (or the lip into one).  The sprung roller
+    doesn't count.  Returns the number of free directions."""
+    ring = next(m for n, m, _ in items if n.endswith("ring"))
+    fixed = [(n, m) for n, m, _ in items if not n.endswith("ring") and n not in SPRUNG and "hub" not in n and n != "display"]
+    T = trimesh.transformations
+    moves = {f"{s}{ax}": T.translation_matrix(np.eye(3)[i] * (0.4 if s == "+" else -0.4))
+             for i, ax in enumerate("xyz") for s in "+-"}
+    moves |= {f"tilt{s}{ax}": T.rotation_matrix(math.radians(0.5 if s == "+" else -0.5), np.eye(3)[i])
+              for i, ax in enumerate("xy") for s in "+-"}
+    free, stops = [], {}
+    for k, t in moves.items():
+        r = ring.copy(); r.apply_transform(t)
+        hit = None
+        for n, m in fixed:
+            lo = np.maximum(r.bounds[0], m.bounds[0]); hi = np.minimum(r.bounds[1], m.bounds[1])
+            if np.any(lo >= hi):
+                continue
+            if trimesh.boolean.intersection([r, m], engine="manifold").volume > 0.01:
+                hit = n; break
+        if hit is None:
+            free.append(k)
+        stops[k] = hit
+    print(f"held {variant}: " + ", ".join(f"{k}->{v}" for k, v in stops.items()))
+    if free:
+        print(f"FREE [{variant}]: the ring can move {free}")
+    return len(free)
 
 
 # The tyre's press fit on the 608, as a volume.
@@ -366,11 +476,11 @@ def main():
             bad.append(name)
 
     shared = {n: mesh(s, os.path.join(tmp, f"{n.replace('/', '_')}.stl")) for n, (s, _, _) in parts.items()
-              if n in KEY and not n.endswith("plate") and not n.endswith("ring")}
+              if n in KEY and not n.endswith("plate") and not n.endswith("ring") and "hub" not in n}
     clashes = 0
-    for variant in ("vwheel", "608", "edge"):
+    for variant in ("vwheel", "608", "edge", "crossed"):
         items = [(n, m, KEY[n]) for n, m in shared.items()]
-        for part in ("plate", "ring"):
+        for part in ("plate", "ring", "hub_210"):
             pn = f"{variant}/{part}" if f"{variant}/{part}" in parts else part
             items.append((pn, mesh(parts[pn][0], os.path.join(tmp, f"{variant}_{part}.stl")), KEY[pn]))
         items += [(n, mesh(s, os.path.join(tmp, f"{variant}_{n}.stl")), k) for n, s, k in bought(variant)]
@@ -386,6 +496,7 @@ def main():
                 c += 1
                 print(f"CLASH [{variant}] {a} x {b}: {v:.1f} mm3")
         print(f"assembly {variant}: {len(items)} parts, {c} clashes")
+        c += held(variant, items)
         clashes += c
         scene(items).export(os.path.join(BUILD, f"jogring_{variant}.glb"))
         cut = []

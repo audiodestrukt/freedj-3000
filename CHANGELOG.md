@@ -8,8 +8,11 @@ All notable changes to this project will be documented in this file.
 - A ring-jog test rig to print (`hardware/cad/jogring/`, `make jogring`):
   the 206 mm jog as a ring on three V-wheels, around a fixed hub for a round
   smart-watch display (1.28" to 2.1").  An O-ring roller sprung against the
-  skirt turns the AS5600 7 × per platter turn.  There are three bearing
-  versions:
+  skirt turns the AS5600 7 × per platter turn.  There are four bearing
+  versions, and the build checks that each one holds the ring against every
+  nudge and tilt:
+  - six 608s crossed at ±45° around a ridge on the skirt, each carrying load
+    and centring;
   - 608 skateboard bearings on edge under the ring, as on a Pioneer, with
     flat 608s centring it and a lip against tipping;
   - 608s in printed V tyres;

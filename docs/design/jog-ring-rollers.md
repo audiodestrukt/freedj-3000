@@ -7,6 +7,7 @@ Dan's decisions so far:
 - **Display:** a round smart-watch LCD, 2.1" at most, with the 1.28" GC9A01 he has for the prototype.
 - **Weight:** none.  A Pioneer doesn't weight the ring.  Eddy-current drag may be tried for the feel.
 - **Bearings:** skateboard bearings (608s) are what he has, and he wants them **on edge**, taking the press straight down, as Pioneer and most decks do.  The rig has three versions to compare:
+  - **crossed** (his pick, after seeing the edge version: "just angled bearings"): 6 × 608 tilted ±45° around a diamond ridge.  Every bearing carries load and centres, and a lean on the rim rolls instead of sliding;
   - **edge**: 3 × 608 on edge under a track, 3 flat against the skirt, and a lip against tipping;
   - **608**: 608s in printed V tyres;
   - **vwheel**: bought V-wheels.
@@ -110,6 +111,14 @@ turns, so a wire can't reach its top.  There are two routes:
 
 The rig's ring is one piece for now, so the rollers and the sensing can be
 judged first.
+
+### Why six angled bearings and not three
+
+Three tilted bearings on one cone carry the press and centre the ring.  But
+a bearing only pushes: lean on the rim between two of them and the far side
+lifts off.  Bearings under a jog sit inside its rim, so they can't prevent
+that.  The second row, tilted the other way over the ridge, is what holds it
+down.  That is the crossed-roller principle.
 
 ## Feel: no weight, maybe eddy-current drag
 

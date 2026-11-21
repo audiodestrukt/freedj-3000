@@ -172,6 +172,37 @@ EDGE_SKIRT_Z0 = GUIDE_Z0 - LIP_GAP - LIP_T2
 GUIDE_FOOT_D = 13.0           # its spacer's foot clears the lip
 EDDY_BAND_EDGE = (72.0, TRACK_R - TRACK_W / 2 - 1.0)
 
+# ── Or: crossed 608s (the "crossed" variant) ──
+# A diamond ridge around the skirt; three 608s tilted 45° under it carry the
+# press and centre the ring, three tilted the other way over it hold it down
+# and centre it too.  Every bearing rolls; nothing only guides or slides.
+# (The crossed-roller-bearing principle, and a V-wheel split in two.)
+X_LOW_ANGLES = (30.0, 150.0, 270.0)
+X_UP_ANGLES = (90.0, 210.0, 330.0)
+RIDGE_Z = 31.0                # the ridge's tip height
+RIDGE_H = 8.0                 # radial depth = half-height (45° flanks)
+RIDGE_TIP_R = SKIRT_R + RIDGE_H                 # 78
+LAND_W, LAND_H = 3.0, 0.5     # a narrow land on each flank: the race scrubs ~3 %
+X_GAP = 0.05
+X_POST_FACE = B608[2] / 2 + 1.0                 # the post's face, behind a 1 mm Ø11 boss
+X_PIN_DEPTH = 8.0
+X_ROD = (8.0, X_PIN_DEPTH + 1.0 + B608[2])      # 8 mm pin: 8 in the post, the boss, the bearing (16)
+_s2 = math.sqrt(0.5)
+# Bearing centres (r, z): the land's middle pushed out along the flank's normal.
+X_LOW_C = (SKIRT_R + RIDGE_H / 2 + (B608[0] / 2 + LAND_H + X_GAP) * _s2,
+           RIDGE_Z - RIDGE_H / 2 - (B608[0] / 2 + LAND_H + X_GAP) * _s2)
+X_UP_C = (X_LOW_C[0], 2 * RIDGE_Z - X_LOW_C[1])
+X_SPAN = (B608[0] / 2 + B608[2] / 2) * _s2      # a tilted 608's half-height
+X_TOP_Z0 = X_UP_C[1] + X_SPAN + 1.0             # the ring's top sits over the upper row
+X_TOP_Z1 = X_TOP_Z0 + TOP_T
+X_SKIRT_Z0 = RIDGE_Z - RIDGE_H - 0.5
+X_UP_BLOCK = (80.5, 96.0)     # the hold-down post (separate, slides ± SLIDE for preload)
+X_UP_FLANGE = (78.0, 98.0, 14.0, 4.0)           # r0, r1, half-width, thickness
+X_UP_SCREWS = ((87.0, 11.0), (87.0, -11.0))
+X_LOW_BLOCK = (69.0, 86.0)    # the support post, printed with the plate
+X_LOW_CAP = X_SKIRT_Z0 - 1.0  # ... and kept under the skirt
+X_POST_W = 16.0
+
 # ── Checks on the numbers ──
 assert WHEEL_R + WHEEL_R_TIP < JOG_D / 2 - RIM_W - 4, "wheels show past the platter"
 assert TYRE_R + TYRE_R_TIP < JOG_D / 2 - RIM_W - 0.5, "608 tyres hit the rim"
@@ -189,4 +220,8 @@ assert SUP_ZC - B608[0] / 2 > PLATE_TOP + 1.0, "support bearing hits the plate"
 assert GUIDE_R - GUIDE_FOOT_D / 2 > LIP_R1 + 0.5, "the guide's spacer hits the lip"
 assert abs(SUP_R1 - SUP_R0 - PIN[1]) < 1e-6, "the pin spans both cheeks"
 assert EDGE_SKIRT_Z0 > ARM_Z0 + ENC_PCB[2] + ENC_PARTS_H + 1.0 + 0.5, "the skirt's lip hits the roller arm"
+assert X_LOW_C[1] - X_SPAN > PLATE_TOP + 1.0, "crossed: the lower 608s hit the plate"
+assert X_SKIRT_Z0 > ARM_Z0 + ENC_PCB[2] + ENC_PARTS_H + 1.0 + 0.5 and X_SKIRT_Z0 < TYRE_ZC - ROLLER_TYRE_H, "crossed: skirt vs roller"
+assert X_UP_FLANGE[1] + SLIDE < JOG_D / 2 - RIM_W, "crossed: the hold-down's flange shows past the ring"
+assert X_UP_BLOCK[0] - SLIDE > RIDGE_TIP_R + 0.5, "crossed: the hold-down post hits the ridge at full preload"
 assert BED[0] >= JOG_D and BED[0] >= PLATE_D

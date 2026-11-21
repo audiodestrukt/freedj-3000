@@ -17,9 +17,46 @@ printed and handled before deck7 changes.
 | ![edge support](renders/edge_support.jpg) | ![edge guide](renders/edge_guide.jpg) |
 | **edge**: a support 608 on its 8 mm pin between two cheeks, under the ring's narrow track. | **edge**: a guide 608 on the skirt, with the skirt's lip 0.3 mm under it. |
 
-## Three versions
+## Four versions
 
-| | `print/edge/` (print now) | `print/608/` (print now) | `print/vwheel/` (when the wheels come) |
+**crossed** (newest, Dan's pick to try): six 608s, all tilted 45°.  Every
+bearing both carries load and centres the ring, and nothing slides.
+
+| | |
+|---|---|
+| ![crossed](renders/crossed_open.jpg) | ![crossed section](renders/crossed_cut.jpg) |
+| Ring lifted off: three 608s tilted up-and-in on posts printed with the plate (grey), three tilted down-and-in on hold-down posts that slide for the preload (orange). | Section: a lower 608 on its land on the ridge's lower face. |
+
+### The crossed version
+
+- **Ridge.** A diamond ridge (45° faces, 8 mm deep) runs around the skirt,
+  with its tip at z 31.  Each face has a 3 mm land, 0.5 mm proud, which is
+  all the race touches, so it scrubs about 3 %.
+- **Lower row** (30° / 150° / 270°): each 608 is tilted with its axis
+  outward-up, and sits under the ridge's lower face.  It carries the press
+  and pushes the ring towards the centre.  Its post is printed with the
+  plate, with an 8 mm pin, 16 mm long, pressed 8 mm into it.  A Ø11 boss
+  bears on the inner race only.
+- **Upper row** (90° / 210° / 330°): each 608 is tilted the other way and
+  sits over the ridge's upper face.  It holds the ring down, so leaning on
+  the rim rolls instead of sliding, and it centres too.  These posts
+  (`crossed/holddown.stl`, 3 of them) are separate.  Each stands on two M3s
+  in radial slots: push it inward until the play is gone, then tighten.
+- **Height.** Two rows of tilted 608s span about 45 mm, so on the rig the
+  jog's top is at 58.4 (35.5 on the others).  The hub is taller to match
+  (`crossed/hub_*`).  In deck7 the bearings would sit down inside the 50 mm
+  body.
+- **Retaining.** A 608 is a slip fit on 8 mm rod.  Glue the inner races
+  (retaining compound) and the pins.
+
+`make jogring` also nudges each version's ring 0.4 mm along x, y and z,
+and tilts it 0.5° about x and y.  Every nudge has to run into a bearing (or,
+on the edge version, into the lip), or the build fails.  The sprung roller
+doesn't count.
+
+## The other three
+
+| | `print/edge/` | `print/608/` | `print/vwheel/` (when the wheels come) |
 |---|---|---|---|
 | Idea | as Pioneer and most decks: bearings **on edge** take the press straight down | a 608 dressed as a V-wheel | bought V-wheels |
 | Bearings | 6 × 608: 3 on edge under the ring, 3 flat against the skirt | 3 × 608 in printed V tyres | 3 × Solid V wheels |
@@ -123,6 +160,8 @@ It is built to answer three questions:
 | `608/plate.stl` *or* `vwheel/plate.stl` | 1 | Ø210 |
 | **edge:** `edge/ring.stl` + `edge/plate.stl` (with the cheeks, 27.5 tall) | 1 each | instead of the two above |
 | **edge:** `edge/spacer.stl`, `edge/race_spacer.stl` | 3 each | |
+| **crossed:** `crossed/ring.stl`, `crossed/plate.stl`, `crossed/hub_128.stl` (or `_210`) | 1 each | instead of the ring, plate and hub above |
+| **crossed:** `crossed/holddown.stl` | 3 | flat on the bed |
 | `608/tyre_fit.stl` | 1 | print first (above) |
 | `608/tyre.stl`, `608/spacer.stl`, `608/race_spacer.stl` | 3 each | the 608 version only |
 | `hub_210.stl` / `hub_128.stl` | 1 | one for the display you have |
@@ -136,6 +175,9 @@ PETG, 0.2 mm layers, 4 walls.
 
 | Part | Qty | Notes |
 |---|---|---|
+| **crossed version:** 608 bearings | 6 | |
+| **crossed version:** 8 mm steel rod, 16 mm | 6 | the pins |
+| **crossed version:** M3 × 8 + inserts | 6 + 6 | the hold-down posts |
 | **edge version:** 608 bearings | 6 | |
 | **edge version:** 8 mm steel rod, 19 mm | 3 | the support pins |
 | **edge version:** M8 × 25 hex bolt + M8 thin nut | 3 | the guides |

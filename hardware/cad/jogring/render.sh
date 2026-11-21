@@ -20,3 +20,7 @@ r wheel608 build/jogring_608_cutaway.glb  --res 1400 --resy 1000 --az 90  --el 1
 r edge_support build/jogring_edge_cutaway.glb --res 1400 --resy 1000 --az 90 --el 10 --dist 0.9 --target 0.0,-0.088,0.020 --lens 60
 r edge_guide   build/jogring_edge_cutaway.glb --res 1400 --resy 1000 --az 90 --el 10 --dist 0.9 --target 0.0,0.075,0.020 --lens 60
 r edge_open    build/jogring_edge_noring.glb  --res 1500 --resy 1100 --az -20 --el 45 --dist 2.4
+r crossed_open build/jogring_crossed_noring.glb  --res 1500 --resy 1100 --az -20 --el 45 --dist 2.4
+r crossed_cut  build/jogring_crossed_cutaway.glb --res 1400 --resy 1000 --az 90 --el 8 --dist 1.0 --target 0.0,-0.08,0.031 --lens 60
+r crossed_up   build/jogring_crossed_cutaway.glb --res 1400 --resy 1000 --az 90 --el 8 --dist 1.0 --target 0.0,0.08,0.031 --lens 60
+r crossed_hero build/jogring_crossed.glb --res 1400 --resy 1000 --az -24 --el 30 --dist 2.6
