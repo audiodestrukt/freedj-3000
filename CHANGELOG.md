@@ -23,8 +23,8 @@ All notable changes to this project will be documented in this file.
   skirt turns the AS5600 7 × per platter turn.  There are six bearing
   versions, and the build checks that each one holds the ring against every
   nudge and tilt:
-  - a 5" mini of the Pioneer-style ring, for fast test prints: 10 mm
-    bearings (623 or MR105) snap onto split stubs on a carrier that is open
+  - a 5" mini of the Pioneer-style ring, for fast test prints: 10 × 6 × 3
+    bearings (MR106) snap onto split stubs on a carrier that is open
     in the middle, and the carrier screws up under the deck-top stand-in
     from underneath (384-count quadrature encoder, Ø54 window);
   - a Pioneer-style ring on 16 small rollers, with a ridge under the deck

@@ -20,7 +20,7 @@ printed and handled before deck7 changes.
 ## Six versions
 
 **mini** (newest, for fast iteration): the pioneer layout at **5"
-(127 mm)**, on the little 10 mm bearings, which snap onto bosses.
+(127 mm)**, on Dan's little 10 × 6 × 3 bearings, which snap onto bosses.
 
 | | |
 |---|---|
@@ -35,12 +35,13 @@ printed and handled before deck7 changes.
   stub that stands out radially from a post printed with the carrier.  A
   vertical slot splits the stub along its length, so it prints without
   support and the halves carry the press in their stiff direction.  A
-  0.2 mm barb at the tip clicks past the inner race and holds it, and a
-  shoulder touches the inner race only.  Two carriers, one per bore:
-  `mini/carrier_623` (10 × 3 × 4) and `mini/carrier_mr105` (10 × 5 × 4).
-  Print the one that matches your bearings.  The 5 mm stub is the stronger
-  snap: `make jogring` prints the strain (0.8 % for 623, 1.5 % for MR105;
-  PETG yields near 4 %).  ⚠ Caliper your bearings' bore first.
+  0.25 mm barb at the tip clicks past the inner race and holds it, and a
+  shoulder touches the inner race only.  The bearings are Dan's
+  **10 × 6 × 3 (MR106ZZ)**.  His calipers read the bore 5.8 mm (inside
+  jaws read a small bore low), so the stub is sized to 5.8 and the barb
+  (Ø6.3) still holds a true 6.0 bore.  The snap bends the halves 2.3 %:
+  **print the carrier in PETG** (PLA yields near 2.5 %).  If a bearing is
+  loose or won't go on, change `STUB_D` in `mini.py`.
 - **Hollow carrier.** The ring below is open in the middle, r 46 to 60.
   Three spokes and the opto pad join it to a small ring under the hub, and
   the display's cable leaves through the middle.
@@ -252,7 +253,7 @@ It is built to answer three questions:
 | **pioneer:** `pioneer/ring.stl`, `pioneer/plate.stl` (Ø250), `pioneer/retainer.stl`, `pioneer/hub_128.stl` (or `_210`) | 1 each | its own set: no arm or roller (the encoder is optical) |
 | **pioneer:** `pioneer/wheel.stl` | 16 | only if not using 623s |
 | **mini:** `mini/ring.stl`, `mini/retainer.stl`, `mini/hub_128.stl` | 1 each | its own set, all on a 165 mm square |
-| **mini:** `mini/carrier_623.stl` or `mini/carrier_mr105.stl` | 1 | the one for your bearings' bore |
+| **mini:** `mini/carrier.stl` | 1 | PETG (the snap stubs) |
 | `608/tyre_fit.stl` | 1 | print first (above) |
 | `608/tyre.stl`, `608/spacer.stl`, `608/race_spacer.stl` | 3 each | the 608 version only |
 | `hub_210.stl` / `hub_128.stl` | 1 | one for the display you have |
@@ -266,7 +267,7 @@ PETG, 0.2 mm layers, 4 walls.
 
 | Part | Qty | Notes |
 |---|---|---|
-| **mini version:** 623ZZ (10 × 3 × 4) or MR105ZZ (10 × 5 × 4) | 10 | snap on: no pins |
+| **mini version:** MR106ZZ (10 × 6 × 3) | 10 | snap on: no pins |
 | **mini version:** slotted opto interrupter, as pioneer | 2 | |
 | **mini version:** clear acrylic, 3 mm, laser-cut Ø54 | 1 | the window |
 | **mini version:** M3 × 8 + inserts | 7 + 7 | hub (3), deck top (4) |

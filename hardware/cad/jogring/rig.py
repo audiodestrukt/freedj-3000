@@ -491,12 +491,11 @@ def main():
     shared = {n: mesh(s, os.path.join(tmp, f"{n.replace('/', '_')}.stl")) for n, (s, _, _) in parts.items()
               if n in KEY and not n.endswith("plate") and not n.endswith("ring") and "hub" not in n}
     clashes = 0
-    for variant in ("vwheel", "608", "edge", "crossed", "pioneer", "mini", "mini_mr105"):
+    for variant in ("vwheel", "608", "edge", "crossed", "pioneer", "mini"):
         if variant == "pioneer":
             items = [(n, mesh(s, os.path.join(tmp, f"{variant}_{n.replace('/', '_')}.stl")), k) for n, s, k in pioneer.assembly()]
         elif variant.startswith("mini"):
-            bore = "mr105" if variant == "mini_mr105" else "623"
-            items = [(n, mesh(s, os.path.join(tmp, f"{variant}_{n.replace('/', '_')}.stl")), k) for n, s, k in mini.assembly(bore)]
+            items = [(n, mesh(s, os.path.join(tmp, f"{variant}_{n.replace('/', '_')}.stl")), k) for n, s, k in mini.assembly()]
         else:
             items = [(n, m, KEY[n]) for n, m in shared.items()]
             for part in ("plate", "ring", "hub_210"):

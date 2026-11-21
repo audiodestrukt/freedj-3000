@@ -16,8 +16,7 @@ Here:
   direction), with a 0.2 mm barb at its tip.  Push a bearing on: the halves
   close, the barb clicks past the inner race and holds it.  A shoulder on the
   stub touches the inner race only.
-- Two carriers, one per bearing: `mini/carrier_623` (10 × 3 × 4) and
-  `mini/carrier_mr105` (10 × 5 × 4).  The 5 mm stub is the stronger snap.
+- Dan's bearings are 10 × 6 × 3 (MR106ZZ).
 - The carrier is an open ring (r 46..60) with three spokes to a small ring
   under the hub, and a pad that holds the two opto interrupters.  The middle
   is open for the display's cable.
@@ -35,20 +34,21 @@ import pioneer
 from rig import cyl, box, tube, revolve_rz, polar
 
 # ── bearings: 10 mm, either bore ──
-BEARINGS = {"623": (10.0, 3.0, 4.0), "mr105": (10.0, 5.0, 4.0)}   # OD, ID, width ⚠
-BEARING = "623"                   # the one the assembly is checked with (both are)
-W_D, W_W = 10.0, 4.0
+BEARINGS = {"mr106": (10.0, 6.0, 3.0)}   # OD, ID, width: Dan's 10 x 6 x 3 (MR106ZZ) ⚠
+BEARING = "mr106"
+STUB_D = 5.8                      # the bore as Dan's calipers read it (inside jaws read a small bore low; nominal 6.0)
+W_D, W_W = 10.0, 3.0
 R_W, N_W = 55.0, 10
 A_W = [360.0 / N_W * k for k in range(N_W)]
 GROOVE = (W_W + 0.3, 0.6)         # the bearings' groove in the ring: width, depth
 
 # ── snap stub ──
-SHOULDER = 2.0                    # from the post's face to the bearing's inner face
-SHOULDER_D = 1.2                  # over the bore: the shoulder touches the inner race only
+SHOULDER = 2.5                    # from the post's face to the bearing's inner face
+SHOULDER_D = 0.8                  # over the bore: the shoulder touches the inner race only
 PIN_FIT = 0.05                    # the stub under the bore
 PLAY = 0.1                        # axial, between the shoulder and the barb
-BARB, BARB_L, LEAD = 0.2, 0.5, 1.0   # the barb: radial catch, its land, the lead-in cone
-SLOT_W = 0.6                      # the split: the halves close 0.2 each to pass the bore
+BARB, BARB_L, LEAD = 0.25, 0.5, 1.0  # the barb: radial catch, its land, the lead-in cone (Ø6.3: holds a true 6.0 bore too)
+SLOT_W = 1.2                      # the split: the halves close 0.2 each to pass the bore (wide, so they bend easily)
 POST_T, POST_W = 3.5, 8.0         # the post: radial thickness, width
 
 # ── sizes ──
@@ -122,7 +122,8 @@ def xcyl(x0, x1, d):
 
 def stub(bore):
     """The snap stub, axle frame (x radial out, origin at the bearing's centre)."""
-    _, d, w = BEARINGS[bore]
+    _, _, w = BEARINGS[bore]
+    d = STUB_D
     xf = -w / 2 - SHOULDER
     x_barb = w / 2 + PLAY
     s = xcyl(xf - 0.5, -w / 2 - 0.05, d + SHOULDER_D)
@@ -230,15 +231,14 @@ def bearing(bore):
 def printed():
     return {
         "mini/ring": (ring(), True, 1),
-        "mini/carrier_623": (carrier("623"), False, 1),
-        "mini/carrier_mr105": (carrier("mr105"), False, 1),
+        "mini/carrier": (carrier(), False, 1),
         "mini/retainer": (retainer(), True, 1),
         "mini/hub_128": (hub(), True, 1),
     }
 
 
 def assembly(bore=BEARING):
-    s = [("mini/ring", ring(), "ring"), (f"mini/carrier_{bore}", carrier(bore), "plate"),
+    s = [("mini/ring", ring(), "ring"), ("mini/carrier", carrier(bore), "plate"),
          ("mini/retainer", retainer(), "hub"), ("mini/hub_128", hub(), "hub"), ("window", window(), "glass")]
     b = bearing(bore)
     for a in A_W:
@@ -257,7 +257,8 @@ def encoder_check(ring_mesh):
 def snap_report():
     """The snap's strain, a cantilevered half-stub closing BARB: 3 t δ / (2 L²)."""
     out = []
-    for b, (_, d, w) in BEARINGS.items():
+    for b, (_, _, w) in BEARINGS.items():
+        d = STUB_D
         t = (d - PIN_FIT - SLOT_W) / 2
         L = SHOULDER + w + PLAY + BARB_L
         out.append(f"{b}: halves {t:.2f} thick, {L:.1f} long, {100 * 3 * t * BARB / (2 * L * L):.1f} % strain to snap")
