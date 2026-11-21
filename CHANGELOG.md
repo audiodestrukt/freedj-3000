@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- OpenDeck as a **stemd server** (`crates/stemd`): it answers the HTTP
+  contract of [stemd](https://github.com/nsaintot/stemd) on port 8420 and
+  announces `_stemd._tcp` over mDNS, so a CDJ-3000 running cdj3k-mods'
+  Server Stems (or any stemd client) gets its stems split by this device's
+  model (the native HTDemucs, ONNX, or Core ML on an iPad).  The jobs API
+  the deck uses (health, upload, poll, fetch, cancel), FLAC / WAV / pcm16
+  / pcm32 at 24–96 kHz, and dsp mode 1: stemd's copy of the CDJ-3000's own
+  44.1 → 96 kHz filter (ported, MIT), so the deck's rebuilt drums cancel.
+  On whenever this device serves live stems (a model, not a Pi);
+  `OPENDECK_STEMD=0` turns it off.  The deck's own split comes first.
+  Real model: a 3:00 track in 65 s.  Not yet tried against a deck running
+  cdj3k-mods.  docs/design/stemd-server.md.
 - Live stems between OpenDecks: a deck that loaded a track from another
   OpenDeck, with no prepared stems for it, gets its stems from that
   OpenDeck when its STEMS panel opens.  The source splits the track with

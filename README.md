@@ -522,6 +522,8 @@ crates/
   rekordbox/    — export.pdb and ANLZ readers (vendored, patched rekordcrate)
   mediaserver/  — Serve a music folder to other decks (dbserver + NFS + background analysis)
   stems/        — OverCue-prepared stems (the CDJMODS USB format)
+  stemd/        — A stemd-compatible stem server (stems for CDJ-3000s running cdj3k-mods)
+  plugin/       — OpenDeck as a VST3 / CLAP plugin
   protocol/     — Control events; MCU serial protocol for the RP2350 control surface
   timecode/     — DVS vinyl timecode decoder (stub; not a current priority)
   db/           — SQLite track library (not yet used by the app)

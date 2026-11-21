@@ -34,6 +34,7 @@ mod settings;
 mod stems;
 mod separate;
 mod livestems;
+mod stemdsrv;
 mod modelfetch;
 mod snapshot;
 mod phrases;
@@ -5107,6 +5108,9 @@ pub fn run(cfg: Config) -> Result<()> {
             }
         }
     }
+    // A stemd-compatible stem server for CDJ-3000s running cdj3k-mods (and
+    // any stemd client), when this device splits for others (stemdsrv).
+    let _stemd = stemdsrv::start();
     // Self-measured CPU use, every 10 s: the log, and on iOS a file the Files
     // app can show (no profiler reaches an App Store build).  INFO shows it.
     cpumeter::set_file_log(settings.perf_log);

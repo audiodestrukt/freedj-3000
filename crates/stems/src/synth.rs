@@ -178,7 +178,7 @@ pub fn flac_verbatim(pcm: &[u8], rate: u32) -> Vec<u8> {
     let info: u64 = (rate as u64) << 44 | 1 << 41 | 15 << 36 | frames as u64;
     out.extend_from_slice(&info.to_be_bytes());
     out.extend_from_slice(&[0; 16]); // MD5 unknown
-    let rate_code = match rate { 96_000 => 0xB, 44_100 => 0x9, 48_000 => 0xA, _ => panic!("rate") };
+    let rate_code = match rate { 96_000 => 0xB, 44_100 => 0x9, 48_000 => 0xA, 24_000 => 0x7, _ => panic!("rate") };
     for (n, block) in pcm.chunks(BLOCK * 4).enumerate() {
         let len = block.len() / 4;
         let mut fr = vec![0xFF, 0xF8, 0x70 | rate_code, 0x18];

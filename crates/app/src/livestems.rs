@@ -80,6 +80,7 @@ fn dir_bytes(d: &std::path::Path) -> u64 {
 }
 
 /// The track ID a live-bank path names (`/CDJMODS/live/12`, or a file in it).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn requested_id(nfs: &str) -> Option<u32> { requested(nfs).map(|r| r.0) }
 
 /// The track ID a live-bank path names and the page the player is at, when
@@ -96,6 +97,7 @@ pub fn at_path(id: u32, page: usize) -> String { format!("{}@{page}", live::dir(
 
 impl LiveStems {
     /// Serve live stems of `files` (track ID → local file) from `cdjmods`.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn start(cdjmods: PathBuf, files: &[(u32, PathBuf)], split: SplitFn) -> Result<Arc<LiveStems>> {
         Self::start_capped(cdjmods, files, split, default_cap())
     }
@@ -345,8 +347,6 @@ pub fn model_split() -> SplitFn {
 /// Where a media server keeps the stems it splits (not the music folder).
 pub fn cache_dir(app_cache: &std::path::Path) -> PathBuf { app_cache.join("cdjmods") }
 
-#[allow(dead_code)]
-pub fn live_dir(id: u32) -> String { live::dir(id) }
 
 #[cfg(test)]
 mod tests {

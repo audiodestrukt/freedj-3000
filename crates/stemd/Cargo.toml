@@ -1,0 +1,18 @@
+[package]
+name = "opendeck-stemd"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-2.0-or-later"
+description = "A stemd-compatible stem server: CDJ-3000s running cdj3k-mods (and any stemd client) get stems split by OpenDeck"
+
+[features]
+default = ["mdns"]
+mdns = ["dep:mdns-sd"]
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+serde_json = "1"
+sha2 = "0.10"
+opendeck-stems = { path = "../stems" }
+mdns-sd = { version = "0.21.7", optional = true }

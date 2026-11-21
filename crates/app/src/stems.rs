@@ -698,7 +698,7 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
         (p.load(Ordering::Relaxed) as usize / 2) * from as usize / deck_sr as usize / oc::live::PAGE_FRAMES
     });
     let mut told = src_page();
-    let mut tell = |media: &mut NfsMedia, page: usize| {
+    let tell = |media: &mut NfsMedia, page: usize| {
         let at = crate::livestems::at_path(id, page);
         media.forget(&at);
         let _ = media.exists(&at);
