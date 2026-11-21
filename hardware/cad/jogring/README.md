@@ -17,7 +17,46 @@ printed and handled before deck7 changes.
 | ![edge support](renders/edge_support.jpg) | ![edge guide](renders/edge_guide.jpg) |
 | **edge**: a support 608 on its 8 mm pin between two cheeks, under the ring's narrow track. | **edge**: a guide 608 on the skirt, with the skirt's lip 0.3 mm under it. |
 
-## Five versions
+## Six versions
+
+**mini** (newest, for fast iteration): the pioneer layout at **5"
+(127 mm)**, on the little 10 mm bearings, which snap onto bosses.
+
+| | |
+|---|---|
+| ![mini](renders/mini_hero.jpg) | ![mini open](renders/mini_open.jpg) |
+| The 5" ring under its deck-top stand-in, with the window over a 1.28" display. | Ring and deck top off: the open carrier, 10 bearings snapped onto split stubs, the two interrupters on their pad. |
+| ![mini section](renders/mini_cut.jpg) | |
+| Section: a bearing on its stub under the ring's groove, and the ridge under the deck top. | |
+
+### The mini version
+
+- **Bearings snap on.** Each of the 10 bearings (at r 55) pushes onto a
+  stub that stands out radially from a post printed with the carrier.  A
+  vertical slot splits the stub along its length, so it prints without
+  support and the halves carry the press in their stiff direction.  A
+  0.2 mm barb at the tip clicks past the inner race and holds it, and a
+  shoulder touches the inner race only.  Two carriers, one per bore:
+  `mini/carrier_623` (10 × 3 × 4) and `mini/carrier_mr105` (10 × 5 × 4).
+  Print the one that matches your bearings.  The 5 mm stub is the stronger
+  snap: `make jogring` prints the strain (0.8 % for 623, 1.5 % for MR105;
+  PETG yields near 4 %).  ⚠ Caliper your bearings' bore first.
+- **Hollow carrier.** The ring below is open in the middle, r 46 to 60.
+  Three spokes and the opto pad join it to a small ring under the hub, and
+  the display's cable leaves through the middle.
+- **Mounts under a deck shell, from underneath.** `mini/retainer` stands
+  in for the deck top.  Four posts hang from its underside, with M3 heat-set
+  inserts in their feet.  The carrier screws up into them from below, and
+  the hub screws up through the carrier into inserts in its flange.  The
+  ring's ridge sits 0.3 mm under the deck top, so the shell retains the
+  platter.
+- **Encoder.** The same as pioneer, scaled: a fin at r 40 with 96 slots
+  (1.31 mm), two interrupters 4¼ slots apart, **384 counts a turn**.
+  `make jogring` checks the quadrature.
+- **Window.** A **Ø54 × 3** laser-cut clear disc over the 1.28" GC9A01.
+  The jog stands 8 mm proud of the deck top.
+
+## Five full-size versions
 
 **pioneer** (newest): the layout of the Pioneer jog Dan took apart, with
 his changes: one circle of rollers, an optical encoder, and a clear window.
@@ -65,7 +104,6 @@ deck's top, which stops it lifting.  Everything fastens from inside.
 - **Height.** The deck top is at 24.3 and the jog's top at 35.9: 11.6 proud.
   The plate is Ø250.
 
-## Four other versions
 ## Four other versions
 
 **crossed** (newest, Dan's pick to try): six 608s, all tilted 45°.  Every
@@ -213,6 +251,8 @@ It is built to answer three questions:
 | **crossed:** `crossed/holddown.stl` | 3 | flat on the bed |
 | **pioneer:** `pioneer/ring.stl`, `pioneer/plate.stl` (Ø250), `pioneer/retainer.stl`, `pioneer/hub_128.stl` (or `_210`) | 1 each | its own set: no arm or roller (the encoder is optical) |
 | **pioneer:** `pioneer/wheel.stl` | 16 | only if not using 623s |
+| **mini:** `mini/ring.stl`, `mini/retainer.stl`, `mini/hub_128.stl` | 1 each | its own set, all on a 165 mm square |
+| **mini:** `mini/carrier_623.stl` or `mini/carrier_mr105.stl` | 1 | the one for your bearings' bore |
 | `608/tyre_fit.stl` | 1 | print first (above) |
 | `608/tyre.stl`, `608/spacer.stl`, `608/race_spacer.stl` | 3 each | the 608 version only |
 | `hub_210.stl` / `hub_128.stl` | 1 | one for the display you have |
@@ -226,6 +266,10 @@ PETG, 0.2 mm layers, 4 walls.
 
 | Part | Qty | Notes |
 |---|---|---|
+| **mini version:** 623ZZ (10 × 3 × 4) or MR105ZZ (10 × 5 × 4) | 10 | snap on: no pins |
+| **mini version:** slotted opto interrupter, as pioneer | 2 | |
+| **mini version:** clear acrylic, 3 mm, laser-cut Ø54 | 1 | the window |
+| **mini version:** M3 × 8 + inserts | 7 + 7 | hub (3), deck top (4) |
 | **pioneer version:** 623ZZ (10 × 3 × 4), or print the wheels | 16 | |
 | **pioneer version:** 3 mm steel pin, 10 mm | 16 | |
 | **pioneer version:** slotted opto interrupter, 3.1 mm gap (TCST2103 class) | 2 | ⚠ caliper the body and beam height (`OPTO`, `OPTO_AXIS`) |

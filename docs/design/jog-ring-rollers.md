@@ -6,7 +6,8 @@ Dan's decisions so far:
 
 - **Display:** a round smart-watch LCD, 2.1" at most, with the 1.28" GC9A01 he has for the prototype.
 - **Weight:** none.  A Pioneer doesn't weight the ring.  Eddy-current drag may be tried for the feel.
-- **Bearings:** skateboard bearings (608s) are what he has, and he wants them **on edge**, taking the press straight down, as Pioneer and most decks do.  The rig has three versions to compare:
+- **Bearings:** skateboard bearings (608s) are what he has, and he wants them **on edge**, taking the press straight down, as Pioneer and most decks do.  The rig has these versions to compare:
+  - **mini** (2026-11-21, to iterate faster): the pioneer layout at 5" (127 mm).  The 10 mm bearings he has snap onto split stubs on a carrier that is open in the middle.  It screws up under the deck-top stand-in from below, and the shell retains the platter;
   - **pioneer** (from a Pioneer teardown he watched, then his changes): one ring on 16 small horizontal rollers in a single circle, a ridge under the deck top against lifting, an **optical quadrature encoder** (a slotted fin through two opto interrupters, 720 counts a turn), and a **laser-cut clear window** glued in over the display.  The low-profile route, and closest to the real thing;
   - **crossed** (his pick, after seeing the edge version: "just angled bearings"): 6 × 608 tilted ±45° around a diamond ridge.  Every bearing carries load and centres, and a lean on the rim rolls instead of sliding;
   - **edge**: 3 × 608 on edge under a track, 3 flat against the skirt, and a lip against tipping;

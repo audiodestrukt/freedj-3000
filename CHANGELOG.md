@@ -20,9 +20,13 @@ All notable changes to this project will be documented in this file.
 - A ring-jog test rig to print (`hardware/cad/jogring/`, `make jogring`):
   the 206 mm jog as a ring on three V-wheels, around a fixed hub for a round
   smart-watch display (1.28" to 2.1").  An O-ring roller sprung against the
-  skirt turns the AS5600 7 × per platter turn.  There are five bearing
+  skirt turns the AS5600 7 × per platter turn.  There are six bearing
   versions, and the build checks that each one holds the ring against every
   nudge and tilt:
+  - a 5" mini of the Pioneer-style ring, for fast test prints: 10 mm
+    bearings (623 or MR105) snap onto split stubs on a carrier that is open
+    in the middle, and the carrier screws up under the deck-top stand-in
+    from underneath (384-count quadrature encoder, Ø54 window);
   - a Pioneer-style ring on 16 small rollers, with a ridge under the deck
     top, an optical quadrature encoder (a slotted fin through two opto
     interrupters, 720 counts a turn) and a laser-cut clear window over the

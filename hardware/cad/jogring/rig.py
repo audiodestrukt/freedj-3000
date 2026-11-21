@@ -472,8 +472,8 @@ def main():
     shutil.rmtree(tmp, ignore_errors=True)       # no stale parts from an older layout
     os.makedirs(tmp, exist_ok=True)
     bad = []
-    import pioneer
-    parts = printed() | pioneer.printed()
+    import pioneer, mini
+    parts = printed() | pioneer.printed() | mini.printed()
     for name, (solid, flip, n) in parts.items():
         s = Rot(180, 0, 0) * solid if flip else solid
         bb = s.bounding_box()
@@ -491,9 +491,12 @@ def main():
     shared = {n: mesh(s, os.path.join(tmp, f"{n.replace('/', '_')}.stl")) for n, (s, _, _) in parts.items()
               if n in KEY and not n.endswith("plate") and not n.endswith("ring") and "hub" not in n}
     clashes = 0
-    for variant in ("vwheel", "608", "edge", "crossed", "pioneer"):
+    for variant in ("vwheel", "608", "edge", "crossed", "pioneer", "mini", "mini_mr105"):
         if variant == "pioneer":
             items = [(n, mesh(s, os.path.join(tmp, f"{variant}_{n.replace('/', '_')}.stl")), k) for n, s, k in pioneer.assembly()]
+        elif variant.startswith("mini"):
+            bore = "mr105" if variant == "mini_mr105" else "623"
+            items = [(n, mesh(s, os.path.join(tmp, f"{variant}_{n.replace('/', '_')}.stl")), k) for n, s, k in mini.assembly(bore)]
         else:
             items = [(n, m, KEY[n]) for n, m in shared.items()]
             for part in ("plate", "ring", "hub_210"):
@@ -515,6 +518,9 @@ def main():
         c += held(variant, items)
         if variant == "pioneer":
             c += pioneer.encoder_check(next(m for n, m, _ in items if n == "pioneer/ring"))
+        if variant == "mini":
+            c += mini.encoder_check(next(m for n, m, _ in items if n == "mini/ring"))
+            print(mini.snap_report())
         clashes += c
         scene(items).export(os.path.join(BUILD, f"jogring_{variant}.glb"))
         cut = []

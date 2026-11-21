@@ -206,13 +206,13 @@ def assembly():
     return s
 
 
-def encoder_check(ring_mesh):
+def encoder_check(ring_mesh, name="pioneer", code_r=CODE_R, code_n=CODE_N, opto_a=OPTO_A, opto_b=OPTO_B, zb=OPTO_TOP - OPTO_AXIS):
     """Cast each interrupter's beam across its gap while turning the ring mesh
     through two slot pitches; the A/B states must step through the quadrature
     cycle one state at a time, in one direction, 4 per slot.  Returns the
     number of failures."""
     import numpy as np, trimesh
-    zb = OPTO_TOP - OPTO_AXIS
+    CODE_R, CODE_N, OPTO_A, OPTO_B = code_r, code_n, opto_a, opto_b
 
     def blocked(m, a):
         c, s = math.cos(math.radians(a)), math.sin(math.radians(a))
@@ -229,6 +229,6 @@ def encoder_check(ring_mesh):
     gray = {(0, 0): 0, (0, 1): 1, (1, 1): 2, (1, 0): 3}
     steps = [(gray[b] - gray[a]) % 4 for a, b in zip(states, states[1:])]
     ok = len(steps) == 8 and len(set(steps)) == 1 and steps[0] in (1, 3)
-    print(f"encoder pioneer: {' '.join(f'{a}{b}' for a, b in states)} -> "
+    print(f"encoder {name}: {' '.join(f'{a}{b}' for a, b in states)} -> "
           f"{'quadrature, ' + str(4 * CODE_N) + ' counts a turn' if ok else 'NOT QUADRATURE'}")
     return 0 if ok else 1
