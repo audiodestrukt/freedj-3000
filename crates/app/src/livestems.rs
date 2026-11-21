@@ -159,6 +159,22 @@ impl LiveStems {
         self.wake.notify_one();
     }
 
+    /// Queue every served track not split yet, behind any player's
+    /// request (a player's request still goes first): the served folder
+    /// split in the background (`OPENDECK_LIVE_STEMS_ALL=1`).
+    pub fn request_all(&self) {
+        let mut ids: Vec<u32> = self.files.keys().copied().collect();
+        ids.sort();
+        let mut q = self.queue.lock().unwrap();
+        for id in ids {
+            let done = std::fs::read(self.cdjmods.join("live").join(id.to_string()).join("pages")).ok()
+                .and_then(|b| live::Map::parse(&b).ok()).is_some_and(|m| m.state == live::State::Complete);
+            if !done && q.1 != Some(id) && !q.0.contains(&id) { q.0.push_back(id); }
+        }
+        log::info!("live stems: {} tracks queued", q.0.len());
+        self.wake.notify_one();
+    }
+
     fn run(&self) {
         loop {
             let id = {
@@ -630,6 +646,26 @@ mod tests {
             crate::media::tests::copy_tree(music.path(), std::path::Path::new(&keep));
             crate::media::tests::copy_tree(&mods, &std::path::Path::new(&keep).join("CDJMODS"));
         }
+    }
+
+    /// The whole folder in the background: every track queued, a player's
+    /// request still first, finished ones skipped.
+    #[test]
+    fn request_all_queues_the_folder_behind_players() {
+        static LOCAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);  // held: nothing runs
+        let cache = tempfile::tempdir().unwrap();
+        let files: Vec<(u32, PathBuf)> = (1..=3).map(|i| (i, cache.path().join(format!("{i}.wav")))).collect();
+        let never: SplitFn = Arc::new(|_, _, _| anyhow::bail!("held"));
+        let live = LiveStems::start_with(cache.path().join("CDJMODS"), &files, never, 1 << 30, &LOCAL, None).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        live.request_all();
+        live.request(3);
+        let q = live.queue.lock().unwrap();
+        // The worker may have taken track 1 already (it then waits, held).
+        assert_eq!(q.0.front(), Some(&3), "the player's track first: {:?}", q.0);
+        let mut all: Vec<u32> = q.0.iter().copied().chain(q.1).collect();
+        all.sort();
+        assert_eq!(all, vec![1, 2, 3]);
     }
 
     #[test]

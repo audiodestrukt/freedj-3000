@@ -25,7 +25,8 @@ All notable changes to this project will be documented in this file.
   (`OPENDECK_LIVE_STEMS=1` / `=0`).  Experimental:
   `OPENDECK_LIVE_STEMS_PUBLISH=1` also writes each finished split as a
   standard bank (96 kHz FLAC pages) indexed under our track IDs, for
-  readers that only know OverCue's format.  docs/design/serving-split-stems.md.
+  readers that only know OverCue's format; `OPENDECK_LIVE_STEMS_ALL=1`
+  splits the whole served folder in the background.  docs/design/serving-split-stems.md.
 
 ### Changed
 - The NFS server sees files made while it runs, and a file's current

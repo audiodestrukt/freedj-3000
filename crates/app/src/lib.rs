@@ -5591,6 +5591,7 @@ fn serve_live_stems(root: &std::path::Path, nfs: &opendeck_nfs::server::NfsServe
         let live = livestems::LiveStems::start_publishing(mods.clone(), files, livestems::model_split(), publish)?;
         if own_mods { nfs.tree.overlay("CDJMODS/live", &mods.join("live"))?; } else { nfs.tree.overlay("CDJMODS", &mods)?; }
         nfs.tree.on_miss(live.hook());
+        if std::env::var("OPENDECK_LIVE_STEMS_ALL").is_ok_and(|v| v == "1") { live.request_all(); }
         Ok(())
     })();
     match res {
