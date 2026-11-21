@@ -35,6 +35,7 @@ mod stems;
 mod separate;
 mod livestems;
 mod stemdsrv;
+mod stemdclient;
 mod modelfetch;
 mod snapshot;
 mod phrases;
@@ -2967,7 +2968,16 @@ impl DeckApp {
                     Some(Err(e)) if j.cancel.load(std::sync::atomic::Ordering::Relaxed) => Err(e),
                     other => {
                         if let Some(Err(e)) = other { log::info!("stems: live stems: {e:#}"); }
-                        split_on_device(&path, &track, sr, &j)
+                        // A stemd server on the network (another OpenDeck, or
+                        // stemd on a GPU): stems around the playhead first.
+                        match stemdclient::server().map(|a| (a, stemdclient::load(a, &track, sr, &j))) {
+                            Some((_, Ok(Some(b)))) => Ok(Some(b)),
+                            Some((_, Err(e))) if j.cancel.load(std::sync::atomic::Ordering::Relaxed) => Err(e),
+                            other => {
+                                if let Some((a, Err(e))) = other { log::info!("stems: stemd {a}: {e:#}"); }
+                                split_on_device(&path, &track, sr, &j)
+                            }
+                        }
                     }
                 },
                 r => r,

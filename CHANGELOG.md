@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- OpenDeck as a **stemd client**, with stems at the playhead first: a
+  track with no prepared stems gets them, when its STEMS panel opens, from a
+  stemd server on the network (another OpenDeck, or stemd itself on a GPU)
+  through stemd's sessions API: the server splits from the deck's playhead
+  and the deck plays each stretch as it is ready.  `OPENDECK_STEMD_SERVER`
+  names the server, else it is found over mDNS; `OPENDECK_STEMD_CLIENT=0`
+  turns it off.  OpenDeck's stemd server serves sessions too.  OpenDeck →
+  OpenDeck with the real model on this desktop's CPU: stems at a playhead
+  60 s in after 6.7 s.
 - OpenDeck as a **stemd server** (`crates/stemd`): it answers the HTTP
   contract of [stemd](https://github.com/nsaintot/stemd) on port 8420 and
   announces `_stemd._tcp` over mDNS, so a CDJ-3000 running cdj3k-mods'
@@ -43,6 +52,9 @@ All notable changes to this project will be documented in this file.
   splits the whole served folder in the background.  docs/design/serving-split-stems.md.
 
 ### Changed
+- Stems fill in steps of whole bank pages: the stems at a mid-track
+  playhead no longer wait for the split to wrap round (prepared, live and
+  stemd banks).
 - The NFS server sees files made while it runs, and a file's current
   size: needed to serve stems as they are split.
 

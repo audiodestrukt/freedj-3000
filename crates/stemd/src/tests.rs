@@ -176,3 +176,92 @@ fn dsp_mode_1_stems_cancel_against_a_mix_converted_the_same_way() {
     let worst = deck_mix.iter().zip(&h).zip(&v).zip(&drums_want).map(|(((m, h), v), d)| (m - h - v - d).abs()).fold(0f32, f32::max);
     assert!(worst < 1e-5, "{worst}");
 }
+
+/// A stand-in that splits as a session wants: from the needle onward in
+/// 0.5 s stretches (re-reading the needle each time), then the rest.
+struct LiveFake;
+
+impl Splitter for LiveFake {
+    fn model_id(&self) -> String { "livefake-1".into() }
+    fn split(&self, mix: &[f32], _: &(dyn Fn(f32) + Sync), _: &AtomicBool) -> Result<Split> {
+        let part = |g: f32| mix.iter().map(|v| v * g).collect();
+        Ok(Split { drums: part(0.5), vocals: part(0.25), harmonics: part(0.25) })
+    }
+    fn split_live(&self, mix: &[f32], needle: &AtomicU64, on_ready: &(dyn Fn(usize, &[f32], &[f32], &[f32]) + Sync), cancel: &AtomicBool) -> Result<()> {
+        let frames = mix.len() / 2;
+        let step = 22_050;
+        let n = frames.div_ceil(step);
+        let mut done = vec![false; n];
+        while let Some(k) = { let at = (needle.load(Ordering::Relaxed) as usize / step).min(n - 1); (at..n).chain(0..at).find(|&k| !done[k]) } {
+            if cancel.load(Ordering::Relaxed) { bail!("cancelled"); }
+            std::thread::sleep(Duration::from_millis(15));
+            let (a, b) = (k * step * 2, ((k + 1) * step * 2).min(mix.len()));
+            let p = |g: f32| -> Vec<f32> { mix[a..b].iter().map(|v| v * g).collect() };
+            on_ready(k * step, &p(0.5), &p(0.25), &p(0.25));
+            done[k] = true;
+        }
+        Ok(())
+    }
+}
+
+/// A session as a deck uses one: open, upload (out of order), point the
+/// window at the needle; the ranges under the needle are ready first and
+/// read back as split, with the x-stemd headers; a range not ready is 409;
+/// the derived part sums exactly; DELETE ends it.
+#[test]
+fn a_session_serves_the_needle_first() {
+    let resample: Resample = Arc::new(|x, _, _| x.to_vec());
+    let s = start(Config { port: 0, advertise: false, resample, version: "test".into() }, Arc::new(LiveFake)).unwrap();
+    let frames = 44_100 * 20;
+    let mix = noise(frames);
+    let (st, b) = http(s.port, "POST", &format!("/v1/sessions?frames={frames}&format=f32le&output_format=pcm32&include_derived=true"), b"");
+    assert_eq!(st, 201, "{}", String::from_utf8_lossy(&b));
+    let id = json_of(&b)["id"].as_str().unwrap().to_string();
+    let needle = 44_100 * 12;
+    let (st, _) = http(s.port, "PUT", &format!("/v1/sessions/{id}/window"), json!({"needle": needle, "ahead": {"frames": 441000, "priority": "critical"}}).to_string().as_bytes());
+    assert_eq!(st, 200);
+    let half = frames / 2;
+    assert_eq!(http(s.port, "PUT", &format!("/v1/sessions/{id}/pcm?offset={half}"), &f32le(&mix[half * 2..])).0, 200);
+    let v = json_of(&http(s.port, "GET", &format!("/v1/sessions/{id}"), b"").1);
+    assert_eq!(v["state"], "uploading", "half the track is not enough to start");
+    assert_eq!(http(s.port, "PUT", &format!("/v1/sessions/{id}/pcm?offset=0"), &f32le(&mix[..half * 2])).0, 200);
+    // The first ready range is the one under the needle.
+    let t0 = Instant::now();
+    let first = loop {
+        let v = json_of(&http(s.port, "GET", &format!("/v1/sessions/{id}"), b"").1);
+        if let Some(r) = v["ready"].as_array().and_then(|r| r.first()).cloned() { break r; }
+        assert!(t0.elapsed() < Duration::from_secs(5), "{v}");
+        std::thread::sleep(Duration::from_millis(5));
+    };
+    let (a, b) = (first[0].as_u64().unwrap() as usize, first[1].as_u64().unwrap() as usize);
+    assert!(a <= needle && needle < b, "first ready {a}..{b} holds the needle {needle}");
+    assert_eq!(http(s.port, "GET", &format!("/v1/sessions/{id}/stems/vocals?from=0&to=1000"), b"").0, 409, "the top isn't ready yet");
+    let get = |name: &str, from: usize, to: usize| -> Vec<f32> {
+        let (st, body) = http(s.port, "GET", &format!("/v1/sessions/{id}/stems/{name}?from={from}&to={to}"), b"");
+        assert_eq!(st, 200, "{name} {from}..{to}");
+        body.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    };
+    let (h, vo, d) = (get("harmonics", needle, needle + 1000), get("vocals", needle, needle + 1000), get("drums", needle, needle + 1000));
+    for i in 0..2000 {
+        let m = mix[needle * 2 + i];
+        assert!((h[i] - m * 0.25).abs() < 1e-6 && (vo[i] - m * 0.25).abs() < 1e-6, "as split");
+        assert!((m - h[i] - vo[i] - d[i]).abs() < 1e-6, "the derived drums sum exactly");
+    }
+    // Everything ends up ready; then DELETE.
+    let t0 = Instant::now();
+    while json_of(&http(s.port, "GET", &format!("/v1/sessions/{id}"), b"").1)["state"] != "done" {
+        assert!(t0.elapsed() < Duration::from_secs(10));
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(get("vocals", 0, 1000).len(), 2000);
+    assert_eq!(http(s.port, "DELETE", &format!("/v1/sessions/{id}"), b"").0, 200);
+    assert_eq!(http(s.port, "GET", &format!("/v1/sessions/{id}"), b"").0, 404);
+}
+
+#[test]
+fn session_ranges_merge() {
+    let mut r = session::Ranges::default();
+    r.add(10, 20); r.add(30, 40); r.add(20, 30); r.add(50, 50);
+    assert_eq!(r.0, vec![(10, 40)]);
+    assert!(r.covers(12, 38) && !r.covers(5, 15) && !r.covers(35, 45));
+}

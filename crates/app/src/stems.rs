@@ -694,8 +694,13 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
     // Where the deck is, as a live page: looking it up tells the source
     // (and asks it for the track), so its split starts there.
     let from = oc::live::RATE;
+    // The page holding the start of the deck step the playhead is in, less
+    // the margin a step reads before itself, so the source's first pages
+    // cover that step whole.
     let src_page = || job.playhead.as_ref().map_or(0, |p| {
-        (p.load(Ordering::Relaxed) as usize / 2) * from as usize / deck_sr as usize / oc::live::PAGE_FRAMES
+        let step = step_frames(deck_sr);
+        let deck = p.load(Ordering::Relaxed) as usize / 2 / step * step;
+        (deck * from as usize / deck_sr as usize).saturating_sub(PAGED_MARGIN + 2048) / oc::live::PAGE_FRAMES
     });
     let mut told = src_page();
     let tell = |media: &mut NfsMedia, page: usize| {
@@ -718,7 +723,7 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
     bank.scale = if db == 6 { SPLIT_SCALE } else { 10f32.powf(db as f32 / 20.0) };
     let bank = Arc::new(bank);
     let frames = track.len() / 2;
-    let step = deck_sr as usize * PAGED_STEP_SECS;
+    let step = step_frames(deck_sr);
     let steps = frames.div_ceil(step).max(1);
     let mut done = vec![false; steps];
     let (mut n_done, mut first) = (0usize, None);
@@ -772,10 +777,16 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
 }
 
 /// Seconds of stems each step of a paged load reads, converts and appends.
-const PAGED_STEP_SECS: usize = 4;
+pub(crate) const PAGED_STEP_SECS: usize = 4;
+
+/// Deck frames in one fill step: about [`PAGED_STEP_SECS`], rounded down
+/// to whole bank pages, so a step's pages are ready the moment it is
+/// written (a step that started mid-page left that page waiting for the
+/// step before it).
+pub(crate) fn step_frames(deck_sr: u32) -> usize { (deck_sr as usize * PAGED_STEP_SECS / PAGE_FRAMES).max(1) * PAGE_FRAMES }
 /// Source frames read either side of a step, so the rate converter has the
 /// audio around it and a step's edges match a whole-role conversion.
-const PAGED_MARGIN: usize = 8192;
+pub(crate) const PAGED_MARGIN: usize = 8192;
 
 /// Read, convert, align and shift a bank onto `track`.
 ///
@@ -877,7 +888,7 @@ impl PagedRole {
 }
 
 /// Where [`deck_span`] reads a role's source frames from.
-trait SpanSource {
+pub(crate) trait SpanSource {
     fn frames(&self) -> usize;
     /// Source frames `[a, b)` (clamped to the role) as interleaved i16.
     fn source(&mut self, media: &mut dyn oc::Media, a: usize, b: usize) -> Result<Vec<i16>>;
@@ -892,7 +903,7 @@ impl SpanSource for PagedRole {
 /// role stored at `from` Hz, converted to `to` Hz exactly as converting the
 /// whole role would: the source span is widened by [`PAGED_MARGIN`] and
 /// started on a frame that maps to a whole deck frame.
-fn deck_span(role: &mut impl SpanSource, media: &mut dyn oc::Media, from: u32, to: u32, a: isize, b: isize) -> Result<Vec<i16>> {
+pub(crate) fn deck_span(role: &mut impl SpanSource, media: &mut dyn oc::Media, from: u32, to: u32, a: isize, b: isize) -> Result<Vec<i16>> {
     let mut out = vec![0i16; (b - a).max(0) as usize * 2];
     let total_out = match (from, to) {
         (x, y) if x == y => role.frames(),
@@ -947,7 +958,7 @@ fn build_paged(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32
     let bank = Arc::new(bank);
     if let Some(j) = job { let _ = j.bank.set(Arc::clone(&bank)); }
     let frames = track.len() / 2;
-    let step = deck_sr as usize * PAGED_STEP_SECS;
+    let step = step_frames(deck_sr);
     let steps = frames.div_ceil(step).max(1);
     let mut done = vec![false; steps];
     let mut first = None;

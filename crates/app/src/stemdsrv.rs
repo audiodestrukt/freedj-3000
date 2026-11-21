@@ -21,7 +21,7 @@ pub struct ModelSplitter { split: livestems::SplitFn, local: &'static AtomicBool
 impl ModelSplitter {
     pub fn new() -> ModelSplitter { ModelSplitter { split: livestems::model_split(), local: &LOCAL_SPLIT } }
     #[cfg(test)]
-    fn with(split: livestems::SplitFn, local: &'static AtomicBool) -> ModelSplitter { ModelSplitter { split, local } }
+    pub(crate) fn with(split: livestems::SplitFn, local: &'static AtomicBool) -> ModelSplitter { ModelSplitter { split, local } }
 }
 
 impl Splitter for ModelSplitter {
@@ -57,6 +57,46 @@ impl Splitter for ModelSplitter {
         anyhow::ensure!(!job.cancel.load(Ordering::Relaxed), "cancelled");
         // The bank holds drums, vocal, harmonics.
         Ok(Split { drums: bank.stem_levels(0), vocals: bank.stem_levels(1), harmonics: bank.stem_levels(2) })
+    }
+
+    /// A session: the device split follows the client's needle exactly
+    /// (no look-ahead) and each bank page is reported the moment it is
+    /// whole.
+    fn split_live(&self, mix: &[f32], needle: &std::sync::atomic::AtomicU64, on_ready: &(dyn Fn(usize, &[f32], &[f32], &[f32]) + Sync), cancel: &AtomicBool) -> Result<()> {
+        use crate::stems::PAGE;
+        while self.local.load(Ordering::Relaxed) {
+            if cancel.load(Ordering::Relaxed) { anyhow::bail!("cancelled"); }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        let track = Arc::new(mix.to_vec());
+        let bank = StemBank::filling_split(&track);
+        let head = Arc::new(std::sync::atomic::AtomicU64::new(needle.load(Ordering::Relaxed) * 2));
+        let job = Job { playhead: Some(Arc::clone(&head)), at_playhead: true, ..Default::default() };
+        let done = AtomicBool::new(false);
+        let mut sent = vec![false; bank.page_count()];
+        let report = |bank: &StemBank, sent: &mut Vec<bool>| {
+            for p in 0..sent.len() {
+                if sent[p] || !bank.page_ready(p) { continue; }
+                let (a, b) = (p * PAGE, ((p + 1) * PAGE).min(bank.len()));
+                let lv = |st: usize| -> Vec<f32> { (a..b).map(|i| bank.sample(st, i) as f32 / 32768.0 * bank.scale).collect() };
+                on_ready(a / 2, &lv(0), &lv(1), &lv(2));
+                sent[p] = true;
+            }
+        };
+        let r = std::thread::scope(|s| {
+            let h = s.spawn(|| { let r = (self.split)(&track, &job, &bank); done.store(true, Ordering::Release); r });
+            while !done.load(Ordering::Acquire) {
+                head.store(needle.load(Ordering::Relaxed) * 2, Ordering::Relaxed);
+                if cancel.load(Ordering::Relaxed) || self.local.load(Ordering::Relaxed) { job.cancel.store(true, Ordering::Relaxed); }
+                report(&bank, &mut sent);
+                std::thread::sleep(Duration::from_millis(30));
+            }
+            h.join().map_err(|_| anyhow::anyhow!("split panicked"))?
+        });
+        report(&bank, &mut sent);
+        r?;
+        anyhow::ensure!(!job.cancel.load(Ordering::Relaxed), "cancelled");
+        Ok(())
     }
 }
 
@@ -148,3 +188,4 @@ mod tests {
         LOCAL.store(false, Ordering::Relaxed);
     }
 }
+

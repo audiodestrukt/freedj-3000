@@ -46,8 +46,8 @@ output at 24, 44.1, 48 or 96 kHz; `parts` drawn from harmonics, vocals and
 drums (leaving one out, which is the derived part), `include_derived`; a
 cache (the same audio and parameters again is a `200` with the finished job);
 the last six finished jobs keep their stems (older ones answer `410`, as stemd
-does).  Not served: sessions (the deck doesn't use them), `bass` / `other`
-as parts (our split folds them into harmonics), `mp3`.
+does).  Not served: `bass` / `other` as parts (our split folds them into
+harmonics), `mp3`.
 
 **dsp mode 1** is stemd's copy of the CDJ-3000's 44.1 → 96 kHz converter: a
 polyphase FIR (L = 320, M = 147, 18,880 taps) that stemd's author measured
@@ -69,6 +69,43 @@ the device's deck is splitting and cancels a job under way when the deck
 starts one, as live stems do.  On whenever live stems are
 (`livestems::enabled`: a model, not a Pi by default); `OPENDECK_STEMD=0`
 turns it off.
+
+## Sessions (stems at the playhead first)
+
+stemd's own sessions API (`docs/api.md`, "Sessions"): not an extension, and
+not ours.  cdj3k-mods v0.1.1 doesn't use it (whole-track jobs only, so its
+stems come after the whole split); OpenDeck's client does.  Served
+(`crates/stemd/src/session.rs`): open (`POST /v1/sessions?frames=…`), upload
+(`PUT …/pcm?offset=`, any order), window (`PUT …/window`, the needle), view
+(`arrived`, `ready`, `state`), ready ranges (`GET …/stems/{name}?from=&to=`
+with `x-stemd-from` / `-frames` / `-gain` / `-clipped`), `DELETE`; `pcm32`
+or `pcm16` at 44.1 kHz; the derived part with `include_derived`.  Not
+served: stored `pieces`, sharing a track between sessions, early `mean` /
+`std` (our model normalises by the whole track, so the split starts once
+the upload is complete).  Behind it, `Splitter::split_live`: the app runs
+the device split with the session's needle as its playhead (no look-ahead)
+and reports each bank page as it is whole.
+
+## OpenDeck as a client
+
+`crates/app/src/stemdclient.rs`.  When a track's STEMS panel opens and it
+has no prepared stems: live stems from the linked OpenDeck it came from,
+else a **stemd server** (`OPENDECK_STEMD_SERVER=host[:port]`, else the first
+`_stemd._tcp` over mDNS that isn't this device; `OPENDECK_STEMD_CLIENT=0`
+off), else a split on this device.  The client opens a session at 44.1 kHz,
+sets the window to the start of the deck step the playhead is in (less the
+few thousand frames a step reads before itself), uploads the track in 10 s
+pieces from the playhead, then fills its bank a step at a time from the
+playhead as ranges become ready: harmonics and vocals over the wire, drums
+= mix − both (exact), all three converted to the deck's rate.  A jump to
+somewhere not split moves the window.  It speaks plain stemd, so it also
+works against stemd itself (e.g. with CUDA on the RTX 4070 desktop).
+
+Fill steps are now whole bank pages (`stems::step_frames`, ~4 s): a step
+that began mid-page left that page waiting for the step before it, so the
+stems at a mid-track playhead only counted as ready once the split had
+wrapped round (67 s instead of 7 s; prepared and live banks had the same
+edge).
 
 ## Measured
 
@@ -105,6 +142,11 @@ The audio itself wasn't listened to (the emulator's output goes nowhere
 here); the waveform following the faders is drawn from the stems' own
 levels, which is the evidence.
 
+Sessions, OpenDeck → OpenDeck (`real_model_stemd_session`, the same desktop
+as both server and client over loopback, a 48 kHz deck playing from 60 s
+into a 3:00 track): stems at the playhead after **6.7 s** (the whole upload,
+then one model chunk on the CPU), the whole track after 67 s.
+
 ## Tests
 
 `crates/stemd/src/tests.rs` drives the server exactly as the deck's
@@ -120,5 +162,4 @@ the bank's levels and gives way to the deck.
 
 - Try it on a real CDJ-3000 running cdj3k-mods, and listen.
 - A real FLAC encoder.
-- Sessions (stems near the needle first) if a client wants them.
-- OpenDeck as a stemd **client**: split on a GPU machine running stemd.
+- Upload only the stretch around the playhead before asking for the window (stemd's `mean` / `std`): the first stems would no longer wait for the whole upload.

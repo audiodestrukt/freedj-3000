@@ -474,11 +474,16 @@ mod tests {
         let bank = reader.join().unwrap().unwrap().expect("live stems");
         assert!(bank.complete());
         let order = order.lock().unwrap().clone();
-        let page_of = |secs: usize| secs * 44_100 / PAGE_FRAMES;
-        assert_eq!(order[0], page_of(6), "the split starts where the player is: {order:?}");
-        let jumped = order.iter().position(|p| *p == page_of(2)).unwrap();
-        assert!(jumped < 12, "the page jumped to is split soon after the jump, not at the end: {order:?}");
-        assert!(order[..4].iter().all(|p| *p >= page_of(6)), "{order:?}");
+        let page_of_secs = |secs: usize| secs * 44_100 / PAGE_FRAMES;
+        // The split starts at the deck step the player is in (steps of
+        // about 4 s in whole bank pages), less the little a step reads
+        // before itself.
+        let step_page = |secs: usize| { let st = crate::stems::step_frames(44_100); ((secs * 44_100) / st * st - (crate::stems::PAGED_MARGIN + 2048)) / PAGE_FRAMES };
+        assert_eq!(order[0], step_page(6), "the split starts where the player is: {order:?}");
+        assert!(order[..4].iter().all(|p| *p >= step_page(6)), "{order:?}");
+        // The jump back to 2 s (the step from 0 s) is split soon after, not at the end.
+        let jumped = order.iter().position(|p| *p == page_of_secs(2)).unwrap();
+        assert!(jumped < 14, "the page jumped to is split soon after the jump, not at the end: {order:?}");
     }
 
     /// The cache keeps the newest banks under its cap.

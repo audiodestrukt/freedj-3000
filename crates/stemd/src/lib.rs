@@ -23,13 +23,17 @@
 //! ([`Config::resample`]).  One job runs at a time, newest last.
 
 pub mod mode1;
+/// The mDNS crate, for clients that browse `_stemd._tcp`.
+#[cfg(feature = "mdns")]
+pub use mdns_sd;
+mod session;
 
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
 use std::collections::{HashMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,6 +58,17 @@ pub trait Splitter: Send + Sync {
     /// Split `mix` (interleaved stereo, 44.1 kHz).  `progress` takes 0–1;
     /// stop early (an error) once `cancel` is set.
     fn split(&self, mix: &[f32], progress: &(dyn Fn(f32) + Sync), cancel: &AtomicBool) -> Result<Split>;
+    /// Split `mix` starting around `needle` (a frame, which may move while
+    /// it runs) and report each finished stretch as it lands:
+    /// `on_ready(first frame, drums, vocals, harmonics)`, interleaved and
+    /// the same length.  For sessions.  The default splits the whole track
+    /// and reports it once.
+    fn split_live(&self, mix: &[f32], needle: &AtomicU64, on_ready: &(dyn Fn(usize, &[f32], &[f32], &[f32]) + Sync), cancel: &AtomicBool) -> Result<()> {
+        let _ = needle;
+        let s = self.split(mix, &|_| {}, cancel)?;
+        on_ready(0, &s.drums, &s.vocals, &s.harmonics);
+        Ok(())
+    }
 }
 
 /// Interleaved stereo from one rate to another.
@@ -123,7 +138,7 @@ struct Job {
 
 struct Inner { jobs: HashMap<String, Arc<Job>>, by_key: HashMap<[u8; 32], String>, queue: VecDeque<String>, done: VecDeque<String>, attempt: u64, running: Option<String> }
 
-struct State { cfg: Config, splitter: Arc<dyn Splitter>, inner: Mutex<Inner>, wake: Condvar }
+struct State { cfg: Config, splitter: Arc<dyn Splitter>, inner: Mutex<Inner>, wake: Condvar, sessions: Mutex<HashMap<String, Arc<session::Session>>> }
 
 /// A running server.
 pub struct Server {
@@ -139,7 +154,7 @@ pub fn start(cfg: Config, splitter: Arc<dyn Splitter>) -> Result<Server> {
     let advertise = cfg.advertise;
     let model = splitter.model_id();
     let version = cfg.version.clone();
-    let st = Arc::new(State { cfg, splitter, inner: Mutex::new(Inner { jobs: HashMap::new(), by_key: HashMap::new(), queue: VecDeque::new(), done: VecDeque::new(), attempt: 0, running: None }), wake: Condvar::new() });
+    let st = Arc::new(State { cfg, splitter, inner: Mutex::new(Inner { jobs: HashMap::new(), by_key: HashMap::new(), queue: VecDeque::new(), done: VecDeque::new(), attempt: 0, running: None }), wake: Condvar::new(), sessions: Mutex::new(HashMap::new()) });
     let w = Arc::clone(&st);
     std::thread::Builder::new().name("stemd-worker".into()).spawn(move || worker(w))?;
     let a = Arc::clone(&st);
@@ -175,10 +190,10 @@ fn advertise_mdns(port: u16, model: &str, version: &str) -> Result<mdns_sd::Serv
 
 struct Request { method: String, path: String, query: HashMap<String, String>, body_len: u64 }
 
-struct Response { status: u16, content_type: &'static str, body: Vec<u8> }
+struct Response { status: u16, content_type: &'static str, body: Vec<u8>, headers: Vec<(&'static str, String)> }
 
 impl Response {
-    fn json(status: u16, v: Value) -> Response { Response { status, content_type: "application/json", body: v.to_string().into_bytes() } }
+    fn json(status: u16, v: Value) -> Response { Response { status, content_type: "application/json", body: v.to_string().into_bytes(), headers: Vec::new() } }
     fn error(status: u16, msg: &str) -> Response { Response::json(status, json!({ "error": msg })) }
 }
 
@@ -230,33 +245,38 @@ fn serve(st: &Arc<State>, conn: TcpStream) -> Result<()> {
     conn.set_read_timeout(Some(Duration::from_secs(60)))?;
     let mut r = BufReader::new(&conn);
     let req = read_request(&mut r)?;
-    let resp = route(st, &req, &mut r);
+    // Read any body first, so even a refusal leaves nothing unread (closing
+    // on unread bytes resets the connection under the reply).
+    let resp = if req.body_len > (MAX_TRACK_SECS as u64) * RATE as u64 * 8 {
+        Response::error(413, "body too large")
+    } else {
+        let mut body = vec![0u8; req.body_len as usize];
+        match r.read_exact(&mut body) {
+            Ok(()) => route(st, &req, body),
+            Err(e) => Response::error(400, &format!("body: {e}")),
+        }
+    };
     let mut w = &conn;
-    write!(w, "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", resp.status, reason(resp.status), resp.content_type, resp.body.len())?;
+    write!(w, "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n", resp.status, reason(resp.status), resp.content_type, resp.body.len())?;
+    for (k, v) in &resp.headers { write!(w, "{k}: {v}\r\n")?; }
+    write!(w, "\r\n")?;
     w.write_all(&resp.body)?;
     w.flush()?;
     Ok(())
 }
 
-fn route(st: &Arc<State>, req: &Request, body: &mut BufReader<&TcpStream>) -> Response {
+fn route(st: &Arc<State>, req: &Request, body: Vec<u8>) -> Response {
     let parts: Vec<&str> = req.path.trim_matches('/').split('/').collect();
     match (req.method.as_str(), parts.as_slice()) {
         ("GET", ["v1", "health"]) => Response::json(200, health(st)),
-        ("POST", ["v1", "jobs"]) => {
-            // Read the upload first, so even a refusal leaves nothing unread
-            // (closing on unread bytes resets the connection under the reply).
-            if req.body_len > (MAX_TRACK_SECS as u64) * RATE as u64 * 8 { return Response::error(413, "track too long"); }
-            let mut raw = vec![0u8; req.body_len as usize];
-            if let Err(e) = body.read_exact(&mut raw) { return Response::error(400, &format!("body: {e}")); }
-            match create(st, req, raw) { Ok(r) => r, Err(e) => Response::error(400, &format!("{e:#}")) }
-        }
+        ("POST", ["v1", "jobs"]) => match create(st, req, body) { Ok(r) => r, Err(e) => Response::error(400, &format!("{e:#}")) },
         ("GET", ["v1", "jobs", id]) => match job(st, id) { Some(j) => Response::json(200, doc(st, &j)), None => Response::error(404, "no such job") },
         ("DELETE", ["v1", "jobs", id]) => match job(st, id) {
             Some(j) => { cancel(st, &j); Response::json(200, json!({ "id": j.id, "stage": "cancelled" })) }
             None => Response::error(404, "no such job"),
         },
         ("GET", ["v1", "jobs", id, "stems", name]) => stem(st, id, name),
-        ("POST" | "GET" | "PUT" | "DELETE", ["v1", "sessions", ..]) => Response::error(404, "sessions are not served here; use /v1/jobs"),
+        (_, ["v1", "sessions", ..]) => session::route(st, req, &parts[2..], body),
         ("GET", ["v1", "logs"]) => Response::json(200, json!({ "lines": [] })),
         _ => Response::error(404, "not found"),
     }
@@ -288,6 +308,9 @@ fn health(st: &State) -> Value {
         "derived_stem": "drums",
         "parts": ["harmonics", "vocals", "drums"],
         "default_parts": ["harmonics", "vocals"],
+        "sessions": true,
+        "segment_frames": session::SEGMENT,
+        "stride_frames": session::STRIDE,
     })
 }
 
@@ -417,7 +440,7 @@ fn stem(st: &State, id: &str, name: &str) -> Response {
     if j.reaped.load(Ordering::Relaxed) { return Response::error(410, "stems dropped; submit the job again"); }
     let Some(o) = j.out.lock().unwrap().clone() else { return Response::error(409, "not done yet") };
     match o.stems.iter().find(|s| s.part.name() == name) {
-        Some(s) => Response { status: 200, content_type: j.params.format.content_type(), body: s.bytes.clone() },
+        Some(s) => Response { status: 200, content_type: j.params.format.content_type(), body: s.bytes.clone(), headers: Vec::new() },
         None => Response::error(404, "no such stem in this job"),
     }
 }
@@ -430,6 +453,17 @@ fn worker(st: Arc<State>) {
             let mut i = st.inner.lock().unwrap();
             loop {
                 if let Some(id) = i.queue.pop_front() {
+                    if let Some(sid) = id.strip_prefix("s:") {
+                        let s = st.sessions.lock().unwrap().get(sid).cloned();
+                        if let Some(s) = s {
+                            i.running = Some(id.clone());
+                            drop(i);
+                            session::run(&st, &s);
+                            i = st.inner.lock().unwrap();
+                            i.running = None;
+                        }
+                        continue;
+                    }
                     if let Some(j) = i.jobs.get(&id).cloned() { i.running = Some(id); break j; }
                     continue;
                 }
