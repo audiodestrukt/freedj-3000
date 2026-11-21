@@ -17,7 +17,48 @@ printed and handled before deck7 changes.
 | ![edge support](renders/edge_support.jpg) | ![edge guide](renders/edge_guide.jpg) |
 | **edge**: a support 608 on its 8 mm pin between two cheeks, under the ring's narrow track. | **edge**: a guide 608 on the skirt, with the skirt's lip 0.3 mm under it. |
 
-## Four versions
+## Five versions
+
+**pioneer** (newest): the layout of the Pioneer jog Dan took apart.
+
+| | |
+|---|---|
+| ![pioneer](renders/pioneer_hero.jpg) | ![pioneer open](renders/pioneer_open.jpg) |
+| The ring under its "deck top" stand-in. | Ring and deck top off: 24 rollers in two circles, the six posts, and the AS5600 arm with its gear. |
+| ![pioneer section](renders/pioneer_cut.jpg) | ![pioneer gear](renders/pioneer_gear.jpg) |
+| Section: the ring's foot on an outer roller, in its groove; the toothed ridge under the deck top. | The arm's 20-tooth gear. |
+
+### The pioneer version
+
+What Dan saw inside the Pioneer: the ring rides on two concentric sets of
+small plastic wheels on pins (axles horizontal, about 10 mm).  A little
+ridge round its foot sits under the deck's top, which is what stops it
+lifting.  Everything fastens from inside, and the angle comes from a gear.
+
+- **Rollers.** 24 of them, 10 × 4: **623 bearings** (10 × 3 × 4) or
+  printed `pioneer/wheel.stl` (TPU for a quiet roll, PETG for a firm one),
+  on **3 mm pins, 10 mm long**.  There are 12 at r 70 and 12 at r 94.  Each
+  sits in a block printed with the plate, and its pin drops into a slot
+  open at the top: no tools, and swapping wheels for bearings takes seconds.
+  Ø5 bosses on the walls bear on a 623's inner race only.
+- **Centring.** Each circle runs in its own 0.6 mm groove under the ring
+  (0.15 mm side clearance), so the rollers' sides keep it centred.  A
+  0.2 mm shift runs into 12 rollers at once.
+- **Lift.** The ridge round the ring's foot sits 0.3 mm under
+  `pioneer/retainer.stl`, which stands in for the deck's top on six posts.
+  In deck7 the top shell is the retainer, and the roller carrier screws to
+  it from inside.
+- **Angle.** The ridge carries the gear teeth (module 1, 214 teeth) under a
+  45° shroud.  The shroud prints without support and keeps the gears in
+  line.  The arm's 20-tooth gear (`pioneer/pinion.stl`) meshes with them
+  from outside, at 45°: **10.7 turns per platter turn, about 43,800 counts**.
+  The flexure presses the gear into mesh, so there's no backlash; its foot
+  slides *inward* here.  The rig's plate is square (250 mm) so the arm's
+  board stays on it.
+- **Height.** The deck top is at 33.4 and the jog's top at 45, so the jog
+  stands 11.6 mm proud.
+
+## Four other versions
 
 **crossed** (newest, Dan's pick to try): six 608s, all tilted 45°.  Every
 bearing both carries load and centres the ring, and nothing slides.
@@ -162,6 +203,8 @@ It is built to answer three questions:
 | **edge:** `edge/spacer.stl`, `edge/race_spacer.stl` | 3 each | |
 | **crossed:** `crossed/ring.stl`, `crossed/plate.stl`, `crossed/hub_128.stl` (or `_210`) | 1 each | instead of the ring, plate and hub above |
 | **crossed:** `crossed/holddown.stl` | 3 | flat on the bed |
+| **pioneer:** `pioneer/ring.stl`, `pioneer/plate.stl` (250 square), `pioneer/retainer.stl`, `pioneer/hub_128.stl` (or `_210`), `pioneer/arm.stl`, `pioneer/pinion.stl` | 1 each | its own set: no shared ring, plate, hub, arm or roller |
+| **pioneer:** `pioneer/wheel.stl` | 24 | only if not using 623s |
 | `608/tyre_fit.stl` | 1 | print first (above) |
 | `608/tyre.stl`, `608/spacer.stl`, `608/race_spacer.stl` | 3 each | the 608 version only |
 | `hub_210.stl` / `hub_128.stl` | 1 | one for the display you have |
@@ -175,6 +218,9 @@ PETG, 0.2 mm layers, 4 walls.
 
 | Part | Qty | Notes |
 |---|---|---|
+| **pioneer version:** 623ZZ (10 × 3 × 4), or print the wheels | 24 | |
+| **pioneer version:** 3 mm steel pin, 10 mm | 24 | |
+| **pioneer version:** M3 × 8 + inserts | 9 + 9 | hub (3), deck top (6) |
 | **crossed version:** 608 bearings | 6 | |
 | **crossed version:** 8 mm steel rod, 16 mm | 6 | the pins |
 | **crossed version:** M3 × 8 + inserts | 6 + 6 | the hold-down posts |

@@ -210,9 +210,11 @@ def plate(variant="vwheel"):
     return s
 
 
-def arm():
+def arm(inward=False):
     """The roller's arm: the boss with the two bearings, the AS5600 under
-    it, a flexure beam, and the slotted foot.  Drawn at the tyre's touch."""
+    it, a flexure beam, and the slotted foot.  Drawn at the tyre's touch.
+    The foot slides outward to press the tyre on (or inward, for the pioneer
+    version's gear, which meshes from outside the ring)."""
     cx, cy = 0.0, ROLL_R
     pw = ENC_PCB[0] / 2
     blk_z1 = ARM_Z0 + ENC_PCB[2] + ENC_PARTS_H + 1.0
@@ -223,7 +225,8 @@ def arm():
     s += box(x0, x1, y0, y1, ARM_Z0, FOOT_Z1)
     s += box(RISER[0], RISER[1], y0, y1, ARM_Z0, BEAM_Z[1])
     for x, y in FOOT_SCREWS:
-        s -= slot(x, y - PRELOAD_MAX, y, M3_CLR, ARM_Z0 - OVS, FOOT_Z1 + OVS)
+        y0s, y1s = (y, y + PRELOAD_MAX) if inward else (y - PRELOAD_MAX, y)
+        s -= slot(x, y0s, y1s, M3_CLR, ARM_Z0 - OVS, FOOT_Z1 + OVS)
     # The board slides in from below, chip up; its parts sit in a cavity.
     s -= box(cx - pw - 0.1, cx + pw + 0.1, cy - pw - 0.1, cy + pw + 0.1, ARM_Z0 - OVS, ARM_Z0 + ENC_PCB[2])
     q = pw - 1.5
@@ -372,6 +375,16 @@ def bought(variant="vwheel"):
                 s.append((f"xpin{n}", f * pin, "steel"))
                 if up:
                     s.append((f"holddown{n}", Rot(0, 0, a) * holddown(), "arm"))
+    s += sense_stack()
+    glass, window, thick = DISPLAYS["210"]
+    z1 = (X_TOP_Z1 if variant == "crossed" else TOP_Z1) - LIP_T
+    s.append(("display", cyl(0, 0, z1 - thick, z1 - 0.05, glass), "black"))
+    return s
+
+
+def sense_stack(oring=True):
+    """The bought parts of the sense arm, at ROLL_R on +y."""
+    s = []
     for i in range(2):
         z = BRG1_Z0 + i * BRG[2]
         s.append((f"mr105_{i}", tube(BRG[1] / 2, BRG[0] / 2, z, z + BRG[2], 0, ROLL_R), "steel"))
@@ -380,11 +393,8 @@ def bought(variant="vwheel"):
     pw = ENC_PCB[0] / 2
     s.append(("as5600", box(-pw, pw, ROLL_R - pw, ROLL_R + pw, ARM_Z0, ARM_Z0 + ENC_PCB[2]), "blue"))
     s.append(("as5600_chip", box(-2.5, 2.5, ROLL_R - 3, ROLL_R + 3, ARM_Z0 + ENC_PCB[2], CHIP_TOP), "black"))
-    oring = Pos(0, ROLL_R, TYRE_ZC) * Torus((ROLL_ROOT_D + ORING_CS) / 2, ORING_CS / 2)
-    s.append(("oring", oring, "rubber"))
-    glass, window, thick = DISPLAYS["210"]
-    z1 = (X_TOP_Z1 if variant == "crossed" else TOP_Z1) - LIP_T
-    s.append(("display", cyl(0, 0, z1 - thick, z1 - 0.05, glass), "black"))
+    if oring:
+        s.append(("oring", Pos(0, ROLL_R, TYRE_ZC) * Torus((ROLL_ROOT_D + ORING_CS) / 2, ORING_CS / 2), "rubber"))
     return s
 
 
@@ -418,7 +428,7 @@ def scene(items):
     return sc
 
 
-SPRUNG = {"oring", "roller", "arm", "magnet_cup", "axle", "magnet", "as5600", "as5600_chip", "mr105_0", "mr105_1"}
+SPRUNG = {"pinion", "oring", "roller", "arm", "magnet_cup", "axle", "magnet", "as5600", "as5600_chip", "mr105_0", "mr105_1"}
 
 
 def held(variant, items):
@@ -426,7 +436,7 @@ def held(variant, items):
     nudge must run it into a bearing (or the lip into one).  The sprung roller
     doesn't count.  Returns the number of free directions."""
     ring = next(m for n, m, _ in items if n.endswith("ring"))
-    fixed = [(n, m) for n, m, _ in items if not n.endswith("ring") and n not in SPRUNG and "hub" not in n and n != "display"]
+    fixed = [(n, m) for n, m, _ in items if not n.endswith("ring") and n.split("/")[-1] not in SPRUNG and "hub" not in n and n != "display"]
     T = trimesh.transformations
     moves = {f"{s}{ax}": T.translation_matrix(np.eye(3)[i] * (0.4 if s == "+" else -0.4))
              for i, ax in enumerate("xyz") for s in "+-"}
@@ -460,7 +470,8 @@ def main():
     tmp = os.path.join(BUILD, "parts")
     os.makedirs(tmp, exist_ok=True)
     bad = []
-    parts = printed()
+    import pioneer
+    parts = printed() | pioneer.printed()
     for name, (solid, flip, n) in parts.items():
         s = Rot(180, 0, 0) * solid if flip else solid
         bb = s.bounding_box()
@@ -478,12 +489,15 @@ def main():
     shared = {n: mesh(s, os.path.join(tmp, f"{n.replace('/', '_')}.stl")) for n, (s, _, _) in parts.items()
               if n in KEY and not n.endswith("plate") and not n.endswith("ring") and "hub" not in n}
     clashes = 0
-    for variant in ("vwheel", "608", "edge", "crossed"):
-        items = [(n, m, KEY[n]) for n, m in shared.items()]
-        for part in ("plate", "ring", "hub_210"):
-            pn = f"{variant}/{part}" if f"{variant}/{part}" in parts else part
-            items.append((pn, mesh(parts[pn][0], os.path.join(tmp, f"{variant}_{part}.stl")), KEY[pn]))
-        items += [(n, mesh(s, os.path.join(tmp, f"{variant}_{n}.stl")), k) for n, s, k in bought(variant)]
+    for variant in ("vwheel", "608", "edge", "crossed", "pioneer"):
+        if variant == "pioneer":
+            items = [(n, mesh(s, os.path.join(tmp, f"{variant}_{n.replace('/', '_')}.stl")), k) for n, s, k in pioneer.assembly()]
+        else:
+            items = [(n, m, KEY[n]) for n, m in shared.items()]
+            for part in ("plate", "ring", "hub_210"):
+                pn = f"{variant}/{part}" if f"{variant}/{part}" in parts else part
+                items.append((pn, mesh(parts[pn][0], os.path.join(tmp, f"{variant}_{part}.stl")), KEY[pn]))
+            items += [(n, mesh(s, os.path.join(tmp, f"{variant}_{n}.stl")), k) for n, s, k in bought(variant)]
         c = 0
         for (a, ma, _), (b, mb, _) in itertools.combinations(items, 2):
             lo = np.maximum(ma.bounds[0], mb.bounds[0]); hi = np.minimum(ma.bounds[1], mb.bounds[1])
@@ -509,7 +523,7 @@ def main():
             if len(cm.faces):
                 cut.append((n, cm, k))
         scene(cut).export(os.path.join(BUILD, f"jogring_{variant}_cutaway.glb"))
-        scene([i for i in items if not i[0].endswith("ring")]).export(os.path.join(BUILD, f"jogring_{variant}_noring.glb"))
+        scene([i for i in items if not i[0].endswith(("ring", "retainer"))]).export(os.path.join(BUILD, f"jogring_{variant}_noring.glb"))
     # The small hub has to hold the 1.28" module too.
     m128 = mesh(hub("128"), os.path.join(tmp, "hub_128.stl"))
     g, _, t = DISPLAYS["128"]

@@ -7,6 +7,7 @@ Dan's decisions so far:
 - **Display:** a round smart-watch LCD, 2.1" at most, with the 1.28" GC9A01 he has for the prototype.
 - **Weight:** none.  A Pioneer doesn't weight the ring.  Eddy-current drag may be tried for the feel.
 - **Bearings:** skateboard bearings (608s) are what he has, and he wants them **on edge**, taking the press straight down, as Pioneer and most decks do.  The rig has three versions to compare:
+  - **pioneer** (from a Pioneer teardown he watched): one ring on 24 small horizontal rollers in two concentric circles, a ridge under the deck top against lifting, and the angle from a gear on that ridge.  The low-profile route, and closest to the real thing;
   - **crossed** (his pick, after seeing the edge version: "just angled bearings"): 6 × 608 tilted ±45° around a diamond ridge.  Every bearing carries load and centres, and a lean on the rim rolls instead of sliding;
   - **edge**: 3 × 608 on edge under a track, 3 flat against the skirt, and a lip against tipping;
   - **608**: 608s in printed V tyres;
@@ -62,6 +63,23 @@ A CDJ-style jog has a **display in the middle that does not turn** and a
 Load check: a hard press on the rim is a few kg at r = 103 against wheels at
 r ≈ 70–82.  625 bearings are rated well above that (about 1.7 kN dynamic).
 The weak part is the printed groove's flank, not the wheels.
+
+## What a Pioneer does (teardown, 2026-11-20)
+
+From a video teardown Dan watched, and his reading of it:
+
+- The ring rides on **two concentric sets of small plastic wheels on
+  pins**, about 10 mm, axles horizontal.  The inner and outer parts of the
+  jog turn together.
+- A **little ridge** round its foot sits under the deck's top, which stops
+  it lifting.  The assembly fastens from inside.
+- The angle comes from a **gear**: a white gear about 25 mm across, which
+  the ring turns.
+- The centre is a fixed rectangular display on a metal bracket.  The rubber
+  grip is a separate ring, held by three clips.
+
+The `pioneer` rig version follows this.  Its gear is on the ridge outside
+the ring, because a 2.1" hub leaves no room for it inside.
 
 ## Sensing the angle: a roller on the skirt
 
