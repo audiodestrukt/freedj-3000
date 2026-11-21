@@ -194,6 +194,9 @@ bank is ~276 MB for 3 minutes and the cache cap doesn't count it yet, and
 OverCue loaded no bank from a non-OverCue source on 2026-11-15.  Skipped
 when the served folder has its own `CDJMODS` (its index stays the
 stick's).  Tested: our own reader finds it by ID over LINK and plays it.
+On the emulated CDJ-3000 with OverCue 0.14.6 (2026-11-21): OverCue reads
+our index-v2 and plays the track, but loads no stems (STEMS grey, no
+reads of the bank): see `stems-overcue.md`, last section.
 `source_timing_policy` is `opendeck-decoded/1` (our decoder's timeline,
 no MP3 padding restored), so a CDJ's own decode may be offset from it.
 

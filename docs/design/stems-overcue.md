@@ -389,3 +389,23 @@ We watched only OpenDeck's own NFS and dbserver logs.
   question for them (their README invites compatibility reports); we do
   not probe their channel.
 
+### Retest with banks OpenDeck split itself (2026-11-21)
+
+Same rig (OverCue 0.14.6 mod on cdj3k-emu slot 2, `djlink0`), OpenDeck as
+the source with `OPENDECK_LIVE_STEMS_PUBLISH=1`: two tracks split by
+OpenDeck (HTDemucs) and published as standard banks in the CDJ-3000
+profile (96 kHz FLAC pages, four roles, `three_part: 2`), indexed in
+`index.json` and index-v2 under OpenDeck's dbserver IDs.  Our own reader
+finds and plays them by ID over LINK.
+
+- OverCue browsed OpenDeck (ARTIST → ALRT → Attitude) and looked the
+  track up in our index-v2 (`current`, the generation, bucket `9E.IDX`).
+- It loaded and played the track (NFS reads of the MP3 only).  STEMS
+  stayed grey and a tap didn't open it; it read nothing under
+  `CDJMODS/stems/` over ~40 s.
+
+So OverCue still won't load stems from a player that doesn't run
+OverCue, however standard the bank.  Its own Live Stems (Desktop
+2.2.58+, firmware 0.14.7+) is a private protocol we don't look into.
+OpenDeck's live stems therefore serve OpenDecks (and any open client),
+not OverCue players, unless OverCue opens up.
