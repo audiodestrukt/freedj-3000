@@ -30,8 +30,9 @@ use super::lanhid::JogScaler;
 
 pub const FRAME: usize = 32;
 
-/// Jog position counts per platter turn.
-const JOG_TICKS_PER_REV: f64 = 1440.0;
+/// Jog position counts per platter turn: ~3272, one turn by hand on the unit
+/// (the CDJ-3000's is 3240).  The counter counts up turning clockwise.
+const JOG_TICKS_PER_REV: f64 = 3272.0;
 /// The tempo fader's raw value reads 0x00xx at one end and 0xFFxx at the
 /// other, 0x80xx at the centre; this much either side of 0x8000 reads 0 %.
 const TEMPO_DEAD: u16 = 0x0200;
@@ -45,12 +46,14 @@ const TOUCH_Y: (f32, f32) = (85.0, 900.0);
 const TOUCH_MIN: u16 = 16;
 
 /// Every key the panel reports that OpenDeck has an action for, by its
-/// cdj3k-emu name.  REV (16.7) and USB STOP (19.5) have none.
+/// cdj3k-emu name.  REV (16.7) has none; USB STOP is wired to the main
+/// board, not the panel.
 const KEYS: &[(&str, usize, u8)] = &[
     ("PLAY", 16, 0x01), ("CUE", 16, 0x02), ("RELOOP", 16, 0x04), ("LOOP_OUT", 16, 0x08), ("LOOP_IN", 16, 0x10),
     ("ROTARY_PRESS", 17, 0x01),
     ("TRACK_PREV", 18, 0x01), ("TRACK_NEXT", 18, 0x02), ("SEARCH_PREV", 18, 0x04), ("SEARCH_NEXT", 18, 0x08),
     ("QUANTIZE", 19, 0x01), ("TIME_MODE", 19, 0x02), ("BACK", 19, 0x04), ("TAG_TRACK", 19, 0x08), ("SHORTCUT", 19, 0x10),
+    ("TRACK_FILTER", 19, 0x20),
     ("JOG_MODE", 20, 0x01), ("TEMPO_RANGE", 20, 0x02), ("MASTER_TEMPO", 20, 0x04),
 ];
 
@@ -111,8 +114,9 @@ pub fn lcd_touch(f: &[u8; FRAME]) -> Option<(f32, f32)> {
     Some((1.0 - frac(x, TOUCH_X), frac(y, TOUCH_Y)))
 }
 
-/// A hand on the jog's top plate.
-fn jog_touched(flags: u8) -> bool { flags & 0x30 == 0 }
+/// A hand on the jog's top plate: both touch bits set (checked on the unit:
+/// 00 untouched, 11 touched).
+fn jog_touched(flags: u8) -> bool { flags & 0x30 == 0x30 }
 
 /// Panel frames in, bus events out.  Holds the previous frame so each key
 /// edge, detent and jog count is reported once.
@@ -170,6 +174,7 @@ impl Decoder {
 
         let (was_t, is_t) = (jog_touched(p[at::JOG_FLAGS]), jog_touched(f[at::JOG_FLAGS]));
         if was_t != is_t { out.push(deck(CE::JogTouch { touched: is_t })); }
+        // Clockwise (forward) counts up.
         let moved = u16be(f, at::JOG).wrapping_sub(u16be(&p, at::JOG)) as i16 as i32;
         if moved != 0 {
             match self.jog.step(moved) {
@@ -397,7 +402,7 @@ mod tests {
         let mut pos = u16be(&idle(), at::JOG);
         let mut total = 0;
         for _ in 0..(JOG_TICKS_PER_REV as usize / 30) {
-            pos = pos.wrapping_add(30);
+            pos = pos.wrapping_add(30);   // clockwise: counting up
             let f = with(idle(), |f| f[8..10].copy_from_slice(&pos.to_be_bytes()));
             for e in d.feed(&f) {
                 if let Event::Deck(CE::JogDelta { delta, .. }) = e { total += delta; }
@@ -405,6 +410,16 @@ mod tests {
         }
         let want = (1.8 / crate::input::JOG_SECS_PER_TICK).round() as i32;
         assert!((total - want).abs() <= 1, "{total} vs {want}");
+    }
+
+    #[test]
+    fn jog_touch_is_both_bits_set() {
+        let mut d = Decoder::new();
+        d.feed(&idle());                     // byte 15 = 0x32: touch bits 11
+        let free = with(idle(), |f| f[15] = 0x02);
+        assert!(matches!(d.feed(&free)[..], [Event::Deck(CE::JogTouch { touched: false })]));
+        let held = with(idle(), |f| f[15] = 0x32);
+        assert!(matches!(d.feed(&held)[..], [Event::Deck(CE::JogTouch { touched: true })]));
     }
 
     #[test]

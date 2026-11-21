@@ -18,6 +18,11 @@ h = peek(0x2000, 16)
 print(f"magic {h[:4]!r} stage {h[4]} events {h[5]} frames logged {h[7]} "
       f"sent {h[8] | h[9] << 8} BUSY rose after {h[10] | h[11] << 8}")
 w = h[12] | h[13] << 8
+if h[6] & 0xf0 == 0xe0:
+    print(f"BUSY released after 0.6 s held low: {'high' if h[6] & 1 else 'low'} at 0.2 us, {'high' if h[6] & 2 else 'low'} at 1 us, {'high' if h[6] & 4 else 'low'} at 10 us")
+print(f"BUSY after a 1 us pull-down: {dict([(0xd1, 'driven high (the panel holds it)'), (0xf1, 'stayed low (floating: nobody drives it)')]).get(h[6], 'not tested')}")
+print(f"PNL_RST before holding it: read high {h[14] * 100 // 255}% of 200 ms, {h[15]} edges")
+if h[4] == 9: print(f"REFUSED: the main board still clocks SCK ({w} edges in 200 ms): check the tape")
 print(f"SCK rise after a test release: {'never (no pull-up?)' if w == 0xffff else f'{w} polls'}")
 ev = peek(0x2010, 4 * h[5])
 for i in range(h[5]):

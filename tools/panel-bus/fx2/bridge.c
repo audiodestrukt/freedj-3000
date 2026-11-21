@@ -1,0 +1,319 @@
+/* bridge: master_pd2.c (the master that drove the panel) with its lamp
+ * pattern replaced by the frame the Mac writes to EP1 OUT, and each reply
+ * handed back on EP1 IN (32 bytes, frames sent u16, bad replies u16); see
+ * bridge.py.  Load with the deck off, then switch it on.
+ *
+ * master_boot: master.c from power-on: waits for the panel to be powered,
+ * holds PNL_RST low at once, logs the start-up, then sends for good.
+ *
+ * master_pd2: master_pd with the main board's BUSY pull-down faked (see
+ * panel_busy()): frames are paced by the panel's real ready.
+ *
+ * master: the analyser as the panel-link master after a normal boot, with the
+ * main board cut off from SCK and RXD (ribbon contacts 17-20 masked at
+ * CN8002, see docs/reference/xdj-1000mk2-panel-bus.md).
+ *
+ * Interlock first: SCK is only watched for ~200 ms; any clock edge means the
+ * main board can still reach it, and nothing is driven (stage 9).  Then it
+ * clocks a frame each time the panel pulls BUSY low, 28 us later, at the
+ * stock ~857 kHz: lamps on and off every ~0.5 s and the jog ring stepping.
+ * If BUSY does not rise after a frame, it waits 20 ms with no clock before
+ * the next one.  Runs until halted (readlog.py halts it and reads the log).
+ * D4 = PNL_RST (CN8002 leg 13): pulsed high ~33 ms to restart the panel
+ * (as the stock main board does before talking to it), then held low: the main
+ * board drives it through 242 ohm (R18 + R1176), so holding it low is a
+ * ~14 mA fight at worst and keeps the panel out of reset.  It is sampled
+ * first: hdr[14] = share of 200 ms it read high (0-255), hdr[15] = its edges.
+ * After it is held, the panel's start-up (TXD/BUSY changes) is logged until
+ * it is ready (BUSY high then low, at most 2 s).
+ * Log as bootlog.c: hdr "XDJL", stage (1 watch, 3 sending, 9 refused),
+ * events, frames logged, sent (u16), BUSY rose (u16), SCK edges seen (u16);
+ * frames: (0, BUSY-rose flag, tick u16, 32 reply bytes). */
+__sfr __at (0x90) IOB;
+__sfr __at (0xB3) OEB;
+__sfr __at (0x89) TMOD;
+__sfr __at (0x8C) TH0;
+__sfr __at (0x8A) TL0;
+__sbit __at (0x8C) TR0;
+__sbit __at (0x8D) TF0;
+__sbit __at (0x90) SCK;
+__sbit __at (0x91) MOSI;
+__sbit __at (0x92) MISO;
+__sbit __at (0x93) BUSY;
+__sbit __at (0x94) RST;
+__xdata __at (0xE600) volatile unsigned char CPUCS;
+__xdata __at (0xE601) volatile unsigned char IFCONFIG;
+
+#define NEV 64
+#define NFR 48
+__xdata __at (0x2000) volatile unsigned char hdr[16];
+__xdata __at (0x2010) volatile unsigned char ev[NEV][4];
+__xdata __at (0x2110) volatile unsigned char fl[NFR][36];
+
+#define T_WATCH_END 122     /* give up waiting for ready after 2.0 s */
+#define T_SEND_END  244     /* 4.0 s: released well before the main board */
+
+static const __code unsigned char LAMPS_ON[30] = {
+    0x73, 0x18, 0, 0, 0, 0, 0, 0x33, 0x40, 0x3f, 0x28, 0x10, 0x01, 0, 0, 0,
+    0, 0, 0x20, 0, 0, 0, 0x02, 0x02, 0x02, 0, 0, 0, 0, 0 };
+static __data unsigned char tx[32];
+static __data unsigned char rx[32];
+static __data unsigned int ticks;
+__bit hdr_tmp_a, hdr_tmp_b;
+
+static void tick(void) { if (TF0) { TF0 = 0; ticks++; } }
+#define SCK_LOW()  (OEB |= 0x01)
+#define SCK_REL()  (OEB &= ~0x01)
+
+/* One frame in about 300 us, as the stock main board clocks it: ~857 kHz,
+ * no gap inside a byte.  A bit is 14 cycles at 48 MHz (83 ns each): SCK low
+ * for 7, high for 7, both driven (an open-drain SCK on the deck's pull-up
+ * does not rise in 7 cycles).  RXD is driven too.  One rotate through the
+ * carry sends a bit and keeps the one just received, so a byte is 8 of those
+ * and one more rotate.  tx[] and rx[] are in __data. */
+static void shift_frame(void) __naked {
+    __asm
+    mov r1,#_tx
+    mov r0,#_rx
+    mov r2,#32
+00001$:
+    mov a,@r1
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    clr _SCK            ; SCK low                    2 cycles
+    rrc a               ; C = next bit out; a7 = last bit in   1
+    mov _MOSI,c         ; RXD                        2
+    nop                 ;                            1
+    nop                 ;                            1  -> 7 low
+    setb _SCK           ; SCK high: the panel samples   2
+    nop                 ;                            1
+    nop                 ;                            1
+    nop                 ;                            1
+    mov c,_MISO         ; the panel bit              2  -> 7 high
+    rrc a               ; the last bit in
+    mov @r0,a
+    inc r0
+    inc r1
+    djnz r2,00003$      ; the loop is too long for a relative jump back
+    ret
+00003$:
+    ljmp 00001$
+    __endasm;
+}
+
+
+/* The main board pulls BUSY down (the panel drives it high when busy and lets
+ * go when ready); with that pull-down cut off by the tape, it is faked: hold
+ * BUSY low, and to read it, let go for a moment.  A panel driving high snaps
+ * the line straight back; a released line (weak pull-up) is still low ~0.2 us
+ * later.  Returns 1 if the panel is busy (driving high), 0 if it is ready, and
+ * leaves BUSY held low either way. */
+static __bit panel_busy(void) __naked {
+    __asm
+    anl 0x90,#0xf7      ; BUSY latch 0
+    orl 0xb3,#0x08      ; hold low (it may already be)
+    nop
+    nop
+    nop
+    nop
+    nop
+    nop
+    anl 0xb3,#0xf7      ; let go
+    mov c,_BUSY         ; ~0.2 us later
+    orl 0xb3,#0x08      ; hold low again
+    ret
+    __endasm;
+}
+
+static void frame(void) {
+    unsigned char i;
+    unsigned int s = 0;
+    for (i = 0; i < 30; i++) { s += tx[i]; s = (s & 0xff) + (s >> 8); }
+    tx[30] = (unsigned char)s;
+    tx[31] = 0x8f;
+    shift_frame();
+}
+
+/* ~28 us: the stock main board's pause between BUSY falling and the clock. */
+static void pause28(void) __naked {
+    __asm
+    mov r7,#112         ; 112 x 3 cycles = 336 cycles = 28 us
+00002$:
+    djnz r7,00002$
+    ret
+    __endasm;
+}
+
+__xdata __at (0xE780) volatile unsigned char EP1OUTBUF[64];
+__xdata __at (0xE7C0) volatile unsigned char EP1INBUF[64];
+__xdata __at (0xE68D) volatile unsigned char EP1OUTBC;
+__xdata __at (0xE68F) volatile unsigned char EP1INBC;
+__xdata __at (0xE6A1) volatile unsigned char EP1OUTCS;
+__xdata __at (0xE6A2) volatile unsigned char EP1INCS;
+#define EP_BUSY 0x02
+/* The FX2 wants a few cycles after writing an endpoint byte count. */
+static void syncdelay(void) __naked {
+    __asm
+    nop
+    nop
+    nop
+    nop
+    ret
+    __endasm;
+}
+static __xdata unsigned char host[30];
+
+void main(void) {
+    unsigned char i, ring = 1, nfr = 0, st, on, last;
+    unsigned int sent = 0, rose = 0, edges = 0, t;
+    CPUCS = 0x10;
+    IFCONFIG = 0x80;
+    IOB = 0x03;
+    OEB = 0x00;                              /* nothing driven until the interlock passes */
+    for (i = 0; i < 16; i++) hdr[i] = 0;
+    hdr[0] = 'X'; hdr[1] = 'D'; hdr[2] = 'J'; hdr[3] = 'L'; hdr[4] = 1;
+    for (i = 0; i < 30; i++) host[i] = 0;
+    host[0] = 0x30; host[1] = 0xdf; host[8] = 0x58; host[9] = 1; host[11] = 0x10;
+    host[22] = host[23] = host[24] = 0x02;
+    EP1OUTBC = 0; syncdelay();               /* arm EP1 OUT */
+    TMOD = 0x01; TH0 = 0; TL0 = 0; TF0 = 0; TR0 = 1; ticks = 0;
+
+    while (!MISO) ;                          /* deck off: wait until the panel is powered */
+    IOB = 0x03;                              /* SCK, RXD high; RST latch 0 */
+    OEB = 0x13;                              /* drive them from power-on, as the main board
+                                                does; RST held low, never pulsed (a panel
+                                                reset glitches PWR_SW and reboots the deck) */
+    ticks = 0; TH0 = 0; TL0 = 0;
+    /* BUSY held low through the panel's start-up, as a pull-down on the main
+     * board would hold it: does the panel need to see that to talk at all? */
+    IOB = 0x03;
+    OEB = 0x13;                              /* BUSY left to the panel during its start-up */
+    hdr[4] = 2;
+    while (ticks < 37) tick();               /* ~0.6 s */
+    { unsigned char a, b, c, k;              /* let go: how fast does it rise? */
+      __asm
+        anl 0xb3,#0xf7      ; release BUSY
+        mov c,_BUSY         ; ~0.2 us later
+        mov _hdr_tmp_a,c
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        nop
+        mov c,_BUSY         ; ~1 us
+        mov _hdr_tmp_b,c
+      __endasm;
+      for (k = 0; k < 20; k++) ;
+      c = BUSY;                              /* ~10 us */
+      a = hdr_tmp_a; b = hdr_tmp_b;
+      hdr[6] = 0xe0 | (a ? 1 : 0) | (b ? 2 : 0) | (c ? 4 : 0); }
+    hdr[12] = edges & 0xff; hdr[13] = edges >> 8;
+    if (edges) { OEB = 0x00; hdr[4] = 9; for (;;) ; }   /* someone else clocks SCK */
+    hdr[4] = 3;
+    OEB = 0x13;                              /* SCK and RXD are ours too, idling high */
+    for (;;) {
+        if (!(EP1OUTCS & EP_BUSY)) {         /* a new frame from the Mac */
+            unsigned char n = EP1OUTBC;
+            if (n > 30) n = 30;
+            for (i = 0; i < n; i++) host[i] = EP1OUTBUF[i];
+            EP1OUTBC = 0; syncdelay();
+        }
+        for (i = 0; i < 30; i++) tx[i] = host[i];
+        { unsigned int s = 0;
+          for (i = 0; i < 30; i++) { s += tx[i]; s = (s & 0xff) + (s >> 8); }
+          tx[30] = (unsigned char)s; tx[31] = 0x8f; }
+        t = 0;                                         /* ready? checked every ~50 us */
+        while (panel_busy() && ++t < 2000) { unsigned char k; OEB &= ~0x08; for (k = 0; k < 40; k++) ; }
+        pause28();
+        shift_frame();                                 /* BUSY held low throughout */
+        sent++;
+        OEB &= ~0x08;                                  /* let the panel drive it high */
+        for (t = 0; t < 107; t++) pause28();           /* ~3 ms: the stock frame period; the
+                                                          busy check alone does not hold back */
+        st = panel_busy();                             /* busy now, as it should be? */
+        OEB &= ~0x08;
+        tick();
+        { unsigned int c = 0;
+          for (i = 0; i < 30; i++) { c += rx[i]; c = (c & 0xff) + (c >> 8); }
+          st = rx[0] == 0x81 && rx[31] == 0x8f && (unsigned char)c == rx[30];
+          if (!st) rose++; }                  /* bad replies */
+        if (st && !(EP1INCS & EP_BUSY)) {    /* a good reply, and the Mac took the last one */
+            for (i = 0; i < 32; i++) EP1INBUF[i] = rx[i];
+            EP1INBUF[32] = sent & 0xff; EP1INBUF[33] = sent >> 8;
+            EP1INBUF[34] = rose & 0xff; EP1INBUF[35] = rose >> 8;
+            EP1INBC = 36; syncdelay();
+        }
+        hdr[8] = sent & 0xff; hdr[9] = sent >> 8; hdr[10] = rose & 0xff; hdr[11] = rose >> 8;
+    }
+}
