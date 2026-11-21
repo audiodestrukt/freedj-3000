@@ -25,17 +25,18 @@ All notable changes to this project will be documented in this file.
   against Wi-Fi packet bursts.  Before the track's waveform arrives, a grid
   from the player's live beats shows the phase.  The other player's active
   loop is shaded amber, as our own is on the main waveform, and the zoom
-  works with no track loaded on this deck.
+  works with no track loaded on this deck.  David (@mortalinstrument),
+  PR #54.
 - CDJ-3000 INFO screen: a tab per player on the network (playing, master
   and loaded marks), showing the selected player's track: title, artist,
   album, key, BPM, length, cover and the stick's colour and player number.
-  Tracks stay fetched as tabs switch.
+  Tracks stay fetched as tabs switch.  David (@mortalinstrument), PR #54.
 - The meter slot starts in the WAVEFORM view (the stacked waveform), as a
   CDJ-3000 ships; a tap switches to the phase meter and back.  The
   waveform runs to the right edge of the screen, as on the unit, with its
   playhead on the enlarged waveform's.
 - CDJ-3000 screen: the meter slot reads MASTER PLAYER while this deck is
-  the tempo master.
+  the tempo master.  David (@mortalinstrument), PR #54.
 - OpenDeck takes tempo master by itself when it plays with no master on
   the network, as a CDJ does: after two seconds (long enough to hear an
   existing master), without MASTER pressed.  With a master present nothing
@@ -44,11 +45,13 @@ All notable changes to this project will be documented in this file.
 ### Changed
 - MASTER pressed while this deck is master hands the role to a player that
   is playing, as a CDJ-3000 does (it did nothing); with no other player
-  playing it stays master.
+  playing it stays master.  David (@mortalinstrument) and Dan, PR #54.
 - CDJ-3000 screen: pressing the browse encoder on the playback screen does
   nothing, as on the unit (it opened BROWSE, which has its own key).
+  David (@mortalinstrument), PR #54.
 - binrw 0.15 for the rekordbox export reader, and explicit `f32` literals
-  where Rust is phasing out the fallback (a future hard error).
+  where Rust is phasing out the fallback (a future hard error).  David
+  (@mortalinstrument), PR #54.
 - The full-size deck's front-right top piece (`hardware/cad/deck7`,
   `top_fr.stl`, the only part that changes): both jog bearings now sit in
   the top's boss, so the base tower is not needed; the AS5600 board snaps
