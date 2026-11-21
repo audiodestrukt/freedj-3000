@@ -6,6 +6,7 @@ Dan's decisions so far:
 
 - **Display:** a round smart-watch LCD, 2.1" at most, with the 1.28" GC9A01 he has for the prototype.
 - **Weight:** none.  A Pioneer doesn't weight the ring.  Eddy-current drag may be tried for the feel.
+- **Bearings:** skateboard bearings (608s) are what he has.  The rig has a 608 version, a 608 in a printed V tyre, beside the V-wheel one.  Both use the same ring.
 - **Touch:** undecided.  A Pioneer uses a physical switch, not capacitive.
 
 ## Why the jog changes

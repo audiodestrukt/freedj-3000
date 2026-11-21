@@ -42,6 +42,14 @@ def slot(x, y0, y1, d, z0, z1):
     return cyl(x, y0, z0, z1, d) + cyl(x, y1, z0, z1, d) + box(x - d / 2, x + d / 2, y0, y1, z0, z1)
 
 
+def slot_x(x0, x1, d, z0, z1):
+    """A slot along x from x0 to x1 (y = 0)."""
+    s = cyl(x0, 0, z0, z1, d)
+    if x1 > x0:
+        s += cyl(x1, 0, z0, z1, d) + box(x0, x1, -d / 2, d / 2, z0, z1)
+    return s
+
+
 def polar(r, deg):
     a = math.radians(deg)
     return r * math.cos(a), r * math.sin(a)
@@ -84,13 +92,13 @@ def hub(disp="210"):
     return s
 
 
-def plate():
+def plate(variant="vwheel"):
     s = cyl(0, 0, 0, PLATE_T, PLATE_D)
     s -= cyl(0, 0, -OVS, PLATE_T + OVS, CABLE_HOLE_D)
     for a in (0.0, 120.0, 240.0):                 # hub screws: heat-set inserts
         x, y = polar(HUB_SCREW_R, a)
         s -= cyl(x, y, PLATE_TOP - INSERT[1], PLATE_TOP + OVS, INSERT[0])
-    for a in WHEEL_ANGLES:
+    for a in WHEEL_ANGLES if variant == "vwheel" else ():
         x, y = polar(WHEEL_R, a)
         if a == ECC_WHEEL:                        # eccentric spacer: its shank in a hole, nut under a counterbore
             s += cyl(x, y, PLATE_TOP - 0.1, WHEEL_Z0 - ECC[1], 14.0)
@@ -100,6 +108,12 @@ def plate():
             s += cyl(x, y, PLATE_TOP - 0.1, WHEEL_Z0 - SPACER[1], 12.0)
             s -= cyl(x, y, -OVS, WHEEL_Z0, M5_CLR)
             s -= hexagon(x, y, M5_NUT_AF + 0.2, -OVS, M5_NUT_T)
+    for a in WHEEL_ANGLES if variant == "608" else ():
+        # M8 up from below, its head in a counterbore; the 270° one in a
+        # radial slot, so pushing it in and tightening sets the preload.
+        r0, r1 = (TYRE_R - SLIDE, TYRE_R + SLIDE) if a == ECC_WHEEL else (TYRE_R, TYRE_R)
+        for d, z0, z1 in ((M8_CLR, -OVS, PLATE_T + OVS), (M8_HEAD[2], -OVS, CBORE)):
+            s -= Rot(0, 0, a) * slot_x(r0, r1, d, z0, z1)
     # The roller arm: a pad under its foot (the arm floats 1 mm up), two
     # inserts, a recess under the AS5600 board and a hole for its wires.
     x0, x1, y0, y1 = FOOT
@@ -154,11 +168,51 @@ def cup():
     return s
 
 
-# name: (solid, print flipped?, how many)
+def tyre(bore=TYRE_BORE):
+    """The 608's V tyre, at the origin: the V-wheel's V on a 608."""
+    hw0 = WHEEL_TIP_W / 2 + WHEEL_V_H
+    s = revolve_rz([(bore / 2, 0), (TYRE_R_CORE, 0), (TYRE_R_CORE, TYRE_W / 2 - hw0),
+                    (TYRE_R_TIP, TYRE_W / 2 - WHEEL_TIP_W / 2), (TYRE_R_TIP, TYRE_W / 2 + WHEEL_TIP_W / 2),
+                    (TYRE_R_CORE, TYRE_W / 2 + hw0), (TYRE_R_CORE, TYRE_W), (bore / 2, TYRE_W)])
+    s += tube(TYRE_LIP[0] / 2, bore / 2 + 0.5, 0, TYRE_LIP[1])
+    return s
+
+
+def tyre_fit():
+    """Three short rings, bores TYRE_BORE - 0.1 / +0 / +0.1, marked with 1 / 2 / 3
+    notches: press a 608 into each and set TYRE_BORE to the snug one."""
+    s = None
+    for i, d in enumerate((TYRE_BORE - 0.1, TYRE_BORE, TYRE_BORE + 0.1)):
+        x = i * 30.0
+        r = tube(d / 2, d / 2 + 2.5, 0, 4.0, x, 0)
+        for k in range(i + 1):
+            r -= Pos(x + (k - i / 2) * 3.0, d / 2 + 2.5, 2.0) * Box(1.2, 2.0, 5.0)
+        s = r if s is None else s + r
+    s += box(0, 60, -1.5, 1.5, 0, 1.2)       # a tie bar, so it prints as one part
+    return s
+
+
+def spacer608():
+    """Under each 608: a Ø16 foot on the plate, a Ø11 step on the inner race only."""
+    s = cyl(0, 0, PLATE_TOP, TYRE_Z0 - 0.5, 16.0) + cyl(0, 0, TYRE_Z0 - 0.5, SPACER608_Z1, RACE_D)
+    return s - cyl(0, 0, PLATE_TOP - OVS, SPACER608_Z1 + OVS, M8_CLR)
+
+
+def race_spacer():
+    z0 = B608_Z0 + B608[2]
+    return tube(M8_CLR / 2, RACE_D / 2, z0, z0 + 1.0)
+
+
+# name: (solid, print flipped?, how many); "vwheel/..." and "608/..." go in print/<variant>/
 def printed():
     return {
         "ring": (ring(), True, 1),
-        "plate": (plate(), False, 1),
+        "vwheel/plate": (plate("vwheel"), False, 1),
+        "608/plate": (plate("608"), False, 1),
+        "608/tyre": (tyre(), False, 3),
+        "608/tyre_fit": (tyre_fit(), False, 1),
+        "608/spacer": (spacer608(), False, 3),
+        "608/race_spacer": (race_spacer(), False, 3),
         "hub_210": (hub("210"), True, 1),
         "hub_128": (hub("128"), True, 1),
         "arm": (arm(), False, 1),
@@ -167,7 +221,7 @@ def printed():
     }
 
 
-def bought():
+def bought(variant="vwheel"):
     s = []
     wheel = revolve_rz([(WHEEL_BORE / 2, 0), (WHEEL_R_CORE, 0),
                         (WHEEL_R_CORE, WHEEL_W / 2 - WHEEL_TIP_W / 2 - WHEEL_V_H),
@@ -175,7 +229,7 @@ def bought():
                         (WHEEL_R_TIP, WHEEL_W / 2 + WHEEL_TIP_W / 2),
                         (WHEEL_R_CORE, WHEEL_W / 2 + WHEEL_TIP_W / 2 + WHEEL_V_H),
                         (WHEEL_R_CORE, WHEEL_W), (WHEEL_BORE / 2, WHEEL_W)])
-    for a in WHEEL_ANGLES:
+    for a in WHEEL_ANGLES if variant == "vwheel" else ():
         x, y = polar(WHEEL_R, a)
         n = int(a)
         s.append((f"wheel{n}", Pos(x, y, WHEEL_Z0) * wheel, "pom"))
@@ -188,6 +242,15 @@ def bought():
         s.append((f"washer{n}", tube(WHEEL_BORE / 2, M5_WASHER[0] / 2, zw, zw + M5_WASHER[1], x, y), "steel"))
         zh = zw + M5_WASHER[1]
         s.append((f"bolt{n}", cyl(x, y, 0.5, zh, WHEEL_BORE) + cyl(x, y, zh, zh + M5_HEAD[1], M5_HEAD[0]), "steel"))
+    for a in WHEEL_ANGLES if variant == "608" else ():
+        x, y = polar(TYRE_R, a)
+        n = int(a)
+        s.append((f"tyre{n}", Pos(x, y, TYRE_Z0) * tyre(), "tyre"))
+        s.append((f"b608_{n}", tube(B608[1] / 2, B608[0] / 2, B608_Z0, B608_Z0 + B608[2], x, y), "steel"))
+        s.append((f"spacer{n}", Pos(x, y, 0) * spacer608(), "tyre"))
+        s.append((f"race{n}", Pos(x, y, 0) * race_spacer(), "tyre"))
+        s.append((f"nut{n}", tube(M8_CLR / 2, M8_JAM[0] / 2, NUT_Z0, NUT_Z0 + M8_JAM[1], x, y), "steel"))
+        s.append((f"bolt{n}", cyl(x, y, CBORE - M8_HEAD[1], CBORE, M8_HEAD[0]) + cyl(x, y, CBORE, CBORE + 25.0, 8.0), "steel"))
     for i in range(2):
         z = BRG1_Z0 + i * BRG[2]
         s.append((f"mr105_{i}", tube(BRG[1] / 2, BRG[0] / 2, z, z + BRG[2], 0, ROLL_R), "steel"))
@@ -211,9 +274,9 @@ MAT = {
     "pom": ((0.9, 0.9, 0.88, 1), 0.0, 0.4), "alu": ((0.75, 0.76, 0.78, 1), 1.0, 0.3),
     "steel": ((0.62, 0.63, 0.65, 1), 1.0, 0.25), "blue": ((0.05, 0.15, 0.55, 1), 0.0, 0.5),
     "black": ((0.02, 0.02, 0.022, 1), 0.0, 0.2), "rubber": ((0.03, 0.03, 0.03, 1), 0.0, 0.8),
-    "magnet": ((0.4, 0.4, 0.42, 1), 1.0, 0.4),
+    "magnet": ((0.4, 0.4, 0.42, 1), 1.0, 0.4), "tyre": ((0.10, 0.45, 0.20, 1), 0.0, 0.5),
 }
-KEY = {"ring": "ring", "plate": "plate", "hub_210": "hub", "arm": "arm", "roller": "arm", "magnet_cup": "arm"}
+KEY = {"ring": "ring", "vwheel/plate": "plate", "608/plate": "plate", "hub_210": "hub", "arm": "arm", "roller": "arm", "magnet_cup": "arm"}
 
 
 def mesh(solid, path):
@@ -234,6 +297,10 @@ def scene(items):
     return sc
 
 
+# The tyre's press fit on the 608, as a volume.
+PRESS_FIT = math.pi * ((B608[0] / 2) ** 2 - (TYRE_BORE / 2) ** 2) * (TYRE_W - TYRE_LIP[1])
+
+
 def main():
     os.makedirs(PRINT, exist_ok=True)
     tmp = os.path.join(BUILD, "parts")
@@ -244,26 +311,48 @@ def main():
         s = Rot(180, 0, 0) * solid if flip else solid
         bb = s.bounding_box()
         path = os.path.join(PRINT, f"{name}.stl")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
         export_stl(Pos(-bb.min.X, -bb.min.Y, -bb.min.Z) * s, path)
         m = trimesh.load(path)
         ext = m.bounds[1] - m.bounds[0]
         bodies = len(m.split(only_watertight=False))
         ok = m.is_watertight and bodies == 1 and ext[0] <= BED[0] and ext[1] <= BED[1]
-        print(f"{'ok ' if ok else 'BAD'} {name:11s} x{n}  {ext.round(1)}  watertight={m.is_watertight} bodies={bodies}")
+        print(f"{'ok ' if ok else 'BAD'} {name:17s} x{n}  {ext.round(1)}  watertight={m.is_watertight} bodies={bodies}")
         if not ok:
             bad.append(name)
 
-    items = [(n, mesh(s, os.path.join(tmp, f"{n}.stl")), KEY[n]) for n, (s, _, _) in parts.items() if n != "hub_128"]
-    items += [(n, mesh(s, os.path.join(tmp, f"{n}.stl")), k) for n, s, k in bought()]
+    shared = {n: mesh(s, os.path.join(tmp, f"{n.replace('/', '_')}.stl")) for n, (s, _, _) in parts.items()
+              if n in KEY and not n.endswith("plate")}
     clashes = 0
-    for (a, ma, _), (b, mb, _) in itertools.combinations(items, 2):
-        lo = np.maximum(ma.bounds[0], mb.bounds[0]); hi = np.minimum(ma.bounds[1], mb.bounds[1])
-        if np.any(lo >= hi):
-            continue
-        v = trimesh.boolean.intersection([ma, mb], engine="manifold").volume
-        if v > 1.0:
-            clashes += 1
-            print(f"CLASH {a} x {b}: {v:.1f} mm3")
+    for variant in ("vwheel", "608"):
+        items = [(n, m, KEY[n]) for n, m in shared.items()]
+        pl = f"{variant}/plate"
+        items.append((pl, mesh(parts[pl][0], os.path.join(tmp, f"{variant}_plate.stl")), "plate"))
+        items += [(n, mesh(s, os.path.join(tmp, f"{variant}_{n}.stl")), k) for n, s, k in bought(variant)]
+        c = 0
+        for (a, ma, _), (b, mb, _) in itertools.combinations(items, 2):
+            lo = np.maximum(ma.bounds[0], mb.bounds[0]); hi = np.minimum(ma.bounds[1], mb.bounds[1])
+            if np.any(lo >= hi):
+                continue
+            v = trimesh.boolean.intersection([ma, mb], engine="manifold").volume
+            if a.startswith("tyre") and b == "b608_" + a[4:]:
+                v -= PRESS_FIT     # the tyre is pressed on: exactly that overlap is meant
+            if v > 1.0:
+                c += 1
+                print(f"CLASH [{variant}] {a} x {b}: {v:.1f} mm3")
+        print(f"assembly {variant}: {len(items)} parts, {c} clashes")
+        clashes += c
+        scene(items).export(os.path.join(BUILD, f"jogring_{variant}.glb"))
+        cut = []
+        for n, m, k in items:      # cut on the plane through the roller and the 270° wheel (x = 0), keep x < 0
+            if m.bounds[1][0] <= 0:
+                cut.append((n, m, k)); continue
+            if m.bounds[0][0] >= 0:
+                continue
+            cm = m.slice_plane([0, 0, 0], [-1, 0, 0], cap=True)
+            if len(cm.faces):
+                cut.append((n, cm, k))
+        scene(cut).export(os.path.join(BUILD, f"jogring_{variant}_cutaway.glb"))
     # The small hub has to hold the 1.28" module too.
     m128 = mesh(hub("128"), os.path.join(tmp, "hub_128.stl"))
     g, _, t = DISPLAYS["128"]
@@ -272,21 +361,8 @@ def main():
     if trimesh.boolean.intersection([m128, d128], engine="manifold").volume > 1.0:
         clashes += 1
         print("CLASH hub_128 x the 1.28\" module")
-    print(f"assembly: {len(items)} parts, {clashes} clashes")
     print(f"roller: {RATIO:.2f} turns per platter turn = {4096 * RATIO:.0f} counts/turn; "
           f"beam {BEAM_K:.2f} N/mm, so {PRELOAD_MAX} mm of preload is {BEAM_K * PRELOAD_MAX:.1f} N; axle {AXLE_L:.1f} mm")
-
-    scene(items).export(os.path.join(BUILD, "jogring.glb"))
-    cut = []
-    for n, m, k in items:          # cut on the plane through the roller and the 270° wheel (x = 0), keep x < 0
-        if m.bounds[1][0] <= 0:
-            cut.append((n, m, k)); continue
-        if m.bounds[0][0] >= 0:
-            continue
-        c = m.slice_plane([0, 0, 0], [-1, 0, 0], cap=True)
-        if len(c.faces):
-            cut.append((n, c, k))
-    scene(cut).export(os.path.join(BUILD, "jogring_cutaway.glb"))
     if bad or clashes:
         sys.exit(1)
 

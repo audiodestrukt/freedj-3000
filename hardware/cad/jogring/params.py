@@ -37,6 +37,24 @@ M5_NUT_AF, M5_NUT_T = 8.0, 4.0
 M5_HEAD = (8.5, 5.0)          # socket head: diameter, height
 M5_WASHER = (10.0, 1.0)
 
+# ── Or: 608 "skateboard" bearings with a printed V tyre (the 608 variant) ──
+# The tyre's V is the V-wheel's V (same tip, flanks, height and centre
+# height), so one ring fits both variants: the groove depends only on the V,
+# not on the wheel's diameter.
+B608 = (22.0, 8.0, 7.0)       # OD, ID, width
+TYRE_BORE = 21.95             # press fit on the 608 ⚠ print tyre_fit.stl first and change this
+TYRE_W = 8.0
+TYRE_WALL = 2.0               # under the V
+TYRE_R_CORE = B608[0] / 2 + TYRE_WALL
+TYRE_R_TIP = TYRE_R_CORE + WHEEL_V_H          # 15.5: Ø31 over the V
+TYRE_LIP = (20.4, 0.5)        # a lip under the bearing's outer race: bore, thickness
+RACE_D = 11.0                 # printed spacers touch the inner race only (608 inner race ~Ø12)
+M8_CLR = 8.3
+M8_HEAD = (14.6, 5.3, 15.5)   # hex head: across corners, height, counterbore diameter
+M8_JAM = (14.6, 5.0)          # thin nut: across corners, height
+CBORE = 2.5                   # head counterbore under the plate
+SLIDE = 1.5                   # the 270° 608 slides ± this in a radial slot to set the preload
+
 WHEEL_Z0 = 14.0               # bottom face of every wheel
 WHEEL_ZC = WHEEL_Z0 + WHEEL_W / 2
 WHEEL_ANGLES = (30.0, 150.0, 270.0)   # the 270° wheel rides on the eccentric spacer
@@ -52,6 +70,11 @@ V_PEN = 2.0                   # how far the wheel's V sits into the groove
 V_TIP_CLR = 0.5               # past the V's tip, at the groove's root
 V_FLANK_CLR = 0.05            # on each flank (the eccentric takes up the rest)
 WHEEL_R = SKIRT_R + WHEEL_R_TIP - V_PEN        # wheel axes: r = 79.95
+TYRE_R = SKIRT_R + TYRE_R_TIP - V_PEN          # 608 axes: r = 83.5
+TYRE_Z0 = WHEEL_ZC - TYRE_W / 2
+B608_Z0 = TYRE_Z0 + TYRE_LIP[1]
+SPACER608_Z1 = B608_Z0                          # the printed spacer's step meets the inner race here
+NUT_Z0 = B608_Z0 + B608[2] + 1.0                # 1 mm race spacer, then the jam nut
 TOP_Z0 = 31.5                 # underside of the ring's top plate
 TOP_T = 4.0
 TOP_Z1 = TOP_Z0 + TOP_T       # the jog's top surface, z = 35.5
@@ -126,6 +149,8 @@ BEAM_K = 3 * E_PETG * ((BEAM_Z[1] - BEAM_Z[0]) * BEAM_T ** 3 / 12) / _L ** 3   #
 
 # ── Checks on the numbers ──
 assert WHEEL_R + WHEEL_R_TIP < JOG_D / 2 - RIM_W - 4, "wheels show past the platter"
+assert TYRE_R + TYRE_R_TIP < JOG_D / 2 - RIM_W - 0.5, "608 tyres hit the rim"
+assert NUT_Z0 + M8_JAM[1] < TOP_Z0 - 1.0, "M8 nuts hit the top"
 assert WHEEL_Z0 + WHEEL_W + M5_WASHER[1] + M5_HEAD[1] < TOP_Z0 - 1.0, "bolt heads hit the top"
 assert ROLL_R + BOSS_D / 2 < SKIRT_RI - 1.0, "the roller's boss rubs the skirt"
 assert SKIRT_Z0 < TYRE_ZC - ROLLER_TYRE_H / 2 and ROLLER_Z1 < TOP_Z0 - 1.0, "tyre off the skirt"
