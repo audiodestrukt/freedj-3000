@@ -474,6 +474,9 @@ pub struct Browser {
     pub selected: usize,
     rb:        Option<Arc<RbExport>>,
     rb_source: Option<RbSource>,
+    /// The export of the rekordbox stick a FOLDER listing is inside, by its
+    /// root: its tracks' analysis, BPM, key and cover fill the folder's rows.
+    folder_rb: Option<(PathBuf, Option<Arc<RbExport>>)>,
     /// Open dbserver session to a peer (its address and the slot we browse:
     /// USB on a player, Collection on rekordbox), on its own thread.
     db:        Option<DbSession>,
@@ -587,6 +590,7 @@ impl Browser {
             selected: 0,
             rb: None,
             rb_source: None,
+            folder_rb: None,
             db: None,
             media: media::mounts(),
             media_at: Some(Instant::now()),
@@ -990,6 +994,7 @@ impl Browser {
         }
         dirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         files.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.fill_from_stick(dir, &mut files);
         out.extend(dirs);
         out.extend(files);
         out
@@ -1522,6 +1527,32 @@ impl Browser {
             b.selected = i;
             b.enter();
         });
+    }
+
+    /// Files in a folder of a rekordbox stick: what the stick's export knows
+    /// of each (its analysis, so the PREVIEW cell draws; BPM, key, artist,
+    /// cover), as the same track reached through the lists would show.
+    fn fill_from_stick(&mut self, dir: &Path, files: &mut [Entry]) {
+        let Some(root) = dir.ancestors().find(|a| media::has_rekordbox(a)).map(Path::to_path_buf) else { return };
+        if !matches!(&self.folder_rb, Some((r, _)) if *r == root) {
+            let exp = match read_export(&root) {
+                Ok(e) => Some(Arc::new(e)),
+                Err(e) => { log::warn!("rekordbox export at {}: {e:#}", root.display()); None }
+            };
+            self.folder_rb = Some((root.clone(), exp));
+        }
+        let Some((_, Some(exp))) = &self.folder_rb else { return };
+        let by_path: std::collections::HashMap<PathBuf, &opendeck_rekordbox::RbTrack> =
+            exp.tracks.iter().map(|t| (t.path_on(&root), t)).collect();
+        for f in files {
+            let EntryKind::Track(Load::Local { path, analyze }) = &mut f.kind else { continue };
+            let Some(t) = by_path.get(path.as_path()) else { continue };
+            *analyze = t.analyze_on(&root);
+            f.artist = Some(t.artist.clone());
+            f.bpm = Some(t.bpm);
+            f.key = (!t.key.is_empty()).then(|| t.key.clone());
+            f.art = t.artwork_on(&root);
+        }
     }
 
     fn rb_playlist_entries(&self, id: u32) -> Vec<Entry> {
@@ -2163,6 +2194,31 @@ pub(crate) mod tests {
         assert!(b.entries().iter().all(|e| !e.name.starts_with("USB:")), "no USB row left");
         assert!(b.rb.is_none(), "export dropped with the stick");
         std::env::remove_var("OPENDECK_MEDIA_DIRS");
+    }
+
+    /// A track reached by FOLDER on a rekordbox stick shows what the export
+    /// knows of it (its analysis for the PREVIEW cell, BPM, key), as it does
+    /// through TRACK; a file the export does not list stays bare.
+    #[test]
+    fn folder_rows_on_a_stick_carry_the_exports_analysis() {
+        let (_root, stick) = crate::media::tests::fake_media_root("browser-folder-rb");
+        let exp = read_export(&stick).unwrap();
+        let t = &exp.tracks[0];
+        let file = t.path_on(&stick);
+        let dir = file.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&file, b"").unwrap();
+        std::fs::write(dir.join("not in the export.mp3"), b"").unwrap();
+        let link = crate::prodj::LinkState::new(1);
+        let mut b = Browser::new(&stick, link);
+        let rows = b.fs_entries(&dir);
+        let row = |n: &str| rows.iter().find(|e| e.name == n).unwrap_or_else(|| panic!("{n} listed"));
+        let known = row(&file.file_name().unwrap().to_string_lossy());
+        assert!(matches!(known.load(), Some(Load::Local { analyze: Some(a), .. }) if *a == t.analyze_on(&stick).unwrap()));
+        assert_eq!(known.bpm, Some(t.bpm));
+        let bare = row("not in the export.mp3");
+        assert!(matches!(bare.load(), Some(Load::Local { analyze: None, .. })));
+        assert_eq!(bare.bpm, None);
     }
 
     // The CDJ-3000 skin's right pane: the highlighted folder's contents,
