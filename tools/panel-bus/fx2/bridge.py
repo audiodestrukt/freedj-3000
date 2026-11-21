@@ -20,7 +20,8 @@ import usb.core, usb.util, usb.backend.libusb1
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 VID, PID = 0x0925, 0x3881
-BACKEND = usb.backend.libusb1.get_backend(find_library=lambda _: "/opt/homebrew/lib/libusb-1.0.dylib")
+_BREW_LIBUSB = "/opt/homebrew/lib/libusb-1.0.dylib"   # macOS (Homebrew); Linux finds the system libusb
+BACKEND = usb.backend.libusb1.get_backend(find_library=lambda _: _BREW_LIBUSB) if os.path.exists(_BREW_LIBUSB) else usb.backend.libusb1.get_backend()
 
 # Panel -> main keys, (byte, mask): name.  From the captures (reference doc, "Buttons").
 KEYS = {

@@ -1,0 +1,7 @@
+# The fx2 logic analyser (Cypress CY7C68013A, Saleae-Logic clone, 0925:3881)
+# that OpenDeck drives the XDJ-1000MK2's panel through (OPENDECK_XDJPANEL=fx2,
+# docs/hardware/xdj-1000mk2-analyser.md): let the plugdev group open it, so
+# OpenDeck needs no root.  Install:
+#   sudo cp 60-xdj-fx2-analyser.rules /etc/udev/rules.d/
+#   sudo udevadm control --reload && sudo udevadm trigger
+SUBSYSTEM=="usb", ATTR{idVendor}=="0925", ATTR{idProduct}=="3881", MODE="0660", GROUP="plugdev"

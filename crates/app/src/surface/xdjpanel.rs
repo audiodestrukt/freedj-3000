@@ -32,6 +32,9 @@
 //!   switched on after OpenDeck starts).  The deck's controls drive OpenDeck
 //!   and OpenDeck lights the face.  A [`Link`] is the only part that knows how
 //!   frames reach the panel; a Pi's spidev + GPIO is the next one.
+//!
+//! The XDJ's LCD touch panel is decoded but only passed on with
+//! `OPENDECK_XDJPANEL_TOUCH=1`: OpenDeck normally draws on a screen of its own.
 
 use crate::input::{ControlEvent as CE, Event, UiEvent};
 use crate::snapshot::DeckSnapshot;
@@ -139,6 +142,11 @@ pub struct Decoder {
     jog: JogScaler,
     tempo_sent: u16,
     touch: Option<(f32, f32)>,
+    /// Pass the XDJ's own LCD touch panel on as pointer events.  Off unless
+    /// asked for (`OPENDECK_XDJPANEL_TOUCH=1`): OpenDeck draws on its own
+    /// screen (a Pi's capacitive one), and the XDJ panel's readings would land
+    /// on that screen as stray presses.
+    lcd_touch: bool,
     pub bad_frames: u64,
 }
 
@@ -150,8 +158,18 @@ impl Decoder {
     pub fn new() -> Self {
         Decoder {
             prev: None, keys: [0; 5], pending: [(0, 0); 5],
-            jog: JogScaler::per_rev(JOG_TICKS_PER_REV), tempo_sent: 0, touch: None, bad_frames: 0,
+            jog: JogScaler::per_rev(JOG_TICKS_PER_REV), tempo_sent: 0, touch: None, lcd_touch: false, bad_frames: 0,
         }
+    }
+
+    /// Pass the XDJ's LCD touch on as pointer events (see `lcd_touch`).
+    pub fn with_lcd_touch(mut self, on: bool) -> Self { self.lcd_touch = on; self }
+
+    /// The decoder the transports use: LCD touch per `OPENDECK_XDJPANEL_TOUCH`.
+    fn from_env() -> Self {
+        let on = std::env::var("OPENDECK_XDJPANEL_TOUCH").as_deref() == Ok("1");
+        if on { log::info!("xdjpanel: the XDJ's LCD touch is a pointer"); }
+        Decoder::new().with_lcd_touch(on)
     }
 
     pub fn feed(&mut self, f: &[u8; FRAME]) -> Vec<Event> {
@@ -203,7 +221,7 @@ impl Decoder {
             out.push(deck(CE::TempoFader { position: tempo_position(tempo) }));
         }
 
-        let now = lcd_touch(f);
+        let now = if self.lcd_touch { lcd_touch(f) } else { None };
         match (self.touch, now) {
             (_, Some((x, y))) if self.touch != now => out.push(Event::Ui(UiEvent::PanelTouch { x, y, down: true })),
             (Some((x, y)), None) => out.push(Event::Ui(UiEvent::PanelTouch { x, y, down: false })),
@@ -364,7 +382,7 @@ impl Poke {
 /// The master loop every [`Link`] shares: lamps out, replies through the
 /// [`Decoder`] onto the bus.  Returns when the app has gone away.
 fn drive(link: &mut dyn Link, tx: &std::sync::mpsc::Sender<Event>, lamps: &Lamps) -> std::io::Result<()> {
-    let mut dec = Decoder::new();
+    let mut dec = Decoder::from_env();
     let mut poke = Poke::from_env();
     lamps.active.store(true, Ordering::Relaxed);
     let r = (|| loop {
@@ -567,7 +585,7 @@ mod sniff {
             .stdout(Stdio::piped()).stderr(Stdio::null()).spawn()?;
         let mut stdout = child.stdout.take().expect("piped");
         log::info!("xdjpanel: listening to the panel link through the analyser");
-        let (mut sniffer, mut dec) = (Sniffer::new(GAP), Decoder::new());
+        let (mut sniffer, mut dec) = (Sniffer::new(GAP), Decoder::from_env());
         let (mut frames, mut reported_bad) = (0u64, 0u64);
         let mut buf = vec![0u8; 1 << 16];
         let mut gone = false;
@@ -771,6 +789,21 @@ mod tests {
         snap.playing = false;
         assert_ne!(mosi_frame(&snap, true)[0] & 0x01, 0, "PLAY blinks while paused");
         assert_eq!(mosi_frame(&snap, false)[0] & 0x01, 0);
+    }
+
+    #[test]
+    fn lcd_touch_is_off_unless_asked_for() {
+        let mut f = idle();
+        f[22..24].copy_from_slice(&0x200u16.to_be_bytes());
+        f[24..26].copy_from_slice(&0x200u16.to_be_bytes());
+        let f = stamp(f);
+        let touches = |evs: Vec<Event>| evs.into_iter().filter(|e| matches!(e, Event::Ui(UiEvent::PanelTouch { .. }))).count();
+        let mut off = Decoder::new();
+        off.feed(&idle());
+        assert_eq!(touches(off.feed(&f)), 0);
+        let mut on = Decoder::new().with_lcd_touch(true);
+        on.feed(&idle());
+        assert_eq!(touches(on.feed(&f)), 1);
     }
 
     #[test]

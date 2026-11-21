@@ -1,6 +1,7 @@
 # Cross-build OpenDeck for a 64-bit Raspberry Pi (aarch64, glibc 2.36 = Pi OS
-# Bookworm) from an x86 box.  Only ALSA and SDL2 (the renderer-sdl feature)
-# are linked from the system; Rubber Band and Bungee are vendored and compiled
+# Bookworm) from an x86 box (or natively on an arm64 Docker host).  Only ALSA,
+# SDL2 (the renderer-sdl feature) and libusb (rusb, for the XDJ panel's fx2
+# transport) are linked from the system; Rubber Band and Bungee are vendored and compiled
 # by build.rs with the cross g++.
 #
 #   deploy/pi/cross/build.sh            # → target/aarch64-unknown-linux-gnu/release/opendeck
@@ -8,7 +9,7 @@ FROM rust:1-bookworm
 RUN dpkg --add-architecture arm64 \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      g++-aarch64-linux-gnu libasound2-dev:arm64 libsdl2-dev:arm64 pkg-config \
+      g++-aarch64-linux-gnu libasound2-dev:arm64 libsdl2-dev:arm64 libusb-1.0-0-dev:arm64 pkg-config \
  && rm -rf /var/lib/apt/lists/*
 # rust-toolchain.toml asks for `stable`; the image ships a version-named
 # toolchain, so install `stable` (with the components it lists) once here.

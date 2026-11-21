@@ -175,6 +175,38 @@ and served it **from its power-up**.
 `docs/reference/xdj-1000mk2-panel-bus.md`, *Driving the panel*, has the
 bring-up step by step with the reasons and the line states.
 
+The XDJ's own LCD touch panel is decoded but not used: OpenDeck draws on a
+screen of its own, and the XDJ's touch readings would land on it as stray
+presses. `OPENDECK_XDJPANEL_TOUCH=1` passes them on as the pointer.
+
+### On a Raspberry Pi
+
+The analyser plugs into the Pi's USB and OpenDeck runs as the Pi's boot
+service (`deploy/pi/`, `opendeck.service` under cage), drawing on the Pi's
+own screen; the deck's controls and lamps go through the analyser exactly as
+on a desktop. Tested on a Pi 5 (Debian 13).
+
+1. **Let OpenDeck open the analyser without root:**
+   `sudo cp deploy/pi/xdjpanel/60-xdj-fx2-analyser.rules /etc/udev/rules.d/ && sudo udevadm control --reload && sudo udevadm trigger`,
+   then replug it. The user OpenDeck runs as must be in `plugdev`.
+2. **Build** (natively on the Pi: about 13 min the first time, about 5 min
+   after a change to the app crate; needs `libusb-1.0-0-dev` besides the
+   usual packages), or cross-build with `deploy/pi/cross/build.sh`, whose
+   image has libusb:
+   `cargo build --release -p opendeck-app --features renderer-sdl`.
+3. **Install** the stripped binary where `OPENDECK_BIN` in
+   `/etc/default/opendeck` points, and add `OPENDECK_XDJPANEL=fx2` to that
+   file.
+4. **Deck off, then `sudo systemctl restart opendeck`, then deck on.**
+5. To restart OpenDeck without losing the panel:
+   `sudo systemctl set-environment OPENDECK_XDJPANEL_LOAD=0 && sudo systemctl restart opendeck && sudo systemctl unset-environment OPENDECK_XDJPANEL_LOAD`.
+
+Under cage, OpenDeck's log does not reach the journal; to see the
+`xdjpanel:` lines, stop the service and run the binary by hand from a
+console. The analyser draws little power, but a Pi 5 on a 3 A supply (most
+USB-C chargers, however many watts they are rated) caps its USB ports at
+600 mA in total.
+
 ### Mapping outputs
 
 - The map page: every output bit as a toggle (click a byte number for all
@@ -202,6 +234,7 @@ bring-up step by step with the reasons and the line states.
 | Listen → Drive | tape on (CN2602 1–4), D4 wired, deck off, **replug the analyser**, start the master, deck on |
 | Drive → Listen | tape off, **replug the analyser** (sigrok reloads its own firmware), deck on as normal |
 | map page ↔ OpenDeck | stop one, start the other with `--no-load` / `OPENDECK_XDJPANEL_LOAD=0`: no power cycle |
+| desktop ↔ Pi | move the analyser's USB, deck off, start the master on the other host, deck on |
 
 ## Troubleshooting
 
