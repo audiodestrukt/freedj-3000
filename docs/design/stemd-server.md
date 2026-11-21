@@ -147,6 +147,17 @@ as both server and client over loopback, a 48 kHz deck playing from 60 s
 into a 3:00 track): stems at the playhead after **6.7 s** (the whole upload,
 then one model chunk on the CPU), the whole track after 67 s.
 
+Two OpenDeck instances on this desktop (2026-11-21): **A** with the model,
+its stemd server on 8420, no media server; **B** with no model,
+`OPENDECK_STEMD_SERVER=127.0.0.1:8420`, the CDJ-3000 screen with the STEMS
+panel open, "Get Your Money" (3:51) needled to 60 s and playing, drums
+muted.  B opened a session, uploaded the track (0.09 s over loopback), and
+had **the first 4 s at its playhead playable 2.4 s later**; A split the
+whole track in 87 s (CPU), B's bank filling from the playhead meanwhile.
+
+![B 22 s in: the STEMS keys live while A is still splitting](img/stemd-opendeck-session-early.png)
+![B once the session finished: the enlarged waveform drawn from the stems, drums muted](img/stemd-opendeck-session-done.png)
+
 ## Tests
 
 `crates/stemd/src/tests.rs` drives the server exactly as the deck's

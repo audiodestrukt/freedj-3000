@@ -12,8 +12,9 @@ All notable changes to this project will be documented in this file.
   and the deck plays each stretch as it is ready.  `OPENDECK_STEMD_SERVER`
   names the server, else it is found over mDNS; `OPENDECK_STEMD_CLIENT=0`
   turns it off.  OpenDeck's stemd server serves sessions too.  OpenDeck →
-  OpenDeck with the real model on this desktop's CPU: stems at a playhead
-  60 s in after 6.7 s.
+  OpenDeck with the real model on this desktop's CPU: two instances, a
+  deck with no model needled 60 s in had stems playable there 2.4 s after
+  opening STEMS (the whole 3:51 split in 87 s).
 - OpenDeck as a **stemd server** (`crates/stemd`): it answers the HTTP
   contract of [stemd](https://github.com/nsaintot/stemd) on port 8420 and
   announces `_stemd._tcp` over mDNS, so a CDJ-3000 running cdj3k-mods'
