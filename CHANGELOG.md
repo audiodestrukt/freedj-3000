@@ -53,6 +53,9 @@ All notable changes to this project will be documented in this file.
   splits the whole served folder in the background.  docs/design/serving-split-stems.md.
 
 ### Changed
+- A split (on the device or by a stemd server) waits for the whole
+  track: with STEMS already open it used to start on the part streamed in
+  so far and start again when the rest arrived.
 - Stems fill in steps of whole bank pages: the stems at a mid-track
   playhead no longer wait for the split to wrap round (prepared, live and
   stemd banks).

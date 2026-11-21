@@ -160,6 +160,20 @@ whole track in 87 s (CPU), B's bank filling from the playhead meanwhile.
 
 ## Tests
 
+Deck level (`lib.rs` `opening_stems_plays_stems_from_a_stemd_server`): a
+deck with no model loads a track, needles to 12 s and opens STEMS; it asks
+the stemd server, the stems at the playhead play before the split is done,
+the finished bank is the server's (drums at the stand-in's level), exactly
+one split runs on the server, and without a server it falls back (NONE, no
+model here).  `stemdclient.rs` `a_jump_moves_the_servers_window`: a jump to
+45 s mid-session moves the server's split there and is served before the
+rest of the track.
+
+Found while writing them: when STEMS was already open, the deck started its
+split on the part of the track streamed in so far and again once the whole
+track arrived (the two sessions in the two-instance run).  A split now
+waits for the whole track.
+
 `crates/stemd/src/tests.rs` drives the server exactly as the deck's
 `http.c` does: health passes the deck's compatibility check; a whole job
 (f32le up, pcm16 back) rebuilds drums from the mix to 1e-4; the same audio

@@ -38,7 +38,19 @@ static FOUND: OnceLock<Mutex<Option<SocketAddr>>> = OnceLock::new();
 
 /// The stemd server to use, if any: `OPENDECK_STEMD_SERVER`, else one found
 /// over mDNS (looked for in the background from the first call on).
+/// Tests point the deck at an in-process server here (the environment is
+/// shared by every test in the process).
+#[cfg(test)]
+pub(crate) static TEST_SERVER: Mutex<Option<SocketAddr>> = Mutex::new(None);
+/// Held by the deck tests that start stems jobs, so one test's server
+/// isn't asked by another test's deck.
+#[cfg(test)]
+pub(crate) static TEST_DECKS: Mutex<()> = Mutex::new(());
+
 pub fn server() -> Option<SocketAddr> {
+    #[cfg(test)]
+    { return *TEST_SERVER.lock().unwrap(); }
+    #[allow(unreachable_code)]
     if std::env::var("OPENDECK_STEMD_CLIENT").is_ok_and(|v| v == "0") { return None; }
     if let Ok(s) = std::env::var("OPENDECK_STEMD_SERVER") {
         let s = if s.contains(':') { s } else { format!("{s}:{}", opendeck_stemd::PORT) };
@@ -248,6 +260,58 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64};
 
+    /// A jump while the session runs: the deck's playhead moves to a part
+    /// not split yet, the client moves the window there, and the server's
+    /// split follows (the stand-in records where the playhead it was given
+    /// went).
+    #[test]
+    fn a_jump_moves_the_servers_window() {
+        static LOCAL: AtomicBool = AtomicBool::new(false);
+        static SEEN: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+        let slow: crate::livestems::SplitFn = Arc::new(|t, job, bank| {
+            let ps = stems::PAGE;
+            let n = t.len().div_ceil(ps);
+            let mut done = vec![false; n];
+            while let Some(p) = {
+                let at = (job.playhead.as_ref().unwrap().load(Ordering::Relaxed) as usize / ps).min(n - 1);
+                SEEN.lock().unwrap().push(at * ps / 2);
+                (at..n).chain(0..at).find(|&p| !done[p])
+            } {
+                if job.cancel.load(Ordering::Relaxed) { anyhow::bail!("cancelled"); }
+                let (a, b) = (p * ps, ((p + 1) * ps).min(t.len()));
+                let q: Vec<i16> = t[a..b].iter().map(|v| (v * 0.25 / SPLIT_SCALE * 32768.0).round() as i16).collect();
+                bank.write(a, [&q, &q, &q]);
+                done[p] = true;
+                std::thread::sleep(Duration::from_millis(3));
+            }
+            Ok(())
+        });
+        let resample: opendeck_stemd::Resample = Arc::new(|x, f, t| crate::audio::resample_interleaved(x, 2, f, t).unwrap());
+        let srv = opendeck_stemd::start(opendeck_stemd::Config { port: 0, advertise: false, resample, version: "test".into() },
+                                        Arc::new(crate::stemdsrv::ModelSplitter::with(slow, &LOCAL))).unwrap();
+        let addr: SocketAddr = format!("127.0.0.1:{}", srv.port).parse().unwrap();
+        let track: Arc<Vec<f32>> = Arc::new((0..RATE as usize * 60).flat_map(|i| { let v = ((i as f32) * 0.003).sin() * 0.4; [v, v] }).collect());
+        let head = Arc::new(AtomicU64::new(RATE as u64 * 5 * 2));
+        let job = Arc::new(Job { playhead: Some(Arc::clone(&head)), ..Default::default() });
+        let (j, t) = (Arc::clone(&job), Arc::clone(&track));
+        let h = std::thread::spawn(move || load(addr, &t, RATE, &j));
+        let t0 = Instant::now();
+        while !job.bank.get().is_some_and(|b| b.range_ready(RATE as usize * 5 * 2..RATE as usize * 6 * 2)) {
+            assert!(t0.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        head.store(RATE as u64 * 45 * 2, Ordering::Relaxed);   // the DJ jumps to 45 s
+        while !job.bank.get().unwrap().range_ready(RATE as usize * 45 * 2..RATE as usize * 46 * 2) {
+            assert!(t0.elapsed() < Duration::from_secs(20) && !h.is_finished(), "stems at the jump");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let bank = job.bank.get().unwrap().clone();
+        assert!(!bank.complete(), "the jump was served before the rest of the track");
+        assert!(SEEN.lock().unwrap().iter().any(|f| (RATE as usize * 40..RATE as usize * 46).contains(f)), "the server's split moved to the jump");
+        job.cancel.store(true, Ordering::Relaxed);
+        let _ = h.join();
+    }
+
     /// The real model behind another OpenDeck's stemd server
     /// (`OPENDECK_SEPARATE_MODEL`), a real track (`OPENDECK_TEST_STEMD_SESSION_REAL=<file>`),
     /// a 48 kHz deck playing from 60 s in: prints when the stems at the
@@ -337,4 +401,5 @@ mod tests {
         }
     }
 }
+
 

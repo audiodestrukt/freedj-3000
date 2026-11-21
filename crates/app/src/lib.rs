@@ -3099,7 +3099,11 @@ impl DeckApp {
         }
         // The stems were opened for a track with none prepared: split it
         // (once per load; the stick lookup finishes first).
+        // Only once the whole track is in: a split of the part streamed so
+        // far is thrown away when the rest arrives (and a stemd server would
+        // be asked twice).
         if !self.stems_split_tried && self.stems_rx.is_none() && self.stems_wanted()
+            && self.audio.complete.load(Ordering::Relaxed)
             && self.audio.stems.bank().filter(|b| b.is_for(&self.audio.current())).is_none() {
             let (t, ch) = (self.audio.current(), self.audio.channels as usize);
             if !t.is_empty() { self.start_stems_job(&t, ch, true); }
@@ -5964,6 +5968,7 @@ mod deck_tests {
     /// the stems (here the XDJ's STEMS pad mode), then starts once.
     #[test]
     fn a_split_waits_for_the_stems_to_be_opened() {
+        let _decks = stemdclient::TEST_DECKS.lock().unwrap_or_else(|e| e.into_inner());
         let mut d = deck(2.0);
         d.settings.stems = true;
         let dir = tempfile::tempdir().unwrap();
@@ -5974,10 +5979,14 @@ mod deck_tests {
         let (tx, rx) = mpsc::channel();
         DeckApp::prepare_local(prep, wav, None, &tx).unwrap();
         drop(tx);
-        let Some(LoadMsg::Ready(p)) = rx.into_iter().next() else { panic!("loaded") };
-        d.apply_prepared(p).unwrap();
-        let t = d.audio.current();
-        d.start_stems(&t, 2);
+        // The whole stream (the last piece looks for prepared stems).
+        for m in rx {
+            match m {
+                LoadMsg::Ready(p) => d.apply_prepared(p).unwrap(),
+                LoadMsg::Grow(g) => d.apply_grow(g),
+                LoadMsg::Failed(e) => panic!("{e:#}"),
+            }
+        }
         for _ in 0..200 { d.poll_stems(); if d.stems_rx.is_none() { break; } std::thread::sleep(Duration::from_millis(5)); }
         assert!(!d.stems_split_tried, "no split on load");
         d.poll_stems();
@@ -5987,6 +5996,100 @@ mod deck_tests {
         assert!(d.stems_split_tried, "opening the stems starts the split");
         let job = d.stems_job.as_ref().expect("a split job");
         assert!(job.playhead.as_ref().is_some_and(|p| Arc::ptr_eq(p, &d.audio.position)), "the split follows the deck's playhead");
+    }
+
+    /// STEMS opened on a track with no stems, with a stemd server on the
+    /// network: the deck asks it (no model here), the stems it plays come
+    /// from the server's split, the stretch at the playhead first; without
+    /// a server it falls back to its own split (none possible here: NONE).
+    #[test]
+    fn opening_stems_plays_stems_from_a_stemd_server() {
+        let _decks = stemdclient::TEST_DECKS.lock().unwrap_or_else(|e| e.into_inner());
+        static LOCAL: AtomicBool = AtomicBool::new(false);
+        static SPLITS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let fake: livestems::SplitFn = Arc::new(|t, job, bank| {
+            SPLITS.fetch_add(1, Ordering::Relaxed);
+            let ps = stems::PAGE;
+            let n = t.len().div_ceil(ps);
+            let mut done = vec![false; n];
+            while let Some(p) = {
+                let at = (job.playhead.as_ref().unwrap().load(Ordering::Relaxed) as usize / ps).min(n - 1);
+                (at..n).chain(0..at).find(|&p| !done[p])
+            } {
+                if job.cancel.load(Ordering::Relaxed) { anyhow::bail!("cancelled"); }
+                let (a, b) = (p * ps, ((p + 1) * ps).min(t.len()));
+                let q = |k: f32| -> Vec<i16> { t[a..b].iter().map(|v| (v * k / stems::SPLIT_SCALE * 32768.0).round() as i16).collect() };
+                bank.write(a, [&q(0.5), &q(0.25), &q(0.25)]);
+                done[p] = true;
+                std::thread::sleep(Duration::from_millis(4));   // about a second for the track: slow enough to watch
+            }
+            Ok(())
+        });
+        let resample: opendeck_stemd::Resample = Arc::new(|x, f, t| audio::resample_interleaved(x, 2, f, t).unwrap());
+        let srv = opendeck_stemd::start(opendeck_stemd::Config { port: 0, advertise: false, resample, version: "test".into() },
+                                        Arc::new(stemdsrv::ModelSplitter::with(fake, &LOCAL))).unwrap();
+
+        let load = |d: &mut DeckApp, dir: &std::path::Path| {
+            let wav = dir.join("t.wav");
+            super::stream_load_tests::wav(&wav, SR, 20.0, 0.0);
+            let prep = Prep { deck_sr: SR, deck_ch: 2, auto_cue: false, auto_cue_level_db: -48.0,
+                              cache_dir: dir.join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+            let (tx, rx) = mpsc::channel();
+            DeckApp::prepare_local(prep, wav, None, &tx).unwrap();
+            drop(tx);
+            // The whole stream: playable first, then the rest grows in.
+            for m in rx {
+                match m {
+                    LoadMsg::Ready(p) => d.apply_prepared(p).unwrap(),
+                    LoadMsg::Grow(g) => d.apply_grow(g),
+                    LoadMsg::Failed(e) => panic!("{e:#}"),
+                }
+            }
+            assert!(d.audio.complete.load(Ordering::Relaxed), "the whole track is in");
+            for _ in 0..400 { d.poll_stems(); if d.stems_rx.is_none() { break; } std::thread::sleep(Duration::from_millis(5)); }
+        };
+
+        // With the server: the deck's bank fills from it, from the playhead.
+        *stemdclient::TEST_SERVER.lock().unwrap() = Some(format!("127.0.0.1:{}", srv.port).parse().unwrap());
+        let mut d = deck(2.0);
+        d.settings.stems = true;
+        let dir = tempfile::tempdir().unwrap();
+        load(&mut d, dir.path());
+        d.audio.seek(DeckApp::samples(12.0));   // needle search to 12 s
+        d.run(0.05);
+        d.perform_mode = PerformMode::Stems;
+        d.poll_stems();
+        assert!(d.stems_split_tried, "opening the stems asks for them");
+        let t0 = Instant::now();
+        let mut early = false;
+        while d.stems_rx.is_some() {
+            d.poll_stems();
+            if let Some(b) = d.audio.stems.bank() { early |= !b.complete() && b.ready_at(DeckApp::samples(12.0) as usize); }
+            assert!(t0.elapsed() < Duration::from_secs(30), "stems from the server");
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        *stemdclient::TEST_SERVER.lock().unwrap() = None;
+        let bank = d.audio.stems.bank().expect("the deck plays a bank");
+        assert!(bank.complete() && bank.is_for(&d.audio.current()));
+        assert!(early, "the stems at the playhead were playing before the split was done");
+        let track = d.audio.current();
+        let drums = bank.stem_levels(0);
+        let worst = track.iter().zip(&drums).skip(SR as usize).take(track.len() - 2 * SR as usize).map(|(m, x)| (m * 0.5 - x).abs()).fold(0f32, f32::max);
+        assert!(worst < 2e-3, "the server's drums: off by {worst}");
+        assert_eq!(d.stems_view().state, snapshot::StemsState::Ready);
+        assert_eq!(SPLITS.load(Ordering::Relaxed), 1, "one split on the server, for the whole track");
+
+        // Without one (and no model here): nothing to play, NONE.
+        let mut d = deck(2.0);
+        d.settings.stems = true;
+        let dir = tempfile::tempdir().unwrap();
+        load(&mut d, dir.path());
+        d.perform_mode = PerformMode::Stems;
+        d.poll_stems();
+        let t0 = Instant::now();
+        while d.stems_rx.is_some() { d.poll_stems(); assert!(t0.elapsed() < Duration::from_secs(10)); std::thread::sleep(Duration::from_millis(2)); }
+        assert!(d.audio.stems.bank().is_none());
+        assert_eq!(d.stems_view().state, snapshot::StemsState::None);
     }
 
     /// The stem model stays loaded while STEMS is open (the next track's
