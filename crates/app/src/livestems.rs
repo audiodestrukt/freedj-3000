@@ -180,7 +180,7 @@ impl LiveStems {
         let mut w = LiveWriter::create(&self.cdjmods, id, frames as u64, HEADROOM_DB)?;
         std::fs::write(w.dir.join(SOURCE), source_key(path))?;
         let bank = Arc::new(StemBank::filling_split(&track));
-        let job = Job { playhead: Some(self.playhead(id)), ..Default::default() };
+        let job = Job { playhead: Some(self.playhead(id)), at_playhead: true, ..Default::default() };
         let done = std::sync::atomic::AtomicBool::new(false);
         let res = std::thread::scope(|s| {
             let h = s.spawn(|| { let r = (self.split)(&track, &job, &bank); done.store(true, std::sync::atomic::Ordering::Release); r });
@@ -494,6 +494,46 @@ mod tests {
         assert!(t0.elapsed() < Duration::from_secs(2));
         assert!(job.bank.get().is_none(), "no empty bank left on the deck");
         LOCAL.store(false, Relaxed);
+    }
+
+    /// The real model (`OPENDECK_SEPARATE_MODEL`, a model feature) on a
+    /// real track (`OPENDECK_TEST_LIVE_REAL=<file>`), source and a 48 kHz
+    /// deck over loopback NFS: prints when the first stems and the whole
+    /// bank arrive.  Skipped without the variable.
+    #[test]
+    fn real_model_live_stems_over_loopback() {
+        let Ok(track_file) = std::env::var("OPENDECK_TEST_LIVE_REAL") else { return };
+        let file = PathBuf::from(track_file);
+        let dir = file.parent().unwrap().to_path_buf();
+        let cache = tempfile::tempdir().unwrap();
+        let mods = cache.path().join("cdjmods");
+        let srv = opendeck_nfs::server::NfsServer::start(opendeck_nfs::server::Tree::scan(&dir).unwrap(), "/C/", 0, 0).unwrap();
+        let files: Vec<(u32, PathBuf)> = vec![(1, file.clone())];
+        let live = LiveStems::start(mods.clone(), &files, model_split()).unwrap();
+        srv.tree.overlay("CDJMODS", &mods).unwrap();
+        srv.tree.on_miss(live.hook());
+        let (s, sr, ch, _) = crate::audio::decode_file(&file).unwrap();
+        assert_eq!(ch, 2);
+        let track = Arc::new(crate::audio::resample_interleaved(&s, 2, sr, 48_000).unwrap());
+        let job = Job { playhead: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))), ..Default::default() };
+        let mut m = crate::stems::NfsMedia::mount_at(std::net::Ipv4Addr::LOCALHOST, srv.portmap, "/C/").unwrap();
+        let t0 = std::time::Instant::now();
+        let bank = std::thread::scope(|sc| {
+            let h = sc.spawn(|| crate::stems::live_from(&mut m, 1, &track, 48_000, &job, Duration::from_secs(30)));
+            while !job.bank.get().is_some_and(|b| b.range_ready(0..48_000 * 2 * 4)) { assert!(!h.is_finished() || job.bank.get().is_some()); std::thread::sleep(Duration::from_millis(20)); }
+            eprintln!("live stems: first 4 s playable after {:.2}s", t0.elapsed().as_secs_f32());
+            h.join().unwrap()
+        }).unwrap().expect("stems");
+        let secs = track.len() as f32 / 2.0 / 48_000.0;
+        eprintln!("live stems: {secs:.0}s track complete after {:.1}s ({:.1}x real time)", t0.elapsed().as_secs_f32(), secs / t0.elapsed().as_secs_f32());
+        assert!(bank.complete());
+        // The stems add up to the track (as a split's do).
+        let mut err = 0f64; let mut sig = 0f64;
+        let lv: Vec<Vec<f32>> = (0..3).map(|i| bank.stem_levels(i)).collect();
+        for i in (0..track.len()).step_by(7) { let sum = lv[0][i] + lv[1][i] + lv[2][i]; err += ((sum - track[i]) as f64).powi(2); sig += (track[i] as f64).powi(2); }
+        let snr = 10.0 * (sig / err.max(1e-12)).log10();
+        eprintln!("live stems: sum of stems vs track {snr:.1} dB");
+        assert!(snr > 15.0, "{snr:.1} dB");
     }
 
     #[test]

@@ -177,6 +177,14 @@ player's page and follows a jump back; a full cache drops the oldest; a
 split for a player waits for and gives way to the deck's own, and the
 player then splits it itself with no empty bank left on its deck.
 
+**Measured** (2026-11-21, `real_model_live_stems_over_loopback`, desktop,
+`separate-native` HTDemucs, a 3:00 MP3, a 48 kHz deck over loopback NFS):
+the first 4 s of stems playable **5.05 s** after the deck asked, the whole
+track in 58 s (3.1x real time), the stems summing to the track within
+31 dB.  Before `Job::at_playhead` the split began at the reported page
+plus the deck split's look-ahead (~4 s, for a deck moving on while a chunk
+computes), so the first 4 s came last, after 60 s.
+
 **Not done yet:** a run between two real devices (iPad source, desktop
 deck); writing the finished bank into the served index under our IDs
 (A.2, A.3), which only OverCue-format readers would need now (an OpenDeck

@@ -64,6 +64,10 @@ pub struct Job {
     /// split starts just ahead of it and follows its jumps.  `None`: split
     /// from the top.
     pub playhead: Option<std::sync::Arc<std::sync::atomic::AtomicU64>>,
+    /// The playhead is where stems are needed now, not a deck moving on
+    /// while a chunk computes (a linked player's reported page): runs start
+    /// at it, with no look-ahead.
+    pub at_playhead: bool,
 }
 
 
@@ -200,7 +204,7 @@ impl Geometry {
     fn target(&self, job: &Job, chunk_s: Option<f64>) -> usize {
         match &job.playhead {
             None => 0,
-            Some(p) => (p.load(Ordering::Relaxed) as usize / 2 + self.look(chunk_s)).min(self.frames.saturating_sub(1)),
+            Some(p) => (p.load(Ordering::Relaxed) as usize / 2 + if job.at_playhead { 0 } else { self.look(chunk_s) }).min(self.frames.saturating_sub(1)),
         }
     }
     /// Deck frames the playhead moves while a chunk is computed, and a
@@ -763,6 +767,20 @@ mod tests {
         JUMP.with(|j| if let Some((after, ph, to)) = j.borrow().as_ref() {
             if ran == *after { ph.store(*to, Ordering::Relaxed); }
         });
+    }
+
+    /// A linked player's page (live stems) is where it needs stems now: no
+    /// look-ahead.
+    #[test]
+    fn a_split_for_a_reported_playhead_starts_at_it() {
+        let sr = 44_100;
+        let track = tone(sr as usize * 20, sr);
+        let ph = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(2 * sr as u64 * 2));
+        let job = Job { playhead: Some(ph), at_playhead: true, on_chunk: Some(record), ..Default::default() };
+        RAN.with(|r| r.borrow_mut().clear());
+        split(&track, sr, &mut Fake { seg: 10_000, calls: 0 }, &job).unwrap();
+        let first_s = RAN.with(|r| r.borrow()[0]) as f64 * 7_500.0 / 44_100.0;
+        assert!((1.5..2.0).contains(&first_s), "first chunk at {first_s:.2}s: at the playhead (2 s), less the run-in");
     }
 
     /// The split with the deck's playhead: it starts just ahead of it (the
