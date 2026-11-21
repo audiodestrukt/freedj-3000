@@ -76,6 +76,18 @@ def ring():
     return s
 
 
+def ring_edge():
+    """The edge variant's ring: a track under the top for the supports, a
+    plain skirt for the guides, and a lip under the guides."""
+    r_out = JOG_D / 2
+    s = tube(RING_BORE / 2, r_out, TOP_Z0, TOP_Z1)
+    s += tube(r_out - RIM_W, r_out, TOP_Z0 - RIM_DROP, TOP_Z0 + 0.5)
+    s += tube(SKIRT_RI, SKIRT_R, EDGE_SKIRT_Z0, TOP_Z0 + 0.5)
+    s += tube(SKIRT_R - 0.5, LIP_R1, EDGE_SKIRT_Z0, EDGE_SKIRT_Z0 + LIP_T2)
+    s += tube(TRACK_R - TRACK_W / 2, TRACK_R + TRACK_W / 2, TOP_Z0 - TRACK_H, TOP_Z0 + 0.5)
+    return s
+
+
 def hub(disp="210"):
     glass, window, thick = DISPLAYS[disp]
     big = DISPLAYS["210"][0] + 2 * HUB_FIT
@@ -108,12 +120,23 @@ def plate(variant="vwheel"):
             s += cyl(x, y, PLATE_TOP - 0.1, WHEEL_Z0 - SPACER[1], 12.0)
             s -= cyl(x, y, -OVS, WHEEL_Z0, M5_CLR)
             s -= hexagon(x, y, M5_NUT_AF + 0.2, -OVS, M5_NUT_T)
-    for a in WHEEL_ANGLES if variant == "608" else ():
-        # M8 up from below, its head in a counterbore; the 270° one in a
-        # radial slot, so pushing it in and tightening sets the preload.
-        r0, r1 = (TYRE_R - SLIDE, TYRE_R + SLIDE) if a == ECC_WHEEL else (TYRE_R, TYRE_R)
+    vert = {"608": [(a, TYRE_R, a == ECC_WHEEL) for a in WHEEL_ANGLES],
+            "edge": [(a, GUIDE_R, a == EDGE_GUIDE_SLIDE) for a in EDGE_GUIDE_ANGLES]}.get(variant, [])
+    for a, R, sliding in vert:
+        # M8 up from below, its head in a counterbore; one in a radial slot,
+        # so pushing its bearing in and tightening sets the preload.
+        r0, r1 = (R - SLIDE, R + SLIDE) if sliding else (R, R)
         for d, z0, z1 in ((M8_CLR, -OVS, PLATE_T + OVS), (M8_HEAD[2], -OVS, CBORE)):
             s -= Rot(0, 0, a) * slot_x(r0, r1, d, z0, z1)
+    for a in EDGE_SUP_ANGLES if variant == "edge" else ():
+        # A support 608 on edge between two cheeks, on a pin pushed in from
+        # outside; Ø11 bosses bear on its inner race only.
+        c = box(SUP_R0, SUP_R0 + CHEEK_T, -CHEEK_W / 2, CHEEK_W / 2, PLATE_TOP - 0.1, CHEEK_Z1)
+        c += box(SUP_R1 - CHEEK_T, SUP_R1, -CHEEK_W / 2, CHEEK_W / 2, PLATE_TOP - 0.1, CHEEK_Z1)
+        for x0, x1 in ((SUP_R0 + CHEEK_T, SUP_R0 + CHEEK_T + SUP_BOSS), (SUP_R1 - CHEEK_T - SUP_BOSS, SUP_R1 - CHEEK_T)):
+            c += Pos(x0, 0, SUP_ZC) * Rot(0, 90, 0) * Cylinder(RACE_D / 2, x1 - x0, align=(Align.CENTER, Align.CENTER, Align.MIN))
+        c -= Pos(SUP_R0 - OVS, 0, SUP_ZC) * Rot(0, 90, 0) * Cylinder(PIN_FIT / 2, PIN[1] + 2 * OVS, align=(Align.CENTER, Align.CENTER, Align.MIN))
+        s += Rot(0, 0, a) * c
     # The roller arm: a pad under its foot (the arm floats 1 mm up), two
     # inserts, a recess under the AS5600 board and a hole for its wires.
     x0, x1, y0, y1 = FOOT
@@ -192,9 +215,9 @@ def tyre_fit():
     return s
 
 
-def spacer608():
-    """Under each 608: a Ø16 foot on the plate, a Ø11 step on the inner race only."""
-    s = cyl(0, 0, PLATE_TOP, TYRE_Z0 - 0.5, 16.0) + cyl(0, 0, TYRE_Z0 - 0.5, SPACER608_Z1, RACE_D)
+def spacer608(foot=16.0):
+    """Under each 608: a foot on the plate, a Ø11 step on the inner race only."""
+    s = cyl(0, 0, PLATE_TOP, TYRE_Z0 - 0.5, foot) + cyl(0, 0, TYRE_Z0 - 0.5, SPACER608_Z1, RACE_D)
     return s - cyl(0, 0, PLATE_TOP - OVS, SPACER608_Z1 + OVS, M8_CLR)
 
 
@@ -213,6 +236,10 @@ def printed():
         "608/tyre_fit": (tyre_fit(), False, 1),
         "608/spacer": (spacer608(), False, 3),
         "608/race_spacer": (race_spacer(), False, 3),
+        "edge/ring": (ring_edge(), True, 1),
+        "edge/plate": (plate("edge"), False, 1),
+        "edge/spacer": (spacer608(GUIDE_FOOT_D), False, 3),
+        "edge/race_spacer": (race_spacer(), False, 3),
         "hub_210": (hub("210"), True, 1),
         "hub_128": (hub("128"), True, 1),
         "arm": (arm(), False, 1),
@@ -251,6 +278,23 @@ def bought(variant="vwheel"):
         s.append((f"race{n}", Pos(x, y, 0) * race_spacer(), "tyre"))
         s.append((f"nut{n}", tube(M8_CLR / 2, M8_JAM[0] / 2, NUT_Z0, NUT_Z0 + M8_JAM[1], x, y), "steel"))
         s.append((f"bolt{n}", cyl(x, y, CBORE - M8_HEAD[1], CBORE, M8_HEAD[0]) + cyl(x, y, CBORE, CBORE + 25.0, 8.0), "steel"))
+    for a in EDGE_GUIDE_ANGLES if variant == "edge" else ():
+        x, y = polar(GUIDE_R, a)
+        n = int(a)
+        s.append((f"guide{n}", tube(B608[1] / 2, B608[0] / 2, GUIDE_Z0, GUIDE_Z0 + B608[2], x, y), "steel"))
+        s.append((f"spacer{n}", Pos(x, y, 0) * spacer608(GUIDE_FOOT_D), "tyre"))
+        s.append((f"race{n}", Pos(x, y, 0) * race_spacer(), "tyre"))
+        s.append((f"nut{n}", tube(M8_CLR / 2, M8_JAM[0] / 2, NUT_Z0, NUT_Z0 + M8_JAM[1], x, y), "steel"))
+        s.append((f"bolt{n}", cyl(x, y, CBORE - M8_HEAD[1], CBORE, M8_HEAD[0]) + cyl(x, y, CBORE, CBORE + 25.0, 8.0), "steel"))
+    for a in EDGE_SUP_ANGLES if variant == "edge" else ():
+        n = int(a)
+        rot = Rot(0, 0, a)
+        b = Pos(TRACK_R - B608[2] / 2, 0, SUP_ZC) * Rot(0, 90, 0) * (
+            Cylinder(B608[0] / 2, B608[2], align=(Align.CENTER, Align.CENTER, Align.MIN))
+            - Cylinder(B608[1] / 2, B608[2], align=(Align.CENTER, Align.CENTER, Align.MIN)))
+        s.append((f"support{n}", rot * b, "steel"))
+        pin = Pos(SUP_R0, 0, SUP_ZC) * Rot(0, 90, 0) * Cylinder(PIN_FIT / 2, PIN[1], align=(Align.CENTER, Align.CENTER, Align.MIN))
+        s.append((f"pin{n}", rot * pin, "steel"))
     for i in range(2):
         z = BRG1_Z0 + i * BRG[2]
         s.append((f"mr105_{i}", tube(BRG[1] / 2, BRG[0] / 2, z, z + BRG[2], 0, ROLL_R), "steel"))
@@ -276,7 +320,7 @@ MAT = {
     "black": ((0.02, 0.02, 0.022, 1), 0.0, 0.2), "rubber": ((0.03, 0.03, 0.03, 1), 0.0, 0.8),
     "magnet": ((0.4, 0.4, 0.42, 1), 1.0, 0.4), "tyre": ((0.10, 0.45, 0.20, 1), 0.0, 0.5),
 }
-KEY = {"ring": "ring", "vwheel/plate": "plate", "608/plate": "plate", "hub_210": "hub", "arm": "arm", "roller": "arm", "magnet_cup": "arm"}
+KEY = {"ring": "ring", "edge/ring": "ring", "vwheel/plate": "plate", "608/plate": "plate", "edge/plate": "plate", "hub_210": "hub", "arm": "arm", "roller": "arm", "magnet_cup": "arm"}
 
 
 def mesh(solid, path):
@@ -322,12 +366,13 @@ def main():
             bad.append(name)
 
     shared = {n: mesh(s, os.path.join(tmp, f"{n.replace('/', '_')}.stl")) for n, (s, _, _) in parts.items()
-              if n in KEY and not n.endswith("plate")}
+              if n in KEY and not n.endswith("plate") and not n.endswith("ring")}
     clashes = 0
-    for variant in ("vwheel", "608"):
+    for variant in ("vwheel", "608", "edge"):
         items = [(n, m, KEY[n]) for n, m in shared.items()]
-        pl = f"{variant}/plate"
-        items.append((pl, mesh(parts[pl][0], os.path.join(tmp, f"{variant}_plate.stl")), "plate"))
+        for part in ("plate", "ring"):
+            pn = f"{variant}/{part}" if f"{variant}/{part}" in parts else part
+            items.append((pn, mesh(parts[pn][0], os.path.join(tmp, f"{variant}_{part}.stl")), KEY[pn]))
         items += [(n, mesh(s, os.path.join(tmp, f"{variant}_{n}.stl")), k) for n, s, k in bought(variant)]
         c = 0
         for (a, ma, _), (b, mb, _) in itertools.combinations(items, 2):
@@ -353,6 +398,7 @@ def main():
             if len(cm.faces):
                 cut.append((n, cm, k))
         scene(cut).export(os.path.join(BUILD, f"jogring_{variant}_cutaway.glb"))
+        scene([i for i in items if not i[0].endswith("ring")]).export(os.path.join(BUILD, f"jogring_{variant}_noring.glb"))
     # The small hub has to hold the 1.28" module too.
     m128 = mesh(hub("128"), os.path.join(tmp, "hub_128.stl"))
     g, _, t = DISPLAYS["128"]

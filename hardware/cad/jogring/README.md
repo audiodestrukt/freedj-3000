@@ -12,13 +12,51 @@ printed and handled before deck7 changes.
 | ![hero](renders/hero.jpg) | ![cutaway](renders/cutaway.jpg) |
 | ![roller](renders/roller.jpg) | ![wheel](renders/wheel.jpg) |
 | The sense roller: an O-ring tyre on the skirt's inside face, two MR105s, the magnet cup over the AS5600. | **vwheel**: a bought V-wheel in the skirt's groove, on the eccentric spacer. |
-| ![608](renders/wheel608.jpg) | |
-| **608**: a skateboard bearing with a printed V tyre, the same V in the same groove; the 270° one slides in a slot to set the preload. | |
+| ![608](renders/wheel608.jpg) | ![edge](renders/edge_open.jpg) |
+| **608**: a skateboard bearing with a printed V tyre, the same V in the same groove; the 270° one slides in a slot to set the preload. | **edge**, ring lifted off: three 608s on edge carry the press, three flat ones centre the ring. |
+| ![edge support](renders/edge_support.jpg) | ![edge guide](renders/edge_guide.jpg) |
+| **edge**: a support 608 on its 8 mm pin between two cheeks, under the ring's narrow track. | **edge**: a guide 608 on the skirt, with the skirt's lip 0.3 mm under it. |
 
-## Two versions, one ring
+## Three versions
 
-The wheels come in two versions.  Everything else is shared: the ring,
-hub, arm and roller.  The groove's shape depends only on the V (its tip,
+| | `print/edge/` (print now) | `print/608/` (print now) | `print/vwheel/` (when the wheels come) |
+|---|---|---|---|
+| Idea | as Pioneer and most decks: bearings **on edge** take the press straight down | a 608 dressed as a V-wheel | bought V-wheels |
+| Bearings | 6 × 608: 3 on edge under the ring, 3 flat against the skirt | 3 × 608 in printed V tyres | 3 × Solid V wheels |
+| Ring | `edge/ring.stl`: a 3 mm track under the top (r 88), a plain skirt, a lip at its foot | `ring.stl` (V groove) | `ring.stl` (V groove) |
+| Rolling surface | steel race on the printed track | printed tyre on printed groove | POM on printed groove |
+| Tipping | a lean on the rim lifts the far side 0.3 mm onto the lip under the guides (it slides there, only then) | held by the V | held by the V |
+| Play | the 330° guide slides in a slot | the 270° wheel slides in a slot | eccentric spacer |
+| Feel for eddy drag | r 72–85 under the top is clear | r 74–100 | r 74–100 |
+
+The checks prove each version holds the ring.  For the edge version:
+
+| Ring moved | What stops it |
+|---|---|
+| pressed down 0.2 mm | the three supports |
+| lifted 0.4 mm | the lip catches all three guides |
+| tilted 0.5° | a support on one side, the lip under a guide on the other |
+| shifted 0.2 mm | a guide |
+
+### The edge version
+
+- **Supports.** Each 608 stands on an 8 mm steel pin, 19 mm long.  The pin
+  is pushed in from outside through two cheeks printed as part of the
+  plate.  It's a grip fit (`PIN_FIT` 7.95): the same rod as deck7's shaft,
+  cut short.  Ø11 bosses on the cheeks bear on the inner race only.  The
+  race's top runs 0.05 mm under a 3 mm track on the ring's underside.  The
+  narrow track keeps the race's two edges from scrubbing against each other
+  (about 2 % instead of 8 %).
+- **Guides.** Three 608s lie flat against the skirt's outside, on M8s from
+  below: the same stack as the 608 version, with a Ø13 foot so the spacer
+  clears the lip.  The 330° one slides in a slot: push it in and tighten.
+- **Lip.** A 2 mm lip at the skirt's foot reaches under the guides' outer
+  races, 0.3 mm below them.
+
+## The 608 version (V tyres)
+
+These two versions share the ring (and, with the edge version, the hub,
+arm and roller).  The groove's shape depends only on the V (its tip,
 its 45° flanks, its height and how high it sits), not on the wheel's
 diameter.  The 608's printed tyre copies the V-wheel's V, so **the same
 `ring.stl` fits both**.  Print the 608 version now; swap the plate when the
@@ -83,6 +121,8 @@ It is built to answer three questions:
 |---|---|---|
 | `ring.stl` | 1 | 206 × 205.9 × 22.5, top face down |
 | `608/plate.stl` *or* `vwheel/plate.stl` | 1 | Ø210 |
+| **edge:** `edge/ring.stl` + `edge/plate.stl` (with the cheeks, 27.5 tall) | 1 each | instead of the two above |
+| **edge:** `edge/spacer.stl`, `edge/race_spacer.stl` | 3 each | |
 | `608/tyre_fit.stl` | 1 | print first (above) |
 | `608/tyre.stl`, `608/spacer.stl`, `608/race_spacer.stl` | 3 each | the 608 version only |
 | `hub_210.stl` / `hub_128.stl` | 1 | one for the display you have |
@@ -96,6 +136,9 @@ PETG, 0.2 mm layers, 4 walls.
 
 | Part | Qty | Notes |
 |---|---|---|
+| **edge version:** 608 bearings | 6 | |
+| **edge version:** 8 mm steel rod, 19 mm | 3 | the support pins |
+| **edge version:** M8 × 25 hex bolt + M8 thin nut | 3 | the guides |
 | **608 version:** 608 bearings (skateboard) | 3 | |
 | **608 version:** M8 × 25 hex bolt + M8 thin nut (5 mm) | 3 | |
 | **V-wheel version, from here to the M5 bolts:** | | |

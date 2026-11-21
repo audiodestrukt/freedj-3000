@@ -17,3 +17,6 @@ r cutaway  build/jogring_vwheel_cutaway.glb  --res 1600 --resy 1000 --az 90  --e
 r roller   build/jogring_vwheel_cutaway.glb  --res 1400 --resy 1000 --az 90  --el 10 --dist 0.9 --target 0.0,0.054,0.020 --lens 60
 r wheel    build/jogring_vwheel_cutaway.glb  --res 1400 --resy 1000 --az 90  --el 10 --dist 0.9 --target 0.0,-0.080,0.020 --lens 60
 r wheel608 build/jogring_608_cutaway.glb  --res 1400 --resy 1000 --az 90  --el 10 --dist 0.9 --target 0.0,-0.0835,0.020 --lens 60
+r edge_support build/jogring_edge_cutaway.glb --res 1400 --resy 1000 --az 90 --el 10 --dist 0.9 --target 0.0,-0.088,0.020 --lens 60
+r edge_guide   build/jogring_edge_cutaway.glb --res 1400 --resy 1000 --az 90 --el 10 --dist 0.9 --target 0.0,0.075,0.020 --lens 60
+r edge_open    build/jogring_edge_noring.glb  --res 1500 --resy 1100 --az -20 --el 45 --dist 2.4

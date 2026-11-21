@@ -147,6 +147,31 @@ E_PETG = 2000.0               # MPa
 _L = abs(RISER[1]) - math.sqrt((BOSS_D / 2) ** 2 - (ROLL_R - BEAM_Y) ** 2)
 BEAM_K = 3 * E_PETG * ((BEAM_Z[1] - BEAM_Z[0]) * BEAM_T ** 3 / 12) / _L ** 3   # N/mm
 
+# ── Or: 608s on edge (the "edge" variant, as Pioneer and most decks do it) ──
+# Three 608s stand on edge under a narrow track on the ring's underside and
+# take the press straight down; three more lie flat against the skirt's
+# outside to centre it; a lip on the skirt's foot tucks under those, so a
+# lean on the rim can't tip the ring (it only touches then).
+EDGE_SUP_ANGLES = (30.0, 150.0, 270.0)
+EDGE_GUIDE_ANGLES = (90.0, 210.0, 330.0)
+EDGE_GUIDE_SLIDE = 330.0      # this guide slides in a slot to take out the play
+TRACK_R, TRACK_W, TRACK_H = 88.0, 3.0, 1.0      # a narrow track: the race scrubs less
+SUP_ZC = TOP_Z0 - TRACK_H - 0.05 - B608[0] / 2  # 19.45: the support's axle height
+PIN = (8.0, 19.0)             # 8 mm steel pin through the support: diameter, length
+PIN_FIT = 7.95                # the cheeks grip it ⚠ (deck7's rod fit)
+CHEEK_T, CHEEK_W = 5.0, 16.0
+SUP_BOSS = 1.0                # Ø11 boss on each cheek, on the inner race only
+SUP_R0 = TRACK_R - B608[2] / 2 - SUP_BOSS - CHEEK_T    # 78.5: the inner cheek's inner face
+SUP_R1 = TRACK_R + B608[2] / 2 + SUP_BOSS + CHEEK_T    # 98.5
+CHEEK_Z1 = SUP_ZC + PIN[0] / 2 + 4.0
+GUIDE_R = SKIRT_R + B608[0] / 2 + 0.05          # 81.05
+GUIDE_Z0 = B608_Z0                              # same stack as the 608 variant
+LIP_GAP, LIP_T2 = 0.3, 2.0
+LIP_R1 = 73.5                 # the lip reaches under the guide's outer race only
+EDGE_SKIRT_Z0 = GUIDE_Z0 - LIP_GAP - LIP_T2
+GUIDE_FOOT_D = 13.0           # its spacer's foot clears the lip
+EDDY_BAND_EDGE = (72.0, TRACK_R - TRACK_W / 2 - 1.0)
+
 # ── Checks on the numbers ──
 assert WHEEL_R + WHEEL_R_TIP < JOG_D / 2 - RIM_W - 4, "wheels show past the platter"
 assert TYRE_R + TYRE_R_TIP < JOG_D / 2 - RIM_W - 0.5, "608 tyres hit the rim"
@@ -159,4 +184,9 @@ assert HUB_OD / 2 < SKIRT_RI - ROLL_TYRE_D - 2, "no room for the roller"
 for _x, _y in FOOT_SCREWS:
     assert math.hypot(_x, _y + PRELOAD_MAX) + M3_HEAD[0] / 2 < SKIRT_RI - 0.5, "a foot screw's head under the skirt"
 assert math.hypot(RISER[0], FOOT[3] + PRELOAD_MAX) < SKIRT_RI - 0.5, "the riser hits the skirt at full preload"
+assert SUP_R1 < JOG_D / 2 - RIM_W - 1.0 and CHEEK_Z1 < TOP_Z0 - TRACK_H - 1.0, "support cheeks hit the ring"
+assert SUP_ZC - B608[0] / 2 > PLATE_TOP + 1.0, "support bearing hits the plate"
+assert GUIDE_R - GUIDE_FOOT_D / 2 > LIP_R1 + 0.5, "the guide's spacer hits the lip"
+assert abs(SUP_R1 - SUP_R0 - PIN[1]) < 1e-6, "the pin spans both cheeks"
+assert EDGE_SKIRT_Z0 > ARM_Z0 + ENC_PCB[2] + ENC_PARTS_H + 1.0 + 0.5, "the skirt's lip hits the roller arm"
 assert BED[0] >= JOG_D and BED[0] >= PLATE_D
