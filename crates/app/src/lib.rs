@@ -3932,6 +3932,9 @@ impl DeckApp {
         if self.indicators.panel.active() {
             self.indicators.panel.publish(surface::subucom::mosi_frame(&snap, &view, self.transport.cued, surface::blink_phase()));
         }
+        if self.indicators.xdj.active() {
+            self.indicators.xdj.publish(surface::xdjpanel::mosi_frame(&snap, surface::blink_phase()));
+        }
         if let Some(path) = self.script_lamps.take() {
             let report = cdjface::lamp_report(&snap, &view, false);
             if let Err(e) = std::fs::write(&path, report) { log::warn!("script: lamps {path}: {e}"); }

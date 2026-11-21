@@ -43,6 +43,8 @@ pub struct Indicators {
     pub cdj: lanhid::Feed,
     /// The CDJ-3000 sub-CPU's LED frame, when that panel is attached.
     pub panel: subucom::Panel,
+    /// The XDJ-1000MK2 panel's lamp frame, when OpenDeck drives it.
+    pub xdj: xdjpanel::Lamps,
 }
 
 pub mod bit {
@@ -145,7 +147,7 @@ pub fn start(file: SurfaceFile, deck: Deck, tx: Sender<Event>, ind: Arc<Indicato
     // The CDJ-3000's own panel over its sub-CPU SPI device, if OPENDECK_SUBUCOM is set.
     subucom::spawn_from_env(tx.clone(), Arc::clone(&ind));
     // The XDJ-1000MK2's own panel, if OPENDECK_XDJPANEL is set.
-    xdjpanel::spawn_from_env(tx.clone());
+    xdjpanel::spawn_from_env(tx.clone(), Arc::clone(&ind));
 
     let mut midis = Vec::new();
     for s in file.surface {

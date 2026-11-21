@@ -85,6 +85,12 @@ tempfile = "3"
 [target.'cfg(not(target_os = "android"))'.dependencies]
 midir             = { workspace = true }
 
+# The XDJ-1000MK2's panel through an fx2 logic analyser running
+# tools/panel-bus/fx2/bridge.c (surface/xdjpanel.rs, OPENDECK_XDJPANEL=fx2):
+# libusb for its bulk endpoints.
+[target.'cfg(any(target_os = "macos", target_os = "linux"))'.dependencies]
+rusb              = "0.9"
+
 # Android: a NativeActivity app (deploy/android/), entry point `android_main`.
 [target.'cfg(target_os = "android")'.dependencies]
 winit             = { workspace = true, features = ["android-native-activity"] }

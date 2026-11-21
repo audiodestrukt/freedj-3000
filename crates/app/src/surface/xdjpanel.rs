@@ -17,16 +17,27 @@
 //! as `subucom` does for the CDJ-3000, so `DeckApp` gives them the same
 //! faceplate behaviour.  Jog, fader and rotary become deck events here.
 //!
-//! Transport, enabled out of band:
-//!   OPENDECK_XDJPANEL = sniff
-//! listens to a stock unit through an fx2 logic analyser (`sigrok-cli` on the
-//! PATH; wiring as `tools/panel-bus/capture.sh`): the XDJ's main board still
-//! clocks the panel and owns its lamps, the deck's controls drive OpenDeck.
-//! Driving the panel as the master (OpenDeck's lamps on the face) is the
-//! next transport.
+//! Main → panel ([`mosi_frame`]): the lamps and the jog ring, built from the
+//! deck's state on top of the stock idle frame; only bits identified on the
+//! unit are touched (one of the others puts the deck into standby).
+//!
+//! Transports, enabled out of band with `OPENDECK_XDJPANEL`:
+//! - `sniff`: listen to a stock unit through an fx2 logic analyser
+//!   (`sigrok-cli` on the PATH; wiring as `tools/panel-bus/capture.sh`): the
+//!   XDJ's main board still clocks the panel and owns its lamps, the deck's
+//!   controls drive OpenDeck.
+//! - `fx2`: OpenDeck is the panel's master through the same analyser running
+//!   `tools/panel-bus/fx2/bridge.c` (embedded here and loaded at start; the
+//!   main board cut off SCK/RXD/BUSY as in the reference doc, the deck
+//!   switched on after OpenDeck starts).  The deck's controls drive OpenDeck
+//!   and OpenDeck lights the face.  A [`Link`] is the only part that knows how
+//!   frames reach the panel; a Pi's spidev + GPIO is the next one.
 
 use crate::input::{ControlEvent as CE, Event, UiEvent};
+use crate::snapshot::DeckSnapshot;
 use super::lanhid::JogScaler;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
 pub const FRAME: usize = 32;
 
@@ -203,6 +214,172 @@ impl Decoder {
     }
 }
 
+// ── Lamps and the jog ring (main → panel) ─────────────────────────────────
+
+/// Main → panel frame bytes OpenDeck writes; the link adds the sum and 0x8F.
+pub const OUT: usize = 30;
+
+/// The stock main board's frame with a track loaded and paused (2026-11-19).
+/// Bits not named below are left as it sends them: one of the unnamed ones
+/// puts the deck into standby.
+const STOCK_IDLE: [u8; OUT] = [
+    0x30, 0xdf, 0, 0, 0, 0, 0, 0, 0x58, 0x01, 0, 0x10, 0, 0, 0, 0,
+    0, 0, 0, 0, 0, 0, 0x02, 0x02, 0x02, 0, 0, 0, 0, 0,
+];
+
+/// Lamp bits identified on the unit (reference doc, "Lamps").
+mod lamp {
+    /// PLAY: byte 0 bit 0 (on while playing).
+    pub const PLAY: (usize, u8) = (0, 0x01);
+    /// REV: byte 0 bit 2.  OpenDeck has no reverse play, so it stays dark.
+    pub const REV: (usize, u8) = (0, 0x04);
+    /// MASTER TEMPO: byte 1 bit 2.
+    pub const MASTER_TEMPO: (usize, u8) = (1, 0x04);
+    /// QUANTIZE: byte 1 bit 3.
+    pub const QUANTIZE: (usize, u8) = (1, 0x08);
+    /// JOG MODE = VINYL: byte 1 bits 1 and 7 and byte 8 bits 3 and 4 switched
+    /// together with the VINYL key in the stock captures (the key's lamp and
+    /// the jog display's VINYL mark).
+    pub const VINYL: [(usize, u8); 2] = [(1, 0x82), (8, 0x18)];
+    /// The jog ring's playhead: byte 9, 1..=135 around the ring.
+    pub const RING: usize = 9;
+    /// The jog display's red cue mark: byte 7, 1..=80 around the ring (each
+    /// step a pair of red segments, wrapping past 80), 0 = none; same origin
+    /// as the playhead, so the two meet when the playhead reaches the cue.
+    pub const CUE_MARK: usize = 7;
+}
+
+/// Jog ring positions in one turn for the playhead and the cue mark, and how
+/// long a turn is (33⅓ rpm).
+const RING_STEPS: f64 = 135.0;
+const CUE_STEPS: f64 = 80.0;
+const RING_TURN_S: f64 = 1.8;
+
+fn on_ring(seconds: f64, steps: f64) -> u8 {
+    let turn = (seconds / RING_TURN_S).rem_euclid(1.0);
+    1 + ((turn * steps) as u8).min(steps as u8 - 1)
+}
+
+/// The jog ring position for a playhead, as the stock deck draws it: one turn
+/// every 1.8 s of track time, 1..=135.
+pub fn ring_position(seconds: f64) -> u8 { on_ring(seconds, RING_STEPS) }
+
+/// The red cue mark's position for a cue point, 1..=80 on the same turn.
+pub fn cue_mark_position(seconds: f64) -> u8 { on_ring(seconds, CUE_STEPS) }
+
+/// The main → panel frame for the deck as it is now.  `blink` is the shared
+/// blink phase (`super::blink_phase()`), passed in so a test can pin it.
+pub fn mosi_frame(snap: &DeckSnapshot, blink: bool) -> [u8; OUT] {
+    let mut f = STOCK_IDLE;
+    let mut set = |(byte, mask): (usize, u8), on: bool| {
+        if on { f[byte] |= mask } else { f[byte] &= !mask }
+    };
+    let loaded = snap.total_samples > 0;
+    set(lamp::PLAY, if snap.playing { true } else { loaded && blink });
+    set(lamp::REV, false);
+    set(lamp::MASTER_TEMPO, snap.key_lock);
+    set(lamp::QUANTIZE, snap.quantize);
+    for bits in lamp::VINYL { set(bits, snap.jog_vinyl); }
+    let per_sec = snap.sample_rate as f64 * snap.channels.max(1) as f64;
+    f[lamp::RING] = if loaded && per_sec > 0.0 { ring_position(snap.position as f64 / per_sec) } else { 1 };
+    f[lamp::CUE_MARK] = if loaded && per_sec > 0.0 { cue_mark_position(snap.cue_point as f64 / per_sec) } else { 0 };
+    f
+}
+
+/// Where `DeckApp` leaves the lamp frame for the link thread.  `active` is set
+/// once a panel is being driven, so the frame is built only when someone reads it.
+#[derive(Default)]
+pub struct Lamps {
+    active: AtomicBool,
+    frame: Mutex<Option<[u8; OUT]>>,
+}
+
+impl Lamps {
+    pub fn active(&self) -> bool { self.active.load(Ordering::Relaxed) }
+    pub fn publish(&self, f: [u8; OUT]) {
+        if let Ok(mut l) = self.frame.lock() { *l = Some(f); }
+    }
+    fn latest(&self) -> Option<[u8; OUT]> { self.frame.lock().ok().and_then(|l| *l) }
+}
+
+/// How frames reach the panel: one exchange is "send this, here is the
+/// panel's latest reply".  The fx2 bridge today; a Pi's spidev + GPIO next.
+pub trait Link {
+    /// Send `out` (the link adds the sum and trailer) if it differs from the
+    /// last one sent, and return the next panel reply, or `None` if none came
+    /// in time.
+    fn exchange(&mut self, out: &[u8; OUT]) -> std::io::Result<Option<[u8; FRAME]>>;
+}
+
+/// Mapping aid: `OPENDECK_XDJPANEL_POKE=<file>` overrides bits of the frame
+/// OpenDeck sends, re-read whenever the file changes.  One edit per line:
+/// `10 = 40` sets byte 10, `8 |= 0x20` sets bits, `1 &= 0xfd` clears them;
+/// `#` starts a comment.  An empty or missing file overrides nothing.
+struct Poke {
+    path: Option<std::path::PathBuf>,
+    stamp: Option<std::time::SystemTime>,
+    checked: std::time::Instant,
+    edits: Vec<(usize, char, u8)>,
+}
+
+impl Poke {
+    fn from_env() -> Self {
+        let path = std::env::var_os("OPENDECK_XDJPANEL_POKE").map(std::path::PathBuf::from);
+        if let Some(p) = &path { log::info!("xdjpanel: frame overrides from {}", p.display()); }
+        Poke { path, stamp: None, checked: std::time::Instant::now(), edits: Vec::new() }
+    }
+
+    fn parse(text: &str) -> Vec<(usize, char, u8)> {
+        let num = |s: &str| {
+            let s = s.trim();
+            s.strip_prefix("0x").map_or_else(|| s.parse().ok(), |h| u8::from_str_radix(h, 16).ok())
+        };
+        text.lines().filter_map(|l| {
+            let l = l.split('#').next()?.trim();
+            let (lhs, op, rhs) = if let Some((a, b)) = l.split_once("|=") { (a, '|', b) }
+                else if let Some((a, b)) = l.split_once("&=") { (a, '&', b) }
+                else { let (a, b) = l.split_once('=')?; (a, '=', b) };
+            let byte: usize = lhs.trim().parse().ok().filter(|&b| b < OUT)?;
+            Some((byte, op, num(rhs)?))
+        }).collect()
+    }
+
+    fn apply(&mut self, out: &mut [u8; OUT]) {
+        let Some(path) = &self.path else { return };
+        if self.checked.elapsed() > std::time::Duration::from_millis(200) {
+            self.checked = std::time::Instant::now();
+            let stamp = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            if stamp != self.stamp {
+                self.stamp = stamp;
+                self.edits = std::fs::read_to_string(path).map(|t| Self::parse(&t)).unwrap_or_default();
+                log::info!("xdjpanel: {} frame override(s)", self.edits.len());
+            }
+        }
+        for &(b, op, v) in &self.edits {
+            match op { '|' => out[b] |= v, '&' => out[b] &= v, _ => out[b] = v }
+        }
+    }
+}
+
+/// The master loop every [`Link`] shares: lamps out, replies through the
+/// [`Decoder`] onto the bus.  Returns when the app has gone away.
+fn drive(link: &mut dyn Link, tx: &std::sync::mpsc::Sender<Event>, lamps: &Lamps) -> std::io::Result<()> {
+    let mut dec = Decoder::new();
+    let mut poke = Poke::from_env();
+    lamps.active.store(true, Ordering::Relaxed);
+    let r = (|| loop {
+        let mut out = lamps.latest().unwrap_or(STOCK_IDLE);
+        poke.apply(&mut out);
+        if let Some(reply) = link.exchange(&out)? {
+            for ev in dec.feed(&reply) {
+                if tx.send(ev).is_err() { return Ok(()); }
+            }
+        }
+    })();
+    lamps.active.store(false, Ordering::Relaxed);
+    r
+}
+
 /// Bits off the analyser, frames out: SCK on bit 0, the main board's data on
 /// bit 1, the panel's on bit 2, BUSY on bit 3, one byte per sample.  A frame
 /// is 256 bits sampled on SCK's rising edge, LSB first; a pause in the clock
@@ -247,14 +424,114 @@ impl Sniffer {
     }
 }
 
-pub fn spawn_from_env(tx: std::sync::mpsc::Sender<Event>) {
+pub fn spawn_from_env(tx: std::sync::mpsc::Sender<Event>, ind: std::sync::Arc<super::Indicators>) {
+    let spawn = |f: Box<dyn FnOnce() + Send>| {
+        if let Err(e) = std::thread::Builder::new().name("xdjpanel".into()).spawn(f) { log::warn!("xdjpanel: {e}"); }
+    };
     match std::env::var("OPENDECK_XDJPANEL").as_deref() {
-        Ok("sniff") => {
-            let r = std::thread::Builder::new().name("xdjpanel".into()).spawn(move || sniff::run(tx));
-            if let Err(e) = r { log::warn!("xdjpanel: {e}"); }
+        Ok("sniff") => spawn(Box::new(move || sniff::run(tx))),
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        Ok("fx2") => spawn(Box::new(move || fx2::run(tx, ind))),
+        Ok(other) if !other.is_empty() => {
+            let _ = ind;
+            log::warn!("OPENDECK_XDJPANEL={other}: \"sniff\" or \"fx2\" (macOS / Linux)")
         }
-        Ok(other) if !other.is_empty() => log::warn!("OPENDECK_XDJPANEL={other}: only \"sniff\" is supported"),
         _ => {}
+    }
+}
+
+/// OpenDeck as the panel's master through the fx2 analyser running
+/// `tools/panel-bus/fx2/bridge.c`: 30 bytes out on EP1 OUT, each valid panel
+/// reply back on EP1 IN (32 bytes, then frames sent and bad replies, u16 each).
+/// The firmware is embedded and loaded once at start with the FX2's own 0xA0
+/// request, so the analyser must be freshly plugged in (its default
+/// descriptors carry EP1) and the deck switched on afterwards: the panel only
+/// answers a master that has had it from power-up.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod fx2 {
+    use super::*;
+    use std::sync::mpsc::Sender;
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    const VID: u16 = 0x0925;
+    const PID: u16 = 0x3881;
+    const FIRMWARE: &str = include_str!("../../firmware/xdj-fx2-bridge.ihx");
+    const EP_OUT: u8 = 0x01;
+    const EP_IN: u8 = 0x81;
+
+    struct Fx2 {
+        usb: rusb::DeviceHandle<rusb::GlobalContext>,
+        sent: Option<[u8; OUT]>,
+    }
+
+    fn io(e: rusb::Error) -> std::io::Error { std::io::Error::other(e) }
+
+    /// Load the bridge firmware: CPU held in reset, image written, released.
+    fn load(usb: &rusb::DeviceHandle<rusb::GlobalContext>) -> rusb::Result<usize> {
+        let t = Duration::from_secs(1);
+        usb.write_control(0x40, 0xA0, 0xE600, 0, &[1], t)?;
+        let mut bytes = 0;
+        for line in FIRMWARE.lines() {
+            let Some(hex) = line.strip_prefix(':') else { continue };
+            let rec: Vec<u8> = (0..hex.len() / 2).filter_map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).ok()).collect();
+            if rec.len() < 5 || rec[3] != 0 { continue; }
+            let (n, addr) = (rec[0] as usize, u16::from_be_bytes([rec[1], rec[2]]));
+            usb.write_control(0x40, 0xA0, addr, 0, &rec[4..4 + n], t)?;
+            bytes += n;
+        }
+        usb.write_control(0x40, 0xA0, 0xE600, 0, &[0], t)?;
+        Ok(bytes)
+    }
+
+    impl Fx2 {
+        fn open(load_firmware: bool) -> rusb::Result<Self> {
+            let usb = rusb::open_device_with_vid_pid(VID, PID).ok_or(rusb::Error::NoDevice)?;
+            if load_firmware {
+                let n = load(&usb)?;
+                log::info!("xdjpanel: bridge firmware loaded ({n} bytes); switch the deck on now");
+            }
+            let _ = usb.set_active_configuration(1);
+            usb.claim_interface(0)?;
+            usb.set_alternate_setting(0, 1)?;
+            Ok(Fx2 { usb, sent: None })
+        }
+    }
+
+    impl Link for Fx2 {
+        fn exchange(&mut self, out: &[u8; OUT]) -> std::io::Result<Option<[u8; FRAME]>> {
+            if self.sent.as_ref() != Some(out) {
+                self.usb.write_bulk(EP_OUT, out, Duration::from_millis(100)).map_err(io)?;
+                self.sent = Some(*out);
+            }
+            let mut buf = [0u8; 64];
+            match self.usb.read_bulk(EP_IN, &mut buf, Duration::from_millis(20)) {
+                Ok(n) if n >= FRAME => Ok(Some(buf[..FRAME].try_into().expect("32 bytes"))),
+                Ok(_) | Err(rusb::Error::Timeout) => Ok(None),
+                Err(e) => Err(io(e)),
+            }
+        }
+    }
+
+    /// `OPENDECK_XDJPANEL_LOAD=0` skips loading the firmware: the bridge is
+    /// already running and has the panel (restarting OpenDeck then needs no
+    /// power cycle of the deck).
+    pub fn run(tx: Sender<Event>, ind: Arc<crate::surface::Indicators>) {
+        let mut load_firmware = std::env::var("OPENDECK_XDJPANEL_LOAD").as_deref() != Ok("0");
+        loop {
+            match Fx2::open(load_firmware) {
+                Ok(mut link) => {
+                    load_firmware = false;      // reloading would need the deck power-cycled again
+                    log::info!("xdjpanel: driving the panel through the fx2 bridge");
+                    match drive(&mut link, &tx, &ind.xdj) {
+                        Ok(()) => return,       // the app is gone
+                        Err(e) => log::warn!("xdjpanel: fx2: {e}; reopening"),
+                    }
+                }
+                Err(e) => log::warn!("xdjpanel: fx2 analyser (0925:3881): {e}; retrying"),
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
     }
 }
 
@@ -457,6 +734,61 @@ mod tests {
         f[24..26].copy_from_slice(&0x380u16.to_be_bytes());
         let (x, y) = lcd_touch(&f).unwrap();
         assert!(x > 0.98 && y > 0.95, "{x} {y}");
+    }
+
+    #[test]
+    fn ring_turns_once_per_1_8_seconds() {
+        assert_eq!(ring_position(0.0), 1);
+        assert_eq!(ring_position(0.9), 68);          // half a turn
+        assert_eq!(ring_position(1.8), 1);           // a full turn wraps
+        assert!(ring_position(1.79) >= 134);
+        assert!((1..=135).contains(&ring_position(-0.5)));
+        assert_eq!(cue_mark_position(0.0), 1);
+        assert_eq!(cue_mark_position(0.9), 41);       // half of 80
+        assert_eq!(cue_mark_position(1.8), 1);
+    }
+
+    #[test]
+    fn lamps_follow_the_deck_and_leave_unknown_bits_alone() {
+        let tags = opendeck_decode::TrackTags::default();
+        let mut snap = DeckSnapshot::test(&tags);
+        snap.total_samples = 44_100 * 2 * 60;
+        snap.sample_rate = 44_100;
+        snap.channels = 2;
+        snap.position = 44_100 * 2 * 9 / 10;          // 0.9 s in
+        snap.playing = true;
+        snap.quantize = true;
+        snap.key_lock = false;
+        let f = mosi_frame(&snap, false);
+        assert_ne!(f[0] & 0x01, 0, "PLAY lit while playing");
+        assert_eq!(f[0] & 0x04, 0, "REV dark");
+        assert_ne!(f[1] & 0x08, 0, "QUANTIZE");
+        assert_eq!(f[1] & 0x04, 0, "MASTER TEMPO off");
+        assert_eq!(f[9], 68, "ring half way");
+        assert_eq!(f[7], 1, "cue mark at the track start's place");
+        for i in (2..7).chain(10..30) { assert_eq!(f[i], STOCK_IDLE[i], "byte {i} untouched"); }
+        assert_eq!(f[8] & !0x18, STOCK_IDLE[8] & !0x18, "byte 8 beyond the VINYL bits untouched");
+        snap.playing = false;
+        assert_ne!(mosi_frame(&snap, true)[0] & 0x01, 0, "PLAY blinks while paused");
+        assert_eq!(mosi_frame(&snap, false)[0] & 0x01, 0);
+    }
+
+    #[test]
+    fn poke_lines_parse() {
+        assert_eq!(Poke::parse("10 = 40\n8 |= 0x20 # cue?\n1 &= 0xfd\n# all\n99 = 1\nnonsense"),
+                   vec![(10, '=', 40), (8, '|', 0x20), (1, '&', 0xfd)]);
+    }
+
+    #[test]
+    fn vinyl_lamps_follow_jog_mode() {
+        let tags = opendeck_decode::TrackTags::default();
+        let mut snap = DeckSnapshot::test(&tags);
+        snap.jog_vinyl = true;
+        let f = mosi_frame(&snap, false);
+        assert_eq!((f[1] & 0x82, f[8] & 0x18), (0x82, 0x18));
+        snap.jog_vinyl = false;
+        let f = mosi_frame(&snap, false);
+        assert_eq!((f[1] & 0x82, f[8] & 0x18), (0, 0));
     }
 
     /// Samples as the analyser streams them: one frame clocked out, LSB first.

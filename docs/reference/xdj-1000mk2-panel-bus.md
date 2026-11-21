@@ -233,25 +233,37 @@ passes through the neighbouring code for 30–90 ms (TEMPO RANGE shows brief
 read the same for ~100 ms. Panel byte 15 bit 1 dropped to 0 exactly while REV
 was held; meaning unknown.
 
-### Lamps (main → panel), provisional
+### Lamps and the jog display (main → panel)
 
-Seen to follow the deck's own state; names are inferred. The full map wants a
-bit walk once we drive the panel ourselves (one bit set per frame, note what
-lights).
+First from the stock captures (what changed with which key), then checked by
+driving the panel (2026-11-21, `OPENDECK_XDJPANEL_POKE`, see *In OpenDeck*).
+"Driven" = confirmed by setting it ourselves and looking.
 
-| Bit | Followed |
-|---|---|
-| 0.0, 0.1 | PLAY: alternate every 0.5 s while paused (two bits: maybe two levels) |
-| 0.4, 0.5 | CUE: blink, 300 ms on / 300 ms off |
-| 0.2 | REV on |
-| 0.6 | set by LOOP OUT (loop active?) |
-| 1.2 | toggled with MASTER TEMPO, and also during TEMPO RANGE presses |
-| 1.3 | QUANTIZE on |
-| 1.1, 1.7, 8.3, 8.4 | VINYL on |
-| 7.1–7.6 | LOOP IN / LOOP OUT / RELOOP states |
-| 8.5 | CUE (0x58 → 0x78) |
-| 1.0, 1.6, 1.7 | single-frame blips every ~50 ms or few seconds; not a lamp |
-| 22–24 bits 1, 3, 5 | alternate every 0.5 s, always; unknown |
+| Field | Meaning | How sure |
+|---|---|---|
+| 0.0 | PLAY lamp (on while playing; the stock deck blinks it paused) | driven |
+| 0.1 | alternates with 0.0 while paused on the stock deck; a second PLAY level? | captures |
+| 0.2 | REV lamp | captures |
+| 0.4, 0.5 | CUE lamp (blinks 300 ms on / off on the stock deck) | captures |
+| 0.6 | set by LOOP OUT on the stock deck | captures |
+| 1.2 | MASTER TEMPO lamp | driven |
+| 1.3 | QUANTIZE lamp | driven |
+| 1.1, 1.7, 8.3, 8.4 | VINYL: the key's lamp and the **"VINYL" mark in the jog display's centre** (all four switch together) | driven |
+| **7** | **red cue mark on the jog ring: 1–80 round the ring, 0 = none**, wrapping past 80 (81 = 1). Each step lights a pair of red segments (never one alone: the ring is ~160 segments in 80 pairs). Same origin as the playhead ring (byte 7 = 1 and byte 9 = 1 line up), so the marks meet when the playhead reaches the cue. The stock "LOOP IN" changes in this byte were the cue point moving | driven |
+| 8.5 | the jog display's **inner white ring** (set by CUE on the stock deck) | driven |
+| **9** | **jog ring playhead**, 1–135, one turn per 1.8 s (below) | driven |
+| 10 | no visible change at 40, 100 or 255 | driven |
+| **11** | **standby**: 0xFF (the stock deck sends 0x10) puts the panel into a standby state: lamps and display off, the controls still reported but scanned slowly (long latency). Restoring 0x10 does not bring it back; a power cycle does. Which bit: not narrowed | driven |
+| 12.0 | lights a single white ring inside the display | driven |
+| 2–5 | at 40 together (with 8.5): both inner white rings and the outer ring lit except at the playhead; not narrowed to a byte or bit | driven |
+| 13–21, 25–29, 2–6 at 0xFF | no visible change | driven |
+| 22–24 | bits 1, 3, 5 alternate every 0.5 s on the stock deck; 0xFF shows nothing new | captures / driven |
+| 1.0, 1.6, 1.7 | single-frame blips every ~50 ms or few seconds on the stock deck; not a lamp | captures |
+
+A **position** field shows nothing when set to 0xFF (out of range): the cue
+mark was only found by setting the untried bytes to a valid position (40) and
+halving. Bytes still open: 0.1/0.4–0.6, the rest of 8, 2–5, 12, and the bits of
+11 (which must not be set while hunting, or the panel needs a power cycle).
 
 With a track playing (not analysed in rekordbox, so no waveform):
 
@@ -331,12 +343,30 @@ not documented; a capture would tell how close it is to the MK3's.
 
 `crates/app/src/surface/xdjpanel.rs` decodes panel frames into the same
 events as the CDJ-3000's `subucom` (keys by their cdj3k-emu names, jog,
-fader, rotary, LCD touch). `OPENDECK_XDJPANEL=sniff` listens to a stock unit
-through the fx2 analyser (`sigrok-cli` streaming 4 MHz to the app), so the
-deck's own controls drive OpenDeck while its main board keeps the panel and
-the lamps. Checked on the unit 2026-11-19: keys, rotary, fader (direction
-fixed), jog (CDJ bend / VINYL scrub), jog touch (11 = touched), jog counts
-(~3272 per turn, clockwise counts up). REV has no action: OpenDeck has no reverse play.
+fader, rotary, LCD touch), with two transports:
+
+- **`OPENDECK_XDJPANEL=sniff`**: listens to a stock unit through the fx2
+  analyser (`sigrok-cli` streaming 4 MHz to the app), so the deck's own
+  controls drive OpenDeck while its main board keeps the panel and the lamps.
+- **`OPENDECK_XDJPANEL=fx2`**: OpenDeck is the panel's master through the
+  analyser running `bridge.c` (embedded in the app, `crates/app/firmware/`,
+  loaded with the 0xA0 request at start). Set up as in *Driving the panel*;
+  start OpenDeck with the deck off, then switch the deck on.
+  `OPENDECK_XDJPANEL_LOAD=0` reconnects to a bridge already running (restart
+  OpenDeck without power-cycling the deck). The deck's controls drive OpenDeck
+  and OpenDeck lights the face from its own state ([`mosi_frame`]): PLAY,
+  QUANTIZE, MASTER TEMPO, VINYL (key and centre mark), the playhead ring
+  (byte 9) and the red cue mark (byte 7), on top of the stock idle frame; no
+  other bit is touched. Checked on the unit 2026-11-21.
+- **`OPENDECK_XDJPANEL_POKE=<file>`** (mapping aid): lines `7 = 40`,
+  `8 |= 0x20`, `1 &= 0xfd` override bits of the frame sent, re-read whenever
+  the file changes; how the cue mark and the standby byte were found.
+
+The transport is a `Link` (send 30 bytes, get the panel's reply); a Pi's
+spidev + GPIO is the next one (*Route A*). Calibrated on the unit: keys,
+rotary, fader (0x0000 at the top), jog (~3272 counts per turn, clockwise
+counts up), jog touch (11 = touched). REV has no action: OpenDeck has no
+reverse play.
 
 ## Driving the panel (master side): it works
 
@@ -487,10 +517,10 @@ jog display's centre.
   bits light the rest. USB may be wired from the main board (CN8002 8–10).
 - With the main board cut off and nobody clocking, the panel lights its lamps
   solid on its own, and shows a short TXD pulse every ~0.75 ms.
-- **A bit in bytes 2–29 puts the deck into standby** ("All on" in the page):
-  the deck goes dark and comes back when a control is moved, like the
-  auto-standby. The panel drives PWR_SW / EUP_CON, so this is the panel being
-  told to put the main board to sleep. Not yet narrowed to a byte.
+- **Byte 11 = 0xFF puts the panel into standby** ("All on" in the page): the
+  lamps and the jog display go dark and the controls are scanned slowly (long
+  latency); setting byte 11 back to the stock 0x10 does not wake it, a power
+  cycle does. The bit within byte 11 is not narrowed yet.
 - The main board rebooting does not disturb the panel or the bridge: with the
   bus cut, the panel stays ours.
 
