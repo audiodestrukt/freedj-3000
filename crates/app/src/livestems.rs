@@ -57,6 +57,11 @@ pub struct LiveStems {
     cap: u64,
     /// This device's deck is splitting ([`LOCAL_SPLIT`]; tests use their own).
     local: &'static std::sync::atomic::AtomicBool,
+    /// Also write each finished split as a standard bank into the served
+    /// index (`stems/<bundle>/`, index.json, index-v2 under our track IDs),
+    /// for readers that only know the spec: the served folder, whose files'
+    /// paths go in the entries.  `None`: live banks only.
+    publish: Option<PathBuf>,
 }
 
 /// How much the cache keeps by default (`OPENDECK_LIVE_STEMS_MB`
@@ -97,10 +102,16 @@ impl LiveStems {
 
     /// [`start`](Self::start) keeping at most `cap` bytes of banks.
     pub fn start_capped(cdjmods: PathBuf, files: &[(u32, PathBuf)], split: SplitFn, cap: u64) -> Result<Arc<LiveStems>> {
-        Self::start_with(cdjmods, files, split, cap, &LOCAL_SPLIT)
+        Self::start_with(cdjmods, files, split, cap, &LOCAL_SPLIT, None)
     }
 
-    fn start_with(cdjmods: PathBuf, files: &[(u32, PathBuf)], split: SplitFn, cap: u64, local: &'static std::sync::atomic::AtomicBool) -> Result<Arc<LiveStems>> {
+    /// [`start`](Self::start), also publishing finished splits as standard
+    /// banks of the folder `served` (see [`LiveStems::publish`]).
+    pub fn start_publishing(cdjmods: PathBuf, files: &[(u32, PathBuf)], split: SplitFn, served: Option<PathBuf>) -> Result<Arc<LiveStems>> {
+        Self::start_with(cdjmods, files, split, default_cap(), &LOCAL_SPLIT, served)
+    }
+
+    fn start_with(cdjmods: PathBuf, files: &[(u32, PathBuf)], split: SplitFn, cap: u64, local: &'static std::sync::atomic::AtomicBool, publish: Option<PathBuf>) -> Result<Arc<LiveStems>> {
         std::fs::create_dir_all(cdjmods.join("live"))?;
         // Track IDs follow the folder's scan order, so a bank cached under an
         // ID may now be another track's: keep only those still matching.
@@ -111,7 +122,7 @@ impl LiveStems {
                 .is_some_and(|p| std::fs::read_to_string(e.path().join(SOURCE)).ok() == Some(source_key(p)));
             if !keep { let _ = std::fs::remove_dir_all(e.path()); }
         }
-        let me = Arc::new(LiveStems { cdjmods, files: files.iter().cloned().collect(), queue: Mutex::new((VecDeque::new(), None)), wake: Condvar::new(), playheads: Mutex::new(HashMap::new()), split, cap, local });
+        let me = Arc::new(LiveStems { cdjmods, files: files.iter().cloned().collect(), queue: Mutex::new((VecDeque::new(), None)), wake: Condvar::new(), playheads: Mutex::new(HashMap::new()), split, cap, local, publish });
         let w = Arc::clone(&me);
         std::thread::Builder::new().name("live-stems".into()).spawn(move || w.run())?;
         Ok(me)
@@ -200,11 +211,46 @@ impl LiveStems {
         }
         let pages = w.map().pages();
         w.finish()?;
+        if self.publish.is_some() {
+            if let Err(e) = self.publish_bank(id, path, &bank, &track) { log::warn!("live stems: publishing track {id}: {e:#}"); }
+        }
         Ok(pages)
     }
 }
 
 impl LiveStems {
+    /// Write the split of track `id` as a standard bank (the spec's
+    /// CDJ-3000 profile: 96 kHz, FLAC pages, at full level) and index it
+    /// under `id`, keeping the other entries already published.
+    fn publish_bank(&self, id: u32, path: &std::path::Path, bank: &StemBank, track: &[f32]) -> Result<()> {
+        let served = self.publish.as_ref().context("not publishing")?;
+        let rel = path.strip_prefix(served).context("track outside the served folder")?;
+        let file_path = format!("/{}", rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/"));
+        let up = |v: &[f32]| -> Result<Vec<i16>> {
+            Ok(crate::audio::resample_interleaved(v, 2, RATE, 96_000)?.iter().map(|x| (x * 32768.0).round().clamp(-32768.0, 32767.0) as i16).collect())
+        };
+        // One role at a time (a 96 kHz f32 role is ~140 MB for 3 minutes).
+        let vocal = up(&bank.stem_levels(1))?;
+        let drums = up(&bank.stem_levels(0))?;
+        let harm = up(&bank.stem_levels(2))?;
+        let full = up(track)?;
+        let n = [vocal.len(), drums.len(), harm.len(), full.len()].into_iter().min().unwrap_or(0) & !1;
+        let entry = opendeck_stems::writer::write_bank(&self.cdjmods, [&vocal[..n], &drums[..n], &harm[..n], &full[..n]], &file_path, path)?;
+        let mut entries: std::collections::BTreeMap<u32, serde_json::Value> = std::fs::read(self.cdjmods.join("index.json")).ok()
+            .and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok())
+            .and_then(|v| v.get("tracks").and_then(|t| t.as_object()).map(|t| t.iter().filter_map(|(k, v)| Some((k.parse().ok()?, v.clone()))).collect()))
+            .unwrap_or_default();
+        // Entries for tracks no longer served, or replaced, go with their banks.
+        entries.retain(|k, _| self.files.contains_key(k));
+        if let Some(old) = entries.insert(id, entry).and_then(|o| o.get("bundle").and_then(|b| b.as_str()).map(String::from)) {
+            let _ = std::fs::remove_dir_all(self.cdjmods.join("stems").join(old));
+        }
+        let root = self.cdjmods.parent().context("CDJMODS has no parent")?;
+        opendeck_stems::writer::write_index(root, &entries, 8)?;
+        log::info!("live stems: track {id} published as a bank for {file_path}");
+        Ok(())
+    }
+
     /// Delete the oldest finished banks (not `id`'s) until `need` more bytes
     /// fit under the cap.
     fn make_room(&self, id: u32, need: u64) {
@@ -464,7 +510,7 @@ mod tests {
             anyhow::bail!("cancelled")
         });
         let mods = cache.path().join("cdjmods");
-        let live = LiveStems::start_with(mods.clone(), &[(1, file.clone())], split, 1 << 30, &LOCAL).unwrap();
+        let live = LiveStems::start_with(mods.clone(), &[(1, file.clone())], split, 1 << 30, &LOCAL, None).unwrap();
         let srv = opendeck_nfs::server::NfsServer::start(opendeck_nfs::server::Tree::scan(music.path()).unwrap(), "/C/", 0, 0).unwrap();
         srv.tree.overlay("CDJMODS", &mods).unwrap();
         srv.tree.on_miss(live.hook());
@@ -534,6 +580,56 @@ mod tests {
         let snr = 10.0 * (sig / err.max(1e-12)).log10();
         eprintln!("live stems: sum of stems vs track {snr:.1} dB");
         assert!(snr > 15.0, "{snr:.1} dB");
+    }
+
+    /// Publishing on: a finished split is also a standard bank in the
+    /// served index, found by our track ID over LINK exactly as a stick's
+    /// prepared stems are (what a reader that knows only the spec sees).
+    /// `OPENDECK_TEST_KEEP_PUBLISHED=<dir>` keeps a copy for the reference
+    /// validator.
+    #[test]
+    fn a_finished_split_is_published_as_a_standard_bank() {
+        static LOCAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let music = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let frames = 44_100 * 5;
+        // Noise, low-passed: no period for the alignment check to lock onto.
+        let mut x = 12345u32; let mut lp = 0f32;
+        let pcm: Vec<i16> = (0..frames).flat_map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12_345);
+            lp = lp * 0.9 + ((x >> 16) as f32 / 32768.0 - 1.0) * 0.1;
+            let v = (lp * 40_000.0).clamp(-20_000.0, 20_000.0) as i16;
+            [v, v]
+        }).collect();
+        let mut wav = opendeck_stems::pgz::wav_header(frames as u32 * 4).to_vec();
+        wav.extend(pcm.iter().flat_map(|v| v.to_le_bytes()));
+        std::fs::create_dir_all(music.path().join("Contents")).unwrap();
+        let file = music.path().join("Contents/t.wav");
+        std::fs::write(&file, wav).unwrap();
+        let split: SplitFn = Arc::new(|t, _, bank| {
+            let pick = |k: f32| -> Vec<i16> { t.iter().map(|v| to_i16(v * k)).collect() };
+            bank.write(0, [&pick(0.5), &pick(0.25), &pick(0.25)]);
+            Ok(())
+        });
+        let mods = cache.path().join("x/CDJMODS");
+        let live = LiveStems::start_with(mods.clone(), &[(3, file.clone())], split, 1 << 30, &LOCAL, Some(music.path().to_path_buf())).unwrap();
+        live.split_one(3).unwrap();
+        let srv = opendeck_nfs::server::NfsServer::start(opendeck_nfs::server::Tree::scan(music.path()).unwrap(), "/C/", 0, 0).unwrap();
+        srv.tree.overlay("CDJMODS", &mods).unwrap();
+        let mut m = crate::stems::NfsMedia::mount_at(std::net::Ipv4Addr::LOCALHOST, srv.portmap, "/C/").unwrap();
+        let e = crate::stems::link_entry(&mut m, "/Contents/t.wav", Some(3)).unwrap().expect("found by our ID through index-v2");
+        assert_eq!(e.sample_rate, 96_000);
+        let track = Arc::new(pcm.iter().map(|v| *v as f32 / 32768.0).collect::<Vec<f32>>());
+        let bank = crate::stems::build(&mut m, &e, &track, 44_100, 2, None).unwrap();
+        assert!(bank.complete());
+        let drums = bank.stem_levels(0);
+        let err = track.iter().zip(&drums).skip(4000).take(track.len() - 8000).map(|(x, y)| (x * 0.5 - y).abs()).fold(0f32, f32::max);
+        let worst = track.iter().zip(&drums).enumerate().skip(4000).take(track.len() - 8000).max_by(|a, b| (a.1.0 * 0.5 - a.1.1).abs().total_cmp(&(b.1.0 * 0.5 - b.1.1).abs())).map(|(i, (x, y))| (i, *x, *y));
+        assert!(err < 0.01, "drums at full level, back at 44.1 kHz: {err}, offset {} frames, worst {worst:?} of {}", bank.offset_frames, track.len());
+        if let Ok(keep) = std::env::var("OPENDECK_TEST_KEEP_PUBLISHED") {
+            crate::media::tests::copy_tree(music.path(), std::path::Path::new(&keep));
+            crate::media::tests::copy_tree(&mods, &std::path::Path::new(&keep).join("CDJMODS"));
+        }
     }
 
     #[test]

@@ -5581,10 +5581,15 @@ fn serve_live_stems(root: &std::path::Path, nfs: &opendeck_nfs::server::NfsServe
     }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()).hash(&mut h);
-    let mods = livestems::cache_dir(&link_cache_dir()).join(format!("{:016x}", h.finish()));
+    let mods = livestems::cache_dir(&link_cache_dir()).join(format!("{:016x}", h.finish())).join("CDJMODS");
+    let own_mods = root.join("CDJMODS").is_dir();
+    // Experimental: finished splits also as standard banks in our index, for
+    // readers that only know the spec (a folder with its own CDJMODS keeps
+    // its index as it is).
+    let publish = (std::env::var("OPENDECK_LIVE_STEMS_PUBLISH").is_ok_and(|v| v == "1") && !own_mods).then(|| root.to_path_buf());
     let res = (|| -> Result<()> {
-        let live = livestems::LiveStems::start(mods.clone(), files, livestems::model_split())?;
-        if root.join("CDJMODS").is_dir() { nfs.tree.overlay("CDJMODS/live", &mods.join("live"))?; } else { nfs.tree.overlay("CDJMODS", &mods)?; }
+        let live = livestems::LiveStems::start_publishing(mods.clone(), files, livestems::model_split(), publish)?;
+        if own_mods { nfs.tree.overlay("CDJMODS/live", &mods.join("live"))?; } else { nfs.tree.overlay("CDJMODS", &mods)?; }
         nfs.tree.on_miss(live.hook());
         Ok(())
     })();

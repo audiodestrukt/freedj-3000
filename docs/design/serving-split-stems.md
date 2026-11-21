@@ -185,6 +185,18 @@ track in 58 s (3.1x real time), the stems summing to the track within
 plus the deck split's look-ahead (~4 s, for a deck moving on while a chunk
 computes), so the first 4 s came last, after 60 s.
 
+**Publishing finished splits (experimental, `OPENDECK_LIVE_STEMS_PUBLISH=1`).**
+A finished split is also written as a standard bank in the spec's CDJ-3000
+profile (96 kHz, FLAC pages stored verbatim, full level, four roles) and
+indexed under our dbserver IDs (`index.json` + index-v2), for readers that
+only know the spec, such as OverCue players.  Off by default: a verbatim
+bank is ~276 MB for 3 minutes and the cache cap doesn't count it yet, and
+OverCue loaded no bank from a non-OverCue source on 2026-11-15.  Skipped
+when the served folder has its own `CDJMODS` (its index stays the
+stick's).  Tested: our own reader finds it by ID over LINK and plays it.
+`source_timing_policy` is `opendeck-decoded/1` (our decoder's timeline,
+no MP3 padding restored), so a CDJ's own decode may be offset from it.
+
 **Not done yet:** a run between two real devices (iPad source, desktop
 deck); writing the finished bank into the served index under our IDs
 (A.2, A.3), which only OverCue-format readers would need now (an OpenDeck

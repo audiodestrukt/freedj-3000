@@ -94,11 +94,79 @@ pub fn write_index(root: &Path, entries: &BTreeMap<u32, Value>, bits: u32) -> Re
     Ok(())
 }
 
+/// Write one bank in the spec's CDJ-3000 profile (`flac-96k`, four roles,
+/// `three_part: 2`) under `mods` (the `CDJMODS` folder) and return its
+/// index entry, for [`write_index`].  `roles`: interleaved stereo i16 at
+/// 96 kHz in [`Role::ALL`] order, all the same length.  `file_path` is
+/// the track's path from the USB root; `source` the file itself (hashed
+/// into `source_sha256`).  FLAC pages are stored verbatim (valid FLAC, no
+/// compression).  A fresh bundle folder each time.
+pub fn write_bank(mods: &Path, roles: [&[i16]; 4], file_path: &str, source: &Path) -> Result<Value> {
+    use crate::synth::{pgz, SynthCodec};
+    use crate::{Role, PAGE_BYTES};
+    let frames = roles[0].len() / 2;
+    if frames == 0 || roles.iter().any(|r| r.len() != frames * 2) { bail!("bank roles must share a length"); }
+    if !file_path.starts_with('/') { bail!("file_path {file_path:?} must start with /"); }
+    let src = std::fs::read(source).with_context(|| format!("{}", source.display()))?;
+    let md = std::fs::metadata(source)?;
+    let bytes = |r: &[i16]| -> Vec<u8> { r.iter().flat_map(|v| v.to_le_bytes()).collect() };
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let bundle = hex(&sha256(&[file_path.as_bytes(), &now.to_be_bytes()[..], &sha256(&bytes(roles[3]))[..]].concat())[..8]);
+    let dir = mods.join("stems").join(&bundle);
+    std::fs::create_dir_all(&dir)?;
+    let mut e = Map::new();
+    e.insert("bundle".into(), bundle.clone().into());
+    e.insert("file_path".into(), file_path.into());
+    e.insert("frames".into(), (frames as u64).into());
+    e.insert("three_part".into(), 2.into());
+    e.insert("page_bytes".into(), PAGE_BYTES.into());
+    e.insert("page_codec".into(), "flac-96k".into());
+    e.insert("source_timing_policy".into(), "opendeck-decoded/1".into());
+    e.insert("source_sha256".into(), hex(&sha256(&src)).into());
+    e.insert("source_size".into(), md.len().into());
+    let mt = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64);
+    e.insert("source_modified_ns".into(), mt.into());
+    for (r, pcm) in Role::ALL.iter().zip(roles) {
+        let pcm = bytes(pcm);
+        let (file, table) = pgz(&pcm, SynthCodec::Flac96);
+        let tmp = dir.join(format!(".{}.tmp", r.file_name()));
+        std::fs::write(&tmp, &file)?;
+        std::fs::rename(&tmp, dir.join(format!("stems-sidecar-{}.s16le.pgz", r.file_name())))?;
+        e.insert(format!("{}_sha256", r.key()), hex(&sha256(&pcm)).into());
+        e.insert(format!("{}_page_table_sha256", r.key()), hex(&table).into());
+    }
+    e.insert("generator".into(), "opendeck".into());
+    Ok(Value::Object(e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::synth::{write_stick, SynthCodec, SynthTrack};
     use crate::{Index, Role};
+
+    /// A bank written here reads back through our own reader exactly, by
+    /// path and by ID, every page and whole-role hash checked.
+    #[test]
+    fn a_written_bank_reads_back_by_path_and_by_id() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("Music")).unwrap();
+        std::fs::write(d.path().join("Music/t.mp3"), b"orig").unwrap();
+        let roles: Vec<Vec<i16>> = (0..4).map(|k| (0..96_000 * 3 * 2).map(|i| ((i * (k + 3)) % 2000) as i16 - 1000).collect()).collect();
+        let e = write_bank(&d.path().join("CDJMODS"), [&roles[0], &roles[1], &roles[2], &roles[3]], "/Music/t.mp3", &d.path().join("Music/t.mp3")).unwrap();
+        let mut entries = BTreeMap::new();
+        entries.insert(42u32, e);
+        write_index(d.path(), &entries, 8).unwrap();
+        let mut m = crate::DirMedia::new(d.path());
+        let by_id = crate::v2::lookup(&mut m, crate::index::Namespace::DeviceLibrary, 42).unwrap().expect("by ID");
+        let by_path = Index::read(&mut m).unwrap().unwrap().by_path("/Music/t.mp3").unwrap().unwrap().clone();
+        assert_eq!(by_id.bundle, by_path.bundle);
+        for (k, r) in Role::ALL.iter().enumerate() {
+            let rr = crate::RoleReader::open(&mut m, &by_id, *r).unwrap();
+            let got: Vec<i16> = (0..rr.pages.len()).flat_map(|p| rr.page(&mut m, p).unwrap()).collect();
+            assert_eq!(got, roles[k], "{r:?}");
+        }
+    }
 
     /// Re-keying a stick: the same banks under new IDs, found through both
     /// index.json and index-v2, old IDs gone.

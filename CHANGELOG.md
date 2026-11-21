@@ -22,7 +22,10 @@ All notable changes to this project will be documented in this file.
   comes first: a split for another player waits for, and gives way to,
   its own.  Serving needs a separation model and is off by default on a
   Raspberry Pi, which keeps its cores for its own split
-  (`OPENDECK_LIVE_STEMS=1` / `=0`).  docs/design/serving-split-stems.md.
+  (`OPENDECK_LIVE_STEMS=1` / `=0`).  Experimental:
+  `OPENDECK_LIVE_STEMS_PUBLISH=1` also writes each finished split as a
+  standard bank (96 kHz FLAC pages) indexed under our track IDs, for
+  readers that only know OverCue's format.  docs/design/serving-split-stems.md.
 
 ### Changed
 - The NFS server sees files made while it runs, and a file's current

@@ -135,7 +135,7 @@ pub fn write_stick(root: &Path, tracks: &[SynthTrack], codec: SynthCodec, v2_bit
 fn as_bytes(s: &[i16]) -> Vec<u8> { s.iter().flat_map(|v| v.to_le_bytes()).collect() }
 
 /// A `.pgz` file and the SHA-256 of its header + page table.
-fn pgz(pcm: &[u8], codec: SynthCodec) -> (Vec<u8>, [u8; 32]) {
+pub(crate) fn pgz(pcm: &[u8], codec: SynthCodec) -> (Vec<u8>, [u8; 32]) {
     let pages: Vec<&[u8]> = pcm.chunks(PAGE_BYTES as usize).collect();
     let payloads: Vec<Vec<u8>> = pages.iter().map(|p| match codec {
         SynthCodec::Zlib96 => {
