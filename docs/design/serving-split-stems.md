@@ -1,7 +1,8 @@
 # StemStream: serving split stems over Pro DJ Link
 
-Status: **proposal** (2026-11-15). Nothing here is built yet; it is the
-plan for when we get to it.
+Status: **live stems built (2026-11-21)**, tested over loopback only (see
+"Live stems as built" below).  Writing finished banks into the served
+`CDJMODS` index (A.2, A.3) and the ESP32 client (B) are still plans.
 
 **StemStream** is the name for the whole feature: OpenDeck splits the
 music it serves and players play those stems over Pro DJ Link. It is a
@@ -38,7 +39,8 @@ two things:
    carry a bank before it's complete, because every page's hash and the
    whole-file hashes sit in the index. Splitting the served library in the
    background beforehand mostly removes the need: tracks are ready before
-   anyone browses to them.
+   anyone browses to them.  (2026-11-21: solved without a protocol, as
+   plain files beside the spec's: see "Live stems as built".)
 2. **A mix mode for chips without PSRAM** (the C6 in freedj-nano). Such a
    player can play the plain full mix over LINK without stems.
 
@@ -95,6 +97,71 @@ For the S3 deck (ESP32-S3R8, 8 MB PSRAM, I2S at the track's rate):
    comfortably. With `wav-44k1` banks a page is raw PCM; no decoder.
 5. **Mix:** the stems with their gains where pages have arrived, the full
    mix elsewhere, crossfading at the edges, as OpenDeck's mixer does.
+
+## Live stems as built (2026-11-21)
+
+Dan, after OverCue Desktop 2.2.58 shipped "Live Stems" (a computer splits
+a player's track on request and streams it; their protocol is private and
+we don't look into it): do the same between OpenDecks, with the iPad's fast
+Core ML split as a source and small players such as an ESP32 as clients.
+
+**What the spec gives and what it doesn't.**  The spec pages a *finished*
+bank: 131,072-byte pages (32,768 stereo frames), each page's SHA-256 in
+the role's page table, "a real-time reader can verify the table up front
+and pages as it fetches them" (our reader does, from the playhead).  But a
+writer must "finish and verify every referenced file" before publishing
+the index, so a bank still being split has no place in it.
+
+**The extension: `CDJMODS/live/<track id>/`** (`opendeck_stems::live`), plain
+files beside the spec's, which OverCue readers never open:
+
+- `stems-sidecar-<role>.s16le.wav` for vocal, drums, harmonics and the full
+  mix: the spec's canonical `wav-44k1` role files, full length from the
+  start, pages written in place.  A finished role is a spec `wav-44k1` role
+  byte for byte.
+- `pages`: a 32-byte header (`ODLIVE01`, frames, page bytes, page count,
+  state splitting / complete / failed, headroom dB) and one byte per page,
+  set once the page is in every role file and its hashes are written.  The
+  reader polls it (about 300 bytes for a 4-minute track).
+- `pages.sha`: four SHA-256 per page, one per role.  A page is used only
+  once it checks out.
+
+Everything is 16-bit stereo at 44.1 kHz (the model's rate) on the source's
+own decode timeline, the full mix included, so a client without an MP3
+decoder can play the whole track from these files.  The PCM is stored 6 dB
+down (the device split's headroom), as the header says.
+
+**Asking is a lookup.**  A deck whose STEMS panel opens on a track loaded
+from another OpenDeck, with no prepared stems, looks up
+`/CDJMODS/live/<id>`.  On the source the lookup misses and the NFS server's
+miss hook (`Tree::on_miss`) queues the split (`livestems.rs`: newest
+request first, one at a time).  The bank appears within the decode time;
+the reader publishes an empty bank on the deck at once and fills it a few
+seconds at a time from the playhead as pages arrive, converted to the
+deck's rate.  A source without `/CDJMODS/live` (a CDJ, rekordbox) answers
+the first lookup, and the deck splits the track itself.  The NFS server's
+tree is now live (new files, growing files), and the source's banks live
+in the app's cache, served as `/CDJMODS` or, inside a stick's own
+`CDJMODS`, as `/CDJMODS/live`, so prepared banks stay served.  A cached
+bank is kept only while its track ID still names the same file (IDs follow
+the folder's scan order).
+
+**Tests** (loopback, a stand-in model): a player reads the first pages
+while the split is still running, then the rest, each as split; a deck
+plays them at 44.1 and 48 kHz, the start before the split is done; a
+source with no live stems costs no wait; damaged pages and maps are
+refused; a renumbered track's bank is dropped.
+
+**Not done yet:** a run between two real devices (iPad source, desktop
+deck); the source splitting from the *player's* playhead (it splits from
+the top; the player's position is in its status packets); writing the
+finished bank into the served index under our IDs (A.2, A.3), so a second
+load needs no split; eviction of the cache.
+
+**For an ESP32 client** (B): look up `/CDJMODS/live/<id>`, poll `pages`,
+read 128 KiB pages of raw PCM near the playhead into PSRAM, check each
+against `pages.sha` (or not, on a chip without the time), and mix the three
+stems with the full mix as fallback.  No FLAC, no index parsing.
 
 ## Open questions
 

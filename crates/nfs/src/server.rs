@@ -92,18 +92,23 @@ impl Tree {
         let t = self.inner.read().unwrap();
         t.nodes.iter().filter(|n| !n.is_dir).map(|n| (n.nfs.clone(), n.path.clone())).collect()
     }
-    /// Serve local folder `dir` as `/<name>` at the export root, in place of
-    /// any folder of that name in the scanned one (a media server keeps its
-    /// own `CDJMODS` outside the user's music folder).
-    pub fn overlay(&self, name: &str, dir: &Path) -> Result<()> {
-        anyhow::ensure!(plain_name(name), "overlay name {name:?}");
+    /// Serve local folder `dir` at NFS path `at` (`CDJMODS`, or
+    /// `CDJMODS/live` inside a folder that exists), in place of anything of
+    /// that name in the scanned tree: a media server keeps its own stems
+    /// outside the user's music folder.
+    pub fn overlay(&self, at: &str, dir: &Path) -> Result<()> {
+        let at = at.trim_matches('/');
+        let (parent, name) = at.rsplit_once('/').map_or(("", at), |(p, n)| (p, n));
+        anyhow::ensure!(plain_name(name) && parent.split('/').all(|c| c.is_empty() || plain_name(c)), "overlay path {at:?}");
         fs::create_dir_all(dir)?;
         let mut t = self.inner.write().unwrap();
-        let ci = t.add(dir.to_path_buf(), format!("/{name}"))?;
-        let root = &mut t.nodes[0].children;
-        root.retain(|(n, _)| n != name);
-        root.push((name.to_string(), ci));
-        root.sort();
+        let pnfs = format!("/{parent}");
+        let pi = t.nodes.iter().position(|n| n.is_dir && n.nfs == pnfs).with_context(|| format!("overlay: no folder {pnfs}"))?;
+        let ci = t.add(dir.to_path_buf(), join_nfs(&pnfs, name))?;
+        let ch = &mut t.nodes[pi].children;
+        ch.retain(|(n, _)| n != name);
+        ch.push((name.to_string(), ci));
+        ch.sort();
         Ok(())
     }
     /// Set the hook called on a lookup that finds nothing ([`MissHook`]).
@@ -479,6 +484,15 @@ mod tests {
         let names: Vec<String> = c.readdir(&root).unwrap().into_iter().map(|e| e.name).collect();
         assert!(names.contains(&"new.mp3".to_string()) && names.contains(&"CDJMODS".to_string()), "{names:?}");
         assert_eq!(names.iter().filter(|n| *n == "CDJMODS").count(), 1, "{names:?}");
+
+        // Inside a stick's own CDJMODS: only live/ comes from elsewhere.
+        let srv = NfsServer::start(Tree::scan(dir.path()).unwrap(), "/C/", 0, 0).unwrap();
+        srv.tree.overlay("CDJMODS/live", &cache.path().join("live")).unwrap();
+        let mut c = crate::Nfs::connect_at(Ipv4Addr::LOCALHOST, srv.portmap).unwrap();
+        let root = c.mount_usb().unwrap();
+        assert!(c.lookup_path_opt(&root, "CDJMODS/index.json").unwrap().is_some(), "the stick's index stays");
+        assert!(c.lookup_path_opt(&root, "CDJMODS/live/7/map").unwrap().is_some());
+        assert!(srv.tree.overlay("NOPE/live", cache.path()).is_err(), "the parent must exist");
     }
 
     /// A lookup that misses asks the hook first, which may make the file.

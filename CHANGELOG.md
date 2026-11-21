@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- Live stems between OpenDecks: a deck that loaded a track from another
+  OpenDeck, with no prepared stems for it, gets its stems from that
+  OpenDeck when its STEMS panel opens.  The source splits the track with
+  its own model (an iPad's Core ML, a desktop's HTDemucs) and the deck
+  plays each stretch as the source finishes it, the original elsewhere;
+  a source without live stems (a CDJ, rekordbox) answers at once and the
+  deck splits the track itself.  Still Pro DJ Link and plain NFS files:
+  the source serves `CDJMODS/live/<track id>/` with OverCue's page size
+  and `wav-44k1` role files plus a page map, so small players need no
+  decoder (format in `crates/stems/src/live.rs`).  Tested over loopback
+  only.  docs/design/serving-split-stems.md.
+
+### Changed
+- The NFS server sees files made while it runs, and a file's current
+  size: needed to serve stems as they are split.
+
 ## [0.3.34] — 2026-11-20
 
 ### Added

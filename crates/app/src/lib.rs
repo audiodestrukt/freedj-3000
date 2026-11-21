@@ -33,6 +33,7 @@ mod waveform_cpu;
 mod settings;
 mod stems;
 mod separate;
+mod livestems;
 mod modelfetch;
 mod snapshot;
 mod phrases;
@@ -2953,7 +2954,16 @@ impl DeckApp {
                 None => stems::load_local(&path, &track, sr, ch, Some(&j)),
             };
             let got = match found {
-                Ok(None) if ch == 2 && split => split_on_device(&path, &track, sr, &j),
+                // From another OpenDeck: it splits the track and we read
+                // the stems as it goes (live stems); else split it here.
+                Ok(None) if ch == 2 && split => match link.as_ref().map(|l| stems::load_live(l, &track, sr, &j)) {
+                    Some(Ok(Some(b))) => Ok(Some(b)),
+                    Some(Err(e)) if j.cancel.load(std::sync::atomic::Ordering::Relaxed) => Err(e),
+                    other => {
+                        if let Some(Err(e)) = other { log::info!("stems: live stems: {e:#}"); }
+                        split_on_device(&path, &track, sr, &j)
+                    }
+                },
                 r => r,
             };
             let _ = tx.send(got);
@@ -5552,6 +5562,29 @@ mod rekordbox_link_cue_tests {
     }
 }
 
+/// Live stems (`livestems`): a player's lookup of a served track's
+/// `/CDJMODS/live/<id>` starts a split it reads while it runs.  The banks
+/// live in the app's cache, one folder per served folder, served as
+/// `/CDJMODS` (or as `/CDJMODS/live` inside a stick's own `CDJMODS`, so its
+/// prepared banks stay served).  A device without the model logs and
+/// answers no stems.
+fn serve_live_stems(root: &std::path::Path, nfs: &opendeck_nfs::server::NfsServer, files: &[(u32, std::path::PathBuf)]) {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()).hash(&mut h);
+    let mods = livestems::cache_dir(&link_cache_dir()).join(format!("{:016x}", h.finish()));
+    let res = (|| -> Result<()> {
+        let live = livestems::LiveStems::start(mods.clone(), files, livestems::model_split())?;
+        if root.join("CDJMODS").is_dir() { nfs.tree.overlay("CDJMODS/live", &mods.join("live"))?; } else { nfs.tree.overlay("CDJMODS", &mods)?; }
+        nfs.tree.on_miss(live.hook());
+        Ok(())
+    })();
+    match res {
+        Ok(()) => log::info!("media server: live stems from {} (model {})", mods.display(), if separate::model::present() { "present" } else { "absent" }),
+        Err(e) => log::warn!("media server: no live stems: {e:#}"),
+    }
+}
+
 #[cfg(test)]
 mod nfs_link_tests {
     // Gated: OPENDECK_TEST_NFS=192.168.68.58 (a linked XDJ with a USB)
@@ -5710,6 +5743,7 @@ fn start_media_server(root: &std::path::Path, player: opendeck_dbserver::server:
         m.extend(scanned.files.iter().map(|(id, p)| (std::fs::canonicalize(p).unwrap_or_else(|_| p.clone()), *id)));
     }
     let nfs = NfsServer::start(scanned.tree, "/C/", 111, 2049)?;
+    serve_live_stems(root, &nfs, &scanned.files);
     let db = DbServer::start_on(Arc::clone(&scanned.library), player, prodj::media_bind_ip(), 0, opendeck_dbserver::PORT_QUERY)?;
     if let Ok(mut l) = link.library.lock() { *l = Some(Arc::clone(&scanned.library)); }
     log::info!("media server: {n} tracks under {} — nfs portmap {} nfsd {}, dbserver {}", root.display(), nfs.portmap, nfs.nfsd, db.db_port);

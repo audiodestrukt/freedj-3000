@@ -552,6 +552,22 @@ impl NfsMedia {
         NfsMedia::mount(opendeck_nfs::Nfs::connect_any(ip)?, export)
     }
 
+    /// Connect to a server whose portmap is on `port` (tests).
+    #[cfg(test)]
+    pub(crate) fn mount_at(ip: std::net::Ipv4Addr, port: u16, export: &str) -> Result<NfsMedia> {
+        NfsMedia::mount(opendeck_nfs::Nfs::connect_at(ip, port)?, export)
+    }
+
+    /// Whether `path` (a file or a folder) is there.
+    pub fn exists(&mut self, path: &str) -> Result<bool> {
+        oc::media::components(path)?;
+        Ok(self.nfs.lookup_path_opt(&self.root, path)?.is_some())
+    }
+
+    /// Forget what was looked up under `prefix`, so a file made since (a
+    /// live bank) is looked up again.
+    pub fn forget(&mut self, prefix: &str) { self.files.retain(|k, _| !k.starts_with(prefix)); }
+
     fn mount(mut nfs: opendeck_nfs::Nfs, export: &str) -> Result<NfsMedia> {
         let utf16 = |s: &str| -> Vec<u8> { s.encode_utf16().flat_map(|u| u.to_le_bytes()).collect() };
         let exports = nfs.exports()?;
@@ -614,6 +630,123 @@ fn load_from(media: &mut dyn oc::Media, stick: &LinkStick, track: &Arc<Vec<f32>>
     let Some(entry) = link_entry(media, &rel, stick.id)? else { return Ok(None) };
     log::info!("stems: {} has stems for {rel} on {} (found in {:.0} ms)", stick.ip, stick.export, t0.elapsed().as_secs_f64() * 1e3);
     build(media, &entry, track, deck_sr, ch, job).with_context(|| format!("{} {rel}", stick.ip)).map(Some)
+}
+
+/// How long a live source may take to start a track's bank (its decode
+/// and model load) before the deck stops waiting for it.
+const LIVE_START: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Live stems from the linked player the track came from: another OpenDeck
+/// splitting it while we play (`opendeck_stems::live`, `livestems.rs` on
+/// that side).  `Ok(None)` at once when the source serves no live stems (a
+/// CDJ, a rekordbox laptop), so this device can split instead.  Asking is
+/// looking the track's live folder up; the bank is published on `job` and
+/// filled a few seconds at a time from the playhead as the source's pages
+/// arrive, converted to the deck's rate as a prepared bank is.  The
+/// source's decode of the same file is the deck's timeline (offset 0).  If
+/// the source gives up, what arrived stays and the rest plays the original.
+pub fn load_live(stick: &LinkStick, track: &Arc<Vec<f32>>, deck_sr: u32, job: &crate::separate::Job) -> Result<Option<Arc<StemBank>>> {
+    let Some(id) = stick.id else { return Ok(None) };
+    let mut media = NfsMedia::connect(stick.ip, stick.export)?;
+    live_from(&mut media, id, track, deck_sr, job, LIVE_START)
+}
+
+/// A live bank's pages, each read (and checked) once while a step needs it.
+struct LivePages { r: oc::live::LiveReader, cache: std::collections::BTreeMap<usize, [Vec<i16>; 4]> }
+
+impl LivePages {
+    /// Source frames `[a, b)` (clamped to the role) are all written.
+    fn have(&self, a: usize, b: usize) -> bool {
+        let pf = oc::live::PAGE_FRAMES;
+        let b = b.min(self.r.map.frames as usize);
+        a >= b || (a / pf..=(b - 1) / pf).all(|i| self.r.map.done[i])
+    }
+}
+
+/// One role (`k`, in `Role::ALL` order) of a live bank.
+struct LiveRole<'a> { p: &'a mut LivePages, k: usize }
+
+impl SpanSource for LiveRole<'_> {
+    fn frames(&self) -> usize { self.p.r.map.frames as usize }
+    fn source(&mut self, media: &mut dyn oc::Media, a: usize, b: usize) -> Result<Vec<i16>> {
+        let pf = oc::live::PAGE_FRAMES;
+        let b = b.min(self.frames());
+        let mut out = Vec::with_capacity(b.saturating_sub(a) * 2);
+        if a >= b { return Ok(out); }
+        for i in a / pf..=(b - 1) / pf {
+            if !self.p.cache.contains_key(&i) { let pg = self.p.r.page(media, i)?; self.p.cache.insert(i, pg); }
+            let pg = &self.p.cache[&i][self.k];
+            let start = i * pf;
+            let (lo, hi) = (a.max(start) - start, b.min(start + pg.len() / 2) - start);
+            out.extend_from_slice(&pg[lo * 2..hi * 2]);
+        }
+        Ok(out)
+    }
+}
+
+pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, deck_sr: u32, job: &crate::separate::Job, start_wait: std::time::Duration) -> Result<Option<Arc<StemBank>>> {
+    use std::time::{Duration, Instant};
+    let cancelled = || job.cancel.load(Ordering::Relaxed);
+    // Only a source that serves live stems has the folder; one lookup says.
+    if !media.exists("/CDJMODS/live")? { return Ok(None); }
+    let t0 = Instant::now();
+    let dir = oc::live::dir(id);
+    let reader = loop {
+        media.forget(&dir);
+        if let Some(r) = oc::live::LiveReader::open(media, id)? { break r; }
+        if cancelled() { bail!("cancelled"); }
+        if t0.elapsed() > start_wait { log::info!("stems: no live bank for track {id} after {:.0}s", start_wait.as_secs_f32()); return Ok(None); }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    let from = oc::live::RATE;
+    log::info!("stems: live bank for track {id}, {} pages, started in {:.2}s", reader.map.pages(), t0.elapsed().as_secs_f32());
+    let mut pages = LivePages { r: reader, cache: Default::default() };
+    let mut bank = StemBank::filling(track);
+    let db = pages.r.map.headroom_db;
+    bank.scale = if db == 6 { SPLIT_SCALE } else { 10f32.powf(db as f32 / 20.0) };
+    let bank = Arc::new(bank);
+    let _ = job.bank.set(Arc::clone(&bank));
+    let frames = track.len() / 2;
+    let step = deck_sr as usize * PAGED_STEP_SECS;
+    let steps = frames.div_ceil(step).max(1);
+    let mut done = vec![false; steps];
+    let (mut n_done, mut first) = (0usize, None);
+    let at = || job.playhead.as_ref().map_or(0, |p| (p.load(Ordering::Relaxed) as usize / 2 / step).min(steps - 1));
+    // Source frames a deck step needs (deck_span's margin and rounding).
+    let span = |k: usize| {
+        let (a, b) = (k * step, ((k + 1) * step).min(frames));
+        let s0 = (a * from as usize / deck_sr as usize).saturating_sub(PAGED_MARGIN + 1024);
+        (a, b, s0, b * from as usize / deck_sr as usize + PAGED_MARGIN + 1)
+    };
+    const ROLE_OF: [usize; 3] = [1, 0, 2];   // drums, vocal, harmonics in Role::ALL
+    while n_done < steps {
+        if cancelled() { bail!("cancelled"); }
+        let p = at();
+        let next = (p..steps).chain(0..p).find(|&k| !done[k] && { let (_, _, s0, s1) = span(k); pages.have(s0, s1) });
+        let Some(k) = next else {
+            if pages.r.refresh(media)?.state == oc::live::State::Failed {
+                log::warn!("stems: the source gave up on track {id}; {n_done} of {steps} steps have stems");
+                return Ok(Some(bank));
+            }
+            std::thread::sleep(Duration::from_millis(150));
+            continue;
+        };
+        let (a, b, s0, s1) = span(k);
+        let mut got: [Vec<i16>; 3] = Default::default();
+        for (s, r) in ROLE_OF.iter().enumerate() {
+            got[s] = deck_span(&mut LiveRole { p: &mut pages, k: *r }, media, from, deck_sr, a as isize, b as isize)?;
+        }
+        pages.cache.retain(|i, _| (i + 1) * oc::live::PAGE_FRAMES > s0 && i * oc::live::PAGE_FRAMES < s1);
+        bank.write(a * 2, [&got[0], &got[1], &got[2]]);
+        done[k] = true;
+        n_done += 1;
+        job.progress.store((n_done * 1000 / steps) as u32, Ordering::Relaxed);
+        first.get_or_insert(t0.elapsed());
+    }
+    bank.finish(deck_sr);
+    log::info!("stems: live bank for track {id} complete; first {PAGED_STEP_SECS}s playable in {:.2}s, whole in {:.1}s",
+               first.unwrap_or_default().as_secs_f32(), t0.elapsed().as_secs_f32());
+    Ok(Some(bank))
 }
 
 /// Seconds of stems each step of a paged load reads, converts and appends.
@@ -721,11 +854,23 @@ impl PagedRole {
     }
 }
 
+/// Where [`deck_span`] reads a role's source frames from.
+trait SpanSource {
+    fn frames(&self) -> usize;
+    /// Source frames `[a, b)` (clamped to the role) as interleaved i16.
+    fn source(&mut self, media: &mut dyn oc::Media, a: usize, b: usize) -> Result<Vec<i16>>;
+}
+
+impl SpanSource for PagedRole {
+    fn frames(&self) -> usize { PagedRole::frames(self) }
+    fn source(&mut self, media: &mut dyn oc::Media, a: usize, b: usize) -> Result<Vec<i16>> { PagedRole::source(self, media, a, b) }
+}
+
 /// Deck-rate frames `[a, b)` (may run past either end: silence there) of a
 /// role stored at `from` Hz, converted to `to` Hz exactly as converting the
 /// whole role would: the source span is widened by [`PAGED_MARGIN`] and
 /// started on a frame that maps to a whole deck frame.
-fn deck_span(role: &mut PagedRole, media: &mut dyn oc::Media, from: u32, to: u32, a: isize, b: isize) -> Result<Vec<i16>> {
+fn deck_span(role: &mut impl SpanSource, media: &mut dyn oc::Media, from: u32, to: u32, a: isize, b: isize) -> Result<Vec<i16>> {
     let mut out = vec![0i16; (b - a).max(0) as usize * 2];
     let total_out = match (from, to) {
         (x, y) if x == y => role.frames(),
