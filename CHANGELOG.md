@@ -5,6 +5,12 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- The plugin runs **any number of decks** in one host: two OpenDeck
+  instances in REAPER are two decks, each with its own window, output and
+  Pitch, sharing one event loop.  Each instance saves its track in its
+  state, so a project reopens with its decks loaded.  `make reaper-mixer
+  TRACK_A=… TRACK_B=…` sets up two decks into an automated crossfader
+  (a test-harness JSFX).
 - A ring-jog test rig to print (`hardware/cad/jogring/`, `make jogring`):
   the 206 mm jog as a ring on three V-wheels, around a fixed hub for a round
   smart-watch display (1.28" to 2.1").  An O-ring roller sprung against the
@@ -134,6 +140,8 @@ All notable changes to this project will be documented in this file.
   of hanging on a bracket.
 
 ### Fixed
+- REAPER no longer crashes on quit with OpenDeck loaded (the plugin pins
+  its library in memory).
 - With OpenDeck as tempo master, CDJ-3000s now draw its waveform in their
   WAVEFORM view (Pioneer's "stacked waveform": the master's waveform and
   beat grid above the unit's own).  They never fetched it before: one byte

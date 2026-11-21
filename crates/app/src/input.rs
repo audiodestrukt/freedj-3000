@@ -16,6 +16,9 @@ pub enum Event {
     Deck(ControlEvent),
     /// A display setting; never reaches the audio path.
     Ui(UiEvent),
+    /// Load this file (a plugin host restoring the deck's track), and with
+    /// `play` start it playing once it has loaded.
+    Load { path: std::path::PathBuf, play: bool },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

@@ -13,3 +13,4 @@ opendeck-app = { path = "../app" }
 nih_plug     = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
 log          = { workspace = true }
 env_logger   = { workspace = true }
+libc         = "0.2"   # pin the library in memory (dladdr + dlopen RTLD_NODELETE)

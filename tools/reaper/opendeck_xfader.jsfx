@@ -1,0 +1,31 @@
+desc: OpenDeck DJ crossfader (A on 1/2, B on 3/4)
+// A two-channel DJ crossfader for testing OpenDeck decks in REAPER: deck A's
+// track sends to channels 1/2 of the mixer track, deck B's to 3/4.  Test
+// harness only (tools/reaper/opendeck_mixer.lua); OpenDeck itself is a deck,
+// not a mixer.
+slider1:0<0,1,0.001>Crossfader (0 = A, 1 = B)
+slider2:0<0,2,1{Constant power,Linear,Cut (scratch)}>Curve
+slider3:1<0,1,0.001>Channel fader A
+slider4:1<0,1,0.001>Channel fader B
+
+in_pin:A left
+in_pin:A right
+in_pin:B left
+in_pin:B right
+out_pin:left
+out_pin:right
+
+@init
+k = 1 - exp(-1 / (0.005 * srate));   // 5 ms smoothing: no zipper noise
+xf = slider1; fa = slider3; fb = slider4;
+
+@sample
+xf += (slider1 - xf) * k;
+fa += (slider3 - fa) * k;
+fb += (slider4 - fb) * k;
+slider2 == 0 ? ( ga = cos(xf * $pi / 2); gb = sin(xf * $pi / 2); ) :
+slider2 == 1 ? ( ga = 1 - xf; gb = xf; ) :
+               ( ga = xf < 0.98 ? 1 : 0; gb = xf > 0.02 ? 1 : 0; );
+l = spl0 * ga * fa + spl2 * gb * fb;
+r = spl1 * ga * fa + spl3 * gb * fb;
+spl0 = l; spl1 = r; spl2 = 0; spl3 = 0;

@@ -879,6 +879,14 @@ struct DeckApp {
     script_lamps: Option<String>,
     script_shot: Option<String>,
 
+    /// Hosted beside other decks in one event loop (the plugin): closing
+    /// this deck's window closes only this deck, not the loop.
+    multi:       bool,
+    /// Set when this deck's window was closed (multi only).
+    closed:      bool,
+    /// The servers and Link threads `run` starts for this deck; they stop
+    /// when the deck is dropped.
+    guards:      Vec<Box<dyn std::any::Any>>,
     // Created on first `resumed` (winit) or by the SDL loop.
     host:        Option<Host>,
     renderer:    Option<Box<dyn Renderer>>,
@@ -1234,6 +1242,9 @@ impl DeckApp {
             load_cue: cue_point,
             script_lamps: None,
             script_shot: None,
+            multi:       false,
+            closed:      false,
+            guards:      Vec::new(),
             host:        None,
             renderer:    None,
             egui_ctx:    egui::Context::default(),
@@ -1270,6 +1281,10 @@ impl DeckApp {
     fn apply(&mut self, ev: Event) {
         log::debug!("event: {ev:?}");
         match ev {
+            Event::Load { path, play } => match self.load_track(&path, None) {
+                Ok(()) => self.play_on_load = play,
+                Err(e) => log::warn!("load {}: {e:#}", path.display()),
+            },
             Event::Deck(ControlEvent::Play)  => { self.lock_in_play(); log::info!("playing"); }
             Event::Deck(ControlEvent::Pause) => { self.audio.playing.store(false, Ordering::Relaxed); log::info!("paused"); }
             Event::Deck(ControlEvent::PlayPause) => {
@@ -4538,6 +4553,17 @@ fn first_sound(samples: &[f32], ch: usize, level_db: f32) -> u64 {
     }
 }
 
+impl DeckApp {
+    /// Close: the whole app, or (hosted beside other decks) just this deck.
+    fn quit(&mut self, event_loop: &ActiveEventLoop) {
+        if self.multi { self.closed = true; } else { event_loop.exit(); }
+    }
+
+    fn window_id(&self) -> Option<winit::window::WindowId> {
+        match &self.host { Some(Host::Winit { window, .. }) => Some(window.id()), _ => None }
+    }
+}
+
 impl ApplicationHandler for DeckApp {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         if self.host.is_some() {
@@ -4681,13 +4707,13 @@ impl ApplicationHandler for DeckApp {
         }
 
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => self.quit(event_loop),
 
             WindowEvent::KeyboardInput {
                 event: KeyEvent { physical_key: PhysicalKey::Code(code), state, repeat, .. },
                 ..
             } => {
-                if self.key_input(code, state == ElementState::Pressed, repeat) { event_loop.exit(); }
+                if self.key_input(code, state == ElementState::Pressed, repeat) { self.quit(event_loop); }
             }
 
             WindowEvent::Resized(size) => {
@@ -5007,6 +5033,21 @@ fn music_dir(no_track: bool) -> Option<PathBuf> {
 /// Start a deck and run the UI event loop.  Platform-agnostic: every entry point
 /// (desktop `main`, iOS/Android) builds a `Config` and calls this.
 pub fn run(cfg: Config) -> Result<()> {
+    let host = cfg.host.is_some();
+    #[allow(unused_mut)]   // mutated only by the SDL backend
+    let mut app = build(cfg)?;
+    // OPENDECK_RENDERER=sdl|wgpu picks the backend; wgpu + winit is the default.
+    let want_sdl = std::env::var("OPENDECK_RENDERER").map(|v| v.eq_ignore_ascii_case("sdl")).unwrap_or(false);
+    #[cfg(feature = "renderer-sdl")]
+    if want_sdl { return sdl_backend::run(&mut app); }
+    #[cfg(not(feature = "renderer-sdl"))]
+    if want_sdl { log::warn!("OPENDECK_RENDERER=sdl but this build has no SDL backend (cargo feature renderer-sdl); using wgpu"); }
+    run_loop(app, host)
+}
+
+/// Everything `run` sets up before the window: the audio, the analysis, Link,
+/// the servers, the input bus.  The returned deck owns all of it.
+fn build(cfg: Config) -> Result<DeckApp> {
     let track        = cfg.track;
     let browse_root  = cfg.browse_root;
     // Pro DJ Link player numbers: 1-4 is the universal space (CDJ-2000/NXS2,
@@ -5031,7 +5072,6 @@ pub fn run(cfg: Config) -> Result<()> {
     let link_send    = cfg.link_send;
 
     // ── 1. Decode audio (or boot to an empty deck when no track is given) ─────
-    let host = cfg.host.is_some();
     let audio = match (&track, &cfg.host) {
         (_, Some(h)) => {
             log::info!("plugin host output at {} Hz", h.sample_rate);
@@ -5206,13 +5246,137 @@ pub fn run(cfg: Config) -> Result<()> {
             app.set_loop(start, start + len, *beats as f32);   // …then arm, which anchors the shadow
         }
     }
-    // OPENDECK_RENDERER=sdl|wgpu picks the backend; wgpu + winit is the default.
-    let want_sdl = std::env::var("OPENDECK_RENDERER").map(|v| v.eq_ignore_ascii_case("sdl")).unwrap_or(false);
-    #[cfg(feature = "renderer-sdl")]
-    if want_sdl { return sdl_backend::run(&mut app); }
-    #[cfg(not(feature = "renderer-sdl"))]
-    if want_sdl { log::warn!("OPENDECK_RENDERER=sdl but this build has no SDL backend (cargo feature renderer-sdl); using wgpu"); }
+    app.guards.push(Box::new(_stemd));
+    app.guards.push(Box::new(_prodj));
+    app.guards.push(Box::new(_prodj_tx));
+    Ok(app)
+}
 
+/// A command to the shared deck loop.
+pub enum HostCmd {
+    /// Build a deck from this config and open its window.
+    Add(u64, Config),
+    /// Close the deck and drop it (its plugin instance went away).
+    Remove(u64),
+}
+
+/// One event loop hosting any number of decks, each with its own window: the
+/// plugin's.  winit allows one event loop per process, so the first plugin
+/// instance starts it and every later one adds a deck to it; it lives for the
+/// rest of the process.
+pub struct DeckHost {
+    tx:    mpsc::Sender<HostCmd>,
+    proxy: Mutex<winit::event_loop::EventLoopProxy<()>>,
+}
+
+impl DeckHost {
+    /// The process's deck loop, started on first use.
+    pub fn get() -> Result<&'static DeckHost> {
+        static HOST: std::sync::OnceLock<std::result::Result<DeckHost, String>> = std::sync::OnceLock::new();
+        HOST.get_or_init(|| DeckHost::start().map_err(|e| format!("{e:#}"))).as_ref().map_err(|e| anyhow::anyhow!("{e}"))
+    }
+
+    fn start() -> Result<DeckHost> {
+        let (tx, rx) = mpsc::channel::<HostCmd>();
+        let (ptx, prx) = mpsc::channel();
+        std::thread::Builder::new().name("opendeck-ui".into()).spawn(move || {
+            let built = (|| -> Result<EventLoop<()>> {
+                #[cfg(all(unix, not(any(target_os = "android", target_os = "ios", target_os = "macos"))))]
+                {
+                    use winit::platform::{wayland::EventLoopBuilderExtWayland, x11::EventLoopBuilderExtX11};
+                    let mut b = EventLoop::builder();
+                    EventLoopBuilderExtX11::with_any_thread(&mut b, true);
+                    EventLoopBuilderExtWayland::with_any_thread(&mut b, true);
+                    return b.build().context("failed to create event loop");
+                }
+                #[allow(unreachable_code)]
+                EventLoop::new().context("failed to create event loop")
+            })();
+            let event_loop = match built {
+                Ok(el) => { let _ = ptx.send(Ok(el.create_proxy())); el }
+                Err(e) => { let _ = ptx.send(Err(e)); return; }
+            };
+            event_loop.set_control_flow(ControlFlow::Wait);
+            let mut multi = MultiDeck { decks: Vec::new(), rx };
+            if let Err(e) = event_loop.run_app(&mut multi) { log::error!("deck loop: {e:#}"); }
+        }).context("could not start the deck loop's thread")?;
+        let proxy = prx.recv().context("the deck loop's thread died")??;
+        Ok(DeckHost { tx, proxy: Mutex::new(proxy) })
+    }
+
+    fn send(&self, cmd: HostCmd) {
+        if self.tx.send(cmd).is_ok() { let _ = self.proxy.lock().unwrap().send_event(()); }
+    }
+    pub fn add(&self, id: u64, cfg: Config) { self.send(HostCmd::Add(id, cfg)); }
+    pub fn remove(&self, id: u64) { self.send(HostCmd::Remove(id)); }
+}
+
+/// The deck loop's handler: routes each window's events to its deck, and
+/// wakes for whichever deck needs it soonest.
+struct MultiDeck {
+    decks: Vec<(u64, DeckApp)>,
+    rx:    mpsc::Receiver<HostCmd>,
+}
+
+/// The sooner of two wake-ups (Poll < WaitUntil < Wait).
+fn sooner(a: ControlFlow, b: ControlFlow) -> ControlFlow {
+    match (a, b) {
+        (ControlFlow::Poll, _) | (_, ControlFlow::Poll) => ControlFlow::Poll,
+        (ControlFlow::WaitUntil(x), ControlFlow::WaitUntil(y)) => ControlFlow::WaitUntil(x.min(y)),
+        (ControlFlow::WaitUntil(x), _) | (_, ControlFlow::WaitUntil(x)) => ControlFlow::WaitUntil(x),
+        _ => ControlFlow::Wait,
+    }
+}
+
+impl ApplicationHandler for MultiDeck {
+    fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        for (_, d) in &mut self.decks { d.resumed(event_loop); }
+    }
+
+    fn suspended(&mut self, event_loop: &ActiveEventLoop) {
+        for (_, d) in &mut self.decks { d.suspended(event_loop); }
+    }
+
+    fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
+        while let Ok(cmd) = self.rx.try_recv() {
+            match cmd {
+                HostCmd::Add(id, cfg) => match build(cfg) {
+                    Ok(mut d) => {
+                        d.multi = true;
+                        d.resumed(event_loop);
+                        log::info!("deck loop: deck {id} up ({} in all)", self.decks.len() + 1);
+                        self.decks.push((id, d));
+                    }
+                    Err(e) => log::error!("deck loop: deck {id} did not start: {e:#}"),
+                },
+                HostCmd::Remove(id) => {
+                    self.decks.retain(|(i, _)| *i != id);
+                    log::info!("deck loop: deck {id} closed ({} left)", self.decks.len());
+                }
+            }
+        }
+    }
+
+    fn window_event(&mut self, event_loop: &ActiveEventLoop, id: winit::window::WindowId, event: WindowEvent) {
+        if let Some((_, d)) = self.decks.iter_mut().find(|(_, d)| d.window_id() == Some(id)) {
+            d.window_event(event_loop, id, event);
+        }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let mut wake = ControlFlow::Wait;
+        for (_, d) in &mut self.decks {
+            d.about_to_wait(event_loop);
+            wake = sooner(wake, event_loop.control_flow());
+        }
+        event_loop.set_control_flow(wake);
+        // A deck whose window was closed is dropped (until its plugin
+        // instance is re-created).
+        self.decks.retain(|(id, d)| { if d.closed { log::info!("deck loop: deck {id} window closed"); } !d.closed });
+    }
+}
+
+fn run_loop(mut app: DeckApp, host: bool) -> Result<()> {
     // In a plugin host the deck's window runs on a thread of the host's, not
     // the process's main thread.
     #[cfg(all(unix, not(any(target_os = "android", target_os = "ios", target_os = "macos"))))]
@@ -5237,6 +5401,68 @@ pub fn run(cfg: Config) -> Result<()> {
     event_loop.run_app(&mut app).context("event loop error")?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod host_load_tests {
+    use super::deck_harness::*;
+    use super::*;
+
+    /// A plain 16-bit stereo WAV of a quiet tone, `secs` long at 44.1 kHz.
+    fn wav(path: &std::path::Path, secs: f64) {
+        let n = (secs * 44_100.0) as u32;
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF"); b.extend_from_slice(&(36 + n * 4).to_le_bytes()); b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt "); b.extend_from_slice(&16u32.to_le_bytes()); b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes()); b.extend_from_slice(&44_100u32.to_le_bytes());
+        b.extend_from_slice(&(44_100u32 * 4).to_le_bytes()); b.extend_from_slice(&4u16.to_le_bytes()); b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data"); b.extend_from_slice(&(n * 4).to_le_bytes());
+        for i in 0..n {
+            let v = ((i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin() * 3000.0) as i16;
+            b.extend_from_slice(&v.to_le_bytes()); b.extend_from_slice(&v.to_le_bytes());
+        }
+        std::fs::write(path, b).unwrap();
+    }
+
+    fn load_and_wait(d: &mut DeckApp, path: &std::path::Path, play: bool) {
+        d.apply(Event::Load { path: path.to_path_buf(), play });
+        let end = Instant::now() + Duration::from_secs(10);
+        while d.loading.is_some() || d.fetch_rx.is_none() {
+            assert!(Instant::now() < end, "the load never landed");
+            std::thread::sleep(Duration::from_millis(10));
+            d.poll_fetch();
+            if d.path == path { break; }
+        }
+    }
+
+    /// A plugin host loads a deck's saved track: it lands parked at the cue,
+    /// as a CDJ load does; asked to play (OPENDECK_AUTOPLAY), it plays once
+    /// it is in, not before (a play sent ahead of the load hit the empty deck
+    /// and stopped at its end, so deck A of the REAPER mixer stayed silent).
+    #[test]
+    fn a_host_load_plays_only_once_the_track_is_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let (a, b) = (dir.path().join("a.wav"), dir.path().join("b.wav"));
+        wav(&a, 8.0); wav(&b, 8.0);
+        let mut d = deck(2.0);
+        load_and_wait(&mut d, &a, false);
+        assert_eq!(d.path, a);
+        assert!(!d.audio.playing.load(Ordering::Relaxed), "a plain load parks at the cue");
+        load_and_wait(&mut d, &b, true);
+        assert_eq!(d.path, b);
+        assert!(d.audio.playing.load(Ordering::Relaxed), "asked to play, it plays once loaded");
+    }
+
+    /// The deck loop wakes for whichever deck needs it soonest.
+    #[test]
+    fn the_deck_loop_wakes_for_the_soonest_deck() {
+        let t0 = Instant::now();
+        let (near, far) = (t0 + Duration::from_millis(5), t0 + Duration::from_millis(50));
+        assert_eq!(sooner(ControlFlow::Wait, ControlFlow::WaitUntil(far)), ControlFlow::WaitUntil(far));
+        assert_eq!(sooner(ControlFlow::WaitUntil(far), ControlFlow::WaitUntil(near)), ControlFlow::WaitUntil(near));
+        assert_eq!(sooner(ControlFlow::WaitUntil(near), ControlFlow::Poll), ControlFlow::Poll);
+        assert_eq!(sooner(ControlFlow::Wait, ControlFlow::Wait), ControlFlow::Wait);
+    }
 }
 
 #[cfg(test)]

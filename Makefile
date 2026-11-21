@@ -53,7 +53,7 @@ ios_app        = $(shell cd ios && xcodebuild -project freedj.xcodeproj -scheme 
                    | awk '/ BUILT_PRODUCTS_DIR =/{print $$3}')/freedj.app
 
 .DEFAULT_GOAL := help
-.PHONY: deckbench help build debug relink plugin reaper-demo ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot shots-appstore check fmt clippy test perf cad clean reference distclean
+.PHONY: deckbench help build debug relink plugin reaper-demo reaper-mixer ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot shots-appstore check fmt clippy test perf cad clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -68,6 +68,11 @@ plugin: ## Build OpenDeck as a VST3 / CLAP plugin and install it in ~/.vst3 and 
 
 reaper-demo: plugin ## REAPER with OpenDeck on a track playing TRACK, its Pitch automated (REAPER=/opt/REAPER/reaper)
 	OPENDECK_TRACK="$(abspath $(TRACK))" OPENDECK_AUTOPLAY=1 $(or $(REAPER),/opt/REAPER/reaper) -new $(CURDIR)/tools/reaper/opendeck_demo.lua
+
+reaper-mixer: plugin ## REAPER: two OpenDeck decks (TRACK_A, TRACK_B) into an automated crossfader
+	mkdir -p $(HOME)/.config/REAPER/Effects/OpenDeck
+	cp tools/reaper/opendeck_xfader.jsfx $(HOME)/.config/REAPER/Effects/OpenDeck/
+	OPENDECK_TRACK_A="$(abspath $(TRACK_A))" OPENDECK_TRACK_B="$(abspath $(TRACK_B))" OPENDECK_AUTOPLAY=1 $(or $(REAPER),/opt/REAPER/reaper) -new $(CURDIR)/tools/reaper/opendeck_mixer.lua
 
 relink: ## Force a relink — fixes "librubberband.so.N: cannot open shared object file"
 	@touch crates/timestretch/build.rs crates/app/src/main.rs
