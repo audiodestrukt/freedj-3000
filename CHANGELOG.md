@@ -18,7 +18,11 @@ All notable changes to this project will be documented in this file.
   only.  The source splits from where the player is (the player says by
   looking up `CDJMODS/live/<id>@<page>`) and follows its jumps, and keeps
   finished splits for the next load, up to 2 GB on iOS / Android and 4 GB
-  elsewhere (`OPENDECK_LIVE_STEMS_MB`).  docs/design/serving-split-stems.md.
+  elsewhere (`OPENDECK_LIVE_STEMS_MB`).  The device's own deck always
+  comes first: a split for another player waits for, and gives way to,
+  its own.  Serving needs a separation model and is off by default on a
+  Raspberry Pi, which keeps its cores for its own split
+  (`OPENDECK_LIVE_STEMS=1` / `=0`).  docs/design/serving-split-stems.md.
 
 ### Changed
 - The NFS server sees files made while it runs, and a file's current

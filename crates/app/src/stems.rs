@@ -634,7 +634,7 @@ fn load_from(media: &mut dyn oc::Media, stick: &LinkStick, track: &Arc<Vec<f32>>
 
 /// How long a live source may take to start a track's bank (its decode
 /// and model load) before the deck stops waiting for it.
-const LIVE_START: std::time::Duration = std::time::Duration::from_secs(30);
+const LIVE_START: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Live stems from the linked player the track came from: another OpenDeck
 /// splitting it while we play (`opendeck_stems::live`, `livestems.rs` on
@@ -717,7 +717,6 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
     let db = pages.r.map.headroom_db;
     bank.scale = if db == 6 { SPLIT_SCALE } else { 10f32.powf(db as f32 / 20.0) };
     let bank = Arc::new(bank);
-    let _ = job.bank.set(Arc::clone(&bank));
     let frames = track.len() / 2;
     let step = deck_sr as usize * PAGED_STEP_SECS;
     let steps = frames.div_ceil(step).max(1);
@@ -740,6 +739,11 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
             let now = src_page();
             if now != told && !pages.r.map.done.get(now).copied().unwrap_or(true) { told = now; tell(media, now); }
             if pages.r.refresh(media)?.state == oc::live::State::Failed {
+                // Nothing came: this device splits the track itself.
+                if n_done == 0 && !pages.r.map.done.iter().any(|d| *d) {
+                    log::info!("stems: the source gave up on track {id} before any stems; splitting here");
+                    return Ok(None);
+                }
                 log::warn!("stems: the source gave up on track {id}; {n_done} of {steps} steps have stems");
                 return Ok(Some(bank));
             }
@@ -753,6 +757,9 @@ pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, de
         }
         pages.cache.retain(|i, _| (i + 1) * oc::live::PAGE_FRAMES > s0 && i * oc::live::PAGE_FRAMES < s1);
         bank.write(a * 2, [&got[0], &got[1], &got[2]]);
+        // On the deck once there are stems in it (a source that fails
+        // before then leaves the deck free to split the track itself).
+        if n_done == 0 { let _ = job.bank.set(Arc::clone(&bank)); }
         done[k] = true;
         n_done += 1;
         job.progress.store((n_done * 1000 / steps) as u32, Ordering::Relaxed);

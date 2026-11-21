@@ -157,12 +157,25 @@ playhead-following, `separate::Job::playhead`).
 at once), up to 2 GB on iOS and Android, 4 GB elsewhere
 (`OPENDECK_LIVE_STEMS_MB`); the oldest finished ones go first.
 
+**The deck comes first.**  A device's own deck always has the model
+before a player's request: a split for a player waits while the deck
+splits, and one under way stops at its next chunk when the deck starts
+one (the player keeps what came and plays the original after).  A player
+whose source gave up before any stems is told so at once and splits the
+track itself; a source that never starts a bank costs it 10 s at most.
+Serving live stems needs a separation model and is **off by default on a
+Raspberry Pi** (aarch64 Linux; `OPENDECK_LIVE_STEMS=1` turns it on): the
+Pi 5 splits its own tracks at about real time only with every core, so
+it stays a player.  `OPENDECK_LIVE_STEMS=0` turns it off anywhere.
+
 **Tests** (loopback, a stand-in model): a player reads the first pages
 while the split is still running, then the rest, each as split; a deck
 plays them at 44.1 and 48 kHz, the start before the split is done; a
 source with no live stems costs no wait; damaged pages and maps are
 refused; a renumbered track's bank is dropped; the split starts at the
-player's page and follows a jump back; a full cache drops the oldest.
+player's page and follows a jump back; a full cache drops the oldest; a
+split for a player waits for and gives way to the deck's own, and the
+player then splits it itself with no empty bank left on its deck.
 
 **Not done yet:** a run between two real devices (iPad source, desktop
 deck); writing the finished bank into the served index under our IDs

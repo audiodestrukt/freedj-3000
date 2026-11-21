@@ -113,6 +113,11 @@ impl SlipHold {
 fn split_on_device(path: &std::path::Path, track: &Arc<Vec<f32>>, sr: u32, job: &separate::Job) -> Result<Option<Arc<stems::StemBank>>> {
     use separate::model;
     if !model::present() { return Ok(None); }
+    // A split this device runs for a linked player gives way to this one.
+    struct Local;
+    impl Drop for Local { fn drop(&mut self) { livestems::LOCAL_SPLIT.store(false, std::sync::atomic::Ordering::Relaxed); } }
+    livestems::LOCAL_SPLIT.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _local = Local;
     let secs = track.len() as f64 / 2.0 / sr as f64;
     let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let mem = || { let (used, left) = model::memory_mb(); format!("mem {used} MB, {left} MB left") };
@@ -5566,10 +5571,14 @@ mod rekordbox_link_cue_tests {
 /// `/CDJMODS/live/<id>` starts a split it reads while it runs.  The banks
 /// live in the app's cache, one folder per served folder, served as
 /// `/CDJMODS` (or as `/CDJMODS/live` inside a stick's own `CDJMODS`, so its
-/// prepared banks stay served).  A device without the model logs and
-/// answers no stems.
+/// prepared banks stay served).  Only with a separation model and not on
+/// a Pi by default ([`livestems::enabled`]); then players split themselves.
 fn serve_live_stems(root: &std::path::Path, nfs: &opendeck_nfs::server::NfsServer, files: &[(u32, std::path::PathBuf)]) {
     use std::hash::{Hash, Hasher};
+    if !livestems::enabled() {
+        log::info!("media server: no live stems (no separation model, a Pi, or OPENDECK_LIVE_STEMS=0)");
+        return;
+    }
     let mut h = std::collections::hash_map::DefaultHasher::new();
     std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf()).hash(&mut h);
     let mods = livestems::cache_dir(&link_cache_dir()).join(format!("{:016x}", h.finish()));
@@ -5580,7 +5589,7 @@ fn serve_live_stems(root: &std::path::Path, nfs: &opendeck_nfs::server::NfsServe
         Ok(())
     })();
     match res {
-        Ok(()) => log::info!("media server: live stems from {} (model {})", mods.display(), if separate::model::present() { "present" } else { "absent" }),
+        Ok(()) => log::info!("media server: live stems from {}", mods.display()),
         Err(e) => log::warn!("media server: no live stems: {e:#}"),
     }
 }

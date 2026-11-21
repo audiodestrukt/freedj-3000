@@ -22,6 +22,22 @@ use std::time::Duration;
 /// Splits `track` (interleaved stereo at 44.1 kHz) into `bank`.
 pub type SplitFn = Arc<dyn Fn(&Arc<Vec<f32>>, &Job, &StemBank) -> Result<()> + Send + Sync>;
 
+/// Set while this device's own deck is splitting a track: a split for a
+/// player waits for it, and one under way gives way (the deck always comes
+/// first; on a Pi two splits at once would miss real time).
+pub static LOCAL_SPLIT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Whether this device serves live stems: with a separation model, unless
+/// `OPENDECK_LIVE_STEMS=0`; off by default on a Raspberry Pi (aarch64
+/// Linux), whose cores go to its own deck's split (`=1` turns it on).
+pub fn enabled() -> bool {
+    match std::env::var("OPENDECK_LIVE_STEMS").ok().as_deref() {
+        Some("0") => false,
+        Some("1") => separate::model::present(),
+        _ => separate::model::present() && !cfg!(all(target_os = "linux", target_arch = "aarch64")),
+    }
+}
+
 /// The PCM in a live bank is stored this much below its level, as a
 /// device split's bank is ([`SPLIT_SCALE`]).
 pub const HEADROOM_DB: u8 = 6;
@@ -39,6 +55,8 @@ pub struct LiveStems {
     split: SplitFn,
     /// Bytes of live banks kept; the oldest finished ones go first.
     cap: u64,
+    /// This device's deck is splitting ([`LOCAL_SPLIT`]; tests use their own).
+    local: &'static std::sync::atomic::AtomicBool,
 }
 
 /// How much the cache keeps by default (`OPENDECK_LIVE_STEMS_MB`
@@ -79,6 +97,10 @@ impl LiveStems {
 
     /// [`start`](Self::start) keeping at most `cap` bytes of banks.
     pub fn start_capped(cdjmods: PathBuf, files: &[(u32, PathBuf)], split: SplitFn, cap: u64) -> Result<Arc<LiveStems>> {
+        Self::start_with(cdjmods, files, split, cap, &LOCAL_SPLIT)
+    }
+
+    fn start_with(cdjmods: PathBuf, files: &[(u32, PathBuf)], split: SplitFn, cap: u64, local: &'static std::sync::atomic::AtomicBool) -> Result<Arc<LiveStems>> {
         std::fs::create_dir_all(cdjmods.join("live"))?;
         // Track IDs follow the folder's scan order, so a bank cached under an
         // ID may now be another track's: keep only those still matching.
@@ -89,7 +111,7 @@ impl LiveStems {
                 .is_some_and(|p| std::fs::read_to_string(e.path().join(SOURCE)).ok() == Some(source_key(p)));
             if !keep { let _ = std::fs::remove_dir_all(e.path()); }
         }
-        let me = Arc::new(LiveStems { cdjmods, files: files.iter().cloned().collect(), queue: Mutex::new((VecDeque::new(), None)), wake: Condvar::new(), playheads: Mutex::new(HashMap::new()), split, cap });
+        let me = Arc::new(LiveStems { cdjmods, files: files.iter().cloned().collect(), queue: Mutex::new((VecDeque::new(), None)), wake: Condvar::new(), playheads: Mutex::new(HashMap::new()), split, cap, local });
         let w = Arc::clone(&me);
         std::thread::Builder::new().name("live-stems".into()).spawn(move || w.run())?;
         Ok(me)
@@ -151,6 +173,7 @@ impl LiveStems {
             let same = std::fs::read_to_string(pages.with_file_name(SOURCE)).ok() == Some(source_key(path));
             if m.state == live::State::Complete && same { return Ok(m.pages()); }
         }
+        while self.local.load(std::sync::atomic::Ordering::Relaxed) { std::thread::sleep(Duration::from_millis(250)); }
         let track = Arc::new(decode_44k1(path)?);
         let frames = track.len() / 2;
         self.make_room(id, bank_bytes(frames as u64));
@@ -163,6 +186,9 @@ impl LiveStems {
             let h = s.spawn(|| { let r = (self.split)(&track, &job, &bank); done.store(true, std::sync::atomic::Ordering::Release); r });
             // Write each page out as soon as the split has filled it.
             while !done.load(std::sync::atomic::Ordering::Acquire) {
+                // The deck wants the model: stop at the next chunk.  The
+                // player keeps what it has and plays the original after.
+                if self.local.load(std::sync::atomic::Ordering::Relaxed) { job.cancel.store(true, std::sync::atomic::Ordering::Relaxed); }
                 if let Err(e) = write_ready(&mut w, &bank, &track) { job.cancel.store(true, std::sync::atomic::Ordering::Relaxed); let _ = h.join(); return Err(e); }
                 std::thread::sleep(Duration::from_millis(40));
             }
@@ -412,6 +438,62 @@ mod tests {
         }
         let kept: Vec<bool> = (1..=3).map(|i| mods.join(format!("live/{i}/pages")).exists()).collect();
         assert_eq!(kept, vec![false, true, true], "the oldest went");
+    }
+
+    /// The deck comes first: a split for a player waits while this
+    /// device's deck splits, and one under way stops when the deck starts
+    /// one.  A player whose source gave up before any stems gets no bank
+    /// (so it splits the track itself), at once.
+    #[test]
+    fn a_split_for_a_player_gives_way_to_the_decks_own() {
+        static LOCAL: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        use std::sync::atomic::Ordering::Relaxed;
+        let music = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        let frames = 44_100 * 10;
+        let mut wav = opendeck_stems::pgz::wav_header(frames as u32 * 4).to_vec();
+        wav.extend(std::iter::repeat(0u8).take(frames * 4));
+        let file = music.path().join("t.wav");
+        std::fs::write(&file, wav).unwrap();
+        let started = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let st = Arc::clone(&started);
+        // A stand-in that runs until cancelled, as a long split would.
+        let split: SplitFn = Arc::new(move |_, job, _| {
+            st.fetch_add(1, Relaxed);
+            while !job.cancel.load(Relaxed) { std::thread::sleep(Duration::from_millis(10)); }
+            anyhow::bail!("cancelled")
+        });
+        let mods = cache.path().join("cdjmods");
+        let live = LiveStems::start_with(mods.clone(), &[(1, file.clone())], split, 1 << 30, &LOCAL).unwrap();
+        let srv = opendeck_nfs::server::NfsServer::start(opendeck_nfs::server::Tree::scan(music.path()).unwrap(), "/C/", 0, 0).unwrap();
+        srv.tree.overlay("CDJMODS", &mods).unwrap();
+        srv.tree.on_miss(live.hook());
+        let wait = |what: &str, f: &dyn Fn() -> bool| {
+            let t0 = std::time::Instant::now();
+            while !f() { assert!(t0.elapsed() < Duration::from_secs(10), "timed out: {what}"); std::thread::sleep(Duration::from_millis(10)); }
+        };
+
+        LOCAL.store(true, Relaxed);           // the deck is splitting
+        live.request(1);
+        std::thread::sleep(Duration::from_millis(400));
+        assert_eq!(started.load(Relaxed), 0, "waits for the deck's split");
+        LOCAL.store(false, Relaxed);
+        wait("the split for the player", &|| started.load(Relaxed) == 1);
+
+        // A player reading it; the deck starts a split; the player's split
+        // stops, and the player is told no stems (it splits itself).
+        let track = Arc::new(vec![0f32; frames * 2]);
+        let mut m = crate::stems::NfsMedia::mount_at(std::net::Ipv4Addr::LOCALHOST, srv.portmap, "/C/").unwrap();
+        let job = Arc::new(Job::default());
+        let (j, t) = (Arc::clone(&job), Arc::clone(&track));
+        let reader = std::thread::spawn(move || crate::stems::live_from(&mut m, 1, &t, 44_100, &j, Duration::from_secs(10)));
+        std::thread::sleep(Duration::from_millis(300));
+        LOCAL.store(true, Relaxed);
+        let t0 = std::time::Instant::now();
+        assert!(reader.join().unwrap().unwrap().is_none(), "no stems came: the player splits it");
+        assert!(t0.elapsed() < Duration::from_secs(2));
+        assert!(job.bank.get().is_none(), "no empty bank left on the deck");
+        LOCAL.store(false, Relaxed);
     }
 
     #[test]
