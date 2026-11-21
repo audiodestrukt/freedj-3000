@@ -5,8 +5,9 @@
 //! NULL, GETATTR, LOOKUP, READ, READDIR, STATFS (nfs) and NULL, MNT, UMNT,
 //! EXPORT (mount).
 //!
-//! File handles are 32 bytes: the node index (u64 BE) then zeros.  Nodes are
-//! walked once at start from the served folder.
+//! File handles are 32 bytes: a marker and the node index.  Nodes are
+//! walked at start from the served folder and added as clients find new
+//! files ([`Tree`] is live).
 
 use anyhow::{Context, Result};
 use std::collections::HashMap;
@@ -14,7 +15,7 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom};
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 use std::thread;
 
 const PROG_PORTMAP: u32 = 100_000;
@@ -32,45 +33,136 @@ const MAX_READ: usize = 8192;
 /// refused the track ("E-8302: CANNOT PLAY TRACK").
 const READ_CAP: usize = 32 * 1024;
 
-struct Node { path: PathBuf, is_dir: bool, size: u64, mtime: u32, children: Vec<(String, u32)> }
+#[derive(Clone)]
+struct Node { path: PathBuf, nfs: String, is_dir: bool, size: u64, mtime: u32, children: Vec<(String, u32)> }
 
-/// The served tree.
-pub struct Tree { nodes: Vec<Node>, by_path: HashMap<PathBuf, u32> }
+struct Nodes { nodes: Vec<Node>, by_path: HashMap<PathBuf, u32> }
 
-impl Tree {
-    /// Walk `root` (recursively) into a node table.  Hidden entries are skipped.
-    pub fn scan(root: &Path) -> Result<Tree> {
-        let mut t = Tree { nodes: Vec::new(), by_path: HashMap::new() };
-        t.add(root.to_path_buf())?;
-        Ok(t)
-    }
-    fn add(&mut self, path: PathBuf) -> Result<u32> {
+/// Called with the NFS path (`/CDJMODS/live/12`) of a name a client looked
+/// up and did not find, before the server answers "no such file": a chance
+/// to make it (or to start making it).
+pub type MissHook = Arc<dyn Fn(&str) + Send + Sync>;
+
+/// The served tree.  It is **live**: a LOOKUP or READDIR sees files made
+/// after the scan, and GETATTR and READ see a file's current size, so a file
+/// another thread is still writing can be read as it grows.  Node indices
+/// (and so file handles) never change once given out.
+pub struct Tree { inner: RwLock<Nodes>, on_miss: RwLock<Option<MissHook>> }
+
+fn mtime_of(md: &fs::Metadata) -> u32 {
+    md.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as u32).unwrap_or(0)
+}
+
+/// A name a client may look up: no hidden files, nothing that leaves the dir.
+fn plain_name(n: &str) -> bool { !n.is_empty() && !n.starts_with('.') && !n.contains('/') && !n.contains('\\') }
+
+fn join_nfs(dir: &str, name: &str) -> String { if dir == "/" { format!("/{name}") } else { format!("{dir}/{name}") } }
+
+impl Nodes {
+    fn add(&mut self, path: PathBuf, nfs: String) -> Result<u32> {
         let md = fs::metadata(&path).with_context(|| format!("stat {}", path.display()))?;
-        let mtime = md.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as u32).unwrap_or(0);
+        if let Some(&i) = self.by_path.get(&path) { return Ok(i); }
         let idx = self.nodes.len() as u32;
-        self.nodes.push(Node { path: path.clone(), is_dir: md.is_dir(), size: md.len(), mtime, children: Vec::new() });
+        self.nodes.push(Node { path: path.clone(), nfs: nfs.clone(), is_dir: md.is_dir(), size: md.len(), mtime: mtime_of(&md), children: Vec::new() });
         self.by_path.insert(path.clone(), idx);
         if md.is_dir() {
             let mut names: Vec<(String, PathBuf)> = fs::read_dir(&path)?.flatten()
                 .map(|e| (e.file_name().to_string_lossy().into_owned(), e.path()))
-                .filter(|(n, _)| !n.starts_with('.')).collect();
+                .filter(|(n, _)| plain_name(n)).collect();
             names.sort();
             for (name, child) in names {
-                if let Ok(ci) = self.add(child) { self.nodes[idx as usize].children.push((name, ci)); }
+                let cn = join_nfs(&nfs, &name);
+                if let Ok(ci) = self.add(child, cn) { self.nodes[idx as usize].children.push((name, ci)); }
             }
         }
         Ok(idx)
     }
+}
+
+impl Tree {
+    /// Walk `root` (recursively) into a node table.  Hidden entries are skipped.
+    pub fn scan(root: &Path) -> Result<Tree> {
+        let mut n = Nodes { nodes: Vec::new(), by_path: HashMap::new() };
+        n.add(root.to_path_buf(), "/".into())?;
+        Ok(Tree { inner: RwLock::new(n), on_miss: RwLock::new(None) })
+    }
     /// The NFS path (`/a/b.mp3`, forward slashes, relative to the export root)
     /// of every regular file — what dbserver hands out as a track's path.
     pub fn files(&self) -> Vec<(String, PathBuf)> {
-        let root = &self.nodes[0].path;
-        self.nodes.iter().filter(|n| !n.is_dir).map(|n| {
-            let rel = n.path.strip_prefix(root).unwrap_or(&n.path);
-            let s = rel.components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join("/");
-            (format!("/{s}"), n.path.clone())
-        }).collect()
+        let t = self.inner.read().unwrap();
+        t.nodes.iter().filter(|n| !n.is_dir).map(|n| (n.nfs.clone(), n.path.clone())).collect()
     }
+    /// Serve local folder `dir` as `/<name>` at the export root, in place of
+    /// any folder of that name in the scanned one (a media server keeps its
+    /// own `CDJMODS` outside the user's music folder).
+    pub fn overlay(&self, name: &str, dir: &Path) -> Result<()> {
+        anyhow::ensure!(plain_name(name), "overlay name {name:?}");
+        fs::create_dir_all(dir)?;
+        let mut t = self.inner.write().unwrap();
+        let ci = t.add(dir.to_path_buf(), format!("/{name}"))?;
+        let root = &mut t.nodes[0].children;
+        root.retain(|(n, _)| n != name);
+        root.push((name.to_string(), ci));
+        root.sort();
+        Ok(())
+    }
+    /// Set the hook called on a lookup that finds nothing ([`MissHook`]).
+    pub fn on_miss(&self, f: MissHook) { *self.on_miss.write().unwrap() = Some(f); }
+
+    /// Node `i` with its size and time read again from the disk.
+    fn node(&self, i: u32) -> Option<Node> {
+        let mut t = self.inner.write().unwrap();
+        let nd = t.nodes.get_mut(i as usize)?;
+        if let Ok(md) = fs::metadata(&nd.path) { nd.size = md.len(); nd.mtime = mtime_of(&md); }
+        Some(Node { children: Vec::new(), ..nd.clone() })
+    }
+    /// `name` in directory `dir`: from the table, else from the disk (a file
+    /// made since the scan), else after asking the miss hook.
+    fn lookup(&self, dir: u32, name: &str) -> Option<u32> {
+        if !plain_name(name) { return None; }
+        let (path, nfs) = {
+            let t = self.inner.read().unwrap();
+            let d = t.nodes.get(dir as usize)?;
+            if let Some((_, ci)) = d.children.iter().find(|(c, _)| c == name) {
+                if t.nodes[*ci as usize].path.exists() { return Some(*ci); }
+            }
+            (d.path.join(name), join_nfs(&d.nfs, name))
+        };
+        let found = |tree: &Tree| -> Option<u32> {
+            if !path.exists() { return None; }
+            let mut t = tree.inner.write().unwrap();
+            let ci = t.add(path.clone(), nfs.clone()).ok()?;
+            let ch = &mut t.nodes[dir as usize].children;
+            if !ch.iter().any(|(c, _)| c == name) { ch.push((name.to_string(), ci)); ch.sort(); }
+            Some(ci)
+        };
+        if let Some(ci) = found(self) { return Some(ci); }
+        let hook = self.on_miss.read().unwrap().clone();
+        if let Some(h) = hook { h(&nfs); }
+        found(self)
+    }
+    /// The children of directory `dir` as they are on the disk now.
+    fn children(&self, dir: u32) -> Vec<(String, u32)> {
+        let (path, nfs, overlays) = {
+            let t = self.inner.read().unwrap();
+            let Some(d) = t.nodes.get(dir as usize) else { return Vec::new() };
+            // Children that live elsewhere (overlays) stay as they are.
+            let ov: Vec<(String, u32)> = d.children.iter().filter(|(_, ci)| t.nodes[*ci as usize].path.parent() != Some(d.path.as_path())).cloned().collect();
+            (d.path.clone(), d.nfs.clone(), ov)
+        };
+        let mut names: Vec<String> = fs::read_dir(&path).map(|rd| rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| plain_name(n)).collect()).unwrap_or_default();
+        names.retain(|n| !overlays.iter().any(|(o, _)| o == n));
+        names.sort();
+        let mut t = self.inner.write().unwrap();
+        let mut out = overlays;
+        for n in names {
+            if let Ok(ci) = t.add(path.join(&n), join_nfs(&nfs, &n)) { out.push((n, ci)); }
+        }
+        out.sort();
+        t.nodes[dir as usize].children = out.clone();
+        out
+    }
+    fn len(&self) -> usize { self.inner.read().unwrap().nodes.len() }
 }
 
 // ── XDR ───────────────────────────────────────────────────────────────────────
@@ -237,22 +329,21 @@ fn serve_nfsd(sock: UdpSocket, tree: Arc<Tree>) {
         let Some((xid, prog, _v, proc_, off)) = parse_call(d) else { log::debug!("nfsd: {from} unparsed {n} bytes"); continue };
         log::debug!("nfsd: {from} prog {prog} v{_v} proc {proc_}");
         if prog != PROG_NFS { continue; }
-        let node_at = |o: usize| d.get(o..o + 32).and_then(idx_of).and_then(|i| tree.nodes.get(i as usize).map(|nd| (i, nd)));
+        let node_at = |o: usize| d.get(o..o + 32).and_then(idx_of).and_then(|i| tree.node(i).map(|nd| (i, nd)));
         let body = match proc_ {
             0 => Vec::new(),
             1 => match node_at(off) { // GETATTR
-                Some((i, nd)) => { let mut b = Vec::new(); put32(&mut b, 0); fattr(&mut b, i, nd); b }
+                Some((i, nd)) => { let mut b = Vec::new(); put32(&mut b, 0); fattr(&mut b, i, &nd); b }
                 None => err(NFSERR_STALE),
             },
             4 => { // LOOKUP dir fh + name
                 match node_at(off) {
-                    Some((_, dir)) if dir.is_dir => {
+                    Some((di, dir)) if dir.is_dir => {
                         let name = get_opaque(d, off + 32).map(|(b, _)| unwide(b)).unwrap_or_default();
-                        match dir.children.iter().find(|(c, _)| *c == name) {
-                            Some((_, ci)) => {
-                                let nd = &tree.nodes[*ci as usize];
+                        match tree.lookup(di, &name).and_then(|ci| tree.node(ci).map(|nd| (ci, nd))) {
+                            Some((ci, nd)) => {
                                 log::debug!("nfsd: {from} LOOKUP {name:?} → {}", nd.path.display());
-                                let mut b = Vec::new(); put32(&mut b, 0); b.extend_from_slice(&fh_of(*ci)); fattr(&mut b, *ci, nd); b
+                                let mut b = Vec::new(); put32(&mut b, 0); b.extend_from_slice(&fh_of(ci)); fattr(&mut b, ci, &nd); b
                             }
                             None => { log::info!("nfsd: {from} LOOKUP {name:?}: not found"); err(NFSERR_NOENT) }
                         }
@@ -269,7 +360,7 @@ fn serve_nfsd(sock: UdpSocket, tree: Arc<Tree>) {
                         let mut data = vec![0u8; count];
                         let got = fs::File::open(&nd.path).and_then(|mut f| { f.seek(SeekFrom::Start(offset))?; let mut total = 0; while total < count { let k = f.read(&mut data[total..])?; if k == 0 { break; } total += k; } Ok(total) });
                         match got {
-                            Ok(k) => { data.truncate(k); let mut b = Vec::new(); put32(&mut b, 0); fattr(&mut b, i, nd); put_opaque(&mut b, &data); b }
+                            Ok(k) => { data.truncate(k); let mut b = Vec::new(); put32(&mut b, 0); fattr(&mut b, i, &nd); put_opaque(&mut b, &data); b }
                             Err(e) => { log::warn!("nfsd: read {}: {e}", nd.path.display()); err(NFSERR_IO) }
                         }
                     }
@@ -279,13 +370,14 @@ fn serve_nfsd(sock: UdpSocket, tree: Arc<Tree>) {
             }
             16 => { // READDIR fh, cookie, count
                 match node_at(off) {
-                    Some((_, dir)) if dir.is_dir => {
+                    Some((di, dir)) if dir.is_dir => {
+                        let children = tree.children(di);
                         let cookie = be32(d, off + 32).unwrap_or(0) as usize;
                         let count = be32(d, off + 36).unwrap_or(4096) as usize;
                         let mut b = Vec::new(); put32(&mut b, 0);
                         let mut used = 16; let mut i = cookie; let mut eof = true;
-                        while i < dir.children.len() {
-                            let (name, ci) = &dir.children[i];
+                        while i < children.len() {
+                            let (name, ci) = &children[i];
                             let w = wide(name);
                             if used + 16 + w.len() > count.min(60000) { eof = false; break; }
                             put32(&mut b, 1); put32(&mut b, ci + 1); put_opaque(&mut b, &w); put32(&mut b, i as u32 + 1);
@@ -309,7 +401,7 @@ fn serve_nfsd(sock: UdpSocket, tree: Arc<Tree>) {
 }
 
 /// A running server: the ports it took.
-pub struct NfsServer { pub portmap: u16, pub mountd: u16, pub nfsd: u16 }
+pub struct NfsServer { pub portmap: u16, pub mountd: u16, pub nfsd: u16, pub tree: Arc<Tree> }
 
 impl NfsServer {
     /// Serve `tree` as export `export_name` (e.g. `/C/`).  `portmap_port` is
@@ -330,9 +422,9 @@ impl NfsServer {
         };
         let md = any(0).context("bind mountd")?;
         let nd = any(nfsd_port).or_else(|_| any(0)).context("bind nfsd")?;
-        let ports = NfsServer { portmap: pm.local_addr()?.port(), mountd: md.local_addr()?.port(), nfsd: nd.local_addr()?.port() };
-        log::info!("nfs: portmap {} mountd {} nfsd {}; export {export_name:?} = {} nodes", ports.portmap, ports.mountd, ports.nfsd, tree.nodes.len());
         let tree = Arc::new(tree);
+        let ports = NfsServer { portmap: pm.local_addr()?.port(), mountd: md.local_addr()?.port(), nfsd: nd.local_addr()?.port(), tree: Arc::clone(&tree) };
+        log::info!("nfs: portmap {} mountd {} nfsd {}; export {export_name:?} = {} nodes", ports.portmap, ports.mountd, ports.nfsd, tree.len());
         let p = Ports { mountd: ports.mountd, nfsd: ports.nfsd };
         thread::Builder::new().name("portmap".into()).spawn(move || serve_portmap(pm, p))?;
         let export = wide(export_name);
@@ -359,6 +451,53 @@ mod tests {
         let got = c.read(&fh, 32_768, 32_768).unwrap();
         assert_eq!(got.len(), 32_768, "a 32 KiB read comes back whole");
         assert_eq!(&got[..], &body[32_768..65_536]);
+    }
+
+    /// A media server writes stems while it serves: a player must find a
+    /// file made after the server started, read a file as it grows, list
+    /// a new folder, and see a cache folder served in place of one.
+    #[test]
+    fn a_player_sees_files_made_while_the_server_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("t.mp3"), b"mp3").unwrap();
+        std::fs::create_dir_all(dir.path().join("CDJMODS")).unwrap();
+        std::fs::write(dir.path().join("CDJMODS/index.json"), b"stick's").unwrap();
+        let srv = NfsServer::start(Tree::scan(dir.path()).unwrap(), "/C/", 0, 0).unwrap();
+        srv.tree.overlay("CDJMODS", cache.path()).unwrap();
+        let mut c = crate::Nfs::connect_at(Ipv4Addr::LOCALHOST, srv.portmap).unwrap();
+        let root = c.mount_usb().unwrap();
+
+        assert!(c.lookup_path_opt(&root, "CDJMODS/index.json").unwrap().is_none(), "the overlay hides the stick's CDJMODS");
+        std::fs::create_dir_all(cache.path().join("live/7")).unwrap();
+        std::fs::write(cache.path().join("live/7/map"), [0u8; 4]).unwrap();
+        let (fh, size) = c.lookup_path(&root, "CDJMODS/live/7/map").expect("made after the start");
+        assert_eq!(size, 4);
+        std::fs::write(cache.path().join("live/7/map"), [1u8; 9]).unwrap();
+        assert_eq!(c.read(&fh, 0, 64).unwrap(), vec![1u8; 9], "read at its new size");
+        std::fs::write(dir.path().join("new.mp3"), b"x").unwrap();
+        let names: Vec<String> = c.readdir(&root).unwrap().into_iter().map(|e| e.name).collect();
+        assert!(names.contains(&"new.mp3".to_string()) && names.contains(&"CDJMODS".to_string()), "{names:?}");
+        assert_eq!(names.iter().filter(|n| *n == "CDJMODS").count(), 1, "{names:?}");
+    }
+
+    /// A lookup that misses asks the hook first, which may make the file.
+    #[test]
+    fn a_missed_lookup_asks_the_hook_and_finds_what_it_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let srv = NfsServer::start(Tree::scan(dir.path()).unwrap(), "/C/", 0, 0).unwrap();
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (a, root_dir) = (Arc::clone(&asked), dir.path().to_path_buf());
+        srv.tree.on_miss(Arc::new(move |p: &str| {
+            a.lock().unwrap().push(p.to_string());
+            if p == "/live" { std::fs::create_dir_all(root_dir.join("live")).unwrap(); }
+        }));
+        let mut c = crate::Nfs::connect_at(Ipv4Addr::LOCALHOST, srv.portmap).unwrap();
+        let root = c.mount_usb().unwrap();
+        assert!(c.lookup_path_opt(&root, "live").unwrap().is_some(), "the hook made it");
+        assert!(c.lookup_path_opt(&root, "nothing").unwrap().is_none());
+        assert!(c.lookup_path_opt(&root, "..").unwrap().is_none(), "never outside the export");
+        assert_eq!(*asked.lock().unwrap(), vec!["/live".to_string(), "/nothing".to_string()]);
     }
 
     #[test]
