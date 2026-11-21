@@ -11,9 +11,10 @@ All notable changes to this project will be documented in this file.
   skirt turns the AS5600 7 × per platter turn.  There are five bearing
   versions, and the build checks that each one holds the ring against every
   nudge and tilt:
-  - a Pioneer-style ring on 24 small rollers in two circles, with a ridge
-    under the deck top and the AS5600 driven by a gear on that ridge
-    (10.7 : 1, no slip);
+  - a Pioneer-style ring on 16 small rollers, with a ridge under the deck
+    top, an optical quadrature encoder (a slotted fin through two opto
+    interrupters, 720 counts a turn) and a laser-cut clear window over the
+    display;
   - six 608s crossed at ±45° around a ridge on the skirt, each carrying load
     and centring;
   - 608 skateboard bearings on edge under the ring, as on a Pioneer, with

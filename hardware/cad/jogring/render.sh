@@ -26,5 +26,5 @@ r crossed_up   build/jogring_crossed_cutaway.glb --res 1400 --resy 1000 --az 90 
 r crossed_hero build/jogring_crossed.glb --res 1400 --resy 1000 --az -24 --el 30 --dist 2.6
 r pioneer_hero build/jogring_pioneer.glb --res 1400 --resy 1000 --az -24 --el 32 --dist 2.5
 r pioneer_open build/jogring_pioneer_noring.glb --res 1400 --resy 1000 --az -20 --el 45 --dist 2.3
-r pioneer_cut  build/jogring_pioneer_cutaway.glb --res 1400 --resy 1000 --az 90 --el 8 --dist 1.0 --target 0.0,-0.095,0.025 --lens 60
-r pioneer_gear build/jogring_pioneer_noring.glb --res 1400 --resy 1000 --az 45 --el 30 --dist 0.55 --target 0.083,0.083,0.022 --lens 60
+r pioneer_cut  build/jogring_pioneer_cutaway.glb --res 1400 --resy 1000 --az 90 --el 8 --dist 1.0 --target 0.0,-0.09,0.02 --lens 60
+r pioneer_opto build/jogring_pioneer_cutaway.glb --res 1400 --resy 1000 --az 90 --el 12 --dist 0.9 --target 0.0,0.075,0.015 --lens 60

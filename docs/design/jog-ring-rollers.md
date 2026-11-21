@@ -7,7 +7,7 @@ Dan's decisions so far:
 - **Display:** a round smart-watch LCD, 2.1" at most, with the 1.28" GC9A01 he has for the prototype.
 - **Weight:** none.  A Pioneer doesn't weight the ring.  Eddy-current drag may be tried for the feel.
 - **Bearings:** skateboard bearings (608s) are what he has, and he wants them **on edge**, taking the press straight down, as Pioneer and most decks do.  The rig has three versions to compare:
-  - **pioneer** (from a Pioneer teardown he watched): one ring on 24 small horizontal rollers in two concentric circles, a ridge under the deck top against lifting, and the angle from a gear on that ridge.  The low-profile route, and closest to the real thing;
+  - **pioneer** (from a Pioneer teardown he watched, then his changes): one ring on 16 small horizontal rollers in a single circle, a ridge under the deck top against lifting, an **optical quadrature encoder** (a slotted fin through two opto interrupters, 720 counts a turn), and a **laser-cut clear window** glued in over the display.  The low-profile route, and closest to the real thing;
   - **crossed** (his pick, after seeing the edge version: "just angled bearings"): 6 × 608 tilted ±45° around a diamond ridge.  Every bearing carries load and centres, and a lean on the rim rolls instead of sliding;
   - **edge**: 3 × 608 on edge under a track, 3 flat against the skirt, and a lip against tipping;
   - **608**: 608s in printed V tyres;
@@ -78,8 +78,9 @@ From a video teardown Dan watched, and his reading of it:
 - The centre is a fixed rectangular display on a metal bracket.  The rubber
   grip is a separate ring, held by three clips.
 
-The `pioneer` rig version follows this.  Its gear is on the ridge outside
-the ring, because a 2.1" hub leaves no room for it inside.
+The `pioneer` rig version follows this layout.  Dan then chose one circle
+of rollers (the two Pioneer circles move together anyway), optical
+quadrature instead of the gear, and a clear window over the display.
 
 ## Sensing the angle: a roller on the skirt
 

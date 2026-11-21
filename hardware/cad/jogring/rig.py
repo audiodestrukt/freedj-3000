@@ -405,7 +405,7 @@ MAT = {
     "pom": ((0.9, 0.9, 0.88, 1), 0.0, 0.4), "alu": ((0.75, 0.76, 0.78, 1), 1.0, 0.3),
     "steel": ((0.62, 0.63, 0.65, 1), 1.0, 0.25), "blue": ((0.05, 0.15, 0.55, 1), 0.0, 0.5),
     "black": ((0.02, 0.02, 0.022, 1), 0.0, 0.2), "rubber": ((0.03, 0.03, 0.03, 1), 0.0, 0.8),
-    "magnet": ((0.4, 0.4, 0.42, 1), 1.0, 0.4), "tyre": ((0.10, 0.45, 0.20, 1), 0.0, 0.5),
+    "magnet": ((0.4, 0.4, 0.42, 1), 1.0, 0.4), "glass": ((0.85, 0.9, 0.95, 0.25), 0.0, 0.05), "tyre": ((0.10, 0.45, 0.20, 1), 0.0, 0.5),
 }
 KEY = {"ring": "ring", "edge/ring": "ring", "crossed/ring": "ring", "crossed/plate": "plate", "crossed/hub_210": "hub", "vwheel/plate": "plate", "608/plate": "plate", "edge/plate": "plate", "hub_210": "hub", "arm": "arm", "roller": "arm", "magnet_cup": "arm"}
 
@@ -436,7 +436,7 @@ def held(variant, items):
     nudge must run it into a bearing (or the lip into one).  The sprung roller
     doesn't count.  Returns the number of free directions."""
     ring = next(m for n, m, _ in items if n.endswith("ring"))
-    fixed = [(n, m) for n, m, _ in items if not n.endswith("ring") and n.split("/")[-1] not in SPRUNG and "hub" not in n and n != "display"]
+    fixed = [(n, m) for n, m, _ in items if not n.endswith("ring") and n.split("/")[-1] not in SPRUNG and "hub" not in n and n not in ("display", "window")]   # the window is glued to the ring
     T = trimesh.transformations
     moves = {f"{s}{ax}": T.translation_matrix(np.eye(3)[i] * (0.4 if s == "+" else -0.4))
              for i, ax in enumerate("xyz") for s in "+-"}
@@ -468,6 +468,8 @@ PRESS_FIT = math.pi * ((B608[0] / 2) ** 2 - (TYRE_BORE / 2) ** 2) * (TYRE_W - TY
 def main():
     os.makedirs(PRINT, exist_ok=True)
     tmp = os.path.join(BUILD, "parts")
+    import shutil
+    shutil.rmtree(tmp, ignore_errors=True)       # no stale parts from an older layout
     os.makedirs(tmp, exist_ok=True)
     bad = []
     import pioneer
@@ -523,7 +525,7 @@ def main():
             if len(cm.faces):
                 cut.append((n, cm, k))
         scene(cut).export(os.path.join(BUILD, f"jogring_{variant}_cutaway.glb"))
-        scene([i for i in items if not i[0].endswith(("ring", "retainer"))]).export(os.path.join(BUILD, f"jogring_{variant}_noring.glb"))
+        scene([i for i in items if not i[0].endswith(("ring", "retainer", "window"))]).export(os.path.join(BUILD, f"jogring_{variant}_noring.glb"))
     # The small hub has to hold the 1.28" module too.
     m128 = mesh(hub("128"), os.path.join(tmp, "hub_128.stl"))
     g, _, t = DISPLAYS["128"]
