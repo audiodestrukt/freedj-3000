@@ -1,6 +1,12 @@
 # Design: a ring jog on rollers, a fixed display in the middle
 
-Status: **plan only, not built** (2026-11-20).  For deck7's 206 mm jog.
+Status: **test rig designed, not printed** (2026-11-20): [`hardware/cad/jogring`](../../hardware/cad/jogring/README.md).  For deck7's 206 mm jog.
+
+Dan's decisions so far:
+
+- **Display:** a round smart-watch LCD, 2.1" at most, with the 1.28" GC9A01 he has for the prototype.
+- **Weight:** none.  A Pioneer doesn't weight the ring.  Eddy-current drag may be tried for the feel.
+- **Touch:** undecided.  A Pioneer uses a physical switch, not capacitive.
 
 ## Why the jog changes
 
@@ -23,7 +29,7 @@ A CDJ-style jog has a **display in the middle that does not turn** and a
   ═══════════│      LCD + bezel     │═══│  top surface (touch)         │════
              │                      │ g │                              │
              │   hub column         │   └───┬──────────────────────────┘
-             │   (fixed, hollow:    │       │ skirt  ◄ V-rib (outward)
+             │   (fixed, hollow:    │       │ skirt  ◄ V groove (outside)
              │    display cable)    │       │◄►(V-wheel)    (sense roller)
   top plate ─┴──────────────────────┴───────┴───────┴──────────┴─────────
               cable down to the Pi        wheel posts in the top plate
@@ -32,25 +38,25 @@ A CDJ-style jog has a **display in the middle that does not turn** and a
 | | Value | Why |
 |---|---|---|
 | Platter OD | 206 mm | unchanged (layout.toml `jog.platter_mm`) |
-| Hub window | ~80 mm ⚠ | about 40 % of the jog, like a CDJ; set by the display chosen (below) |
+| Hub | Ø66.4 | a 2.1" watch panel (glass ~61 ⚠) under a 1.5 mm lip; a second top for the 1.28" |
 | Ring bore | hub + 2 × 1.5 mm gap | the only visible seam on the top |
 | Skirt | Ø140 mm, under the platter | a larger support radius resists tilt better when a DJ leans on the rim |
-| Rib | a 90° V around the skirt's outside | one rib carries radial load and up/down load |
-| Wheels | 3 × V-groove wheels, 120° apart, vertical axes, on posts in the top plate | they sit at r ≈ 82, inside the platter's shadow (r < 103), so they can't be seen |
+| Groove | a 90° V around the skirt's outside | V-wheels have the V on the wheel, so the ring gets the groove; one groove carries radial load and up/down load |
+| Wheels | 3 × V-groove wheels, 120° apart, vertical axes, on posts in the top plate | they sit at r ≈ 80, inside the platter's shadow (r < 103), so they can't be seen |
 | Preload | one wheel on an eccentric spacer | removes play; the same trick as on a V-slot gantry |
 
-### Why rollers on a V-rib, and not a big bearing
+### Why rollers in a V groove, and not a big bearing
 
 | Option | For | Against |
 |---|---|---|
-| **3 V-wheels on a V-rib** (recommended) | cheap (3D-printer V-wheels, 625 bearings, M5 posts and an eccentric spacer); self-centring; preload is adjustable; one rib takes every load | a printed rib wears against the wheels.  Fine for the prototype; later a turned or laser-cut ring |
+| **3 V-wheels in a V groove** (built) | cheap (3D-printer V-wheels, 625 bearings, M5 posts and an eccentric spacer); self-centring; preload is adjustable; one groove takes every load | a printed groove wears against the wheels.  Fine for the prototype; later a turned or laser-cut ring |
 | Thin-section bearing (e.g. a 61818, 90 × 115 mm) | smoothest; no adjustment | expensive; heavy; the bore sets the hub size |
 | Lazy-susan bearing | very cheap | gritty and noisy, with play, which is exactly what a jog must not have |
 | Printed ball race with loose balls | no bought parts | hard to make quiet and free of play |
 
 Load check: a hard press on the rim is a few kg at r = 103 against wheels at
 r ≈ 70–82.  625 bearings are rated well above that (about 1.7 kN dynamic).
-The weak part is the printed rib's flank, not the wheels.
+The weak part is the printed groove's flank, not the wheels.
 
 ## Sensing the angle: a roller on the skirt
 
@@ -58,9 +64,11 @@ The recommendation: **a small roller with an O-ring tyre, sprung against the
 skirt's smooth face, with the AS5600 under a magnet in the roller's axle.**
 
 - It reuses the sensor, magnet and firmware the deck already has.
-- It is geared up for free: at a Ø140 skirt and a Ø14 roller, the roller
-  turns 10 × per platter turn.  At the AS5600's 4096 counts that is about
-  41,000 counts per platter turn, against 4096 now.
+- It is geared up for free: the roller (an Ø18 tyre) runs on the skirt's
+  inside face (Ø126), so it turns 7 × per platter turn.  At the AS5600's
+  4096 counts that is about 28,700 counts per platter turn, against 4096
+  now.  (A smaller roller would gear it up more, but its bearing boss has
+  to clear the skirt.)
 - The jog only needs relative motion, so the exact ratio is calibrated once
   in software (spin the platter one turn against a mark).
 - The spring keeps the tyre from slipping.  The only drag on the roller is
@@ -78,48 +86,53 @@ test rig has to answer.  The fallbacks, in order:
    sensor (the AS5304/AS5311 family).  It doesn't touch the ring either, but
    the parts cost more and are harder to get.
 
-Sensing on one of the V-wheels themselves would save a part.  But the rib
+Sensing on one of the V-wheels themselves would save a part.  But the groove
 touches the wheel on its flanks, so the ratio is uncertain, and the
 eccentric preload changes it.  Rejected for now.
 
-## Touch: capacitive, across the gap
+## Touch: undecided
 
-The ring turns, so a wire can't reach its top.  Instead it couples across an
-air gap, with no slip ring:
+A Pioneer jog uses a **physical switch**, not capacitive sensing.  The ring
+turns, so a wire can't reach its top.  There are two routes:
 
-- The platter's top surface is conductive: aluminium tape or foil, or later
-  a metal top ring, as on a CDJ.  It is joined to a conductive band inside
-  the skirt.
-- A fixed electrode, a copper ring on the top plate, faces that band across
-  about 1 mm.
-- Coupling: ε₀ · A / d with a 10 mm band at r = 70 is about 2π · 70 · 10 mm²
-  at 1 mm, roughly **40 pF**.  That is plenty for a touch controller, which
-  detects a few pF.
-- It is read by the control board (#77, RP2350): PIO charge-time sensing, or
-  an MPR121 on I²C.  It replaces layout.toml's `jog_touch` tact switch, so
-  pressing the jog is no longer required.
-- The hub's bezel stays plastic, so touching the display is not a jog touch.
+- **A switch.**  The top plate floats a little on the ring (springs), and
+  pressing it pushes a continuous lip under the ring down onto a fixed
+  switch or optical interrupter.  Because the lip runs all the way round,
+  it works at any angle.  This is the CDJ feel.
+- **Capacitive.**  A conductive top joins a band on the ring, which
+  couples across about 1 mm to a fixed electrode.  A 10 mm band at r = 70
+  gives roughly 40 pF, plenty for a touch controller.  No moving parts, but
+  not what a CDJ does.
+
+The rig's ring is one piece for now, so the rollers and the sensing can be
+judged first.
+
+## Feel: no weight, maybe eddy-current drag
+
+The ring is as light as it prints, as on a Pioneer.  For drag, an aluminium
+or copper sheet under the top and fixed magnets below it would give a
+resistance that grows with speed and is set by the gap, with no contact.
+The rig keeps r 74–100 under the top flat and clear for that
+(`EDDY_BAND`).
 
 ## The display
 
-It is fixed on the hub column, and its cable goes down the hollow column.
-The candidates (all ⚠ measure the module before drawing the hub):
+A round smart-watch LCD, fixed on the hub column, with its cable down the
+hollow column:
 
 | Display | Drive | Note |
 |---|---|---|
-| A round MIPI-DSI panel of about 3.4" | **the Pi 5's second MIPI port** | full frame rate from the deck's own renderer; the recommendation if one fits about 80 mm |
-| A round 2.1–2.8" panel, 480 × 480 (RGB/SPI) | an adapter, or the RP2350 | smaller; more glue |
-| GC9A01, 1.28", 240 × 240, SPI | the RP2350 | cheap and tiny; the hub would shrink to about 40 mm |
+| 1.28" GC9A01, 240 × 240, SPI | the RP2350, or the Pi's SPI | the prototype part; `hub_128` |
+| 2.1" round, 480 × 480 (ST7701-class, RGB/SPI init) | an RGB adapter, or the Pi's DPI | the largest that fits; `hub_210` sets the hub's size |
 
-Software follows the hardware: the deck draws a jog-display view (playhead
-angle, cue marks, artwork) to a second output.  This is a separate piece of
-work.
+Software follows: the deck draws a jog-display view (playhead angle, cue
+marks, artwork) to it.  This is a separate piece of work.
 
 ## How to get there
 
-1. **A standalone test rig**, `hardware/cad/jogring/`: a base plate, the hub
-   column, the skirted ring, three wheel posts (one eccentric) and the sense
-   roller on its spring arm.  It fits the 256 mm bed, so the 206 ring is one
+1. **A standalone test rig**, [`hardware/cad/jogring/`](../../hardware/cad/jogring/README.md) (designed;
+   `make jogring`): a base plate, the hub column, the skirted ring, three
+   wheel posts (one eccentric) and the sense roller on its flexure arm.  It fits the 256 mm bed, so the 206 ring is one
    print.  Print it and answer three questions:
    - Does it feel smooth and without play?
    - Does the roller slip on a hard flick?
@@ -131,9 +144,5 @@ work.
 
 ## Open questions (Dan)
 
-- Which centre display?  It sets the hub, so it is the first thing to pin
-  down.
-- Should the ring be **heavy**, with a metal insert for flywheel feel, or
-  as light as it prints?
-- Should the top's touch surface be **metal** (CDJ feel) or foil under a
-  printed skin?
+- **Touch**: a floating top with a switch, or capacitive.
+- **Eddy-current drag**: try it on the rig once the rollers are judged.

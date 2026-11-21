@@ -11,6 +11,7 @@ dimensions → operations → a watertight, single-body STL — using the
 | File | Part | Status |
 |---|---|---|
 | `cad/deck5/` | **The 5" deck**: two-piece top shell (tongue-and-groove seam), split base, jog platter + bearing tower, caps, knobs; print-ready STLs in `print/`, renders in `renders/` ([README](cad/deck5/README.md)) | v1 designed, checked (watertight, bed fit, no clashes); display and fader dimensions need calipers before printing |
+| `cad/jogring/` | **Ring-jog test rig**: the 206 mm jog as a ring on three V-wheels around a fixed hub for a round watch display (1.28"–2.1"), with a sprung O-ring roller turning the AS5600 ([README](cad/jogring/README.md), [design](../docs/design/jog-ring-rollers.md)) | designed, checked (watertight, bed fit, no clashes); not printed; bought-part dimensions need calipers |
 | `cad/jog_wheel.py` | Jog platter: dished top + center recess, ribbed grip skirt, encoder hub with shaft bore + radial grub-screw | v1, prints |
 | `panel/` | **The single panel board**: every button, LED, the browse encoder, the magnetic jog sensor, the fader slot, the display cutout, the Pi mount and the RP2350-Zero hub on one 298 × 380 mm PCB, generated from `panel/layout.toml` ([design](../docs/design/control-board.md)) | generated + routes in TraceMaker; control positions need caliper verification before fab |
 | `control-board/` | Separate hub PCB (bare RP2350A, USB-C): the module-less variant, kept for a v2 or a modular rig ([design](../docs/design/control-board.md)) | schematic complete, QFN escape routing iterating, not fabricated |

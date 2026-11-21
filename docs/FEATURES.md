@@ -93,6 +93,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | OpenDeck as cdj3k-emu firmware: emulator UPD, bare 1280×720 CDJ-3000 screen, framebuffer output (`OPENDECK_FBDEV`) | 🧪 the release `.iso` installs (`--provision`) and boots to OpenDeck's screen, 0.3.30+ (earlier releases fail to install, #60); small text clipped (#61) | cdj3k-emu |
 | ADK-1000 hardware panel (RP2350 hub) | 📋 PCB routed, not made | — |
 | 5" deck enclosure: Pi 5, 5" display, 140 mm jog, 100 mm fader; prints on a 220 mm bed ([hardware/cad/deck5](../hardware/cad/deck5/README.md)) | 🧪 designed and checked in CAD, not printed; switch board not designed | — |
+| Ring jog with a fixed centre display: 206 mm ring on V-wheels, round watch LCD (1.28"–2.1") in the hub, roller-driven AS5600 ([hardware/cad/jogring](../hardware/cad/jogring/README.md)) | 🧪 test rig designed and checked in CAD, not printed; jog touch undecided | — |
 
 ## Pro DJ Link
 

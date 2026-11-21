@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- A ring-jog test rig to print (`hardware/cad/jogring/`, `make jogring`):
+  the 206 mm jog as a ring on three V-wheels, around a fixed hub for a round
+  smart-watch display (1.28" to 2.1").  An O-ring roller sprung against the
+  skirt turns the AS5600 7 × per platter turn.  Designed and checked in CAD,
+  not printed (docs/design/jog-ring-rollers.md).
 - OpenDeck as a **stemd client**, with stems at the playhead first: a
   track with no prepared stems gets them, when its STEMS panel opens, from a
   stemd server on the network (another OpenDeck, or stemd itself on a GPU)

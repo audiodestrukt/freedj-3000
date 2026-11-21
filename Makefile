@@ -198,6 +198,9 @@ deck5: ## Check the 5" deck's parts (watertight, bed fit, no clashes) and export
 deck7: ## Check the full-size deck's parts (XDJ-1000 size, 206 mm jog, 7" display; 256 mm bed) and export print/ STLs
 	cd hardware/cad/deck7 && python3 make_print.py
 
+jogring: ## Check the ring-jog test rig (206 mm ring on V-wheels, fixed watch-display hub, roller AS5600) and export print/ STLs
+	cd hardware/cad/jogring && python3 rig.py
+
 ## ── Reference material ─────────────────────────────────────────────────────
 
 reference: ## Download the CDJ-3000X manual and extract screen pages (local only)
