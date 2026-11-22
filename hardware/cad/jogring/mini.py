@@ -61,8 +61,9 @@ RIDGE_R = 66.5                    # the ridge reaches under the deck top
 SHROUD = 4.0
 GLASS, ACTIVE, THICK = DISPLAYS["128"]
 BIG = GLASS + 2 * HUB_FIT
-HUB_OD = BIG + 2 * HUB_WALL       # 44.4
-RING_BORE = HUB_OD + 3.0
+BOARD_D, GLASS_T = 36.0, 1.5      # the module's round PCB under the glass (Dan); the glass layer ⚠ assumed
+HUB_OD = BIG + 2 * 2.0            # 46.4: a 2 mm wall, so it fits under the ring's window seat
+RING_BORE = 47.4                  # the window seat's inner edge
 WIN_D, WIN_T, WIN_FIT = 54.0, 3.0, 0.2
 HUB_FL = (31.2, 6.5)              # the hub's flange: outer radius, thickness (takes the inserts)
 HUB_SCREWS = (27.0, (30.0, 150.0, 270.0))   # 3 x M3 on a 54 mm circle (BCD), 120° apart
@@ -99,7 +100,8 @@ RET_Z1 = RET_Z0 + RET_T
 P_TOP_Z1 = RET_Z1 + 8.0           # 8 mm proud of the deck top
 P_TOP_Z0 = P_TOP_Z1 - TOP_T
 GLASS_GAP = 0.5                   # the glass's top under the window's underside: just under the jog's centre
-HUB_TOP = P_TOP_Z1 - WIN_T - GLASS_GAP   # the hub's wall ends flush with the glass (no lip: the standoffs hold the module)
+GLASS_Z1 = P_TOP_Z1 - WIN_T - GLASS_GAP
+HUB_TOP = P_TOP_Z0 - 1.0          # the hub's wall stops 1 under the ring's window seat, level with the glass's underside (the standoffs hold the module)
 OPTO_TOP = CT + BR_T + OPTO[2]
 CODE_Z0 = OPTO_TOP - OPTO[4] + 1.5
 # The module stands on four M2 standoffs; a floor in the hub takes them, M2
@@ -107,12 +109,12 @@ CODE_Z0 = OPTO_TOP - OPTO[4] + 1.5
 DISP_HOLES = (25.0, 19.0)         # the module's M2 holes, centres: across (x), and up the screen (y) ⚠ Dan's calipers
 DISP_STACK = 11.5                 # the module, glass top to the standoffs' feet (Dan, calipered 2026-11-22)
 M2_CLR, FLOOR_T, FLOOR_HOLE = 2.4, 2.0, 22.0   # the floor: screw clearance, thickness, its middle opening for the cable
-FLOOR_Z1 = HUB_TOP - DISP_STACK   # the floor's top, where the standoffs stand
+FLOOR_Z1 = GLASS_Z1 - DISP_STACK   # the floor's top, where the standoffs stand
 # A bump on the module (its connector tab) makes it 44 across in one place;
 # it points out from a 25 mm side of the hole pattern (-y here).  The hub's
 # wall is notched for it, and the ring's bore lip is moved out over it.
 BUMP_A = 270.0                    # its direction
-BUMP = (24.5, 16.0, 1.0, 6.0)     # reach from the centre, width (Dan: ~16, tapered), its top and bottom under the glass (it is the board) ⚠ reach: Dan says it overhangs the bezel by 2 and the module is 44 across there, so ~23; 24.5 leaves room
+BUMP = (23.0, 16.0, GLASS_T, 6.0)  # reach from the centre (Dan: 2 past the Ø42 bezel, 44 across), width (~16, tapered), its top and bottom under the glass (it is the board)
 RELIEF_R = math.hypot(BUMP[0], BUMP[1] / 2) + 0.8   # the ring's bore under the window seat, past the bump's corners (was 23.7)
 
 
@@ -134,8 +136,8 @@ assert CODE_R + OPTO[0] / 2 + OPTO_WALL < R_W - W_W / 2 - SHOULDER - POST_T + 0.
 assert HUB_FL[0] - HUB_SCREWS[0] - HUB_INSERT / 2 >= 1.9 and CODE_R - OPTO[0] / 2 - OPTO_WALL > HUB_FL[0] + 0.1, "an interrupter hits the hub's flange"
 assert CODE_R - CODE_T / 2 > WIN_D / 2 + 1 and CODE_R + CODE_T / 2 < FOOT_R0 - 1
 assert POST_R - POST_D / 2 > RIDGE_R + 1.0, "a deck-top post hits the ridge"
-assert P_TOP_Z0 > RET_Z1 + 1 and HUB_TOP - THICK > CT + HUB_FL[1]
-assert HUB_TOP - BUMP[2] < P_TOP_Z0 - 0.4 and RELIEF_R + 3 < CODE_R - CODE_T / 2 - 1, "the bump hits the window seat"
+assert P_TOP_Z0 > RET_Z1 + 1 and GLASS_Z1 - THICK > CT + HUB_FL[1] and HUB_OD / 2 < RING_BORE / 2 - 0.4
+assert GLASS_Z1 - BUMP[2] < P_TOP_Z0 - 0.4 and RELIEF_R + 3 < CODE_R - CODE_T / 2 - 1, "the bump hits the window seat"
 assert FLOOR_Z1 - FLOOR_T >= CT, "standoffs too long for the hub: lower the floor below the carrier"
 assert math.hypot(*DISP_HOLES) / 2 + M2_CLR / 2 + 1.0 < BIG / 2 and math.hypot(*DISP_HOLES) / 2 - 2.5 > FLOOR_HOLE / 2
 assert math.hypot(*DISP_HOLES) / 2 + 2.0 < 18.5, "the screw heads can't be reached through the carrier's middle"
@@ -270,7 +272,7 @@ def hub():
     for x, y in disp_holes():
         s -= cyl(x, y, FLOOR_Z1 - FLOOR_T - OVS, FLOOR_Z1 + OVS, M2_CLR)
     w = BUMP[1] + 2.0
-    s -= Rot(0, 0, BUMP_A) * box(15.0, HUB_OD / 2 + 1, -w / 2, w / 2, HUB_TOP - BUMP[3] - 0.5, HUB_TOP + OVS)
+    s -= Rot(0, 0, BUMP_A) * box(15.0, HUB_OD / 2 + 1, -w / 2, w / 2, GLASS_Z1 - BUMP[3] - 0.5, HUB_TOP + OVS)
     s += tube(BIG / 2 - 0.5, HUB_FL[0], CT, CT + HUB_FL[1])
     r, angles = HUB_SCREWS
     for a in angles:
@@ -303,9 +305,9 @@ def assembly(bore=BEARING):
     for tag, a in (("a", OPTO_A), ("b", OPTO_B)):
         s.append((f"opto_{tag}", sensor_frame(a) * pioneer.opto(), "black"))
         s.append((f"mini/opto_bracket_{tag}", opto_frame(a) * Pos(0, 0, 0.05) * opto_bracket(), "hub"))   # drawn 0.05 over the carrier
-    z1 = HUB_TOP
-    s.append(("display", cyl(0, 0, z1 - THICK, z1, GLASS), "black"))
-    s.append(("display_bump", Rot(0, 0, BUMP_A) * box(GLASS / 2, BUMP[0], -BUMP[1] / 2, BUMP[1] / 2, z1 - BUMP[3], z1 - BUMP[2]), "black"))
+    z1 = GLASS_Z1
+    tab = Rot(0, 0, BUMP_A) * box(BOARD_D / 2 - 0.5, BUMP[0], -BUMP[1] / 2, BUMP[1] / 2, z1 - BUMP[3], z1 - BUMP[2] + 0.01)
+    s.append(("display", cyl(0, 0, z1 - GLASS_T, z1, GLASS) + cyl(0, 0, z1 - THICK, z1 - GLASS_T + 0.01, BOARD_D) + tab, "black"))
     for k, (x, y) in enumerate(disp_holes()):
         s.append((f"standoff_{k}", cyl(x, y, FLOOR_Z1 + 0.05, z1 - THICK - 0.05, 3.5), "steel"))
     return s

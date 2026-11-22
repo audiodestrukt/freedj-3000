@@ -89,7 +89,7 @@ EDDY_BAND = (74.0, 100.0)
 DISPLAYS = {
     # name: glass/module diameter, active-area window, module thickness  ⚠ VERIFY every one
     "210": (61.0, 54.0, 4.0),     # 2.1" round, 480 x 480 (ST7701-class)
-    "128": (39.0, 32.6, 4.0),     # 1.28" round, 240 x 240 GC9A01 module (round PCB)
+    "128": (42.0, 32.6, 4.0),     # 1.28" round, 240 x 240 GC9A01 module: glass bezel Ø42 over a Ø36 round PCB (Dan, calipered 2026-11-22)
 }
 HUB_WALL = 2.5
 HUB_FIT = 0.2

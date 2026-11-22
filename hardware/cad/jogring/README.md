@@ -70,15 +70,17 @@ printed and handled before deck7 changes.
   the carrier's open middle.  A Ø22 hole in the floor lets the cable out.
   The module is **11.5 mm** from glass top to standoff feet (`DISP_STACK`,
   calipered), so the floor sits 11.5 under the glass, and the glass sits
-  **0.5 mm under the window**, just under the jog's centre.  The hub's wall
-  ends flush with the glass (no lip: the screws hold the module), 1.5 mm
-  inside the ring's bore.
+  **0.5 mm under the window**, just under the jog's centre.  The module
+  is a **Ø42 glass bezel over a Ø36 round board** (calipered), so the
+  hub's bore is Ø42.4 with a 2 mm wall.  The wall stops at the glass's
+  underside, 1 mm under the ring's window seat (no lip: the screws hold the
+  module), so the glass stands clear inside the turning seat.
 - **The module's board tab.** The board sticks out ~2 mm past the bezel in
-  one place, ~16 wide (44 across the module there), pointing out from a
-  25 mm side of the holes.  The hub's wall has an 18 mm notch for it (on
-  -y), and the ring's bore lip under the window is moved out to r 26.6 so
-  the turning ring clears a tab reaching up to r 24.5.  Turn the module so
-  the tab drops into the notch.
+  one place (r 23, ~16 wide, 44 across the module there), pointing out from
+  a 25 mm side of the holes.  The hub's wall has an 18 mm notch for it (on
+  -y), and the ring's bore lip under the window is moved out to r 25.2, so
+  the turning ring clears the tab's corners by 0.8.  Turn the module so the
+  tab drops into the notch.
 - **Hub screws.** 3 × M3 on a **54 mm BCD**, 120° apart, in both the hub and
   the carrier.  The hub's insert holes are **Ø4.4** (4.0 printed too tight),
   and the carrier's clearance holes are Ø3.8, to take a print's error.
