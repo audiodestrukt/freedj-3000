@@ -42,7 +42,7 @@ CODE_R = 75.0                     # the fin's mid-radius
 CODE_T = 1.5                      # fin thickness (passes a 3.1 gap with 0.8 a side)
 CODE_N = 180                      # slots: 720 counts a turn; pitch 2.62 mm, slot = bar = 1.31
 CODE_SLOT_H = 4.5                 # how far the slots run up from the fin's foot
-OPTO = (12.2, 6.3, 10.8, 3.1, 7.0)  # slotted interrupter body: length (radial), width, height, gap, gap depth ⚠
+OPTO = (12.2, 6.3, 10.8, 3.1, 7.0)  # slotted interrupter body (TCST1202/TCST1103 are 11.9 long: 0.15 slack an end): length (radial), width, height, gap, gap depth ⚠
 OPTO_AXIS = 3.5                   # its beam, below its top ⚠ (datasheet)
 OPTO_A = 90.0                     # sensor A's angle; B is a whole number of slots + a quarter on
 OPTO_B = OPTO_A + (10 + 0.25) * 360.0 / CODE_N

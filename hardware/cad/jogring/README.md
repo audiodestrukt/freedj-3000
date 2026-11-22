@@ -273,7 +273,7 @@ PETG, 0.2 mm layers, 4 walls.
 | **mini version:** M3 × 8 + inserts | 7 + 7 | hub (3), deck top (4) |
 | **pioneer version:** 623ZZ (10 × 3 × 4), or print the wheels | 16 | |
 | **pioneer version:** 3 mm steel pin, 10 mm | 16 | |
-| **pioneer version:** slotted opto interrupter, 3.1 mm gap (TCST2103 class) | 2 | ⚠ caliper the body and beam height (`OPTO`, `OPTO_AXIS`) |
+| **pioneer version:** slotted opto interrupter, 3.1 mm gap, no mounting flange (Vishay TCST1202 or TCST1103, 11.9 × 6.3 × 10.8; not the flanged TCST2xxx, 24.5 long) | 2 | ⚠ caliper the body and beam height (`OPTO`, `OPTO_AXIS`) |
 | **pioneer version:** clear acrylic, 3 mm, laser-cut Ø84 | 1 | the window |
 | **pioneer version:** M3 × 8 + inserts | 9 + 9 | hub (3), deck top (6) |
 | **crossed version:** 608 bearings | 6 | |
