@@ -27,7 +27,9 @@ All notable changes to this project will be documented in this file.
     bearings (MR106) snap onto split stubs on a carrier that is open
     in the middle, and the carrier screws up under the deck-top stand-in
     from underneath (a 256-count quadrature encoder with bolt-on sensor brackets, so a premade
-    slot-sensor board or a bare Vishay TCST1202 can be used; Ø54 window);
+    slot-sensor board or a bare Vishay TCST1202 can be used; Ø54 window;
+    the 1.28" module screws to a floor in the hub by its four M2 standoffs,
+    25 × 19, and the hub's M3 insert holes are Ø4.4 on a 54 mm BCD);
   - a Pioneer-style ring on 16 small rollers, with a ridge under the deck
     top, an optical quadrature encoder (a slotted fin through two opto
     interrupters, 720 counts a turn) and a laser-cut clear window over the

@@ -64,6 +64,16 @@ printed and handled before deck7 changes.
   z 14.3 (the fin's slots run from 12.3 to 16.8 over the base's underside).
 - **Window.** A **Ø54 × 3** laser-cut clear disc over the 1.28" GC9A01.
   The jog stands 8 mm proud of the deck top.
+- **Display mount.** The module stands on its four M2 standoffs on a floor
+  inside `mini/hub_128`: holes on **25 × 19** centres (25 across, 19 up the
+  screen, +y), M2 screws up through the floor from below, reached through
+  the carrier's open middle.  A Ø22 hole in the floor lets the cable out.
+  The floor sits so the glass is 0.2 under the hub's lip with **4 mm
+  standoffs** (`STANDOFF_L` ⚠: measure glass top to standoff foot, minus
+  the module's 4 mm).
+- **Hub screws.** 3 × M3 on a **54 mm BCD**, 120° apart, in both the hub and
+  the carrier.  The hub's insert holes are **Ø4.4** (4.0 printed too tight),
+  and the carrier's clearance holes are Ø3.8, to take a print's error.
 
 ## Five full-size versions
 
@@ -279,6 +289,7 @@ PETG, 0.2 mm layers, 4 walls.
 | **mini version:** MR106ZZ (10 × 6 × 3) | 10 | snap on: no pins |
 | **mini version:** Vishay TCST1202 (or a premade LM393 slot board, with its own bracket) | 2 | |
 | **mini version:** M3 × 8 thread-forming | 4 | the opto brackets, up from below |
+| **mini version:** M2 × 5 | 4 | the display's standoffs, up through the hub's floor |
 | **mini version:** clear acrylic, 3 mm, laser-cut Ø54 | 1 | the window |
 | **mini version:** M3 × 8 + inserts | 7 + 7 | hub (3), deck top (4) |
 | **pioneer version:** 623ZZ (10 × 3 × 4), or print the wheels | 16 | |

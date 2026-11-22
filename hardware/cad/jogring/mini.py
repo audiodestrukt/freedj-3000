@@ -26,7 +26,8 @@ Here:
   way.  Everything fastens from inside, as on the Pioneer.
 - The encoder fin at r 40, 64 slots: 256 counts a turn in quadrature.  The
   sensors sit on brackets screwed up from below, so they can be swapped.
-- A 1.28" display (the GC9A01 Dan has) under a Ø54 × 3 clear window.
+- A 1.28" display (the GC9A01 Dan has) under a Ø54 × 3 clear window,
+  standing on its four M2 standoffs (25 × 19) on a floor in the hub.
 """
 import math
 from build123d import *
@@ -63,8 +64,10 @@ BIG = GLASS + 2 * HUB_FIT
 HUB_OD = BIG + 2 * HUB_WALL       # 44.4
 RING_BORE = HUB_OD + 3.0
 WIN_D, WIN_T, WIN_FIT = 54.0, 3.0, 0.2
-HUB_FL = (30.5, 6.5)              # the hub's flange: outer radius, thickness (takes the inserts)
-HUB_SCREWS = (27.0, (30.0, 150.0, 270.0))
+HUB_FL = (31.2, 6.5)              # the hub's flange: outer radius, thickness (takes the inserts)
+HUB_SCREWS = (27.0, (30.0, 150.0, 270.0))   # 3 x M3 on a 54 mm circle (BCD), 120° apart
+HUB_INSERT = 4.4                  # the inserts' holes: 4.0 printed too tight (FDM holes print small); 1.9 mm wall outside
+HUB_CLR = 3.8                     # the carrier's holes for them: 0.4 of slack over M3_CLR to take a print's error
 
 # ── encoder ──
 CODE_R, CODE_T, CODE_N, CODE_SLOT_H = 39.5, 1.5, 64, 4.5   # 64 slots (1.96 mm): coarse enough for a premade board's wide beam
@@ -98,6 +101,12 @@ P_TOP_Z0 = P_TOP_Z1 - TOP_T
 HUB_TOP = P_TOP_Z1 - WIN_T - 0.8
 OPTO_TOP = CT + BR_T + OPTO[2]
 CODE_Z0 = OPTO_TOP - OPTO[4] + 1.5
+# The module stands on four M2 standoffs; a floor in the hub takes them, M2
+# screws up through it from below (through the carrier's open middle).
+DISP_HOLES = (25.0, 19.0)         # the module's M2 holes, centres: across (x), and up the screen (y) ⚠ Dan's calipers
+STANDOFF_L = 4.0                  # the standoffs, board to foot ⚠ measure: glass top to foot = THICK + this
+M2_CLR, FLOOR_T, FLOOR_HOLE = 2.4, 2.0, 22.0   # the floor: screw clearance, thickness, its middle opening for the cable
+FLOOR_Z1 = HUB_TOP - LIP_T - 0.2 - THICK - STANDOFF_L   # the floor's top: the glass 0.2 under the lip
 
 
 def post_face():
@@ -115,10 +124,13 @@ assert CODE_Z0 + CODE_SLOT_H > OPTO_TOP - pioneer.OPTO_AXIS + 1.0 and CODE_Z0 < 
 assert CT + BR_T + OPTO_POCKET < CODE_Z0 - 0.5 and CT + BR_BOSS < CODE_Z0 - 1.0, "the fin hits a bracket"
 assert math.pi * 2 * CODE_R / CODE_N / 2 > 1.2, "slots too fine to print"
 assert CODE_R + OPTO[0] / 2 + OPTO_WALL < R_W - W_W / 2 - SHOULDER - POST_T + 0.2, "an interrupter hits the posts"
-assert CODE_R - OPTO[0] / 2 - OPTO_WALL > HUB_FL[0] + 0.5, "an interrupter hits the hub's flange"
+assert HUB_FL[0] - HUB_SCREWS[0] - HUB_INSERT / 2 >= 1.9 and CODE_R - OPTO[0] / 2 - OPTO_WALL > HUB_FL[0] + 0.1, "an interrupter hits the hub's flange"
 assert CODE_R - CODE_T / 2 > WIN_D / 2 + 1 and CODE_R + CODE_T / 2 < FOOT_R0 - 1
 assert POST_R - POST_D / 2 > RIDGE_R + 1.0, "a deck-top post hits the ridge"
 assert P_TOP_Z0 > RET_Z1 + 1 and HUB_TOP - LIP_T - THICK > CT + HUB_FL[1]
+assert FLOOR_Z1 - FLOOR_T >= CT, "standoffs too long for the hub: lower the floor below the carrier"
+assert math.hypot(*DISP_HOLES) / 2 + M2_CLR / 2 + 1.0 < BIG / 2 and math.hypot(*DISP_HOLES) / 2 - 2.5 > FLOOR_HOLE / 2
+assert math.hypot(*DISP_HOLES) / 2 + 2.0 < 18.5, "the screw heads can't be reached through the carrier's middle"
 
 
 def xcyl(x0, x1, d):
@@ -170,7 +182,7 @@ def carrier(bore=BEARING):
     r, angles = HUB_SCREWS
     for a in angles:
         x, y = polar(r, a)
-        s -= cyl(x, y, -OVS, CT + OVS, M3_CLR)
+        s -= cyl(x, y, -OVS, CT + OVS, HUB_CLR)
     for a in A_W:
         s += station(bore, a)
     l, w, h, g, gd = OPTO
@@ -237,15 +249,24 @@ def retainer():
     return s
 
 
+def disp_holes():
+    hx, hy = DISP_HOLES[0] / 2, DISP_HOLES[1] / 2
+    return [(sx * hx, sy * hy) for sx in (-1, 1) for sy in (-1, 1)]
+
+
 def hub():
-    """The fixed hub for the 1.28" module; it screws up into its flange's inserts."""
+    """The fixed hub for the 1.28" module; it screws up into its flange's
+    inserts.  The module stands on a floor inside it, screwed from below."""
     s = tube(BIG / 2, HUB_OD / 2, CT, HUB_TOP)
+    s += tube(FLOOR_HOLE / 2, BIG / 2 + 0.5, FLOOR_Z1 - FLOOR_T, FLOOR_Z1)
+    for x, y in disp_holes():
+        s -= cyl(x, y, FLOOR_Z1 - FLOOR_T - OVS, FLOOR_Z1 + OVS, M2_CLR)
     s += tube(ACTIVE / 2, BIG / 2 + 0.5, HUB_TOP - LIP_T, HUB_TOP)
     s += tube(BIG / 2 - 0.5, HUB_FL[0], CT, CT + HUB_FL[1])
     r, angles = HUB_SCREWS
     for a in angles:
         x, y = polar(r, a)
-        s -= cyl(x, y, CT - OVS, CT + INSERT[1], INSERT[0])
+        s -= cyl(x, y, CT - OVS, CT + INSERT[1], HUB_INSERT)
     return s
 
 
@@ -274,7 +295,9 @@ def assembly(bore=BEARING):
         s.append((f"opto_{tag}", sensor_frame(a) * pioneer.opto(), "black"))
         s.append((f"mini/opto_bracket_{tag}", opto_frame(a) * Pos(0, 0, 0.05) * opto_bracket(), "hub"))   # drawn 0.05 over the carrier
     z1 = HUB_TOP - LIP_T
-    s.append(("display", cyl(0, 0, z1 - THICK, z1 - 0.05, GLASS), "black"))
+    s.append(("display", cyl(0, 0, z1 - 0.2 - THICK, z1 - 0.2, GLASS), "black"))
+    for k, (x, y) in enumerate(disp_holes()):
+        s.append((f"standoff_{k}", cyl(x, y, FLOOR_Z1 + 0.05, z1 - 0.2 - THICK - 0.05, 3.5), "steel"))
     return s
 
 
