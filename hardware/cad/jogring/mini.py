@@ -108,6 +108,12 @@ DISP_HOLES = (25.0, 19.0)         # the module's M2 holes, centres: across (x), 
 DISP_STACK = 11.5                 # the module, glass top to the standoffs' feet (Dan, calipered 2026-11-22)
 M2_CLR, FLOOR_T, FLOOR_HOLE = 2.4, 2.0, 22.0   # the floor: screw clearance, thickness, its middle opening for the cable
 FLOOR_Z1 = HUB_TOP - DISP_STACK   # the floor's top, where the standoffs stand
+# A bump on the module (its connector tab) makes it 44 across in one place;
+# it points out from a 25 mm side of the hole pattern (-y here).  The hub's
+# wall is notched for it, and the ring's bore lip is moved out over it.
+BUMP_A = 270.0                    # its direction
+BUMP = (24.5, 16.0, 1.0, 6.0)     # reach from the centre, width (Dan: ~16, tapered), its top and bottom under the glass (it is the board) ⚠ reach: Dan says it overhangs the bezel by 2 and the module is 44 across there, so ~23; 24.5 leaves room
+RELIEF_R = math.hypot(BUMP[0], BUMP[1] / 2) + 0.8   # the ring's bore under the window seat, past the bump's corners (was 23.7)
 
 
 def post_face():
@@ -129,6 +135,7 @@ assert HUB_FL[0] - HUB_SCREWS[0] - HUB_INSERT / 2 >= 1.9 and CODE_R - OPTO[0] / 
 assert CODE_R - CODE_T / 2 > WIN_D / 2 + 1 and CODE_R + CODE_T / 2 < FOOT_R0 - 1
 assert POST_R - POST_D / 2 > RIDGE_R + 1.0, "a deck-top post hits the ridge"
 assert P_TOP_Z0 > RET_Z1 + 1 and HUB_TOP - THICK > CT + HUB_FL[1]
+assert HUB_TOP - BUMP[2] < P_TOP_Z0 - 0.4 and RELIEF_R + 3 < CODE_R - CODE_T / 2 - 1, "the bump hits the window seat"
 assert FLOOR_Z1 - FLOOR_T >= CT, "standoffs too long for the hub: lower the floor below the carrier"
 assert math.hypot(*DISP_HOLES) / 2 + M2_CLR / 2 + 1.0 < BIG / 2 and math.hypot(*DISP_HOLES) / 2 - 2.5 > FLOOR_HOLE / 2
 assert math.hypot(*DISP_HOLES) / 2 + 2.0 < 18.5, "the screw heads can't be reached through the carrier's middle"
@@ -229,7 +236,7 @@ def ring():
         t = Rot(0, 0, 360.0 * k / CODE_N) * tooth
         slots = t if slots is None else slots + t
     s -= slots
-    s += tube(RING_BORE / 2, RING_BORE / 2 + 3.0, P_TOP_Z0 - 3.0, P_TOP_Z0 + 0.5)
+    s += tube(RELIEF_R, RELIEF_R + 3.0, P_TOP_Z0 - 3.0, P_TOP_Z0 + 0.5)   # the bore lip, out over the module's bump
     s -= cyl(0, 0, P_TOP_Z1 - WIN_T, P_TOP_Z1 + OVS, WIN_D + WIN_FIT)
     return s
 
@@ -262,6 +269,8 @@ def hub():
     s += tube(FLOOR_HOLE / 2, BIG / 2 + 0.5, FLOOR_Z1 - FLOOR_T, FLOOR_Z1)
     for x, y in disp_holes():
         s -= cyl(x, y, FLOOR_Z1 - FLOOR_T - OVS, FLOOR_Z1 + OVS, M2_CLR)
+    w = BUMP[1] + 2.0
+    s -= Rot(0, 0, BUMP_A) * box(15.0, HUB_OD / 2 + 1, -w / 2, w / 2, HUB_TOP - BUMP[3] - 0.5, HUB_TOP + OVS)
     s += tube(BIG / 2 - 0.5, HUB_FL[0], CT, CT + HUB_FL[1])
     r, angles = HUB_SCREWS
     for a in angles:
@@ -296,6 +305,7 @@ def assembly(bore=BEARING):
         s.append((f"mini/opto_bracket_{tag}", opto_frame(a) * Pos(0, 0, 0.05) * opto_bracket(), "hub"))   # drawn 0.05 over the carrier
     z1 = HUB_TOP
     s.append(("display", cyl(0, 0, z1 - THICK, z1, GLASS), "black"))
+    s.append(("display_bump", Rot(0, 0, BUMP_A) * box(GLASS / 2, BUMP[0], -BUMP[1] / 2, BUMP[1] / 2, z1 - BUMP[3], z1 - BUMP[2]), "black"))
     for k, (x, y) in enumerate(disp_holes()):
         s.append((f"standoff_{k}", cyl(x, y, FLOOR_Z1 + 0.05, z1 - THICK - 0.05, 3.5), "steel"))
     return s
