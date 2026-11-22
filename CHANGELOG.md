@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.35] — 2026-11-22
+
 ### Added
 - Plugin parameters for **juggling and scratching** from host automation:
   Play, Cue (back-cue), Platter touch, and Platter (the record's position,
@@ -97,6 +99,11 @@ All notable changes to this project will be documented in this file.
   stemd banks).
 - The NFS server sees files made while it runs, and a file's current
   size: needed to serve stems as they are split.
+
+### Fixed
+- A track reached by FOLDER on a rekordbox stick shows its PREVIEW, BPM
+  and key: folder rows now look their file up in the stick's export, as
+  the same track does through TRACK.
 
 ## [0.3.34] — 2026-11-20
 

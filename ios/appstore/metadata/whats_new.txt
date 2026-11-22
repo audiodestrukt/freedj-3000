@@ -1,11 +1,5 @@
-STACKED WAVEFORM: on the CDJ-3000 screen the meter slot now starts in the WAVEFORM view, as the unit ships. It shows the tempo master's waveform and beat grid above your own, running to the right edge, so you can see whether the two tracks are in phase. Tap it for the phase meter.
+STEMS FROM ANOTHER DECK: load a track from another OpenDeck and open STEMS, and that deck splits it for you, starting where you are playing, so the stems are ready in seconds instead of waiting for a full split. Finished splits are kept for the next load.
 
-AND THE OTHER WAY ROUND: with OpenDeck as tempo master, CDJ-3000s on the network now draw OpenDeck's waveform in their own WAVEFORM view.
+STEMS FOR THE NETWORK: with a separation model downloaded, OpenDeck can split tracks for other players and stemd clients on the network, using this device's own model.
 
-INFO: a tab for each player on the network, with its track's title, artist, key, BPM and cover.
-
-MASTER like the unit: the deck takes tempo master by itself when it plays with no master on the network; MASTER pressed while you are master hands it to another playing player; the meter reads MASTER PLAYER while you are master.
-
-CUES: players loading tracks from OpenDeck's library now get every track's hot and memory cues (before, only the loaded track's), and tracks loaded from rekordbox over the network bring their cues and loops.
-
-FIXED: CDJ-3000s no longer say "Linked to player with older firmware" when OpenDeck is on the network.
+FIXED: tracks reached by FOLDER on a rekordbox USB drive now show their preview waveform, BPM and key.
