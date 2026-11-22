@@ -51,9 +51,17 @@ printed and handled before deck7 changes.
   the hub screws up through the carrier into inserts in its flange.  The
   ring's ridge sits 0.3 mm under the deck top, so the shell retains the
   platter.
-- **Encoder.** The same as pioneer, scaled: a fin at r 40 with 96 slots
-  (1.31 mm), two interrupters 4¼ slots apart, **384 counts a turn**.
-  `make jogring` checks the quadrature.
+- **Encoder.** A fin at r 39.5 with **64 slots** (1.94 mm), two sensors
+  8¼ slots apart: **256 counts a turn**, in quadrature (`make jogring`
+  checks it).  The slots are coarse enough for a premade LM393 slot-sensor
+  board's wide beam, and they work just as well with a bare interrupter.
+  Each sensor sits on a bracket that screws up from under the carrier with
+  two M3 thread-forming screws (holes 16 mm apart, tangential, centred on
+  r 39.5), so the sensor can change without reprinting the ring or the
+  carrier.  `mini/opto_bracket.stl` (print 2) takes a flangeless **Vishay
+  TCST1202** (or TCST1103).  A bracket for the premade boards uses the same
+  two holes; it gets drawn once one is calipered.  The beam must sit at
+  z 14.3 (the fin's slots run from 12.3 to 16.8 over the base's underside).
 - **Window.** A **Ø54 × 3** laser-cut clear disc over the 1.28" GC9A01.
   The jog stands 8 mm proud of the deck top.
 
@@ -254,6 +262,7 @@ It is built to answer three questions:
 | **pioneer:** `pioneer/wheel.stl` | 16 | only if not using 623s |
 | **mini:** `mini/ring.stl`, `mini/retainer.stl`, `mini/hub_128.stl` | 1 each | its own set, all on a 165 mm square |
 | **mini:** `mini/carrier.stl` | 1 | PETG (the snap stubs) |
+| **mini:** `mini/opto_bracket.stl` | 2 | for TCST1202 / TCST1103 sensors |
 | `608/tyre_fit.stl` | 1 | print first (above) |
 | `608/tyre.stl`, `608/spacer.stl`, `608/race_spacer.stl` | 3 each | the 608 version only |
 | `hub_210.stl` / `hub_128.stl` | 1 | one for the display you have |
@@ -268,7 +277,8 @@ PETG, 0.2 mm layers, 4 walls.
 | Part | Qty | Notes |
 |---|---|---|
 | **mini version:** MR106ZZ (10 × 6 × 3) | 10 | snap on: no pins |
-| **mini version:** slotted opto interrupter, as pioneer | 2 | |
+| **mini version:** Vishay TCST1202 (or a premade LM393 slot board, with its own bracket) | 2 | |
+| **mini version:** M3 × 8 thread-forming | 4 | the opto brackets, up from below |
 | **mini version:** clear acrylic, 3 mm, laser-cut Ø54 | 1 | the window |
 | **mini version:** M3 × 8 + inserts | 7 + 7 | hub (3), deck top (4) |
 | **pioneer version:** 623ZZ (10 × 3 × 4), or print the wheels | 16 | |

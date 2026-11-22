@@ -24,7 +24,8 @@ Here:
   with M3 heat-set inserts in their feet; the carrier screws up into them
   from below, and the hub screws up into the carrier's middle ring the same
   way.  Everything fastens from inside, as on the Pioneer.
-- The encoder fin at r 40, 96 slots: 384 counts a turn in quadrature.
+- The encoder fin at r 40, 64 slots: 256 counts a turn in quadrature.  The
+  sensors sit on brackets screwed up from below, so they can be swapped.
 - A 1.28" display (the GC9A01 Dan has) under a Ø54 × 3 clear window.
 """
 import math
@@ -66,17 +67,22 @@ HUB_FL = (30.5, 6.5)              # the hub's flange: outer radius, thickness (t
 HUB_SCREWS = (27.0, (30.0, 150.0, 270.0))
 
 # ── encoder ──
-CODE_R, CODE_T, CODE_N, CODE_SLOT_H = 40.0, 1.5, 96, 4.5
+CODE_R, CODE_T, CODE_N, CODE_SLOT_H = 39.5, 1.5, 64, 4.5   # 64 slots (1.96 mm): coarse enough for a premade board's wide beam
 OPTO = pioneer.OPTO
 OPTO_A = 90.0
-OPTO_B = OPTO_A + (4 + 0.25) * 360.0 / CODE_N
-OPTO_WALL, OPTO_POCKET = 1.5, 4.0
+OPTO_B = OPTO_A + (8 + 0.25) * 360.0 / CODE_N
+OPTO_WALL, OPTO_POCKET = 1.5, 3.0
+# Each sensor sits on a bracket screwed up from under the carrier (two M3
+# thread-forming screws), so the sensor can change without reprinting the
+# ring or the carrier: `mini/opto_bracket` takes a flangeless TCST1202 /
+# TCST1103; a bracket for a premade LM393 board uses the same two holes.
+BR_T, BR_BOSS, EAR = 3.0, 5.5, 8.0      # bracket base, its screw bosses' height, the screws ± this tangentially
 
 # ── carrier (the ring below) ──
 CT = 4.0                          # its thickness; its top is z = CT
 CAR = (46.0, 60.0)                # the open ring
 SPOKES, SPOKE_W = (210.0, 330.0), 7.0
-PAD = (31.0, 48.0, OPTO_A - 10.0, OPTO_B + 10.0)   # the opto pad: r0, r1, a0, a1
+PAD = (31.0, 48.0, OPTO_A - 18.0, OPTO_B + 18.0)   # the opto pad: r0, r1, a0, a1
 POSTS, POST_R, POST_D = (45.0, 135.0, 225.0, 315.0), 73.0, 9.0
 
 # ── heights ──
@@ -90,7 +96,7 @@ RET_Z1 = RET_Z0 + RET_T
 P_TOP_Z1 = RET_Z1 + 8.0           # 8 mm proud of the deck top
 P_TOP_Z0 = P_TOP_Z1 - TOP_T
 HUB_TOP = P_TOP_Z1 - WIN_T - 0.8
-OPTO_TOP = CT + OPTO[2]
+OPTO_TOP = CT + BR_T + OPTO[2]
 CODE_Z0 = OPTO_TOP - OPTO[4] + 1.5
 
 
@@ -106,7 +112,7 @@ for _b, (_od, _id, _w) in BEARINGS.items():
     assert SLOT_W >= 2 * BARB + 0.15, "the halves can't close past the bore"
 assert R_W + W_W / 2 + PLAY + BARB_L + LEAD < WALL[0] - 1.0, "a stub's tip hits the ring's wall"
 assert CODE_Z0 + CODE_SLOT_H > OPTO_TOP - pioneer.OPTO_AXIS + 1.0 and CODE_Z0 < OPTO_TOP - pioneer.OPTO_AXIS - 1.0, "the slots miss the beam"
-assert CT + OPTO_POCKET < CODE_Z0 - 0.5, "the fin hits the interrupters' pockets"
+assert CT + BR_T + OPTO_POCKET < CODE_Z0 - 0.5 and CT + BR_BOSS < CODE_Z0 - 1.0, "the fin hits a bracket"
 assert math.pi * 2 * CODE_R / CODE_N / 2 > 1.2, "slots too fine to print"
 assert CODE_R + OPTO[0] / 2 + OPTO_WALL < R_W - W_W / 2 - SHOULDER - POST_T + 0.2, "an interrupter hits the posts"
 assert CODE_R - OPTO[0] / 2 - OPTO_WALL > HUB_FL[0] + 0.5, "an interrupter hits the hub's flange"
@@ -169,10 +175,30 @@ def carrier(bore=BEARING):
         s += station(bore, a)
     l, w, h, g, gd = OPTO
     for a in (OPTO_A, OPTO_B):
-        f, t = opto_frame(a), OPTO_WALL
-        s += f * (box(-l / 2 - t, l / 2 + t, -w / 2 - t, w / 2 + t, -0.1, OPTO_POCKET) - box(-l / 2 - 0.1, l / 2 + 0.1, -w / 2 - 0.1, w / 2 + 0.1, 0, OPTO_POCKET + OVS))
-        s -= f * box(-l / 2 + 1, l / 2 - 1, -w / 2 + 1, w / 2 - 1, -CT - OVS, OVS)
+        f = opto_frame(a)
+        s -= f * box(-l / 2 + 1, l / 2 - 1, -w / 2 + 1, w / 2 - 1, -CT - OVS, OVS)    # the leads
+        for y in (-EAR, EAR):
+            s -= f * cyl(0, y, -CT - OVS, OVS, M3_CLR)
     return s
+
+
+def opto_bracket():
+    """A TCST1202 / TCST1103 in a pocket on a base, two bosses for M3
+    thread-forming screws up through the carrier (opto frame)."""
+    l, w, h, g, gd = OPTO
+    t = OPTO_WALL
+    s = box(-l / 2 - t, l / 2 + t, -w / 2 - t, w / 2 + t, 0, BR_T) + box(-4.5, 4.5, -EAR - 3.5, EAR + 3.5, 0, BR_T)   # a cross: clear of the bearing posts
+    s += box(-l / 2 - t, l / 2 + t, -w / 2 - t, w / 2 + t, BR_T - 0.1, BR_T + OPTO_POCKET)
+    s -= box(-l / 2 - 0.1, l / 2 + 0.1, -w / 2 - 0.1, w / 2 + 0.1, BR_T, BR_T + OPTO_POCKET + OVS)
+    s -= box(-l / 2 + 1, l / 2 - 1, -w / 2 + 1, w / 2 - 1, -OVS, BR_T + OVS)    # the leads
+    for y in (-EAR, EAR):
+        s += cyl(0, y, BR_T - 0.1, BR_BOSS, 7.0)
+        s -= cyl(0, y, -OVS, BR_BOSS + OVS, 2.5)
+    return s
+
+
+def sensor_frame(a):
+    return Rot(0, 0, a) * Pos(CODE_R, 0, CT + BR_T + 0.1)
 
 
 def ring():
@@ -234,6 +260,7 @@ def printed():
         "mini/carrier": (carrier(), False, 1),
         "mini/retainer": (retainer(), True, 1),
         "mini/hub_128": (hub(), True, 1),
+        "mini/opto_bracket": (opto_bracket(), False, 2),
     }
 
 
@@ -244,7 +271,8 @@ def assembly(bore=BEARING):
     for a in A_W:
         s.append((f"b{bore}_{int(a)}", Rot(0, 0, a) * Pos(R_W, 0, RC) * b, "steel"))
     for tag, a in (("a", OPTO_A), ("b", OPTO_B)):
-        s.append((f"opto_{tag}", opto_frame(a) * pioneer.opto(), "black"))
+        s.append((f"opto_{tag}", sensor_frame(a) * pioneer.opto(), "black"))
+        s.append((f"mini/opto_bracket_{tag}", opto_frame(a) * Pos(0, 0, 0.05) * opto_bracket(), "hub"))   # drawn 0.05 over the carrier
     z1 = HUB_TOP - LIP_T
     s.append(("display", cyl(0, 0, z1 - THICK, z1 - 0.05, GLASS), "black"))
     return s
