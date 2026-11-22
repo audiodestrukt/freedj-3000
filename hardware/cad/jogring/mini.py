@@ -98,15 +98,16 @@ RET_T, RET_R1 = 3.0, 82.0
 RET_Z1 = RET_Z0 + RET_T
 P_TOP_Z1 = RET_Z1 + 8.0           # 8 mm proud of the deck top
 P_TOP_Z0 = P_TOP_Z1 - TOP_T
-HUB_TOP = P_TOP_Z1 - WIN_T - 0.8
+GLASS_GAP = 0.5                   # the glass's top under the window's underside: just under the jog's centre
+HUB_TOP = P_TOP_Z1 - WIN_T - GLASS_GAP   # the hub's wall ends flush with the glass (no lip: the standoffs hold the module)
 OPTO_TOP = CT + BR_T + OPTO[2]
 CODE_Z0 = OPTO_TOP - OPTO[4] + 1.5
 # The module stands on four M2 standoffs; a floor in the hub takes them, M2
 # screws up through it from below (through the carrier's open middle).
 DISP_HOLES = (25.0, 19.0)         # the module's M2 holes, centres: across (x), and up the screen (y) ⚠ Dan's calipers
-STANDOFF_L = 4.0                  # the standoffs, board to foot ⚠ measure: glass top to foot = THICK + this
+DISP_STACK = 11.5                 # the module, glass top to the standoffs' feet (Dan, calipered 2026-11-22)
 M2_CLR, FLOOR_T, FLOOR_HOLE = 2.4, 2.0, 22.0   # the floor: screw clearance, thickness, its middle opening for the cable
-FLOOR_Z1 = HUB_TOP - LIP_T - 0.2 - THICK - STANDOFF_L   # the floor's top: the glass 0.2 under the lip
+FLOOR_Z1 = HUB_TOP - DISP_STACK   # the floor's top, where the standoffs stand
 
 
 def post_face():
@@ -127,7 +128,7 @@ assert CODE_R + OPTO[0] / 2 + OPTO_WALL < R_W - W_W / 2 - SHOULDER - POST_T + 0.
 assert HUB_FL[0] - HUB_SCREWS[0] - HUB_INSERT / 2 >= 1.9 and CODE_R - OPTO[0] / 2 - OPTO_WALL > HUB_FL[0] + 0.1, "an interrupter hits the hub's flange"
 assert CODE_R - CODE_T / 2 > WIN_D / 2 + 1 and CODE_R + CODE_T / 2 < FOOT_R0 - 1
 assert POST_R - POST_D / 2 > RIDGE_R + 1.0, "a deck-top post hits the ridge"
-assert P_TOP_Z0 > RET_Z1 + 1 and HUB_TOP - LIP_T - THICK > CT + HUB_FL[1]
+assert P_TOP_Z0 > RET_Z1 + 1 and HUB_TOP - THICK > CT + HUB_FL[1]
 assert FLOOR_Z1 - FLOOR_T >= CT, "standoffs too long for the hub: lower the floor below the carrier"
 assert math.hypot(*DISP_HOLES) / 2 + M2_CLR / 2 + 1.0 < BIG / 2 and math.hypot(*DISP_HOLES) / 2 - 2.5 > FLOOR_HOLE / 2
 assert math.hypot(*DISP_HOLES) / 2 + 2.0 < 18.5, "the screw heads can't be reached through the carrier's middle"
@@ -261,7 +262,6 @@ def hub():
     s += tube(FLOOR_HOLE / 2, BIG / 2 + 0.5, FLOOR_Z1 - FLOOR_T, FLOOR_Z1)
     for x, y in disp_holes():
         s -= cyl(x, y, FLOOR_Z1 - FLOOR_T - OVS, FLOOR_Z1 + OVS, M2_CLR)
-    s += tube(ACTIVE / 2, BIG / 2 + 0.5, HUB_TOP - LIP_T, HUB_TOP)
     s += tube(BIG / 2 - 0.5, HUB_FL[0], CT, CT + HUB_FL[1])
     r, angles = HUB_SCREWS
     for a in angles:
@@ -294,10 +294,10 @@ def assembly(bore=BEARING):
     for tag, a in (("a", OPTO_A), ("b", OPTO_B)):
         s.append((f"opto_{tag}", sensor_frame(a) * pioneer.opto(), "black"))
         s.append((f"mini/opto_bracket_{tag}", opto_frame(a) * Pos(0, 0, 0.05) * opto_bracket(), "hub"))   # drawn 0.05 over the carrier
-    z1 = HUB_TOP - LIP_T
-    s.append(("display", cyl(0, 0, z1 - 0.2 - THICK, z1 - 0.2, GLASS), "black"))
+    z1 = HUB_TOP
+    s.append(("display", cyl(0, 0, z1 - THICK, z1, GLASS), "black"))
     for k, (x, y) in enumerate(disp_holes()):
-        s.append((f"standoff_{k}", cyl(x, y, FLOOR_Z1 + 0.05, z1 - 0.2 - THICK - 0.05, 3.5), "steel"))
+        s.append((f"standoff_{k}", cyl(x, y, FLOOR_Z1 + 0.05, z1 - THICK - 0.05, 3.5), "steel"))
     return s
 
 

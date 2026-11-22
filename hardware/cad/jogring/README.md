@@ -68,9 +68,11 @@ printed and handled before deck7 changes.
   inside `mini/hub_128`: holes on **25 × 19** centres (25 across, 19 up the
   screen, +y), M2 screws up through the floor from below, reached through
   the carrier's open middle.  A Ø22 hole in the floor lets the cable out.
-  The floor sits so the glass is 0.2 under the hub's lip with **4 mm
-  standoffs** (`STANDOFF_L` ⚠: measure glass top to standoff foot, minus
-  the module's 4 mm).
+  The module is **11.5 mm** from glass top to standoff feet (`DISP_STACK`,
+  calipered), so the floor sits 11.5 under the glass, and the glass sits
+  **0.5 mm under the window**, just under the jog's centre.  The hub's wall
+  ends flush with the glass (no lip: the screws hold the module), 1.5 mm
+  inside the ring's bore.
 - **Hub screws.** 3 × M3 on a **54 mm BCD**, 120° apart, in both the hub and
   the carrier.  The hub's insert holes are **Ø4.4** (4.0 printed too tight),
   and the carrier's clearance holes are Ø3.8, to take a print's error.
