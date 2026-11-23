@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- FOLLOW: `--follow N` (`OPENDECK_FOLLOW`, or a plugin deck's saved
+  `follow`) makes the deck a mirror of Link player N. It loads whatever
+  that player loads over LINK, never plays, and draws that player's
+  playhead, PLAY, pitch, MASTER and SYNC. A CDJ-3000's playhead comes from
+  its position packets; an older player's from its beat number and beat
+  packets: on the grid at every beat, run on at the pitch between. It only
+  listens (no beats, no status, never master), and its own controls do
+  nothing. Replaying a recorded XDJ-1000MK2 puts it on every beat within
+  2.5 ms.
 - A plugin deck can draw its screen into its host's instead of opening a
   window (Overdeck's display contract, the `overdeck-display` crate). When
   the host names a screen for it in `OVERDECK_DISPLAY`, the deck renders

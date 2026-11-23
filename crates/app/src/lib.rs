@@ -12,6 +12,7 @@ pub use audio::{HostOutput, HostSlot};
 mod browser;
 mod dbsession;
 mod framehost;
+mod follow;
 pub mod chrome;
 mod cpumeter;
 mod grids;
@@ -802,6 +803,16 @@ struct DeckApp {
     /// Where a LINK load finds a peer's services (players: always the
     /// standard ports; tests: loopback servers on free ports).
     link_ports:        LinkPorts,
+    /// FOLLOW: mirror this Link player instead of playing (`follow.rs`).
+    pub(crate) follow: Option<u8>,
+    /// The track loaded for the followed player (its status's track).
+    follow_on:         Option<opendeck_link::prodj::TrackRef>,
+    follow_clock:      follow::FollowClock,
+    follow_smooth:     follow::Smooth,
+    /// The loaded grid as the clock reads it, and what it was built from.
+    follow_grid:       (follow::Grid, (usize, u64, u64)),
+    /// The followed player's latest status, for the screen.
+    follow_seen:       Option<opendeck_link::prodj::Status>,
     /// The stems job for the loaded track (see `stems.rs`).
     stems_rx:          Option<mpsc::Receiver<Result<Option<Arc<stems::StemBank>>>>>,
     /// The loaded track has no prepared stems and the stem model is still
@@ -979,6 +990,15 @@ fn surface_bits(f: &UiFlags, playing: bool, cued: bool) -> u32 {
     if f.linked      { b |= LINKED; }
     for (i, c) in f.hot_cues.iter().enumerate() { if c.is_some() { b |= HOT_CUE0 << i; } }
     b
+}
+
+/// FOLLOW: the screen shows the followed player's transport, not ours.
+fn follow_overlay(st: &opendeck_link::prodj::Status, snap: &mut DeckSnapshot) {
+    snap.playing     = st.playing;
+    snap.speed       = st.pitch;
+    snap.fader_speed = st.pitch;
+    snap.master      = st.master;
+    snap.sync        = st.sync;
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1217,6 +1237,9 @@ impl DeckApp {
             indicators,
             fetch_rx: None,
             link_ports: LinkPorts::default(),
+            follow: None, follow_on: None,
+            follow_clock: Default::default(), follow_smooth: Default::default(),
+            follow_grid: Default::default(), follow_seen: None,
             stems_rx: None,
             stems_await_model: false,
             stems_no_memory: false,
@@ -1296,6 +1319,8 @@ impl DeckApp {
     /// touch, later MIDI and scripts — ends up here.
     fn apply(&mut self, ev: Event) {
         log::debug!("event: {ev:?}");
+        // A FOLLOW deck mirrors another player: nothing here moves it.
+        if self.follow.is_some() && matches!(ev, Event::Deck(_) | Event::Load { .. }) { return; }
         match ev {
             Event::Load { path, play } => match self.load_track(&path, None) {
                 Ok(()) => self.play_on_load = play,
@@ -3180,6 +3205,61 @@ impl DeckApp {
     /// The UI-thread tail of a load: hand the prepared samples to the audio
     /// thread, upload the waveform, reset transport to the cue.  Cheap; every
     /// heavy step happened in [`Prep::finish`].
+    /// FOLLOW: load what the followed player has loaded, when it changes.
+    /// The track comes from the player whose media holds it, as a LINK load
+    /// does; it is never played.
+    fn follow_poll(&mut self) {
+        let Some(p) = self.follow else { return };
+        let st = self.link.peer_status.lock().ok().and_then(|m| m.get(&p).copied());
+        self.follow_seen = st;
+        let Some(st) = st else { return };
+        if !st.track_loaded || st.track.id == 0 || self.follow_on == Some(st.track) || self.fetch_rx.is_some() { return; }
+        let src = if st.track.player == 0 { p } else { st.track.player };
+        let Some(ip) = self.link.peers.lock().ok().and_then(|m| m.get(&src).copied()) else { return };
+        let rekordbox = st.track.slot == 4
+            || self.link.peer_names.lock().ok().and_then(|m| m.get(&src).cloned()).is_some_and(|n| n.to_lowercase().contains("rekordbox"));
+        self.follow_on = Some(st.track);
+        self.follow_clock.reset();
+        self.follow_smooth.reset();
+        log::info!("follow: player {p} loaded track {} from player {src} ({ip}), slot {}", st.track.id, st.track.slot);
+        if let Err(e) = self.load_track_db(ip, st.track.id, &format!("PLAYER {p}"), rekordbox, st.track.slot == 2) {
+            log::warn!("follow: load from {ip}: {e:#}");
+        }
+    }
+
+    /// The followed player's status, once its track is the one loaded here.
+    fn follow_view(&self) -> Option<opendeck_link::prodj::Status> {
+        self.follow?;
+        self.follow_seen.filter(|st| self.follow_on == Some(st.track))
+    }
+
+    /// FOLLOW: where the followed player's playhead is, in interleaved
+    /// samples of the loaded track; None when not following (or its track
+    /// is not in yet).
+    fn follow_pos(&mut self) -> Option<f64> {
+        let p = self.follow?;
+        let st = self.follow_view()?;
+        if self.audio.len() == 0 { return None; }
+        let sr = self.audio.sample_rate;
+        let sr_ch = sr as f64 * self.audio.channels as f64;
+        let now = Instant::now();
+        // A CDJ-3000 says where it is; older players only which beat.
+        let abs = self.link.positions.lock().ok().and_then(|m| m.get(&p).copied()).filter(|(_, at)| at.elapsed() < Duration::from_secs(1));
+        let target = match abs {
+            Some((a, at)) => a.playhead_ms as f64 + if st.playing { at.elapsed().as_secs_f64() * 1000.0 * a.pitch as f64 } else { 0.0 },
+            None => {
+                let g = self.beat_grid.as_ref()?;
+                let key = (g.beats.len(), g.anchor_sample, g.bpm.to_bits());
+                if self.follow_grid.1 != key { self.follow_grid = (follow::Grid::from_beat_grid(g, sr), key); }
+                let heard = self.link.peer_heard.lock().ok().and_then(|m| m.get(&p).copied()).unwrap_or_default();
+                let h = follow::Heard { beat: st.beat, playing: st.playing, pitch: st.pitch as f64, status_at: heard.status_at?, beat_at: heard.beat_at };
+                self.follow_clock.update(&h, &self.follow_grid.0, now)?
+            }
+        };
+        let ms = self.follow_smooth.next(target, st.pitch as f64, st.playing, now);
+        Some((ms.max(0.0) / 1000.0 * sr_ch).min(self.audio.len() as f64))
+    }
+
     /// Tell the Link sender which track is loaded and where it lives, so a
     /// peer can look up its title, artist and grid by ID: a file we serve is
     /// ours, a track from a player's media is that player's (as a CDJ reports
@@ -3719,6 +3799,7 @@ impl DeckApp {
             self.smoothed_pos = self.smoothed_pos.min(total);   // never overshoot the end
         }
 
+        if let Some(p) = self.follow_pos() { self.smoothed_pos = p; }
         let pos = self.smoothed_pos.max(0.0) as u64;
 
         // Scroll-smoothness instrument: audio time advanced per frame should
@@ -3807,6 +3888,7 @@ impl DeckApp {
         }
         snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
+        if let Some(st) = self.follow_view() { follow_overlay(&st, &mut snap); }
         Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote, self.browser.db_handle(), &self.egui_ctx, self.screen_mode == ScreenMode::Info);
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = self.stems_view();
@@ -4004,6 +4086,7 @@ impl DeckApp {
             self.apply(ev);
         }
         if !self.panel_held.is_empty() { self.panel_scan(); }
+        self.follow_poll();
         self.poll_fetch();
         // The track given at launch never went through a LOAD: look for its
         // stems once, on the first frame.
@@ -4020,6 +4103,7 @@ impl DeckApp {
         let platform_output = std::mem::take(&mut output.platform_output);
         let slip_shadow = self.slip_shadow().map(|v| v as u64);
         let stems_view = self.stems_view();
+        let follow_st = self.follow_view();
         let (renderer, host) = match (self.renderer.as_mut(), self.host.as_mut()) {
             (Some(r), Some(h)) => (r, h),
             _ => return,
@@ -4066,6 +4150,7 @@ impl DeckApp {
         }
         snap.ip_line = ip_line;
         snap.loading = self.loading.as_deref();
+        if let Some(st) = follow_st { follow_overlay(&st, &mut snap); }
         Self::fill_waves(&mut snap, &self.waveform, &self.link, &self.remote, self.browser.db_handle(), &self.egui_ctx, self.screen_mode == ScreenMode::Info);
         snap.notice = self.notice.as_ref().filter(|(_, until)| Instant::now() < *until).map(|(m, _)| m.as_str());
         snap.stems = stems_view;
@@ -4969,6 +5054,9 @@ pub struct Config {
     /// Running inside a plugin host (VST3 / CLAP); `None` = the system's
     /// sound card.
     pub host:         Option<PluginHost>,
+    /// FOLLOW: mirror this Link player instead of playing (`--follow N`,
+    /// OPENDECK_FOLLOW, or a plugin's saved `follow`).  Receive-only.
+    pub follow:       Option<u8>,
 }
 
 /// What a deck inside a plugin host shares with the plugin.
@@ -5049,6 +5137,7 @@ pub fn desktop_main() -> Result<()> {
     // full send with `--link-send` (or OPENDECK_LINK_SEND=1).
     let mut link_send = std::env::var("OPENDECK_LINK_SEND").map(|v| v == "1").unwrap_or(false);
     let mut controllers: Option<PathBuf> = std::env::var_os("OPENDECK_CONTROLLERS").map(PathBuf::from);
+    let mut follow = follow_env();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--player" => player = Some(args.next().and_then(|v| v.parse().ok()).context("--player needs a number 1-6 (5-6 only on an all-CDJ-3000 network)")?),
@@ -5060,6 +5149,7 @@ pub fn desktop_main() -> Result<()> {
             "--version" | "-V" => { println!("opendeck {}", screen::APP_VERSION); return Ok(()); }
             "--link-send" => link_send = true,
             "--link-receive-only" => link_send = false,
+            "--follow" => follow = Some(args.next().and_then(|v| v.parse().ok()).filter(|n| (1..=6).contains(n)).context("--follow needs the Link player number (1-6) to mirror")?),
             "--controllers" => controllers = Some(args.next().context("--controllers needs a path to a controllers.toml")?.into()),
             "--faceplate" => std::env::set_var("OPENDECK_FACEPLATE", "1"),
             "--screen-only" => std::env::set_var("OPENDECK_FACEPLATE", "0"),
@@ -5077,7 +5167,12 @@ pub fn desktop_main() -> Result<()> {
     // Dev: OPENDECK_AUTOPLAY=0 boots paused at the cue, as the iOS app does.
     let autoplay = std::env::var("OPENDECK_AUTOPLAY").map(|v| v != "0").unwrap_or(true);
     let browse_root = music_dir(path.is_none());
-    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root, autoplay, controllers, host: None })
+    run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root, autoplay, controllers, host: None, follow })
+}
+
+/// OPENDECK_FOLLOW=N: the Link player to mirror.
+pub fn follow_env() -> Option<u8> {
+    std::env::var("OPENDECK_FOLLOW").ok().and_then(|v| v.parse().ok()).filter(|n| (1..=6).contains(n))
 }
 
 /// Whose waveform the CDJ-3000 WAVEFORM view shows: the tempo master's, as
@@ -5140,7 +5235,9 @@ fn build(cfg: Config) -> Result<DeckApp> {
     let player_auto  = player == 0;
     let player       = if player_auto { prodj::AUTO_ORDER[0] } else { player }.clamp(1, 6);
     let deck_channel = cfg.deck_channel;
-    let link_send    = cfg.link_send;
+    // A FOLLOW deck only listens: it never sends beats or status, and so
+    // never takes master.
+    let link_send    = cfg.link_send && cfg.follow.is_none();
 
     // ── 1. Decode audio (or boot to an empty deck when no track is given) ─────
     let audio = match (&track, &cfg.host) {
@@ -5157,7 +5254,7 @@ fn build(cfg: Config) -> Result<DeckApp> {
     // `open` boots the audio thread playing.  Stop it here, before the
     // analysis below, when the platform wants a paused deck at launch; the
     // playhead is parked at the cue once the app exists (see below).
-    if !cfg.autoplay { audio.set_playing(false); log::info!("autoplay off — booting paused at the cue"); }
+    if !cfg.autoplay || cfg.follow.is_some() { audio.set_playing(false); log::info!("autoplay off — booting paused at the cue"); }
 
     // ── 2. Build waveform + detect beat grid (synchronous, before window opens) ─
     let samples_arc = audio.current();
@@ -5289,6 +5386,8 @@ fn build(cfg: Config) -> Result<DeckApp> {
     let has_track = track.is_some();
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
     app.tile = cfg.host.as_ref().and_then(|h| h.tile);
+    app.follow = cfg.follow;
+    if let Some(p) = cfg.follow { log::info!("follow: mirroring Link player {p}"); }
     app.display = cfg.host.as_ref().and_then(|h| h.display.clone());
     if app.display.is_some() { app.faceplate = false; }   // the host shows the screen; its panel has the controls
     if has_track {
@@ -6214,6 +6313,8 @@ pub(crate) mod deck_harness {
             let raw = self.audio.position.load(Ordering::Relaxed);
             let fl = self.audio.in_flight.load(Ordering::Relaxed);
             self.smoothed_pos = self.heard_pos(raw, fl);
+            self.follow_poll();
+            if let Some(p) = self.follow_pos() { self.smoothed_pos = p; }
         }
 
         /// Let the deck run for `secs`, ticking as frames would.
@@ -6785,6 +6886,71 @@ mod link_load_tests {
         d.send(C::PlayPause);
         d.run(0.3);
         assert!(d.at() > cue + 0.1, "it plays: {cue:.2}s → {:.2}s", d.at());
+    }
+
+    /// FOLLOW: a deck mirroring player 2 (an XDJ: beats and status, no
+    /// position packets) loads what it loads, over LINK, and draws its
+    /// playhead where the XDJ's is, without ever playing.
+    #[test]
+    fn a_follow_deck_loads_the_players_track_and_tracks_its_playhead() {
+        use opendeck_link::prodj::{PlayState, Status, TrackRef};
+        let p = peer();
+        let mut d = deck(2.0);
+        d.link_ports = p.ports;
+        d.follow = Some(2);
+        d.link.peers.lock().unwrap().insert(2, Ipv4Addr::LOCALHOST);
+        d.link.peer_names.lock().unwrap().insert(2, "XDJ-1000".into());
+        let mut st = Status {
+            player: 2, track: TrackRef { player: 2, slot: 3, kind: 1, id: p.id }, play: PlayState::Paused,
+            playing: false, master: true, sync: false, on_air: true, pitch: 1.0, bpm: Some(125.0),
+            beat: Some(1), beat_in_bar: Some(1), handoff_to: None, track_loaded: true,
+            firmware: [0; 4], counter: 0, sync_counter: 0, active_loop: None,
+        };
+        let hear = |d: &DeckApp, st: &Status, beat_at: Option<Instant>| {
+            d.link.peer_status.lock().unwrap().insert(2, *st);
+            let mut m = d.link.peer_heard.lock().unwrap();
+            let h = m.entry(2).or_default();
+            h.status_at = Some(Instant::now());
+            if beat_at.is_some() { h.beat_at = beat_at; }
+        };
+        hear(&d, &st, None);
+        d.tick();
+        finish(&mut d);
+        assert_eq!(d.path, std::path::PathBuf::from(&p.path), "it loaded the XDJ's track");
+        d.tick();
+        assert!(d.at().abs() < 0.01, "paused on beat 1: {:.3}", d.at());
+
+        // The XDJ plays from beat 3 (960 ms; a beat every 480 ms): a beat
+        // packet on each beat, a status every 200 ms.
+        let t0 = Instant::now();
+        let truth = |t: f64| 0.960 + t;
+        st.playing = true; st.play = PlayState::Playing; st.beat = Some(3);
+        hear(&d, &st, Some(t0));
+        let (mut next_beat, mut next_status, mut worst) = (4u32, 0.2, 0.0f64);
+        while t0.elapsed() < Duration::from_secs_f64(2.5) {
+            let t = t0.elapsed().as_secs_f64();
+            let mut beat_at = None;
+            if truth(t) >= (next_beat - 1) as f64 * 0.480 { beat_at = Some(Instant::now()); st.beat = Some(next_beat); next_beat += 1; }
+            if t >= next_status || beat_at.is_some() {
+                if t >= next_status { next_status += 0.2; }
+                hear(&d, &st, beat_at);
+            }
+            d.tick();
+            if t > 0.6 { worst = worst.max((d.at() - truth(t0.elapsed().as_secs_f64())).abs()); }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(worst < 0.03, "the playhead stays on the XDJ's: worst {:.1} ms", worst * 1e3);
+        assert!(!d.audio.playing.load(Ordering::Relaxed), "a follow deck never plays");
+        d.send(C::PlayPause);
+        assert!(!d.audio.playing.load(Ordering::Relaxed), "and its PLAY does nothing");
+
+        // Paused: the playhead holds where the XDJ stopped.
+        st.playing = false; st.play = PlayState::Paused;
+        hear(&d, &st, None);
+        d.tick();
+        let held = d.at();
+        d.run(0.3);
+        assert!((d.at() - held).abs() < 0.005, "holds while paused: {held:.3} → {:.3}", d.at());
     }
 
     #[test]

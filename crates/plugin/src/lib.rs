@@ -115,6 +115,10 @@ struct DeckParams {
     /// that writes it (the plugin's state) loads that track.
     #[persist = "track"]
     track: Arc<RwLock<String>>,
+    /// FOLLOW: the Link player this deck mirrors instead of playing (0 =
+    /// none).  Read when the deck starts; Overdeck's `follow = N` writes it.
+    #[persist = "follow"]
+    follow: Arc<RwLock<u8>>,
 }
 
 impl Default for DeckParams {
@@ -131,6 +135,7 @@ impl Default for DeckParams {
                 .with_unit(" s")
                 .with_value_to_string(Arc::new(|v| format!("{v:+.3}"))),
             track: Arc::new(RwLock::new(String::new())),
+            follow: Arc::new(RwLock::new(0)),
         }
     }
 }
@@ -245,7 +250,9 @@ impl OpenDeck {
         let number = claim_number();
         // The saved track, else (the first deck, for demos) OPENDECK_TRACK.
         let saved = self.params.track.read().unwrap().clone();
-        let track = Some(PathBuf::from(&saved)).filter(|p| p.is_file())
+        // A FOLLOW deck loads what the player it mirrors loads, nothing else.
+        let follow = Some(*self.params.follow.read().unwrap()).filter(|n| (1..=6).contains(n));
+        let track = Some(PathBuf::from(&saved)).filter(|p| p.is_file() && follow.is_none())
             .or_else(|| (number == 1).then(|| std::env::var_os("OPENDECK_TRACK").map(PathBuf::from)).flatten().filter(|p| p.is_file()));
         let events = Arc::new(Mutex::new(None));
         {
@@ -275,6 +282,7 @@ impl OpenDeck {
                 // in its own; `{n}` is the deck's number.
                 display: display_path(std::env::var("OVERDECK_DISPLAY").ok().as_deref(), number),
             }),
+            follow,
         };
         match DeckHost::get() {
             Ok(h) => { h.add(id, cfg); self.deck = Some((id, number)); log::info!("plugin: deck {id} (No. {number}) starting"); }
@@ -398,6 +406,20 @@ mod tests {
         q.deserialize_fields(&fields);
         assert_eq!(*q.track.read().unwrap(), "/music/a b.mp3", "and it reads back");
         let _ = &mut q;
+    }
+
+    /// Overdeck's `follow = N` writes `"fields":{"follow":"N"}` into a deck's
+    /// state: pin that shape, and that it reads back.
+    #[test]
+    fn the_saved_follow_is_the_player_number() {
+        let p = DeckParams::default();
+        assert_eq!(p.serialize_fields().get("follow").map(String::as_str), Some("0"), "none by default");
+        *p.follow.write().unwrap() = 2;
+        let fields = p.serialize_fields();
+        assert_eq!(fields.get("follow").map(String::as_str), Some("2"));
+        let q = DeckParams::default();
+        q.deserialize_fields(&fields);
+        assert_eq!(*q.follow.read().unwrap(), 2);
     }
 
     /// Decks take the lowest free number, and a closed deck's number is free again.

@@ -102,6 +102,9 @@ pub struct LinkState {
     pub positions:     Mutex<HashMap<u8, (AbsPosition, Instant)>>,
     /// Each player's latest status (its loaded track, tempo, …).
     pub peer_status:   Mutex<HashMap<u8, Status>>,
+    /// When each player's latest status and latest beat packet came: a
+    /// FOLLOW deck places an older player's playhead from them (`follow`).
+    pub peer_heard:    Mutex<HashMap<u8, PeerHeard>>,
     /// Tracks we serve as a Link media source (0 = not serving).  Non-zero
     /// answers media queries and flags our USB slot loaded in status.
     pub serve_tracks:  AtomicU32,
@@ -137,6 +140,10 @@ pub struct LinkState {
     /// leaves the phase alone meanwhile and measures the new offset after.
     pub jog_nudge_ms:  AtomicU64,
 }
+
+/// When a player's latest status and beat packet arrived.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PeerHeard { pub status_at: Option<Instant>, pub beat_at: Option<Instant> }
 
 /// How long after the last jog nudge SYNC waits before measuring the offset
 /// the nudge left (the deck is back at the fader speed by then).
@@ -235,6 +242,7 @@ impl LinkState {
             peer_names: Mutex::new(HashMap::new()),
             positions: Mutex::new(HashMap::new()),
             peer_status: Mutex::new(HashMap::new()),
+            peer_heard: Mutex::new(HashMap::new()),
             serve_tracks: AtomicU32::new(0),
             peer_media: Mutex::new(HashMap::new()),
             beat2_beat_ms: AtomicU64::new(0),
@@ -1078,6 +1086,7 @@ impl BeatRx {
             // sender); the second copy lands within a few ms.  A real beat is
             // never closer than 300 ms (200 BPM), so drop the twin.
             if beat_is_twin(last_beat_at, b.player, now) { return out; }
+            if let Ok(mut m) = link.peer_heard.lock() { m.entry(b.player).or_default().beat_at = Some(now); }
             let master = link.master_player.load(Ordering::Relaxed) as u8;
             // Effective tempo = track BPM × the sender's pitch.  The beat packet
             // carries them separately; use the product so a pitched master
@@ -1204,6 +1213,7 @@ impl StatusRx {
         }
         let Some(st) = ProDjLink::parse_status(data) else { return out };
         if let Ok(mut m) = link.peer_status.lock() { m.insert(st.player, st); }
+        if let Ok(mut m) = link.peer_heard.lock() { m.entry(st.player).or_default().status_at = Some(Instant::now()); }
         if st.player == link.player() { return out; }
 
         let changed = last.get(&st.player).map_or(true, |p| {

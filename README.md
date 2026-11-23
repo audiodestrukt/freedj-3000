@@ -420,6 +420,18 @@ phase. MASTER hands over both ways with a real XDJ. While synced, a jog nudge
 is kept as a phase offset, as a CDJ does, until SYNC is pressed again or
 SHIFT GRID writes it into the grid.
 
+**FOLLOW (a mirror of a real deck).** `--follow N` (or `OPENDECK_FOLLOW=N`;
+a plugin deck's saved `follow`, which Overdeck's `follow = N` sets) makes the
+deck a screen for Link player N instead of a player. It loads whatever that
+player loads, over LINK, never plays it, and draws its playhead, PLAY,
+pitch, MASTER and SYNC. It only listens: it sends no beats or status and
+never takes master, and its own controls do nothing. A CDJ-3000 reports its
+playhead in ms; an older player (XDJ-1000, CDJ-2000NXS2) only which beat it
+is on and when each beat lands, so the mirror is on the grid at every beat
+and runs on at the pitch in between. A cue or a scratch inside one beat
+shows at the next, and paused it shows the reported beat. Link carries no
+audio: the real deck's sound goes by cable.
+
 `OPENDECK_LINK_IFACE=<iface>` pins Link to one network interface, for example
 a private bridge to an emulated deck, or `lo` to share the machine with
 [Deckbench](docs/testing/deckbench.md).
