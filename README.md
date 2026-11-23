@@ -425,7 +425,8 @@ a plugin deck's saved `follow`, which Overdeck's `follow = N` sets) makes the
 deck a screen for Link player N instead of a player. It loads whatever that
 player loads, over LINK, never plays it, and draws its playhead, PLAY,
 pitch, MASTER and SYNC. It only listens: it sends no beats or status and
-never takes master, and its own controls do nothing. A CDJ-3000 reports its
+never takes master, and its own controls do nothing. It takes PLAYER No.
+AUTO whatever number it was given, so it never holds the number it mirrors. A CDJ-3000 reports its
 playhead in ms; an older player (XDJ-1000, CDJ-2000NXS2) only which beat it
 is on and when each beat lands, so the mirror is on the grid at every beat
 and runs on at the pitch in between. A cue or a scratch inside one beat

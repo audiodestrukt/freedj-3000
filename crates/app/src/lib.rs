@@ -5170,6 +5170,21 @@ pub fn desktop_main() -> Result<()> {
     run(Config { track: path, player, default_player: 1, deck_channel, link_send, browse_root, autoplay, controllers, host: None, follow })
 }
 
+/// The Link player number to claim (0 = AUTO): the one given, else MENU's,
+/// and always AUTO for a FOLLOW deck, which must never hold the number of
+/// the player it mirrors.
+fn link_number(given: Option<u8>, menu: u8, follow: Option<u8>) -> u8 {
+    if follow.is_some() { 0 } else { given.unwrap_or(menu) }
+}
+
+#[cfg(test)]
+#[test]
+fn a_follow_deck_takes_auto_even_when_given_the_number_it_mirrors() {
+    assert_eq!(link_number(Some(2), 1, None), 2, "a playing deck keeps the number it was given");
+    assert_eq!(link_number(None, 3, None), 3, "else MENU's");
+    assert_eq!(link_number(Some(2), 1, Some(2)), 0, "Overdeck's deck 2 mirroring player 2: AUTO");
+}
+
 /// OPENDECK_FOLLOW=N: the Link player to mirror.
 pub fn follow_env() -> Option<u8> {
     std::env::var("OPENDECK_FOLLOW").ok().and_then(|v| v.parse().ok()).filter(|n| (1..=6).contains(n))
@@ -5231,7 +5246,9 @@ fn build(cfg: Config) -> Result<DeckApp> {
     if let Ok(v) = std::env::var("OPENDECK_LIGHT") { settings.light = v == "1" || v.eq_ignore_ascii_case("on"); }
     // 0 = PLAYER No. AUTO: claim a free number on the network, 4 first,
     // then 5, 6, 3, 2, 1 (prodj::AUTO_ORDER).
-    let player       = cfg.player.unwrap_or(settings.player);
+    // A FOLLOW deck always takes AUTO: a fixed number could be the very
+    // player it mirrors (Overdeck numbers its decks 1, 2, … in start order).
+    let player       = link_number(cfg.player, settings.player, cfg.follow);
     let player_auto  = player == 0;
     let player       = if player_auto { prodj::AUTO_ORDER[0] } else { player }.clamp(1, 6);
     let deck_channel = cfg.deck_channel;
