@@ -57,6 +57,12 @@ impl Grid {
         }
     }
 
+    /// Where `ms` is in beats: 3.25 = a quarter of the way into beat 3.
+    pub fn pos_beats(&self, ms: f64) -> f64 {
+        let n = self.beat_of(ms);
+        n as f64 + ((ms - self.ms_of(n)) / self.period_at(n)).max(0.0)
+    }
+
     /// The beat (1-based) that `ms` falls in.
     pub fn beat_of(&self, ms: f64) -> u32 {
         if self.beats_ms.is_empty() {
@@ -74,8 +80,11 @@ pub struct Heard {
     pub playing:   bool,
     pub pitch:     f64,
     pub status_at: Instant,
-    /// When its latest beat packet came.
+    /// Where in the bar the status's beat is (1-4).
+    pub status_bib: Option<u8>,
+    /// When its latest beat packet came, and where in the bar that beat is.
     pub beat_at:   Option<Instant>,
+    pub beat_bib:  Option<u8>,
 }
 
 /// The followed player's playhead, from its beats and status.
@@ -89,14 +98,35 @@ pub struct FollowClock {
     beat:        Option<u32>,
     last_beat:   Option<Instant>,
     last_status: Option<Instant>,
-    /// Statuses in a row whose beat disagreed with ours (a status sent just
-    /// before its beat number moved is one beat behind: not a jump).
+    /// Statuses in a row whose beat disagreed with ours: one alone is a
+    /// status sent before its number moved, not a jump.
     mismatch:    u8,
+    /// How this player's beat numbers sit in the bar: beat n is at
+    /// `(n - 1 + offset) % 4 + 1`.  Each status votes for an offset (its
+    /// beat and that beat's place in the bar); a status sent as the beat
+    /// changes can pair the new number with the old place, so it takes a
+    /// clear majority.  A beat packet names its place in the bar, so with
+    /// this it names its beat exactly.
+    bar_votes:   [f32; 4],
+}
+
+/// Of the beats next to `n`, the one at `bib` in the bar.
+fn on_bar(n: u32, bib: Option<u8>, offset: Option<u32>) -> u32 {
+    let (Some(bib), Some(off)) = (bib, offset) else { return n };
+    [n, n + 1, n.saturating_sub(1).max(1)].into_iter()
+        .find(|&m| (m - 1 + off) % 4 + 1 == bib as u32).unwrap_or(n)
 }
 
 impl FollowClock {
     /// Start over (a new track).
     pub fn reset(&mut self) { *self = FollowClock::default(); }
+
+    /// The bar offset most statuses agree on (at least three quarters of the vote).
+    fn bar_offset(&self) -> Option<u32> {
+        let total: f32 = self.bar_votes.iter().sum();
+        let (i, best) = self.bar_votes.iter().enumerate().fold((0, 0.0f32), |a, (i, &v)| if v > a.1 { (i, v) } else { a });
+        (total >= 3.0 && best >= total * 0.75).then_some(i as u32)
+    }
 
     /// The playhead at `now`, in track ms.
     pub fn at(&self, now: Instant) -> Option<f64> {
@@ -108,54 +138,86 @@ impl FollowClock {
     /// Take what is new in `h` and return the playhead at `now`.
     pub fn update(&mut self, h: &Heard, grid: &Grid, now: Instant) -> Option<f64> {
         if h.pitch > 0.0 { self.pitch = h.pitch; }
+        if let (Some(n), Some(bib), true) = (h.beat, h.status_bib, Some(h.status_at) != self.last_status) {
+            let off = ((bib as u32 + 7 - (n - 1) % 4) % 4) as usize;
+            for (i, v) in self.bar_votes.iter_mut().enumerate() { *v = *v * 0.95 + if i == off { 1.0 } else { 0.0 }; }
+        }
         // A beat packet: the playhead is on the next beat's line, now.
         if let Some(tb) = h.beat_at.filter(|t| Some(*t) != self.last_beat) {
             self.last_beat = Some(tb);
-            if let (true, Some(b), Some((ms, at))) = (self.playing, self.beat, self.base) {
-                // How far into beat b this packet came; beats missed in
-                // between (a lost packet) count too.
-                let into = ms - grid.ms_of(b) + tb.saturating_duration_since(at).as_secs_f64() * 1000.0 * self.pitch;
-                let k = (into / grid.period_at(b)).round().max(1.0) as u32;
-                let n = b + k;
+            let n = match (self.playing, self.beat, self.base) {
+                (true, Some(b), Some((ms, at))) => {
+                    // How far into beat b this packet came; beats missed in
+                    // between (a lost packet) count too.
+                    let into = ms - grid.ms_of(b) + tb.saturating_duration_since(at).as_secs_f64() * 1000.0 * self.pitch;
+                    Some(b + (into / grid.period_at(b)).round().max(1.0) as u32)
+                }
+                // Beats while we hold it paused: it plays (its status says so
+                // a few hundred ms later), from the next beat line.
+                (false, _, Some((ms, _))) => { self.playing = true; Some(grid.beat_of(ms) + 1) }
+                _ => None,
+            };
+            if let Some(n) = n {
+                let n = on_bar(n, h.beat_bib, self.bar_offset());
+                log::debug!(target: "follow", "beat packet: {:?} → {n}", self.beat);
                 self.beat = Some(n);
                 self.base = Some((grid.ms_of(n), tb));
             }
         }
         if Some(h.status_at) != self.last_status {
-            self.last_status = Some(h.status_at);
-            self.status(h, grid);
+            let prev = self.last_status.replace(h.status_at);
+            self.status(h, grid, prev);
         }
         self.at(now)
     }
 
-    fn status(&mut self, h: &Heard, grid: &Grid) {
+    /// A status: PLAY or pause, and whether its beat number says the
+    /// playhead jumped.
+    ///
+    /// Players number the beat differently.  An XDJ-1000MK2's status moves
+    /// to beat n with n's beat packet; a CDJ-3000's (3.22) halfway through
+    /// beat n-1, the nearest beat.  So a status agrees with us if its beat
+    /// is the one we are in or the nearest one, and a jump is taken only
+    /// from a status in the first half of a beat, where both say the same.
+    fn status(&mut self, h: &Heard, grid: &Grid, prev: Option<Instant>) {
         let ts = h.status_at;
-        let here = self.at(ts);
-        if h.playing != self.playing {
-            // PLAY or pause: hold the playhead where it was, and run on (or not) from there.
-            if let Some(ms) = here { self.base = Some((ms, ts)); }
+        // A paused status just after a beat packet is one sent before the
+        // player started: the beats are newer news.
+        let stale_pause = !h.playing && self.playing && h.beat_at.is_some_and(|tb| tb > ts.checked_sub(std::time::Duration::from_millis(50)).unwrap_or(ts)) && prev.is_none_or(|p| p < ts);
+        if h.playing != self.playing && !stale_pause {
+            // It stopped somewhere since the last status, and a player's status
+            // reports a change late (a CDJ-3000's beats start ~300 ms before its
+            // status says PLAY): hold the playhead where it was at that last
+            // status.  (Starting is taken from the first beat packet instead.)
+            let at = match prev { Some(p) if self.playing && p < ts => p, _ => ts };
+            if let Some(ms) = self.at(at) { self.base = Some((ms, ts)); }
             self.playing = h.playing;
         }
         let Some(n) = h.beat else { return };
-        let ours = match (self.playing, here) {
-            (true, _) => self.beat,
-            (false, Some(ms)) => Some(grid.beat_of(ms)),
-            (false, None) => None,
-        };
-        if ours == Some(n) { self.mismatch = 0; return; }
-        self.mismatch += 1;
-        if ours.is_some() && self.mismatch < 2 { return; }
-        self.mismatch = 0;
-        // A jump (a cue, a search, a new track, the first status): on beat n.
-        // Playing, beat n started at its last beat packet if that came inside
-        // this beat; otherwise we only know the beat, so start it now.
+        let here = self.at(ts);
+        let agrees = here.is_some_and(|ms| {
+            let (pos, n) = (grid.pos_beats(ms), n as f64);
+            n > pos - 1.15 && n <= pos + 0.65   // its own beat (just after a beat line, still the last) or the nearest
+        });
+        if agrees { self.mismatch = 0; return; }
+        self.mismatch = self.mismatch.saturating_add(1);
+        log::debug!(target: "follow", "status: beat {n}, ours {:?}, mismatch {}", here.map(|ms| grid.pos_beats(ms)), self.mismatch);
+        if here.is_some() && self.mismatch < 2 { return; }
+        // A jump (a cue, a search, a beat jump, the first status): on beat n.
+        // Playing with a recent beat packet, beat n began at that packet; in
+        // the second half of a beat wait for the next status.  Otherwise we
+        // only know the beat, so it starts now.
+        let period = grid.period_at(n);
+        // Just after a beat line a status may still name the last beat, and
+        // past the middle the next: take a jump only from one in between.
         let into = match h.beat_at {
             Some(tb) if self.playing && tb <= ts => {
                 let d = ts.duration_since(tb).as_secs_f64() * 1000.0 * self.pitch;
-                if d < grid.period_at(n) { d } else { 0.0 }
+                if d >= period { 0.0 } else if (period * 0.12..period * 0.45).contains(&d) { d } else { return }
             }
             _ => 0.0,
         };
+        self.mismatch = 0;
         self.beat = Some(n);
         self.base = Some((grid.ms_of(n) + into, ts));
     }
@@ -195,14 +257,18 @@ mod tests {
     /// packets on every beat and a status every 200 ms (carrying the beat
     /// number the XDJ is on at that moment).  Returns the clock's playhead
     /// against the truth at every 10 ms.
-    fn run(from: u32, secs: f64, pitch: f64, status_lag_ms: u64) -> Vec<(f64, f64)> {
+    fn run(from: u32, secs: f64, pitch: f64, status_lag_ms: u64) -> Vec<(f64, f64)> { run_as(from, secs, pitch, status_lag_ms, false) }
+
+    /// `nearest`: the status names the nearest beat (a CDJ-3000), not the
+    /// one the playhead is in (an XDJ).
+    fn run_as(from: u32, secs: f64, pitch: f64, status_lag_ms: u64, nearest: bool) -> Vec<(f64, f64)> {
         let grid = Grid::constant(100.0, 120.0);
         let t0 = Instant::now();
         let start_ms = grid.ms_of(from) + 120.0;   // inside the beat
         let truth = |t: f64| start_ms + t * pitch;
         let wall_of = |ms: f64| (ms - start_ms) / pitch;   // ms of wall time when the track is at `ms`
         let mut c = FollowClock::default();
-        let mut h = Heard { beat: None, playing: true, pitch, status_at: t0, beat_at: None };
+        let mut h = Heard { beat: None, playing: true, pitch, status_at: t0, status_bib: None, beat_at: None, beat_bib: None };
         let mut out = Vec::new();
         let mut next_status = 0.0;
         let mut next_beat = from + 1;
@@ -211,12 +277,15 @@ mod tests {
             let now = t0 + Duration::from_secs_f64(t / 1000.0);
             if wall_of(grid.ms_of(next_beat)) <= t {
                 h.beat_at = Some(now);
+                h.beat_bib = Some(((next_beat + 2) % 4 + 1) as u8);   // beat 1 is the bar's 3rd
                 next_beat += 1;
             }
             if t >= next_status {
                 // A status sent `status_lag_ms` after a beat may still carry the old beat number.
-                let on = grid.beat_of(truth(t - status_lag_ms as f64));
+                let ms = truth(t - status_lag_ms as f64);
+                let on = if nearest { grid.beat_of(ms + 250.0) } else { grid.beat_of(ms) };
                 h.beat = Some(on);
+                h.status_bib = Some(((on + 2) % 4 + 1) as u8);
                 h.status_at = now;
                 next_status += 200.0;
             }
@@ -247,19 +316,30 @@ mod tests {
     }
 
     #[test]
+    fn a_player_naming_the_nearest_beat_is_followed_without_slipping_a_beat() {
+        // From inside the second half of a beat, where the two conventions differ.
+        for from in [10, 11] {
+            let v = run_as(from, 8.0, 1.0, 0, true);
+            let worst = v.iter().skip(60).map(|(p, t)| (p - t).abs()).fold(0.0, f64::max);
+            assert!(worst < 15.0, "from beat {from}: worst error {worst:.1} ms");
+        }
+    }
+
+    #[test]
     fn pause_holds_and_a_cue_jumps_to_its_beat() {
         let grid = Grid::constant(0.0, 120.0);
         let t0 = Instant::now();
         let at = |ms: u64| t0 + Duration::from_millis(ms);
         let mut c = FollowClock::default();
         // Playing on beat 9 (4000 ms), a beat packet at its start.
-        let mut h = Heard { beat: Some(9), playing: true, pitch: 1.0, status_at: at(100), beat_at: Some(at(0)) };
+        let mut h = Heard { beat: Some(9), playing: true, pitch: 1.0, status_at: at(100), status_bib: Some(1), beat_at: Some(at(0)), beat_bib: Some(1) };
         let p = c.update(&h, &grid, at(100)).unwrap();
         assert!((p - 4100.0).abs() < 1.0, "{p}");
-        // Paused at 4300: it holds there.
+        // The pause status at 300 says it stopped since the one at 100, and
+        // statuses come late: it holds where the one at 100 had it (4100).
         h.playing = false; h.status_at = at(300);
-        assert!((c.update(&h, &grid, at(300)).unwrap() - 4300.0).abs() < 1.0);
-        assert!((c.update(&h, &grid, at(2000)).unwrap() - 4300.0).abs() < 1.0, "holds while paused");
+        assert!((c.update(&h, &grid, at(300)).unwrap() - 4100.0).abs() < 1.0);
+        assert!((c.update(&h, &grid, at(2000)).unwrap() - 4100.0).abs() < 1.0, "holds while paused");
         // CUE back to beat 1: the status's beat moves (twice, to be believed) and so does the playhead.
         h.beat = Some(1); h.status_at = at(2200);
         c.update(&h, &grid, at(2200));
@@ -303,6 +383,7 @@ mod tests {
                 // Just before the packet, the clock should be about to reach a grid line.
                 let before = c.at(*at).unwrap();
                 hh.beat_at = Some(*at);
+                hh.beat_bib = Some(beat.beat_in_bar);
                 let p = c.update(hh, &grid, *at).unwrap();
                 if beats > 0 {
                     let n = grid.beat_of(p + 1.0);
@@ -312,8 +393,8 @@ mod tests {
                 beats += 1;
             } else if let Some(st) = ProDjLink::parse_status(b) {
                 if st.player != 1 { continue; }
-                let hh = h.get_or_insert(Heard { beat: None, playing: false, pitch: 1.0, status_at: *at, beat_at: None });
-                hh.beat = st.beat; hh.playing = st.playing; hh.pitch = st.pitch as f64; hh.status_at = *at;
+                let hh = h.get_or_insert(Heard { beat: None, playing: false, pitch: 1.0, status_at: *at, status_bib: None, beat_at: None, beat_bib: None });
+                hh.beat = st.beat; hh.status_bib = st.beat_in_bar; hh.playing = st.playing; hh.pitch = st.pitch as f64; hh.status_at = *at;
                 let p = c.update(hh, &grid, *at).unwrap();
                 if beats > 1 {
                     let ours = grid.beat_of(p + 1.0);

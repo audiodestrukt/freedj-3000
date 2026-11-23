@@ -92,6 +92,39 @@ one until it is unsynced (we have seen the XDJ do this).
   one we want most: it shows the 3000's sync counter and handoff bytes in
   motion.
 
+## FOLLOW against an emulated CDJ-3000
+
+A FOLLOW deck (`--follow N`) can be graded against a CDJ-3000 in cdj3k-emu
+on its private bridge (`djlink0`, off the LAN). `OPENDECK_FOLLOW_BEATS=1`
+makes the mirror ignore the CDJ-3000's position packets and place it from
+beats and status alone, as it must an XDJ. The CDJ's own position packets
+then grade that beat clock. `RUST_LOG=follow=debug` logs, every frame, the
+mirror's playhead beside the one the CDJ reports.
+
+```sh
+cdj3k-emu --instance 2 --headless --dev          # the 3000 on djlink0
+OPENDECK_LINK_IFACE=djlink0 OPENDECK_SERVE=0 OPENDECK_FOLLOW_BEATS=1 \
+  RUST_LOG=info,follow=debug opendeck --follow 2
+```
+
+Load a track on the CDJ from its USB. The mirror loads the same track over
+LINK. Then play and pause the CDJ.
+
+**Measured on 2026-11-23** (CDJ-3000 3.22, 126 BPM, six pauses):
+- Beat clock: median 2.5 ms behind the CDJ, p95 22 ms. No frame was a
+  beat off. Paused holds came within 17 ms of the CDJ in five of six
+  pauses, and 139 ms off in the sixth.
+- Position packets: median 0 ms, p95 7 ms.
+
+**What the emulator showed:**
+- A CDJ-3000's status beat number does not always move with its beat
+  packet. Sometimes it moves halfway through the beat, or pairs the new
+  number with the old place in the bar. An XDJ-1000MK2's moves with the
+  packet. The clock therefore names each beat by its place in the bar,
+  which every beat packet carries.
+- The CDJ's beats start about 300 ms before its status says PLAY, so a
+  beat packet counts as PLAY.
+
 ## Running OpenDeck *on* a CDJ-3000
 
 Not this page. That is a firmware replacement and is gated on things no

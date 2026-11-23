@@ -143,7 +143,7 @@ pub struct LinkState {
 
 /// When a player's latest status and beat packet arrived.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct PeerHeard { pub status_at: Option<Instant>, pub beat_at: Option<Instant> }
+pub struct PeerHeard { pub status_at: Option<Instant>, pub beat_at: Option<Instant>, pub beat_bib: Option<u8> }
 
 /// How long after the last jog nudge SYNC waits before measuring the offset
 /// the nudge left (the deck is back at the fader speed by then).
@@ -1086,7 +1086,11 @@ impl BeatRx {
             // sender); the second copy lands within a few ms.  A real beat is
             // never closer than 300 ms (200 BPM), so drop the twin.
             if beat_is_twin(last_beat_at, b.player, now) { return out; }
-            if let Ok(mut m) = link.peer_heard.lock() { m.entry(b.player).or_default().beat_at = Some(now); }
+            if let Ok(mut m) = link.peer_heard.lock() {
+                let h = m.entry(b.player).or_default();
+                h.beat_at = Some(now);
+                h.beat_bib = Some(b.beat_in_bar);
+            }
             let master = link.master_player.load(Ordering::Relaxed) as u8;
             // Effective tempo = track BPM × the sender's pitch.  The beat packet
             // carries them separately; use the product so a pitched master

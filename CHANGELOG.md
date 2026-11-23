@@ -13,7 +13,14 @@ All notable changes to this project will be documented in this file.
   packets: on the grid at every beat, run on at the pitch between. It only
   listens (no beats, no status, never master), and its own controls do
   nothing. Replaying a recorded XDJ-1000MK2 puts it on every beat within
-  2.5 ms.
+  2.5 ms. Against an emulated CDJ-3000, placed from its beats alone, it is
+  a median of 2.5 ms off the CDJ's own position, p95 22 ms, with no beat
+  slips over six pauses. Each beat is named by its place in the bar, since
+  a CDJ-3000's status beat number does not always move with its beat
+  packet. A beat packet counts as PLAY (it comes about 300 ms before the
+  status says so). `OPENDECK_FOLLOW_BEATS=1` ignores a CDJ-3000's
+  position packets, for testing the beat clock against them
+  (docs/testing/cdj-3000-interop.md).
 - A plugin deck can draw its screen into its host's instead of opening a
   window (Overdeck's display contract, the `overdeck-display` crate). When
   the host names a screen for it in `OVERDECK_DISPLAY`, the deck renders

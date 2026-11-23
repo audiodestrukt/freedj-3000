@@ -3244,19 +3244,32 @@ impl DeckApp {
         let sr_ch = sr as f64 * self.audio.channels as f64;
         let now = Instant::now();
         // A CDJ-3000 says where it is; older players only which beat.
-        let abs = self.link.positions.lock().ok().and_then(|m| m.get(&p).copied()).filter(|(_, at)| at.elapsed() < Duration::from_secs(1));
+        // OPENDECK_FOLLOW_BEATS=1 (testing): ignore a CDJ-3000's position
+        // packets and place it as an older player, from its beats alone, so
+        // its own packets can grade the beat clock.
+        static BEATS_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let beats_only = *BEATS_ONLY.get_or_init(|| std::env::var("OPENDECK_FOLLOW_BEATS").as_deref() == Ok("1"));
+        let reported = self.link.positions.lock().ok().and_then(|m| m.get(&p).copied())
+            .filter(|(_, at)| at.elapsed() < Duration::from_secs(1))
+            .map(|(a, at)| a.playhead_ms as f64 + if st.playing { at.elapsed().as_secs_f64() * 1000.0 * a.pitch as f64 } else { 0.0 });
+        let abs = reported.filter(|_| !beats_only);
         let target = match abs {
-            Some((a, at)) => a.playhead_ms as f64 + if st.playing { at.elapsed().as_secs_f64() * 1000.0 * a.pitch as f64 } else { 0.0 },
+            Some(ms) => ms,
             None => {
                 let g = self.beat_grid.as_ref()?;
                 let key = (g.beats.len(), g.anchor_sample, g.bpm.to_bits());
                 if self.follow_grid.1 != key { self.follow_grid = (follow::Grid::from_beat_grid(g, sr), key); }
                 let heard = self.link.peer_heard.lock().ok().and_then(|m| m.get(&p).copied()).unwrap_or_default();
-                let h = follow::Heard { beat: st.beat, playing: st.playing, pitch: st.pitch as f64, status_at: heard.status_at?, beat_at: heard.beat_at };
+                let h = follow::Heard { beat: st.beat, playing: st.playing, pitch: st.pitch as f64, status_at: heard.status_at?,
+                                        status_bib: st.beat_in_bar, beat_at: heard.beat_at, beat_bib: heard.beat_bib };
                 self.follow_clock.update(&h, &self.follow_grid.0, now)?
             }
         };
         let ms = self.follow_smooth.next(target, st.pitch as f64, st.playing, now);
+        // RUST_LOG=follow=debug: the mirror's playhead, to set against the player's own.
+        log::debug!(target: "follow", "player {p} at {ms:.1} ms (clock {target:.1}, it says {}) {} {}",
+                    reported.map_or("-".into(), |r| format!("{r:.1}")),
+                    if abs.is_some() { "position" } else { "beats" }, if st.playing { "playing" } else { "paused" });
         Some((ms.max(0.0) / 1000.0 * sr_ch).min(self.audio.len() as f64))
     }
 
