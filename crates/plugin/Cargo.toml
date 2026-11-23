@@ -10,6 +10,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 opendeck-app = { path = "../app" }
+overdeck-display = { git = "https://github.com/audiodestrukt/freedj-overdeck", rev = "64691fc" }
 nih_plug     = { git = "https://github.com/robbert-vdh/nih-plug.git", default-features = false, features = ["vst3"] }
 log          = { workspace = true }
 env_logger   = { workspace = true }

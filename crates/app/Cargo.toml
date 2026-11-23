@@ -41,6 +41,7 @@ winit             = { workspace = true }
 egui              = { workspace = true }
 egui-wgpu         = { workspace = true }
 egui-winit        = { workspace = true }
+overdeck-display  = { git = "https://github.com/audiodestrukt/freedj-overdeck", rev = "64691fc" }
 bytemuck          = { workspace = true }
 pollster          = "0.3"
 log               = { workspace = true }

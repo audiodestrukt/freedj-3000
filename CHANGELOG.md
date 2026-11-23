@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- A plugin deck can draw its screen into its host's instead of opening a
+  window (Overdeck's display contract, the `overdeck-display` crate). When
+  the host names a screen for it in `OVERDECK_DISPLAY`, the deck renders
+  off-screen at that screen's size, copies each frame in, and takes the
+  touches the host sends back as its pointer. It shows the screen alone,
+  without the faceplate. Overdeck's `--aio` uses it to put every deck in
+  one window.
 - `OPENDECK_TILE=N` for plugin decks: each deck's window takes its Nth of
   the screen's width, side by side, in the order the decks started (the
   layout scales to fit).  Works where a client may place its windows (X11

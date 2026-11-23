@@ -11,6 +11,7 @@ mod audio;
 pub use audio::{HostOutput, HostSlot};
 mod browser;
 mod dbsession;
+mod framehost;
 pub mod chrome;
 mod cpumeter;
 mod grids;
@@ -593,6 +594,8 @@ enum ScreenMode { Playback, Browse, Info, Perform, TagList, Menu, Source, Histor
 /// input and never touches a window type directly.
 enum Host {
     Winit { window: Arc<Window>, egui_state: egui_winit::State },
+    /// No window: a plugin host shows the deck's screen in its own.
+    Frames(framehost::FrameHost),
     #[cfg(feature = "renderer-sdl")]
     Sdl(sdl_backend::SdlHost),
 }
@@ -601,6 +604,7 @@ impl Host {
     fn scale_factor(&self) -> f32 {
         match self {
             Host::Winit { window, .. } => window.scale_factor() as f32,
+            Host::Frames(f) => f.ppp,
             #[cfg(feature = "renderer-sdl")]
             Host::Sdl(h) => h.scale_factor(),
         }
@@ -616,6 +620,7 @@ impl Host {
                 renderer::set_squeeze_x(xs);
                 (w, h)
             }
+            Host::Frames(f) => f.size_px,
             #[cfg(feature = "renderer-sdl")]
             Host::Sdl(h) => h.size_px(),
         }
@@ -643,6 +648,7 @@ impl Host {
                 }
                 raw
             }
+            Host::Frames(f) => f.take_egui_input(),
             #[cfg(feature = "renderer-sdl")]
             Host::Sdl(h) => h.take_egui_input(),
         }
@@ -650,6 +656,7 @@ impl Host {
     fn handle_platform_output(&mut self, out: egui::PlatformOutput) {
         match self {
             Host::Winit { window, egui_state } => egui_state.handle_platform_output(window.as_ref(), out),
+            Host::Frames(_) => {}
             #[cfg(feature = "renderer-sdl")]
             Host::Sdl(_) => {}
         }
@@ -659,6 +666,8 @@ impl Host {
     fn request_redraw(&self) {
         match self {
             Host::Winit { window, .. } => window.request_redraw(),
+            // Drawn on a timer of its own (DeckApp::about_to_wait).
+            Host::Frames(_) => {}
             #[cfg(feature = "renderer-sdl")]
             Host::Sdl(_) => {}
         }
@@ -667,6 +676,7 @@ impl Host {
     fn insets(&self, ppp: f32, win: egui::Rect) -> (f32, f32, f32, f32) {
         match self {
             Host::Winit { window, .. } => phone_insets(window, ppp, win),
+            Host::Frames(_) => (0.0, 0.0, 0.0, 0.0),
             #[cfg(feature = "renderer-sdl")]
             Host::Sdl(_) => screen::PHONE_INSETS,
         }
@@ -886,6 +896,8 @@ struct DeckApp {
     closed:      bool,
     /// The plugin's tile slot and count (see `PluginHost::tile`).
     tile:        Option<(u8, u8)>,
+    /// The host's screen to draw into instead of a window (see `PluginHost::display`).
+    display:     Option<PathBuf>,
     /// The servers and Link threads `run` starts for this deck; they stop
     /// when the deck is dropped.
     guards:      Vec<Box<dyn std::any::Any>>,
@@ -1247,6 +1259,7 @@ impl DeckApp {
             multi:       false,
             closed:      false,
             tile:        None,
+            display:     None,
             guards:      Vec::new(),
             host:        None,
             renderer:    None,
@@ -3368,7 +3381,7 @@ impl DeckApp {
     /// launch), so neither ends up letterboxed in the other's window.
     /// Desktop only: the iPad always shows the deck, the phone its pages.
     fn apply_deck_view(&mut self) {
-        if cfg!(any(target_os = "ios", target_os = "android")) || self.phone || self.portrait { return; }
+        if cfg!(any(target_os = "ios", target_os = "android")) || self.phone || self.portrait || self.display.is_some() { return; }
         self.faceplate = self.settings.full_deck;
         log::info!("deck view → {}", if self.faceplate { "full deck" } else { "screen only" });
         let (w, h) = self.initial_window_size();
@@ -4583,6 +4596,25 @@ impl ApplicationHandler for DeckApp {
             return;
         }
 
+        // A host's screen to draw into: no window.
+        if let Some(path) = self.display.clone() {
+            let layout_w = self.initial_window_size().0;
+            let made = framehost::FrameHost::open(&path, layout_w).and_then(|f| {
+                let (w, h) = f.size_px;
+                let r = pollster::block_on(WgpuRenderer::offscreen(w, h, f.ppp, &self.waveform, f.sink()))?;
+                Ok((f, r))
+            });
+            match made {
+                Ok((f, r)) => {
+                    self.host = Some(Host::Frames(f));
+                    self.renderer = Some(Box::new(r));
+                    self.apply_wave_color();
+                }
+                Err(e) => { log::error!("display {}: {e:#}; no screen", path.display()); self.display = None; }
+            }
+            return;
+        }
+
         let (win_w, win_h) = self.initial_window_size();
         let mut attrs = WindowAttributes::default().with_title("freedj-3000");
         // Only ask for a size where a window manager can grant one.  On iOS the
@@ -4794,6 +4826,19 @@ impl ApplicationHandler for DeckApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        // Drawing into a host's screen: no compositor to pace us, so a timer
+        // (the display rate playing, the idle rate paused) — and at once when
+        // a touch comes in.
+        if let Some(Host::Frames(f)) = &mut self.host {
+            let touched = f.poll();
+            let fps = if self.full_rate { 60.0 } else { self.idle_fps.unwrap_or(60.0) };
+            let due = self.last_render + Duration::from_secs_f32(1.0 / fps);
+            if touched || Instant::now() >= due { self.render_frame(); }
+            let next = self.last_render + Duration::from_secs_f32(1.0 / fps);
+            // Touches aren't events, so look for them at the display rate even when idle.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next.min(Instant::now() + Duration::from_millis(16))));
+            return;
+        }
         // Occluded (iOS background): idle completely — no self-driven frames, no
         // WaitUntil timer to keep waking us.  Occluded(false) requests a redraw
         // to restart the loop.
@@ -4940,6 +4985,11 @@ pub struct PluginHost {
     /// (the layout scales to fit).  Only where the window system lets a
     /// client place its window (X11 / XWayland; GNOME's Wayland doesn't).
     pub tile:        Option<(u8, u8)>,
+    /// A screen the host made for this deck (Overdeck's display contract,
+    /// `overdeck-display`): draw into it, off-screen, instead of opening a
+    /// window, and take the touches it sends back.  The deck shows its
+    /// screen alone (no faceplate), sized to it.
+    pub display:     Option<PathBuf>,
 }
 
 fn init_logging() {
@@ -5239,6 +5289,8 @@ fn build(cfg: Config) -> Result<DeckApp> {
     let has_track = track.is_some();
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
     app.tile = cfg.host.as_ref().and_then(|h| h.tile);
+    app.display = cfg.host.as_ref().and_then(|h| h.display.clone());
+    if app.display.is_some() { app.faceplate = false; }   // the host shows the screen; its panel has the controls
     if has_track {
         if let Some(a) = &startup_analysis { serve_loaded(&app.link, &app.path, a); app.serve_deck_grid(); app.own_phrases(a); }
         app.publish_track();

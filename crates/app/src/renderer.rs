@@ -297,7 +297,11 @@ pub struct WgpuRenderer {
     max_dim:        u32,
 
     /// Kept so `render` can call `pre_present_notify` before each present.
-    window:         Arc<Window>,
+    /// None off-screen.
+    window:         Option<Arc<Window>>,
+    /// Off-screen: the frame is drawn into this texture and each one handed
+    /// to the sink (a host's screen draws it; see [`WgpuRenderer::offscreen`]).
+    offscreen:      Option<Offscreen>,
 
     color_mode:     ColorMode,
     cols_visible:   f32,
@@ -308,21 +312,70 @@ pub struct WgpuRenderer {
     capture:        Option<std::path::PathBuf>,
 }
 
+/// Where an off-screen frame goes: its rows (`bytes_per_row` apart, RGBA),
+/// width, height and `bytes_per_row`.
+pub type FrameSink = Box<dyn FnMut(&[u8], u32, u32, u32)>;
+
+/// An off-screen target: the texture drawn into, the buffer it is read back
+/// through, and who gets the frame.
+struct Offscreen {
+    texture: Arc<wgpu::Texture>,
+    readback: wgpu::Buffer,
+    bpr: u32,
+    sink: FrameSink,
+}
+
+fn offscreen_target(device: &wgpu::Device, format: wgpu::TextureFormat, w: u32, h: u32) -> (Arc<wgpu::Texture>, wgpu::Buffer, u32) {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("offscreen"),
+        size: wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+        mip_level_count: 1, sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let bpr = ((w * 4 + 255) / 256) * 256;   // COPY_BYTES_PER_ROW_ALIGNMENT
+    let readback = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("offscreen_readback"),
+        size: u64::from(bpr) * u64::from(h),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    (Arc::new(texture), readback, bpr)
+}
+
 impl WgpuRenderer {
     pub async fn new(window: Arc<Window>, waveform: &WaveformCache) -> Result<Self> {
-        let size = crate::window_px(&window);
+        Self::build(Some(window), None, waveform).await
+    }
+
+    /// No window: draw `width` × `height` pixels at `pixels_per_point` into
+    /// a texture, and hand every frame to `sink` (a plugin host showing the
+    /// deck's screen inside its own; see the app's `PluginHost::display`).
+    pub async fn offscreen(width: u32, height: u32, pixels_per_point: f32, waveform: &WaveformCache, sink: FrameSink) -> Result<Self> {
+        Self::build(None, Some((width, height, pixels_per_point, sink)), waveform).await
+    }
+
+    async fn build(window: Option<Arc<Window>>, off: Option<(u32, u32, f32, FrameSink)>, waveform: &WaveformCache) -> Result<Self> {
+        let size = match (&window, &off) {
+            (Some(w), _) => crate::window_px(w),
+            (None, Some((w, h, ..))) => winit::dpi::PhysicalSize::new(*w, *h),
+            (None, None) => anyhow::bail!("a renderer needs a window or a size"),
+        };
 
         // ── wgpu instance / surface ───────────────────────────────────────────
         let instance = instance();
 
-        let surface = instance
-            .create_surface(Arc::clone(&window))
-            .context("failed to create wgpu surface")?;
+        let surface = match &window {
+            Some(w) => Some(instance.create_surface(Arc::clone(w)).context("failed to create wgpu surface")?),
+            None => None,
+        };
 
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference:       wgpu::PowerPreference::HighPerformance,
-                compatible_surface:     Some(&surface),
+                compatible_surface:     surface.as_ref(),
                 force_fallback_adapter: false,
             })
             .await
@@ -356,7 +409,17 @@ impl WgpuRenderer {
             .context("failed to get GPU device")?;
 
         // ── Surface configuration ─────────────────────────────────────────────
-        let caps   = surface.get_capabilities(&adapter);
+        // Off-screen: no surface to ask, so a format of our own (RGBA, what
+        // the frame's reader wants) and nothing to present.
+        let caps = match &surface {
+            Some(s) => s.get_capabilities(&adapter),
+            None => wgpu::SurfaceCapabilities {
+                formats: vec![wgpu::TextureFormat::Rgba8UnormSrgb],
+                present_modes: vec![wgpu::PresentMode::Fifo],
+                alpha_modes: vec![wgpu::CompositeAlphaMode::Opaque],
+                usages: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            },
+        };
         let format = caps
             .formats
             .iter()
@@ -411,7 +474,7 @@ impl WgpuRenderer {
             view_formats:                 vec![],
             desired_maximum_frame_latency: 2,
         };
-        surface.configure(&device, &surface_config);
+        if let Some(s) = &surface { s.configure(&device, &surface_config); }
 
         // ── Waveform storage buffer ───────────────────────────────────────────
         // Pack each [R,G,B,A] column into a single u32 (little-endian bytes).
@@ -545,14 +608,24 @@ impl WgpuRenderer {
 
         // ── egui renderer ─────────────────────────────────────────────────────
         let egui_renderer = egui_wgpu::Renderer::new(&device, format, None, 1, false);
-        let scale_factor  = window.scale_factor() as f32;
+        let scale_factor  = match (&window, &off) {
+            (Some(w), _) => w.scale_factor() as f32,
+            (None, Some((_, _, ppp, _))) => *ppp,
+            (None, None) => 1.0,
+        };
+        let offscreen = off.map(|(w, h, _, sink)| {
+            let (texture, readback, bpr) = offscreen_target(&device, format, surface_config.width, surface_config.height);
+            log::info!("renderer: off-screen {w}x{h} at {scale_factor:.2} px/pt");
+            Offscreen { texture, readback, bpr, sink }
+        });
         let egui_screen   = egui_wgpu::ScreenDescriptor {
             size_in_pixels:   [size.width, size.height],
             pixels_per_point: scale_factor,
         };
 
         Ok(Self {
-            surface: Some(surface),
+            surface,
+            offscreen,
             instance,
             adapter,
             surface_config,
@@ -588,7 +661,8 @@ impl Renderer for WgpuRenderer {
     }
 
     fn resume_surface(&mut self) {
-        let surface = match self.instance.create_surface(Arc::clone(&self.window)) {
+        let Some(window) = self.window.clone() else { return };
+        let surface = match self.instance.create_surface(Arc::clone(&window)) {
             Ok(s)  => s,
             Err(e) => { log::error!("resume: cannot create surface: {e}"); return; }
         };
@@ -599,7 +673,7 @@ impl Renderer for WgpuRenderer {
             log::error!("resume: surface lost format {:?} (has {:?})", self.surface_config.format, caps.formats);
             return;
         }
-        let size = crate::window_px(&self.window);
+        let size = crate::window_px(&window);
         self.surface_config.width  = size.width.clamp(1, self.max_dim);
         self.surface_config.height = size.height.clamp(1, self.max_dim);
         surface.configure(&self.device, &self.surface_config);
@@ -658,6 +732,10 @@ impl Renderer for WgpuRenderer {
         self.surface_config.width  = width;
         self.surface_config.height = height;
         if let Some(s) = &self.surface { s.configure(&self.device, &self.surface_config); }
+        if let Some(o) = &mut self.offscreen {
+            let (t, b, bpr) = offscreen_target(&self.device, self.surface_config.format, width, height);
+            (o.texture, o.readback, o.bpr) = (t, b, bpr);
+        }
         self.egui_screen.size_in_pixels = [width, height];
     }
 
@@ -692,8 +770,10 @@ impl Renderer for WgpuRenderer {
         // "timer-paced with a compositor guessing".  Acquire is where a Fifo
         // swapchain blocks when it is genuinely throttling to the display.
         let t_acquire = std::time::Instant::now();
+        let off_tex = self.offscreen.as_ref().map(|o| Arc::clone(&o.texture));
+        let output = if off_tex.is_some() { None } else {
         let Some(surface) = &self.surface else { return };
-        let output = match surface.get_current_texture() {
+        Some(match surface.get_current_texture() {
             Ok(t)  => t,
             // A Lost/Outdated surface is recoverable — reconfigure and skip this
             // frame; the next acquire succeeds.  This self-heals a surface the OS
@@ -705,11 +785,15 @@ impl Renderer for WgpuRenderer {
                 return;
             }
             Err(e) => { log::warn!("surface error: {e}"); return; }
+        })
         };
         let acquire_ms = t_acquire.elapsed().as_secs_f64() * 1000.0;
-        let view = output
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        let target: &wgpu::Texture = match (&output, &off_tex) {
+            (Some(o), _) => &o.texture,
+            (None, Some(t)) => t,
+            (None, None) => return,
+        };
+        let view = target.create_view(&wgpu::TextureViewDescriptor::default());
 
         let mut encoder = self
             .device
@@ -803,7 +887,7 @@ impl Renderer for WgpuRenderer {
             });
             encoder.copy_texture_to_buffer(
                 wgpu::ImageCopyTexture {
-                    texture: &output.texture, mip_level: 0,
+                    texture: target, mip_level: 0,
                     origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::ImageCopyBuffer {
@@ -817,9 +901,33 @@ impl Renderer for WgpuRenderer {
             (path, buf, w, h, bpr)
         });
 
+        // Off-screen: read the frame back for the sink.
+        if let Some(o) = &self.offscreen {
+            let (w, h) = (self.surface_config.width, self.surface_config.height);
+            encoder.copy_texture_to_buffer(
+                wgpu::ImageCopyTexture { texture: target, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                wgpu::ImageCopyBuffer { buffer: &o.readback, layout: wgpu::ImageDataLayout { offset: 0, bytes_per_row: Some(o.bpr), rows_per_image: Some(h) } },
+                wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 },
+            );
+        }
+
         let _t_submit = std::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
         crate::perf_accum("submit", _t_submit.elapsed());
+
+        if let Some(o) = &mut self.offscreen {
+            let _t_rb = std::time::Instant::now();
+            let (w, h) = (self.surface_config.width, self.surface_config.height);
+            let slice = o.readback.slice(..);
+            slice.map_async(wgpu::MapMode::Read, |_| {});
+            self.device.poll(wgpu::Maintain::Wait);
+            {
+                let data = slice.get_mapped_range();
+                (o.sink)(&data, w, h, o.bpr);
+            }
+            o.readback.unmap();
+            crate::perf_accum("readback", _t_rb.elapsed());
+        }
 
         if let Some((path, buf, w, h, bpr)) = capture {
             let slice = buf.slice(..);
@@ -854,8 +962,10 @@ impl Renderer for WgpuRenderer {
         let t_present = std::time::Instant::now();
         // Required on Wayland: this is what requests the compositor frame
         // callback that paces the next RedrawRequested.  See Renderer::new.
-        self.window.pre_present_notify();
-        output.present();
+        if let Some(output) = output {
+            if let Some(w) = &self.window { w.pre_present_notify(); }
+            output.present();
+        }
         crate::perf_accum("present", t_present.elapsed());
         crate::perf_accum("acquire", std::time::Duration::from_secs_f64(acquire_ms / 1000.0));
     }

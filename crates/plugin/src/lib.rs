@@ -226,6 +226,13 @@ fn pin_library() {
     });
 }
 
+/// This deck's screen from the host's `OVERDECK_DISPLAY` template, if the
+/// host made one (Overdeck's display contract).
+fn display_path(template: Option<&str>, number: u8) -> Option<PathBuf> {
+    let p = overdeck_display::Screen::path_for(template.filter(|t| !t.is_empty())?, u32::from(number));
+    p.is_file().then_some(p)
+}
+
 impl OpenDeck {
     /// Start this instance's deck in the shared loop, at the host's rate.
     fn start_deck(&mut self, sr: u32) {
@@ -264,6 +271,9 @@ impl OpenDeck {
                 sample_rate: sr, output: Arc::clone(&self.slot), events,
                 // OPENDECK_TILE=N: N decks side by side, in the order they started.
                 tile: std::env::var("OPENDECK_TILE").ok().and_then(|v| v.parse::<u8>().ok()).filter(|&n| n > 0).map(|n| (number - 1, n)),
+                // OVERDECK_DISPLAY=template: the host shows this deck's screen
+                // in its own; `{n}` is the deck's number.
+                display: display_path(std::env::var("OVERDECK_DISPLAY").ok().as_deref(), number),
             }),
         };
         match DeckHost::get() {
@@ -391,6 +401,19 @@ mod tests {
     }
 
     /// Decks take the lowest free number, and a closed deck's number is free again.
+    #[test]
+    fn a_deck_draws_into_the_screen_the_host_made_for_its_number() {
+        let dir = std::env::var_os("TMPDIR").map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let t = dir.join(format!("plugin-{}-deck{{n}}.screen", std::process::id()));
+        let t = t.to_str().unwrap();
+        let two = overdeck_display::Screen::path_for(t, 2);
+        let _s = overdeck_display::Screen::create(&two, 8, 4).unwrap();
+        assert_eq!(display_path(Some(t), 2), Some(two.clone()));
+        assert_eq!(display_path(Some(t), 3), None, "no screen made for deck 3: it opens a window");
+        assert_eq!(display_path(None, 2), None);
+        let _ = std::fs::remove_file(two);
+    }
+
     #[test]
     fn decks_take_the_lowest_free_number() {
         let (a, b, c) = (claim_number(), claim_number(), claim_number());
