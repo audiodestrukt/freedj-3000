@@ -884,6 +884,8 @@ struct DeckApp {
     multi:       bool,
     /// Set when this deck's window was closed (multi only).
     closed:      bool,
+    /// The plugin's tile slot and count (see `PluginHost::tile`).
+    tile:        Option<(u8, u8)>,
     /// The servers and Link threads `run` starts for this deck; they stop
     /// when the deck is dropped.
     guards:      Vec<Box<dyn std::any::Any>>,
@@ -1244,6 +1246,7 @@ impl DeckApp {
             script_shot: None,
             multi:       false,
             closed:      false,
+            tile:        None,
             guards:      Vec::new(),
             host:        None,
             renderer:    None,
@@ -4596,6 +4599,16 @@ impl ApplicationHandler for DeckApp {
                 fit_to_monitor(event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next()), win_w as f64, win_h as f64)
             } else { (win_w as f64, win_h as f64) };
             attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(w, h));
+            if let (Some((slot, n)), Some(m)) = (self.tile, event_loop.primary_monitor().or_else(|| event_loop.available_monitors().next())) {
+                // An Nth of the screen's width each (less a margin for the
+                // frame), the deck's shape kept, side by side from the left.
+                let scale = m.scale_factor();
+                let cell = m.size().width as f64 / scale / f64::from(n.max(1));
+                let tw = cell - 24.0;
+                let th = tw * win_h as f64 / win_w as f64;
+                attrs = attrs.with_inner_size(winit::dpi::LogicalSize::new(tw, th))
+                    .with_position(winit::dpi::LogicalPosition::new(f64::from(slot) * cell, 0.0));
+            }
             // OPENDECK_FULLSCREEN=1: the deck fills the display with no
             // window frame (a Pi that boots straight into OpenDeck; the SDL
             // backend reads the same variable).  The layout aspect-fits.
@@ -4922,6 +4935,11 @@ pub struct PluginHost {
     /// Where the deck leaves a sender into its input bus, so the host's
     /// parameters (automation) move the deck as a controller would.
     pub events:      Arc<Mutex<Option<mpsc::Sender<Event>>>>,
+    /// With OPENDECK_TILE=N, this deck's slot of N: its window takes that
+    /// Nth of the screen's width, side by side with the host's other decks
+    /// (the layout scales to fit).  Only where the window system lets a
+    /// client place its window (X11 / XWayland; GNOME's Wayland doesn't).
+    pub tile:        Option<(u8, u8)>,
 }
 
 fn init_logging() {
@@ -5220,6 +5238,7 @@ fn build(cfg: Config) -> Result<DeckApp> {
     // ── 6. Run the UI event loop ──────────────────────────────────────────────
     let has_track = track.is_some();
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
+    app.tile = cfg.host.as_ref().and_then(|h| h.tile);
     if has_track {
         if let Some(a) = &startup_analysis { serve_loaded(&app.link, &app.path, a); app.serve_deck_grid(); app.own_phrases(a); }
         app.publish_track();

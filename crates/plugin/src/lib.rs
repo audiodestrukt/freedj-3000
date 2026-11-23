@@ -260,7 +260,11 @@ impl OpenDeck {
             link_send: std::env::var("OPENDECK_LINK_SEND").map(|v| v == "1").unwrap_or(false),
             browse_root: opendeck_app::default_music_dir(),
             autoplay: std::env::var("OPENDECK_AUTOPLAY").as_deref() == Ok("1"), controllers: None,
-            host: Some(opendeck_app::PluginHost { sample_rate: sr, output: Arc::clone(&self.slot), events }),
+            host: Some(opendeck_app::PluginHost {
+                sample_rate: sr, output: Arc::clone(&self.slot), events,
+                // OPENDECK_TILE=N: N decks side by side, in the order they started.
+                tile: std::env::var("OPENDECK_TILE").ok().and_then(|v| v.parse::<u8>().ok()).filter(|&n| n > 0).map(|n| (number - 1, n)),
+            }),
         };
         match DeckHost::get() {
             Ok(h) => { h.add(id, cfg); self.deck = Some((id, number)); log::info!("plugin: deck {id} (No. {number}) starting"); }

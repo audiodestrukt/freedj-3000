@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+- `OPENDECK_TILE=N` for plugin decks: each deck's window takes its Nth of
+  the screen's width, side by side, in the order the decks started (the
+  layout scales to fit).  Works where a client may place its windows (X11
+  or XWayland, not GNOME's Wayland).  Overdeck's `dock = true` sets it.
+
 ### Fixed
 - The plugin no longer crashes its host on exit with two or more decks:
   every deck in a process now shares one GPU instance (closing a deck used
