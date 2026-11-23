@@ -5259,8 +5259,9 @@ fn build(cfg: Config) -> Result<DeckApp> {
 pub enum HostCmd {
     /// Build a deck from this config and open its window.
     Add(u64, Config),
-    /// Close the deck and drop it (its plugin instance went away).
-    Remove(u64),
+    /// Close the deck and drop it (its plugin instance went away), then say
+    /// so, if asked.
+    Remove(u64, Option<mpsc::Sender<()>>),
     /// Close every deck and end the loop (the process is exiting).
     Quit,
 }
@@ -5335,7 +5336,18 @@ impl DeckHost {
         if self.tx.send(cmd).is_ok() { let _ = self.proxy.lock().unwrap().send_event(()); }
     }
     pub fn add(&self, id: u64, cfg: Config) { self.send(HostCmd::Add(id, cfg)); }
-    pub fn remove(&self, id: u64) { self.send(HostCmd::Remove(id)); }
+    /// Close a deck and wait (up to 2 s) until it is dropped: its window,
+    /// GPU surface and audio gone.  A host may exit, and unload the GPU
+    /// driver, as soon as the plugin instance is destroyed; a deck still
+    /// tearing down its swapchain then crashed the process (SIGSEGV in the
+    /// driver, seen hosting decks in Overdeck).
+    pub fn remove(&self, id: u64) {
+        let (ack, done) = mpsc::channel();
+        self.send(HostCmd::Remove(id, Some(ack)));
+        if done.recv_timeout(Duration::from_secs(2)).is_err() {
+            log::warn!("deck loop: deck {id} not closed after 2 s; going on");
+        }
+    }
 }
 
 /// The deck loop's handler: routes each window's events to its deck, and
@@ -5376,9 +5388,10 @@ impl ApplicationHandler for MultiDeck {
                     }
                     Err(e) => log::error!("deck loop: deck {id} did not start: {e:#}"),
                 },
-                HostCmd::Remove(id) => {
+                HostCmd::Remove(id, ack) => {
                     self.decks.retain(|(i, _)| *i != id);
                     log::info!("deck loop: deck {id} closed ({} left)", self.decks.len());
+                    if let Some(a) = ack { let _ = a.send(()); }
                 }
                 HostCmd::Quit => {
                     log::info!("deck loop: closing {} deck(s), the process is exiting", self.decks.len());

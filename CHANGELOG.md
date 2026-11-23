@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- The plugin no longer crashes its host on exit with two or more decks:
+  every deck in a process now shares one GPU instance (closing a deck used
+  to destroy its own Vulkan instance, and the next deck's teardown crashed
+  in the NVIDIA driver), and destroying a plugin instance waits until its
+  deck is really closed, so a host can exit straight after.  Found hosting
+  two decks in Overdeck; likely the crash REAPER showed at quit.
+
 ## [0.3.35] — 2026-11-22
 
 ### Added

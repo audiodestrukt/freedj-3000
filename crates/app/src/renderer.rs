@@ -90,6 +90,21 @@ static PRIMARY_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBo
 
 pub(crate) fn primary_backends_only() { PRIMARY_ONLY.store(true, std::sync::atomic::Ordering::Relaxed); }
 
+/// The process's one wgpu instance, made on first use and never destroyed.
+/// Every deck's renderer shares it: with an instance each, closing one deck
+/// (destroying its Vulkan instance) left the next deck's swapchain teardown
+/// crashing in the NVIDIA driver (two decks hosted in Overdeck, SIGSEGV in
+/// destroy_swapchain; one deck, or the GL backend, was fine).
+fn instance() -> &'static wgpu::Instance {
+    static INSTANCE: std::sync::OnceLock<wgpu::Instance> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends:              backends(),
+        dx12_shader_compiler:  wgpu::Dx12Compiler::default(),
+        gles_minor_version:    wgpu::Gles3MinorVersion::Automatic,
+        flags:                 wgpu::InstanceFlags::default(),
+    }))
+}
+
 /// The backends to ask for: WGPU_BACKEND if set (the CDJ-3000 emulator
 /// needs GL), else the primary ones in a plugin host, else all.
 fn backends() -> wgpu::Backends {
@@ -253,8 +268,8 @@ fn column_buffer(device: &wgpu::Device, data: &[u32]) -> wgpu::Buffer {
 pub struct WgpuRenderer {
     /// None while suspended (Android drops its native window in the background).
     surface:        Option<wgpu::Surface<'static>>,
-    #[allow(dead_code)]   // held so the GPU objects below outlive the surface
-    instance:       wgpu::Instance,
+    #[allow(dead_code)]
+    instance:       &'static wgpu::Instance,
     #[allow(dead_code)]
     adapter:        wgpu::Adapter,
     surface_config: wgpu::SurfaceConfiguration,
@@ -298,12 +313,7 @@ impl WgpuRenderer {
         let size = crate::window_px(&window);
 
         // ── wgpu instance / surface ───────────────────────────────────────────
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
-            backends:              backends(),
-            dx12_shader_compiler:  wgpu::Dx12Compiler::default(),
-            gles_minor_version:    wgpu::Gles3MinorVersion::Automatic,
-            flags:                 wgpu::InstanceFlags::default(),
-        });
+        let instance = instance();
 
         let surface = instance
             .create_surface(Arc::clone(&window))
