@@ -108,13 +108,19 @@ across the board's width.
   `mini/carrier.stl`; the ring, retainer, hub and window are the mini's.
   Each board drops into a pocket moulded on the carrier, with a 0.8 mm lip
   over its top (a dab of hot glue holds it).  The board rests on a 1 mm
-  ledge round its edge, 2.3 mm over the carrier, open inside right through the carrier, so the
+  ledge round its edge, **sunk 1.5 mm into the carrier's deck** (its top
+  flush with the deck; the first print held the boards too high), open
+  inside right through the carrier, so the
   through-hole pins underneath stay clear; a 10 mm notch at the far end
   lets the header's wires out.  A 5 mm bar across the opening sits under
   the board's Ø3 mounting hole (on its centre line, 7 mm in from the header
   end), with a pilot for an M3 × 8 thread-forming screw down through the
-  board; it stops 2 mm short of the header's pins.  The pockets hold the boards up so the beam
-  crosses the mini ring's fin slots (z 12.3–16.8) at z 14.3, their middle.
+  board; it stops 2 mm short of the header's pins.  ⚠ **Sunk, the beam
+  is at z 10.5, under the mini ring's fin (its slots are z 12.3–16.8).**
+  A **3.8 mm spacer** under each board puts the beam at z 14.3, the slots'
+  middle (`SPACER`; `make jogring`'s encoder check assumes it).  The
+  pocket's walls stand 0.8 over a board on that spacer, so they locate it
+  either way.
 - **Calipered:** the interrupter stands 10 mm over the board, its slot is
   5 mm wide, the FR4 is 1.5 mm, the mounting hole is Ø3 on the centre
   line 7 mm in from the header end.  ⚠ **Not calipered:** the slot's depth (6.5 mm), the beam's height

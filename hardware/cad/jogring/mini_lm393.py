@@ -44,13 +44,17 @@ BRIDGE_W, PILOT = 5.0, 2.5         # a bar across the pocket under it (along the
 
 CODE_Z0 = mini.CODE_Z0             # the mini ring's fin, as printed
 BEAM_Z = CODE_Z0 + CODE_SLOT_H / 2 - 0.25   # 14.3: the middle of its slots
-BOARD_Z = BEAM_Z - BEAM_H - BOARD_T        # the board's underside: 6.3, 2.3 over the carrier
+DECK_DROP = 1.5                    # the board's underside under the carrier's deck (Dan, 2026-11-24: the first print held them too high)
+BOARD_Z = CT - DECK_DROP                   # 2.5: the board's top is flush with the deck
+SPACER = round(BEAM_Z - BEAM_H - BOARD_T - BOARD_Z, 2)   # 3.8: a spacer under the board this thick puts the beam mid-slot
+WALL_TOP = BOARD_Z + SPACER + BOARD_T + TRAY_LIP   # the pocket's walls: still 0.8 over a board on that spacer
 DIRS = {OPTO_A: -1, OPTO_B: +1}    # each board runs off away from the other
 
-assert CODE_Z0 > BOARD_Z + BOARD_T + BODY[2] - GAP_DEPTH + 0.5, "the fin touches the gap's floor"
+assert CODE_Z0 > BOARD_Z + SPACER + BOARD_T + BODY[2] - GAP_DEPTH + 0.5, "the fin touches the gap's floor"
+assert CODE_Z0 > BOARD_Z + BOARD_T + BODY[2] - GAP_DEPTH + 0.5, "the fin touches the gap's floor (no spacer)"
 assert CODE_Z0 + CODE_SLOT_H > BEAM_Z + 1.0 and CODE_Z0 < BEAM_Z - 1.0, "the slots miss the beam"
 assert GAP - mini.CODE_T >= 2.0, "the fin in the gap"
-assert BOARD_Z >= CT + 0.8, "no ledge under the board"
+assert BOARD_Z >= 2.0, "too little floor under the ledge"
 
 
 def place(a, solid):
@@ -71,7 +75,7 @@ def tray():
     """A board's pocket, moulded on the carrier (sensor frame)."""
     y0, y1 = ys()
     bw, f, t = BOARD_W / 2, TRAY_FIT, TRAY_WALL
-    top = BOARD_Z + BOARD_T + TRAY_LIP
+    top = WALL_TOP
     s = box(-bw - f - t, bw + f + t, y0 - f - t, y1 + f + t, 0, top)
     s -= box(-bw - f, bw + f, y0 - f, y1 + f, BOARD_Z, top + OVS)                      # the board's pocket
     s -= box(-bw + LEDGE, bw - LEDGE, y0 + LEDGE, y1 - LEDGE, -OVS, BOARD_Z + OVS)     # open under it, through the carrier: leads
@@ -135,6 +139,7 @@ def carrier():
     y0, y1 = ys()
     for a in DIRS:
         s += place(a, tray())
+        s -= place(a, box(-BOARD_W / 2 - TRAY_FIT, BOARD_W / 2 + TRAY_FIT, y0 - TRAY_FIT, y1 + TRAY_FIT, BOARD_Z, CT + OVS))   # the pocket, sunk into the deck
         s -= place(a, box(-BOARD_W / 2 + LEDGE, BOARD_W / 2 - LEDGE, y0 + LEDGE, y1 - LEDGE, -OVS, BOARD_Z + OVS))   # keep the leads' opening clear of the pad
         s += place(a, bridge())
     return s
