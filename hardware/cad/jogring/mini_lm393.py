@@ -29,20 +29,22 @@ from rig import cyl, box
 
 # ── the board (Dan's calipers) ──
 BOARD_L, BOARD_W, BOARD_T = 31.25, 14.25, 1.5   # FR4 1.5 (Dan)
-# ── its interrupter: 10 mm tall over the board (Dan); the rest ⚠ typical, not calipered ──
+# ── its interrupter: 10 mm tall over the board, a 5 mm slot (Dan); the rest ⚠ typical, not calipered ──
 SENSE_AT = 4.5                     # the beam's centre from the board's sensor end
 BODY = (6.5, 12.5, 10.0)           # the interrupter: along the board, across it, height over the board
-GAP, GAP_DEPTH = 5.0, 6.5          # the slot's width (radial here) and depth from the body's top
+GAP, GAP_DEPTH = 5.0, 6.5          # the slot's width (radial here; Dan: 5) and depth from the body's top ⚠
 BEAM_H = BODY[2] - 3.5             # the beam over the board's top face: 3.5 under the body's top, as a TCST
 HEADER = (2.54 * 3, 2.54, 8.5, 2.5)  # a straight 3-pin header: across, along, height, its centre from the far end ⚠
 # ── the pocket on the carrier ──
 TRAY_WALL, TRAY_FIT, TRAY_LIP = 1.2, 0.3, 0.8   # walls, slack round the board, walls over its top
 LEDGE = 1.0                        # the ledge under the board's edges (Dan: 1 mm, clear of the through-hole pins underneath); open inside, through the carrier
 HEADER_SLOT = 10.0                 # the notch in the far end wall for the header's wires (Dan)
+HOLE_IN = 7.0                      # the board's Ø3 mounting hole: on its centre line, 7 in from the header end (Dan)
+BRIDGE_W, PILOT = 5.0, 2.5         # a bar across the pocket under it (along the board), and an M3 thread-forming pilot
 
 CODE_Z0 = mini.CODE_Z0             # the mini ring's fin, as printed
 BEAM_Z = CODE_Z0 + CODE_SLOT_H / 2 - 0.25   # 14.3: the middle of its slots
-BOARD_Z = BEAM_Z - BEAM_H - BOARD_T        # the board's underside: 5.7, 1.7 over the carrier
+BOARD_Z = BEAM_Z - BEAM_H - BOARD_T        # the board's underside: 6.3, 2.3 over the carrier
 DIRS = {OPTO_A: -1, OPTO_B: +1}    # each board runs off away from the other
 
 assert CODE_Z0 > BOARD_Z + BOARD_T + BODY[2] - GAP_DEPTH + 0.5, "the fin touches the gap's floor"
@@ -114,6 +116,19 @@ _reach = math.degrees(math.atan2(ys()[1] + 3.0, CODE_R)) + 3.0
 PAD_B = (PAD[0], mini.CAR[1], OPTO_A - _reach, OPTO_B + _reach)
 
 
+def bridge():
+    """A bar across the pocket's opening under the board's mounting hole,
+    level with the ledge, with a pilot for an M3 screw down through the
+    board.  It stops 2 short of the header's pins (2.5 in from that end)."""
+    y1 = ys()[1]
+    yh = y1 - HOLE_IN
+    s = box(-BOARD_W / 2, BOARD_W / 2, yh - BRIDGE_W / 2, yh + BRIDGE_W / 2, 0, BOARD_Z)
+    return s - cyl(0, yh, -OVS, BOARD_Z + OVS, PILOT)
+
+
+assert ys()[1] - HOLE_IN + BRIDGE_W / 2 < ys()[1] - HEADER[3] - 1.5, "the bar under the header's pins"
+
+
 def carrier():
     """The mini's carrier with the two pockets moulded on, nine bearings."""
     s = mini.carrier(stations=STATIONS, pad=PAD_B, tcst=False)
@@ -121,6 +136,7 @@ def carrier():
     for a in DIRS:
         s += place(a, tray())
         s -= place(a, box(-BOARD_W / 2 + LEDGE, BOARD_W / 2 - LEDGE, y0 + LEDGE, y1 - LEDGE, -OVS, BOARD_Z + OVS))   # keep the leads' opening clear of the pad
+        s += place(a, bridge())
     return s
 
 

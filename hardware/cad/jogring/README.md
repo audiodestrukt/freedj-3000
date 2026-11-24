@@ -110,10 +110,14 @@ across the board's width.
   over its top (a dab of hot glue holds it).  The board rests on a 1 mm
   ledge round its edge, 2.3 mm over the carrier, open inside right through the carrier, so the
   through-hole pins underneath stay clear; a 10 mm notch at the far end
-  lets the header's wires out.  The pockets hold the boards up so the beam
+  lets the header's wires out.  A 5 mm bar across the opening sits under
+  the board's Ø3 mounting hole (on its centre line, 7 mm in from the header
+  end), with a pilot for an M3 × 8 thread-forming screw down through the
+  board; it stops 2 mm short of the header's pins.  The pockets hold the boards up so the beam
   crosses the mini ring's fin slots (z 12.3–16.8) at z 14.3, their middle.
-- **Calipered:** the interrupter stands 10 mm over the board, the FR4 is
-  1.5 mm.  ⚠ **Not calipered:** the gap (5 mm), its depth (6.5 mm), the beam's height
+- **Calipered:** the interrupter stands 10 mm over the board, its slot is
+  5 mm wide, the FR4 is 1.5 mm, the mounting hole is Ø3 on the centre
+  line 7 mm in from the header end.  ⚠ **Not calipered:** the slot's depth (6.5 mm), the beam's height
   over the board (6.5 mm, 3.5 under the top) and the sensor's distance from the board's end
   (4.5 mm) are an ITR9608's typical numbers (`BEAM_H`, `GAP`, `GAP_DEPTH`,
   `SENSE_AT` in `mini_lm393.py`).  The beam may be up to 2 mm higher or
@@ -336,7 +340,7 @@ PETG, 0.2 mm layers, 4 walls.
 |---|---|---|
 | **mini version:** MR106ZZ (10 × 6 × 3) | 10 | snap on: no pins |
 | **mini version:** Vishay TCST1202 (or a premade LM393 slot board, with its own bracket) | 2 | |
-| **mini version:** M3 × 8 thread-forming | 4 | the opto brackets, up from below (not needed with the LM393 boards) |
+| **mini version:** M3 × 8 thread-forming | 4 | the opto brackets, up from below (with the LM393 boards: 2, down through each board's hole) |
 | **mini version:** M2 × 5 | 4 | the display's standoffs, up through the hub's floor |
 | **mini version:** clear acrylic, 3 mm, laser-cut Ø54 | 1 | the window |
 | **mini version:** M3 × 8 + inserts | 7 + 7 | hub (3), deck top (4) |
