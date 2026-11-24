@@ -28,12 +28,12 @@ from mini import CT, CODE_R, CODE_SLOT_H, OPTO_A, OPTO_B, A_W, PAD, R_W, POST_T,
 from rig import cyl, box
 
 # ── the board (Dan's calipers) ──
-BOARD_L, BOARD_W, BOARD_T = 31.25, 14.25, 1.6
-# ── its interrupter (ITR9608-class, ⚠ typical, not calipered) ──
+BOARD_L, BOARD_W, BOARD_T = 31.25, 14.25, 1.5   # FR4 1.5 (Dan)
+# ── its interrupter: 10 mm tall over the board (Dan); the rest ⚠ typical, not calipered ──
 SENSE_AT = 4.5                     # the beam's centre from the board's sensor end
-BODY = (6.5, 12.5, 11.0)           # the interrupter: along the board, across it, height over the board
-GAP, GAP_DEPTH = 5.0, 7.5          # the slot's width (radial here) and depth from the body's top
-BEAM_H = 7.0                       # the beam over the board's top face
+BODY = (6.5, 12.5, 10.0)           # the interrupter: along the board, across it, height over the board
+GAP, GAP_DEPTH = 5.0, 6.5          # the slot's width (radial here) and depth from the body's top
+BEAM_H = BODY[2] - 3.5             # the beam over the board's top face: 3.5 under the body's top, as a TCST
 HEADER = (2.54 * 3, 2.54, 8.5, 2.5)  # a straight 3-pin header: across, along, height, its centre from the far end ⚠
 # ── the pocket on the carrier ──
 TRAY_WALL, TRAY_FIT, TRAY_LIP = 1.2, 0.3, 0.8   # walls, slack round the board, walls over its top

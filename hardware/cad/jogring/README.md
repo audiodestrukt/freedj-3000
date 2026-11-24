@@ -108,12 +108,13 @@ across the board's width.
   `mini/carrier.stl`; the ring, retainer, hub and window are the mini's.
   Each board drops into a pocket moulded on the carrier, with a 0.8 mm lip
   over its top (a dab of hot glue holds it).  The board rests on a 1 mm
-  ledge round its edge, open inside right through the carrier, so the
+  ledge round its edge, 2.3 mm over the carrier, open inside right through the carrier, so the
   through-hole pins underneath stay clear; a 10 mm notch at the far end
-  lets the header's wires out.  The pockets hold the boards 1.7 mm up, so the beam
+  lets the header's wires out.  The pockets hold the boards up so the beam
   crosses the mini ring's fin slots (z 12.3–16.8) at z 14.3, their middle.
-- ⚠ **Not calipered.** The gap (5 mm), its depth (7.5 mm), the beam's height
-  over the board (7 mm) and the sensor's distance from the board's end
+- **Calipered:** the interrupter stands 10 mm over the board, the FR4 is
+  1.5 mm.  ⚠ **Not calipered:** the gap (5 mm), its depth (6.5 mm), the beam's height
+  over the board (6.5 mm, 3.5 under the top) and the sensor's distance from the board's end
   (4.5 mm) are an ITR9608's typical numbers (`BEAM_H`, `GAP`, `GAP_DEPTH`,
   `SENSE_AT` in `mini_lm393.py`).  The beam may be up to 2 mm higher or
   lower than guessed and still cross the slots; check it on a board.
