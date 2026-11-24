@@ -522,7 +522,7 @@ def main():
             c += mini.encoder_check(next(m for n, m, _ in items if n == "mini/ring"))
             print(mini.snap_report())
         if variant == "mini_lm393":
-            c += mini_lm393.encoder_check(next(m for n, m, _ in items if n == "mini_lm393/ring"))
+            c += mini_lm393.encoder_check(next(m for n, m, _ in items if n == "mini/ring"))
         clashes += c
         scene(items).export(os.path.join(BUILD, f"jogring_{variant}.glb"))
         cut = []

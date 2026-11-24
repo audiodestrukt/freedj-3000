@@ -104,21 +104,18 @@ across the board's width.
   bearing circle, so the ten even bearings become **nine**, at 6, 42, 104,
   124, 184, 220, 256, 292 and 328°.  The widest gap is 62°.  The ring is
   still held every way (`make jogring` checks it).
-- **Trays.** `mini_lm393/tray_a.stl` and `tray_b.stl` (one each, mirror
-  images: the 90° sensor's board runs off the other way): the board drops into a pocket
-  with a 0.8 mm lip over its top, open underneath for the interrupter's
-  leads, notched at the far end for the header's wires.  Two M3 × 8
-  thread-forming screws go up through the carrier into ears past the
-  board's ends.
-- **Carrier and ring.** `mini_lm393/carrier.stl` has a wider opto pad under
-  both trays, no TCST holes, and posts for the nine bearings.
-  `mini_lm393/ring.stl` is the mini's ring with its fin's foot at z 12.6
-  (the beam at z 14.6).  The retainer and the hub are the mini's.
+- **Only the carrier is new.** `mini_lm393/carrier.stl` replaces
+  `mini/carrier.stl`; the ring, retainer, hub and window are the mini's.
+  Each board drops into a pocket moulded on the carrier, with a 0.8 mm lip
+  over its top (a dab of hot glue holds it), open underneath through the
+  carrier for the interrupter's leads, and notched at the far end for the
+  header's wires.  The pockets hold the boards 1.7 mm up, so the beam
+  crosses the mini ring's fin slots (z 12.3–16.8) at z 14.3, their middle.
 - ⚠ **Not calipered.** The gap (5 mm), its depth (7.5 mm), the beam's height
   over the board (7 mm) and the sensor's distance from the board's end
   (4.5 mm) are an ITR9608's typical numbers (`BEAM_H`, `GAP`, `GAP_DEPTH`,
-  `SENSE_AT` in `mini_lm393.py`).  Check them on a board.  Only the ring
-  and the tray depend on them.
+  `SENSE_AT` in `mini_lm393.py`).  The beam may be up to 2 mm higher or
+  lower than guessed and still cross the slots; check it on a board.
 - ⚠ **A straight header** (8.5 mm, 3 pins) at the far end was assumed and
   checked clear of the ring's foot.  Bending it flat or soldering wires is
   safer.
@@ -321,8 +318,7 @@ It is built to answer three questions:
 | **mini:** `mini/ring.stl`, `mini/retainer.stl`, `mini/hub_128.stl` | 1 each | its own set, all on a 165 mm square |
 | **mini:** `mini/carrier.stl` | 1 | PETG (the snap stubs) |
 | **mini:** `mini/opto_bracket.stl` | 2 | for TCST1202 / TCST1103 sensors |
-| **mini with LM393 boards:** `mini_lm393/ring.stl`, `mini_lm393/carrier.stl` | 1 each | with the mini's retainer and hub |
-| **mini with LM393 boards:** `mini_lm393/tray_a.stl`, `tray_b.stl` | 1 each | mirror images |
+| **mini with LM393 boards:** `mini_lm393/carrier.stl` | 1 | PETG; in place of `mini/carrier.stl`, the rest is the mini's |
 | `608/tyre_fit.stl` | 1 | print first (above) |
 | `608/tyre.stl`, `608/spacer.stl`, `608/race_spacer.stl` | 3 each | the 608 version only |
 | `hub_210.stl` / `hub_128.stl` | 1 | one for the display you have |
@@ -338,7 +334,7 @@ PETG, 0.2 mm layers, 4 walls.
 |---|---|---|
 | **mini version:** MR106ZZ (10 × 6 × 3) | 10 | snap on: no pins |
 | **mini version:** Vishay TCST1202 (or a premade LM393 slot board, with its own bracket) | 2 | |
-| **mini version:** M3 × 8 thread-forming | 4 | the opto brackets (or the LM393 trays), up from below |
+| **mini version:** M3 × 8 thread-forming | 4 | the opto brackets, up from below (not needed with the LM393 boards) |
 | **mini version:** M2 × 5 | 4 | the display's standoffs, up through the hub's floor |
 | **mini version:** clear acrylic, 3 mm, laser-cut Ø54 | 1 | the window |
 | **mini version:** M3 × 8 + inserts | 7 + 7 | hub (3), deck top (4) |
