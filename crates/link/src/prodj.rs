@@ -740,10 +740,14 @@ impl ProDjLink {
         let beat_raw = u32_at(status::BEAT);
         let bib = data[status::BEAT_BAR];
         let handoff = data[status::HANDOFF];
+        let play = PlayState::from_byte(data[status::PLAY]);
+        // A pre-nexus player (an original CDJ-2000: 0xd0 bytes) leaves the
+        // flags byte at 0 and says PLAY only in its play state.
+        let pre_nexus = data.len() < 0x100;
         Some(Status {
             player:       data[status::DEVICE],
-            play:         PlayState::from_byte(data[status::PLAY]),
-            playing:      f & 0x40 != 0,
+            play,
+            playing:      if pre_nexus { matches!(play, PlayState::Playing | PlayState::Looping | PlayState::CuePlay | PlayState::EmergencyLoop) } else { f & 0x40 != 0 },
             master:       f & 0x20 != 0,
             sync:         f & 0x10 != 0,
             on_air:       f & 0x08 != 0,
@@ -890,6 +894,22 @@ mod tests {
         assert!(!st.track_loaded);
         assert_eq!(st.counter, 268);
         assert_eq!(st.sync_counter, 1);
+    }
+
+    /// An original CDJ-2000 (firmware 4.33, emulated in cdj-nxs2-qemu)
+    /// playing a 126.05 BPM track: 0xd0 bytes, flags byte 0, no beat number.
+    #[test]
+    fn a_pre_nexus_cdj_2000_playing_is_heard_as_playing() {
+        let hex = "5173707431576d4a4f4c0a43444a2d3230303000000000000000000000000001030100ac01000000010301000000000100000001000000040000000000000000000000000000000100000000000000000000000000000000000000000000000000000000000000000100040400000000000000040100000000000003342e333300000000000000000000006a001000008000313d7fffffff0010000000010000ffffffff01ff000000000000000000000000000000000100000000000000000000100000001000000000055705000000";
+        let pkt: Vec<u8> = (0..hex.len()).step_by(2).map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap()).collect();
+        let st = ProDjLink::parse_status(&pkt).expect("status packet");
+        assert_eq!((st.player, st.play, &st.firmware), (1, PlayState::Playing, b"4.33"));
+        assert!(st.playing, "PLAY from the play state");
+        assert!(!st.master && !st.sync);
+        assert_eq!(st.bpm, Some(126.05));
+        assert_eq!((st.beat, st.beat_in_bar), (None, None), "a pre-nexus player names no beat");
+        assert!(st.track_loaded);
+        assert_eq!(st.track.id, 1);
     }
 
     #[test]

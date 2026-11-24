@@ -21,6 +21,19 @@ All notable changes to this project will be documented in this file.
   status says so). `OPENDECK_FOLLOW_BEATS=1` ignores a CDJ-3000's
   position packets, for testing the beat clock against them
   (docs/testing/cdj-3000-interop.md).
+
+### Fixed
+- FOLLOW: a player cued before its track's first beat says beat 0, and
+  the mirror's beat clock overflowed on it. Beat 0 now means the lead-in:
+  the playhead runs on through it but waits at beat 1 for that beat's
+  packet. Found by replaying an XDJ-1000MK2 (firmware 1.45) emulated in
+  cdj-nxs2-qemu, its packets stamped in the deck's own time: through two
+  pauses and pitch changes to +2.5 % and -2.5 %, the clock had run on to
+  each of 274 beats within a median of 0.9 ms (p95 2.6 ms, max 12.8 ms).
+- An original (pre-nexus) CDJ-2000 is heard as playing: it leaves the
+  status flags byte at 0 and says PLAY only in its play state. It names no
+  beat number either, so a FOLLOW deck can load and show its track but not
+  place its playhead.
 - A plugin deck can draw its screen into its host's instead of opening a
   window (Overdeck's display contract, the `overdeck-display` crate). When
   the host names a screen for it in `OVERDECK_DISPLAY`, the deck renders

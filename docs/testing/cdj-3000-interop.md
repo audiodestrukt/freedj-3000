@@ -125,6 +125,33 @@ LINK. Then play and pause the CDJ.
 - The CDJ's beats start about 300 ms before its status says PLAY, so a
   beat packet counts as PLAY.
 
+## FOLLOW against older players (cdj-nxs2-qemu)
+
+[cdj-nxs2-qemu](https://github.com/Stijn-Jacobs/cdj-nxs2-qemu) runs the
+stock firmware of older players (your own update file; none is in either
+repository). Its decks talk on QEMU's own segment, which only a Windows TAP
+adapter joins, so OpenDeck itself is not on it yet; instead the deck's
+traffic is recorded and replayed through the FOLLOW clock. Recorded through
+the sync hub of [cdj2000-emulator](https://github.com/cdj2k-revival/cdj2000-emulator)
+(`link_hub.py --sync`), every frame is stamped in the deck's own guest
+time, so the emulator's speed against the wall clock does not matter. The
+hub's `--replay` of a few keep-alives from a made-up player 2 (and its
+proxy ARP) gives the deck a peer, without which it sends no status.
+
+- **XDJ-1000MK2, firmware 1.45**, with the DSP module `setup.sh` builds and
+  a WAV click track (MP3 breaks up on this model, and without the module
+  any track stalls every dozen beats). Centre the tempo slider first
+  (`lvl:0x04:0x80`), or its status reports a pitch of 0. A session of
+  play, pause, +2.5 %, pause, -2.5 % is
+  `reference/link-captures/xdj-1000mk2-emulated-play-pause-pitch-2026-11-23.log`;
+  the test `an_emulated_xdj_is_followed_through_pauses_and_pitch_changes`
+  replays it: 274 beats, run on to each within a median of 0.9 ms, p95
+  2.6 ms. It showed the beat-0 overflow: a track cued in its lead-in.
+- **CDJ-2000, firmware 4.33.** Beat packets carry BPM and the place in the
+  bar. Its 0xd0-byte status has no beat number (`ffffffff`), no place in
+  the bar and a flags byte of 0 (PLAY is in the play state only). A
+  mirror of one can show its track and PLAY, not its playhead.
+
 ## Running OpenDeck *on* a CDJ-3000
 
 Not this page. That is a firmware replacement and is gated on things no

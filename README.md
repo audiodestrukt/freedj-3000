@@ -430,8 +430,10 @@ AUTO whatever number it was given, so it never holds the number it mirrors. A CD
 playhead in ms; an older player (XDJ-1000, CDJ-2000NXS2) only which beat it
 is on and when each beat lands, so the mirror is on the grid at every beat
 and runs on at the pitch in between. A cue or a scratch inside one beat
-shows at the next, and paused it shows the reported beat. Link carries no
-audio: the real deck's sound goes by cable.
+shows at the next, and paused it shows the reported beat. An original
+CDJ-2000 (before the nexus) names no beat at all, so its mirror shows the
+track and PLAY but cannot place the playhead; a CDJ-1000 is not on Link.
+Link carries no audio: the real deck's sound goes by cable.
 
 `OPENDECK_LINK_IFACE=<iface>` pins Link to one network interface, for example
 a private bridge to an emulated deck, or `lo` to share the machine with

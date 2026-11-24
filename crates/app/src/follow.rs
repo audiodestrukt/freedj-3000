@@ -108,6 +108,10 @@ pub struct FollowClock {
     /// clear majority.  A beat packet names its place in the bar, so with
     /// this it names its beat exactly.
     bar_votes:   [f32; 4],
+    /// Before the grid's first beat (a player says beat 0 anywhere in the
+    /// lead-in): the playhead runs on, but not past beat 1 until its beat
+    /// packet says it got there.
+    cap:         Option<f64>,
 }
 
 /// Of the beats next to `n`, the one at `bib` in the bar.
@@ -132,13 +136,13 @@ impl FollowClock {
     pub fn at(&self, now: Instant) -> Option<f64> {
         let (ms, at) = self.base?;
         let run = if self.playing { now.saturating_duration_since(at).as_secs_f64() * 1000.0 * self.pitch } else { 0.0 };
-        Some(ms + run)
+        Some(self.cap.map_or(ms + run, |cap| (ms + run).min(cap)))
     }
 
     /// Take what is new in `h` and return the playhead at `now`.
     pub fn update(&mut self, h: &Heard, grid: &Grid, now: Instant) -> Option<f64> {
         if h.pitch > 0.0 { self.pitch = h.pitch; }
-        if let (Some(n), Some(bib), true) = (h.beat, h.status_bib, Some(h.status_at) != self.last_status) {
+        if let (Some(n @ 1..), Some(bib), true) = (h.beat, h.status_bib, Some(h.status_at) != self.last_status) {
             let off = ((bib as u32 + 7 - (n - 1) % 4) % 4) as usize;
             for (i, v) in self.bar_votes.iter_mut().enumerate() { *v = *v * 0.95 + if i == off { 1.0 } else { 0.0 }; }
         }
@@ -154,12 +158,14 @@ impl FollowClock {
                 }
                 // Beats while we hold it paused: it plays (its status says so
                 // a few hundred ms later), from the next beat line.
-                (false, _, Some((ms, _))) => { self.playing = true; Some(grid.beat_of(ms) + 1) }
+                // Held before the first beat (cued at beat 0), the next is beat 1.
+                (false, _, Some((ms, _))) => { self.playing = true; Some(if ms < grid.ms_of(1) - 1.0 { 1 } else { grid.beat_of(ms) + 1 }) }
                 _ => None,
             };
             if let Some(n) = n {
                 let n = on_bar(n, h.beat_bib, self.bar_offset());
                 log::debug!(target: "follow", "beat packet: {:?} → {n}", self.beat);
+                self.cap = None;
                 self.beat = Some(n);
                 self.base = Some((grid.ms_of(n), tb));
             }
@@ -195,6 +201,20 @@ impl FollowClock {
         }
         let Some(n) = h.beat else { return };
         let here = self.at(ts);
+        if n == 0 {
+            // In the lead-in: anywhere before beat 1 agrees.  Past it, one
+            // such status is one sent before beat 1's packet moved its number;
+            // two are a cue back to the start, which begins at the top.
+            let first = grid.ms_of(1);
+            if here.is_some_and(|ms| ms < first) { self.cap = Some(first); self.mismatch = 0; return; }
+            self.mismatch = self.mismatch.saturating_add(1);
+            if here.is_some() && self.mismatch < 2 { return; }
+            self.mismatch = 0;
+            self.beat = Some(0);
+            self.base = Some(((first - grid.period_at(1)).max(0.0), ts));
+            self.cap = Some(first);
+            return;
+        }
         let agrees = here.is_some_and(|ms| {
             let (pos, n) = (grid.pos_beats(ms), n as f64);
             n > pos - 1.15 && n <= pos + 0.65   // its own beat (just after a beat line, still the last) or the nearest
@@ -218,6 +238,7 @@ impl FollowClock {
             _ => 0.0,
         };
         self.mismatch = 0;
+        self.cap = None;
         self.beat = Some(n);
         self.base = Some((grid.ms_of(n) + into, ts));
     }
@@ -351,6 +372,30 @@ mod tests {
         assert!((p - 100.0).abs() < 1.0, "{p}");
     }
 
+    /// A track whose first beat is 2 s in: the player says beat 0 all
+    /// through the lead-in.  The playhead starts at the top (a beat before
+    /// beat 1, here), runs on, waits at beat 1's line rather than run past
+    /// it, takes beat 1's packet, and a late status still saying 0 after it
+    /// doesn't send it back.  (Beat 0 used to overflow the bar vote.)
+    #[test]
+    fn a_lead_in_before_the_first_beat_is_followed_into_beat_1() {
+        let grid = Grid::constant(2000.0, 120.0);
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut c = FollowClock::default();
+        let mut h = Heard { beat: Some(0), playing: false, pitch: 1.0, status_at: at(0), status_bib: Some(4), beat_at: None, beat_bib: None };
+        assert_eq!(c.update(&h, &grid, at(0)), Some(1500.0), "cued in the lead-in: at the top of it");
+        h.playing = true; h.status_at = at(200);
+        assert!((c.update(&h, &grid, at(400)).unwrap() - 1700.0).abs() < 1.0, "runs on");
+        assert_eq!(c.update(&h, &grid, at(900)), Some(2000.0), "but not past beat 1 without its packet");
+        h.beat_at = Some(at(950)); h.beat_bib = Some(1);
+        assert_eq!(c.update(&h, &grid, at(950)), Some(2000.0), "beat 1's packet: on its line");
+        h.status_at = at(960);
+        assert!((c.update(&h, &grid, at(1000)).unwrap() - 2050.0).abs() < 1.0, "a status still saying 0 is late, not a cue");
+        h.beat = Some(1); h.status_at = at(1100);
+        assert!((c.update(&h, &grid, at(1200)).unwrap() - 2250.0).abs() < 1.0);
+    }
+
     /// A real XDJ-1000MK2 playing at 126 BPM (reference/link-captures, the
     /// app's own debug log of what it heard), replayed through the clock at
     /// the packets' own times: once its first beat lands, the clock counts
@@ -358,8 +403,37 @@ mod tests {
     /// line, and never runs backwards.
     #[test]
     fn a_recorded_xdj_is_followed_beat_for_beat() {
+        let r = replay(include_str!("../../../reference/link-captures/xdj-1000mk2-playing-2026-08-26.log"), 126.0, 10.0);
+        assert!(r.beats >= 8 && r.statuses >= 15, "the capture has the XDJ playing: {} beats, {} statuses", r.beats, r.statuses);
+    }
+
+    /// An XDJ-1000MK2 (firmware 1.45) running in cdj-nxs2-qemu, its packets
+    /// stamped with the deck's own guest time: it plays a 126.05 BPM click
+    /// track, pauses, plays, goes to +2.5 %, pauses, plays, then -2.5 %.  The
+    /// clock follows every beat through all of it (the emulated deck's beats
+    /// wobble about ±10 ms, so the run-on bound is looser than the real XDJ's).
+    #[test]
+    fn an_emulated_xdj_is_followed_through_pauses_and_pitch_changes() {
+        let r = replay(include_str!("../../../reference/link-captures/xdj-1000mk2-emulated-play-pause-pitch-2026-11-23.log"), 126.05, 25.0);
+        assert!(r.beats >= 150, "{} beats", r.beats);
+        assert_eq!(r.pauses, 2, "both pauses heard");
+        assert!(r.pitches.iter().any(|p| (p - 1.025).abs() < 0.002) && r.pitches.iter().any(|p| (p - 0.975).abs() < 0.002), "{:?}", r.pitches);
+        let mut e = r.runon_ms.clone();
+        e.sort_by(f64::total_cmp);
+        let p95 = e[e.len() * 95 / 100];
+        eprintln!("emulated XDJ: {} beats, run-on error median {:.1} ms, p95 {p95:.1} ms, max {:.1} ms", r.beats, e[e.len() / 2], e[e.len() - 1]);
+        assert!(p95 < 15.0, "p95 {p95:.1} ms");
+    }
+
+    struct Replayed { beats: usize, statuses: usize, pauses: usize, pitches: Vec<f64>, runon_ms: Vec<f64> }
+
+    /// Replay a capture log (the app's debug lines of what it heard) through
+    /// the clock at the packets' own times.  Once its first beat lands, the
+    /// clock must count the same beats the player reports, put each beat
+    /// packet on its grid line having run on to within `runon` ms of it, hold
+    /// still while paused, and never run backwards.
+    fn replay(log: &str, bpm: f64, runon: f64) -> Replayed {
         use opendeck_link::prodj::ProDjLink;
-        let log = include_str!("../../../reference/link-captures/xdj-1000mk2-playing-2026-08-26.log");
         let t0 = Instant::now();
         let mut first: Option<f64> = None;
         let mut packets = Vec::new();
@@ -372,10 +446,11 @@ mod tests {
             let bytes: Vec<u8> = line[open + "— [".len()..close].split(',').map(|h| u8::from_str_radix(h.trim(), 16).unwrap()).collect();
             packets.push((t0 + Duration::from_secs_f64(t), bytes));
         }
-        let grid = Grid::constant(0.0, 126.0);
+        let grid = Grid::constant(0.0, bpm);
         let mut c = FollowClock::default();
         let mut h: Option<Heard> = None;
-        let (mut beats, mut statuses, mut prev) = (0, 0, f64::MIN);
+        let mut r = Replayed { beats: 0, statuses: 0, pauses: 0, pitches: Vec::new(), runon_ms: Vec::new() };
+        let (mut prev, mut was_playing, mut since_play) = (f64::MIN, false, 0);
         for (at, b) in &packets {
             if let Some(beat) = ProDjLink::parse_beat(b) {
                 if beat.player != 1 { continue; }
@@ -385,28 +460,41 @@ mod tests {
                 hh.beat_at = Some(*at);
                 hh.beat_bib = Some(beat.beat_in_bar);
                 let p = c.update(hh, &grid, *at).unwrap();
-                if beats > 0 {
+                if r.beats > 0 {
                     let n = grid.beat_of(p + 1.0);
                     assert!((p - grid.ms_of(n)).abs() < 0.5, "a beat packet is on a grid line");
-                    assert!((before - p).abs() < 10.0, "and the clock had run on to within 10 ms of it: {:.1}", before - p);
+                    // The first beat after a PLAY has nothing to have run on from.
+                    if since_play > 0 {
+                        assert!((before - p).abs() < runon, "and the clock had run on to within {runon} ms of it: {:.1} (beat {n})", before - p);
+                        r.runon_ms.push((before - p).abs());
+                    }
                 }
-                beats += 1;
+                r.beats += 1;
+                since_play += 1;
             } else if let Some(st) = ProDjLink::parse_status(b) {
                 if st.player != 1 { continue; }
                 let hh = h.get_or_insert(Heard { beat: None, playing: false, pitch: 1.0, status_at: *at, status_bib: None, beat_at: None, beat_bib: None });
                 hh.beat = st.beat; hh.status_bib = st.beat_in_bar; hh.playing = st.playing; hh.pitch = st.pitch as f64; hh.status_at = *at;
-                let p = c.update(hh, &grid, *at).unwrap();
-                if beats > 1 {
+                let held = c.at(*at);
+                // A player that has loaded but not cued names no beat yet.
+                let Some(p) = c.update(hh, &grid, *at) else { assert!(st.beat.is_none(), "a beat named, no position"); continue };
+                if !st.playing && !was_playing { if let Some(held) = held { assert!((p - held).abs() < 1.0, "holds while paused: {held:.1} → {p:.1}"); } }
+                if was_playing && !st.playing { r.pauses += 1; }
+                if !was_playing && st.playing { since_play = 0; }
+                was_playing = st.playing;
+                if r.pitches.last().is_none_or(|q| (q - st.pitch as f64).abs() > 1e-4) { r.pitches.push(st.pitch as f64); }
+                if r.beats > 1 && st.playing {
                     let ours = grid.beat_of(p + 1.0);
                     assert!(st.beat == Some(ours) || st.beat == Some(ours - 1), "status says beat {:?}, the clock is on {ours}", st.beat);
                 }
-                statuses += 1;
+                r.statuses += 1;
             } else { continue }
             let p = c.at(*at).unwrap();
+            // Backwards only by a cue (a status jump while paused); the captures have none.
             assert!(p >= prev - 1.0, "never backwards: {prev:.1} → {p:.1}");
             prev = p;
         }
-        assert!(beats >= 8 && statuses >= 15, "the capture has the XDJ playing: {beats} beats, {statuses} statuses");
+        r
     }
 
     #[test]
