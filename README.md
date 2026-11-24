@@ -122,7 +122,16 @@ In short:
 about 0.6 of one core while playing with key lock on. wgpu runs on DRM/KMS
 with no X server. A Pi 4 runs it too, with the timestretcher taking most of a
 core. A Pi Zero W (one ARMv6 core) plays cleanly on the SDL renderer with the
-WSOLA key lock, at 49 fps. Bring-up, build and the gaps to expect are in
+WSOLA key lock. Measured 2026-11-24 on the current build (60 s MP3, key lock
+on, no audio dropouts in any run):
+
+| Pi Zero W, playing | XDJ layout (1024×600) | CDJ-3000 layout (1280×830) |
+|---|---|---|
+| Straight to the screen (KMSDRM, no desktop) | **50 fps**, 20 ms a frame | 21 fps, 47 ms a frame |
+| Under the desktop (labwc) | 18 fps | 11 fps |
+
+On a Zero W, run it without the desktop and with `OPENDECK_SKIN=xdj`.
+Bring-up, build and the gaps to expect are in
 **`docs/reference/raspberry-pi.md`**. Measurements are in
 **`docs/BENCHMARKS.md`**.
 

@@ -114,6 +114,44 @@ Caveats to resolve before treating these as a reference:
   The Pi 5 throttles ~80–85 °C, and throttling is what turns into audio
   glitches. An active cooler is not optional for sustained use.
 
+## Pi Zero W (one ARMv6 core — 2026-11-24)
+
+Pi Zero W Rev 1.1 (ARM1176 @ 1 GHz, VideoCore IV, 426 MB), 32-bit Pi OS
+Trixie, HDMI audio.  The armv6 cross build (`deploy/pi/cross/build.sh armv6`)
+with `OPENDECK_RENDERER=sdl OPENDECK_STRETCH=wsola OPENDECK_RING_MS=250`,
+receive-only Link, a 60 s 142 BPM MP3, 80 s per run, back to back.  KMSDRM runs
+add `SDL_VIDEODRIVER=kmsdrm OPENDECK_FULLSCREEN=1` with lightdm stopped.
+
+| Run | Display | Layout | fps playing | Frame stalls | CPU (one core) | Underruns |
+|---|---|---|---|---|---|---|
+| Oct 29 build | KMSDRM | XDJ 1024×600 | 49.5–51.9 | 0 | 92 % | 0 |
+| Nov 24 build | KMSDRM | XDJ 1024×600 | 49.8–51.3 | 0 | 91 % | 0 |
+| Nov 24 build | KMSDRM | CDJ-3000 1280×830 | 21.3 | ~1,100 | 97 % | 0 |
+| Oct 29 build | labwc | XDJ 1024×600 | 18.0 | hundreds | 53 % | 1 at start |
+| Nov 24 build | labwc | XDJ 1024×600 | 17.6 | hundreds | 53 % | 1 at start |
+| Nov 24 build | labwc | CDJ-3000 1620×720 | 11.3 | hundreds | 56 % | 1 at start |
+
+The 376 commits between the two builds cost nothing at the same layout.  The
+CDJ-3000 layout (the default since the skin landed) is what is slow.  Per frame
+on KMSDRM (`RUST_LOG=opendeck_app=debug`, wall-clock ms, averaged over 120 frames):
+
+| Phase | XDJ | CDJ-3000 |
+|---|---|---|
+| Frame total | 19.6 | 47.2 |
+| Waveform raster (wall) | 2.7 | 9.4 |
+| Waveform texture upload | 1.4 | 3.5 |
+| egui layout (`egui_run`) | 3.4 | 4.0 |
+| Tessellate | 1.7 | 3.9 |
+| Draw meshes | 2.6 | 5.3 |
+| Present | 4.9 | 6.6 |
+| Rest of the render call (unnamed) | 2.2 | 13.3 |
+
+The waveform raster takes 0.17 ms of its own thread's CPU in both layouts.  Its
+wall time is the GL driver and the other threads sharing the one core, so on
+this board wall-clock phases show where the frame waits, not who burns the
+CPU.  A fresh track's analysis took 18 s the first time (no cached grid) and
+4.6 s after that.
+
 ## Threads and cores
 
 freedj is already multi-threaded — the ~1.5 cores of load on the Pi 5 spread
