@@ -99,6 +99,13 @@ impl Nfs {
         }
     }
 
+    /// Like [`connect_at`](Self::connect_at), with `timeout` for each try
+    /// (four tries) of every call: a short one asks whether a player that
+    /// may serve nothing does, without waiting 12 s to find out.
+    pub fn connect_timeout(ip: Ipv4Addr, portmap_port: u16, timeout: Duration) -> Result<Self> {
+        Self::connect_with(ip, portmap_port, timeout)
+    }
+
     fn connect_with(ip: Ipv4Addr, portmap_port: u16, timeout: Duration) -> Result<Self> {
         // Bind a privileged source port; the CDJ NFS server expects < 1024.
         // Fall back to an ephemeral port if we can't (works on some setups).

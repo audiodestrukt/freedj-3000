@@ -21,6 +21,12 @@ All notable changes to this project will be documented in this file.
   status says so). `OPENDECK_FOLLOW_BEATS=1` ignores a CDJ-3000's
   position packets, for testing the beat clock against them
   (docs/testing/cdj-3000-interop.md).
+- LINK loads (and so FOLLOW) from a player that names its track and shares
+  its stick over NFS but has no dbserver: the track's path comes from the
+  stick's `export.pdb`, by the rekordbox ID in the player's status. This is
+  how a FOLLOW deck (or Overdeck's `follow = N`) mirrors freedj-esp's
+  firmware on a CDJ-2000. The NFS check is brief (300 ms a try), so a
+  player that serves neither still fails at once.
 
 ### Fixed
 - FOLLOW: a player cued before its track's first beat says beat 0, and

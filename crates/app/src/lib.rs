@@ -2708,11 +2708,18 @@ impl DeckApp {
             let (path, grid, meta, cues) = match known {
                 Some((caller, meta)) => (caller.call(move |c, s| c.file_path(s, id))?, caller.call(move |c, s| c.beat_grid(s, id)), meta,
                                          if rekordbox { caller.call(move |c, s| c.cues(s, id)) } else { Ok(Vec::new()) }),
-                None => {
-                    let mut db = Client::discover_at(ip, ports.query, device)?;
-                    (db.file_path(slot, id)?, db.beat_grid(slot, id), db.track_meta(slot, id).ok(),
-                     if rekordbox { db.cues(slot, id) } else { Ok(Vec::new()) })
-                }
+                None => match Client::discover_at(ip, ports.query, device) {
+                    Ok(mut db) => (db.file_path(slot, id)?, db.beat_grid(slot, id), db.track_meta(slot, id).ok(),
+                                   if rekordbox { db.cues(slot, id) } else { Ok(Vec::new()) }),
+                    // A player with no dbserver that still shares its stick
+                    // (freedj on a CDJ-2000): the path comes from the stick's
+                    // export.pdb, by the rekordbox ID its status named.
+                    Err(e) if !rekordbox => {
+                        log::info!("LINK {ip}: no dbserver ({e:#}); track {id} from its export.pdb over NFS");
+                        (Some(export_track_path(&ports, ip, sd, id)?), Err(e), None, Ok(Vec::new()))
+                    }
+                    Err(e) => return Err(e),
+                },
             };
             let cues = cues.unwrap_or_else(|e| { log::info!("LINK {ip} cues {id}: {e:#}"); Vec::new() });
             let path = path.ok_or_else(|| anyhow::anyhow!("LINK {ip}: no file path for track {id}"))?;
@@ -4352,22 +4359,7 @@ fn player_anlz(nfs: &mut opendeck_nfs::Nfs, exports: &[Vec<u8>], want: &[u8], ip
         let (fh, size) = nfs_resolve(nfs, exports, want, path)?;
         Ok((size, nfs.read_file(&fh, size)?))
     };
-    let (_, pdb_size) = match nfs_resolve(nfs, exports, want, "PIONEER/rekordbox/export.pdb") {
-        Ok(f) => f,
-        Err(e) => { log::info!("LINK {ip}: no export.pdb for cues ({e:#})"); return None; }
-    };
-    let key = (ip, want.to_vec());
-    let cached = export_cache().lock().ok()?.get(&key).filter(|(sz, _)| *sz == pdb_size).map(|(_, e)| Arc::clone(e));
-    let export = match cached {
-        Some(e) => e,
-        None => {
-            let (_, bytes) = read(nfs, "PIONEER/rekordbox/export.pdb").map_err(|e| log::info!("LINK {ip}: export.pdb: {e:#}")).ok()?;
-            let e = Arc::new(opendeck_rekordbox::read_export_from(&mut std::io::Cursor::new(bytes), PathBuf::from(format!("link://{ip}")))
-                .map_err(|e| log::info!("LINK {ip}: export.pdb: {e:#}")).ok()?);
-            if let Ok(mut c) = export_cache().lock() { c.insert(key, (pdb_size, Arc::clone(&e))); }
-            e
-        }
-    };
+    let export = player_export(nfs, exports, want, ip)?;
     let track = export.tracks.iter().find(|t| t.id == id)?;
     if track.analyze_rel.is_empty() { log::info!("LINK {ip}: track {id} has no rekordbox analysis"); return None; }
     let (_, dat) = read(nfs, &track.analyze_rel).map_err(|e| log::info!("LINK {ip}: ANLZ {}: {e:#}", track.analyze_rel)).ok()?;
@@ -4376,6 +4368,37 @@ fn player_anlz(nfs: &mut opendeck_nfs::Nfs, exports: &[Vec<u8>], want: &[u8], ip
     log::info!("LINK {ip}: track {id}'s analysis over NFS: .DAT {} bytes, .EXT {} ({:.0} ms)",
                dat.len(), ext.as_ref().map_or("none".into(), |e| format!("{} bytes", e.len())), t0.elapsed().as_secs_f64() * 1e3);
     Some((dat, ext))
+}
+
+/// A linked player's `export.pdb` over NFS, read once per player, export and
+/// file size (see [`ExportCache`]).  `None` (logged) when there is none.
+fn player_export(nfs: &mut opendeck_nfs::Nfs, exports: &[Vec<u8>], want: &[u8], ip: std::net::Ipv4Addr) -> Option<Arc<opendeck_rekordbox::RbExport>> {
+    let (fh, pdb_size) = match nfs_resolve(nfs, exports, want, "PIONEER/rekordbox/export.pdb") {
+        Ok(f) => f,
+        Err(e) => { log::info!("LINK {ip}: no export.pdb ({e:#})"); return None; }
+    };
+    let key = (ip, want.to_vec());
+    if let Some(e) = export_cache().lock().ok()?.get(&key).filter(|(sz, _)| *sz == pdb_size).map(|(_, e)| Arc::clone(e)) { return Some(e); }
+    let bytes = nfs.read_file(&fh, pdb_size).map_err(|e| log::info!("LINK {ip}: export.pdb: {e:#}")).ok()?;
+    let e = Arc::new(opendeck_rekordbox::read_export_from(&mut std::io::Cursor::new(bytes), PathBuf::from(format!("link://{ip}")))
+        .map_err(|e| log::info!("LINK {ip}: export.pdb: {e:#}")).ok()?);
+    if let Ok(mut c) = export_cache().lock() { c.insert(key, (pdb_size, Arc::clone(&e))); }
+    Some(e)
+}
+
+/// A track's path on a linked player's stick, by rekordbox ID, from the
+/// stick's `export.pdb` over NFS: for a player that names its track in its
+/// status and shares its stick but answers no dbserver.
+fn export_track_path(ports: &LinkPorts, ip: std::net::Ipv4Addr, sd: bool, id: u32) -> Result<String> {
+    // A player with no dbserver may well serve no NFS either: ask briefly
+    // (a player on the cable answers in milliseconds).
+    let pm = ports.portmap.unwrap_or(opendeck_nfs::PORTMAP_PLAYER);
+    let mut nfs = opendeck_nfs::Nfs::connect_timeout(ip, pm, Duration::from_millis(300))?;
+    let exports = nfs.exports()?;
+    let want: Vec<u8> = (if sd { "/B/" } else { "/C/" }).encode_utf16().flat_map(|u| u.to_le_bytes()).collect();
+    let export = player_export(&mut nfs, &exports, &want, ip).ok_or_else(|| anyhow::anyhow!("LINK {ip}: no dbserver and no export.pdb"))?;
+    let t = export.tracks.iter().find(|t| t.id == id).ok_or_else(|| anyhow::anyhow!("LINK {ip}: track {id} is not in its export.pdb"))?;
+    Ok(t.rel_path.clone())
 }
 
 /// The deck facts a loader thread needs; captured before the thread starts.
@@ -5978,6 +6001,58 @@ mod player_anlz_tests {
         // The export is read once per player: a second track's lookup uses it.
         assert!(export_cache().lock().unwrap().contains_key(&(std::net::Ipv4Addr::LOCALHOST, want.clone())));
         assert!(player_anlz(&mut nfs, &exports, &want, std::net::Ipv4Addr::LOCALHOST, 999_999).is_none(), "no such track");
+    }
+}
+
+/// FOLLOW of a player that shares its stick over NFS but answers no
+/// dbserver (freedj's firmware on a CDJ-2000): the track named in its
+/// status is found in the stick's export.pdb by rekordbox ID and loaded.
+#[cfg(test)]
+mod follow_without_dbserver_tests {
+    use super::deck_harness::*;
+    use super::*;
+    use opendeck_link::prodj::{PlayState, Status, TrackRef};
+    use std::net::Ipv4Addr;
+
+    #[test]
+    fn a_follow_deck_loads_from_a_player_with_no_dbserver_through_its_export() {
+        let dir = tempfile::tempdir().unwrap();
+        crate::media::tests::copy_tree(&crate::media::tests::demo_export(), dir.path());
+        let export = opendeck_rekordbox::read_export(dir.path()).unwrap();
+        let t = export.tracks.iter().find(|t| t.id == 2).unwrap().clone();
+        let audio = dir.path().join(t.rel_path.trim_start_matches('/'));
+        std::fs::create_dir_all(audio.parent().unwrap()).unwrap();
+        let wav = audio.with_extension("wav");
+        super::stream_load_tests::wav(&wav, 44_100, 3.0, 0.0);
+        std::fs::rename(&wav, &audio).unwrap();      // the demo's name, a WAV inside
+        let scanned = opendeck_mediaserver::scan(dir.path(), "STICK").unwrap();
+        let nfs = opendeck_nfs::server::NfsServer::start(scanned.tree, "/C/", 0, 0).unwrap();
+        // Nothing on the dbserver port: refused at once, as the firmware's reset does.
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+
+        let mut d = deck(2.0);
+        d.link_ports = LinkPorts { query: free, portmap: Some(nfs.portmap) };
+        d.follow = Some(2);
+        d.link.peers.lock().unwrap().insert(2, Ipv4Addr::LOCALHOST);
+        d.link.peer_names.lock().unwrap().insert(2, "CDJ-2000".into());
+        let st = Status {
+            player: 2, track: TrackRef { player: 2, slot: 3, kind: 1, id: 2 }, play: PlayState::Paused,
+            playing: false, master: false, sync: false, on_air: true, pitch: 1.0, bpm: Some(120.0),
+            beat: Some(1), beat_in_bar: Some(1), handoff_to: None, track_loaded: true,
+            firmware: [0; 4], counter: 0, sync_counter: 0, active_loop: None,
+        };
+        d.link.peer_status.lock().unwrap().insert(2, st);
+        let t0 = Instant::now();
+        d.tick();
+        while d.fetch_rx.is_some() && t0.elapsed() < Duration::from_secs(10) {
+            d.poll_fetch();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(t0.elapsed() < Duration::from_secs(5), "no wait on the missing dbserver: {:?}", t0.elapsed());
+        assert_eq!(d.path, PathBuf::from(&t.rel_path), "it loaded the track its status named, by its export.pdb path");
+        let secs = d.audio.len() as f64 / (SR as f64 * 2.0);
+        assert!((secs - 3.0).abs() < 0.05, "the whole file came over NFS: {secs:.2} s");
+        assert!(d.beat_grid.is_some(), "with the stick's grid (its ANLZ, found through the same export)");
     }
 }
 
