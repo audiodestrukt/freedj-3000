@@ -107,9 +107,10 @@ across the board's width.
 - **Only the carrier is new.** `mini_lm393/carrier.stl` replaces
   `mini/carrier.stl`; the ring, retainer, hub and window are the mini's.
   Each board drops into a pocket moulded on the carrier, with a 0.8 mm lip
-  over its top (a dab of hot glue holds it), open underneath through the
-  carrier for the interrupter's leads, and notched at the far end for the
-  header's wires.  The pockets hold the boards 1.7 mm up, so the beam
+  over its top (a dab of hot glue holds it).  The board rests on a 1 mm
+  ledge round its edge, open inside right through the carrier, so the
+  through-hole pins underneath stay clear; a 10 mm notch at the far end
+  lets the header's wires out.  The pockets hold the boards 1.7 mm up, so the beam
   crosses the mini ring's fin slots (z 12.3–16.8) at z 14.3, their middle.
 - ⚠ **Not calipered.** The gap (5 mm), its depth (7.5 mm), the beam's height
   over the board (7 mm) and the sensor's distance from the board's end

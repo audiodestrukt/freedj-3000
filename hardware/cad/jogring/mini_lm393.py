@@ -37,7 +37,8 @@ BEAM_H = 7.0                       # the beam over the board's top face
 HEADER = (2.54 * 3, 2.54, 8.5, 2.5)  # a straight 3-pin header: across, along, height, its centre from the far end ⚠
 # ── the pocket on the carrier ──
 TRAY_WALL, TRAY_FIT, TRAY_LIP = 1.2, 0.3, 0.8   # walls, slack round the board, walls over its top
-LEDGE = 2.0                        # a ledge under the board's edges; open inside, through the carrier
+LEDGE = 1.0                        # the ledge under the board's edges (Dan: 1 mm, clear of the through-hole pins underneath); open inside, through the carrier
+HEADER_SLOT = 10.0                 # the notch in the far end wall for the header's wires (Dan)
 
 CODE_Z0 = mini.CODE_Z0             # the mini ring's fin, as printed
 BEAM_Z = CODE_Z0 + CODE_SLOT_H / 2 - 0.25   # 14.3: the middle of its slots
@@ -72,7 +73,7 @@ def tray():
     s = box(-bw - f - t, bw + f + t, y0 - f - t, y1 + f + t, 0, top)
     s -= box(-bw - f, bw + f, y0 - f, y1 + f, BOARD_Z, top + OVS)                      # the board's pocket
     s -= box(-bw + LEDGE, bw - LEDGE, y0 + LEDGE, y1 - LEDGE, -OVS, BOARD_Z + OVS)     # open under it, through the carrier: leads
-    s -= box(-HEADER[0] / 2 - 1, HEADER[0] / 2 + 1, y1 - 1, y1 + f + t + OVS, BOARD_Z, top + OVS)   # the wires out the far end
+    s -= box(-HEADER_SLOT / 2, HEADER_SLOT / 2, y1 - 1, y1 + f + t + OVS, BOARD_Z, top + OVS)   # the wires out the far end
     s -= box(-GAP / 2 - 0.5, GAP / 2 + 0.5, y0 - f - t - OVS, y0 + 1, BOARD_Z, top + OVS)  # the fin's way past the sensor end wall
     # The pocket's inner wall reaches r 30.9, over the hub's flange (r 31.2):
     # cut back round it (the board's own edge is at r 32.4).
