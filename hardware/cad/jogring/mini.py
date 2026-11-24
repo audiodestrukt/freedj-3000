@@ -165,7 +165,9 @@ def stub(bore):
 def station(bore, a):
     _, d, _ = BEARINGS[bore]
     xf = -W_W / 2 - SHOULDER
-    post = box(xf - POST_T, xf, -POST_W / 2, POST_W / 2, CT - 0.1 - RC, d / 2 + 2.0)
+    # Straight sides up to the axle, then a round top on it: the same 0.7
+    # offset round the stub's shoulder as the sides (Dan, 2026-11-24).
+    post = box(xf - POST_T, xf, -POST_W / 2, POST_W / 2, CT - 0.1 - RC, 0) + xcyl(xf - POST_T, xf, POST_W)
     return Rot(0, 0, a) * Pos(R_W, 0, RC) * (post + stub(bore))
 
 
@@ -176,6 +178,15 @@ def opto_frame(a):
 def sector(r0, r1, a0, a1, z0, z1):
     pts = [polar(r1, a0 + (a1 - a0) * i / 16) for i in range(17)] + [polar(r0, a1 - (a1 - a0) * i / 16) for i in range(17)]
     return Pos(0, 0, z0) * extrude(Polygon(*pts, align=None), z1 - z0)
+
+
+CSK_D = 6.4                       # the 90° chamfer under each M3 hole: an M3 countersunk head (Ø6) sits flush
+
+
+def csk(x, y):
+    """A 90° chamfer at the underside (z 0) of a hole at x, y."""
+    r = CSK_D / 2 + OVS
+    return Pos(x, y, -OVS) * Cone(r, 0, r, align=(Align.CENTER, Align.CENTER, Align.MIN))
 
 
 def carrier(bore=BEARING, stations=A_W, pad=PAD, tcst=True):
@@ -189,11 +200,11 @@ def carrier(bore=BEARING, stations=A_W, pad=PAD, tcst=True):
     for a in POSTS:
         x, y = polar(POST_R, a)
         s += Rot(0, 0, a) * box(CAR[1] - 1, POST_R, -POST_D / 2, POST_D / 2, 0, CT) + cyl(x, y, 0, CT, POST_D + 2)
-        s -= cyl(x, y, -OVS, CT + OVS, M3_CLR)
+        s -= cyl(x, y, -OVS, CT + OVS, M3_CLR) + csk(x, y)
     r, angles = HUB_SCREWS
     for a in angles:
         x, y = polar(r, a)
-        s -= cyl(x, y, -OVS, CT + OVS, HUB_CLR)
+        s -= cyl(x, y, -OVS, CT + OVS, HUB_CLR) + csk(x, y)
     for a in stations:
         s += station(bore, a)
     l, w, h, g, gd = OPTO
@@ -201,7 +212,7 @@ def carrier(bore=BEARING, stations=A_W, pad=PAD, tcst=True):
         f = opto_frame(a)
         s -= f * box(-l / 2 + 1, l / 2 - 1, -w / 2 + 1, w / 2 - 1, -CT - OVS, OVS)    # the leads
         for y in (-EAR, EAR):
-            s -= f * cyl(0, y, -CT - OVS, OVS, M3_CLR)
+            s -= f * (cyl(0, y, -CT - OVS, OVS, M3_CLR) + Pos(0, 0, -CT) * csk(0, y))
     return s
 
 

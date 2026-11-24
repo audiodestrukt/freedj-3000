@@ -81,6 +81,10 @@ printed and handled before deck7 changes.
   -y), and the ring's bore lip under the window is moved out to r 25.2, so
   the turning ring clears the tab's corners by 0.8.  Turn the module so the
   tab drops into the notch.
+- **The bearings' posts** rise straight to the axle and round over it,
+  0.7 mm outside the stub's shoulder, the same as the sides.
+- **Every M3 hole in the carrier** (hub, deck-top lugs, opto brackets) has a
+  90° chamfer to Ø6.4 underneath, so an M3 countersunk head sits flush.
 - **Hub screws.** 3 × M3 on a **54 mm BCD**, 120° apart, in both the hub and
   the carrier.  The hub's insert holes are **Ø4.4** (4.0 printed too tight),
   and the carrier's clearance holes are Ø3.8, to take a print's error.
@@ -119,8 +123,8 @@ across the board's width.
   is at z 10.5, under the mini ring's fin (its slots are z 12.3–16.8).**
   A **3.8 mm spacer** under each board puts the beam at z 14.3, the slots'
   middle (`SPACER`; `make jogring`'s encoder check assumes it).  The
-  pocket's walls stand 0.8 over a board on that spacer, so they locate it
-  either way.
+  pocket's walls stand only 0.8 over the deck, so a board on the spacer
+  sits above them (glue it to the spacer).
 - **Calipered:** the interrupter stands 10 mm over the board, its slot is
   5 mm wide, the FR4 is 1.5 mm, the mounting hole is Ø3 on the centre
   line 7 mm in from the header end.  ⚠ **Not calipered:** the slot's depth (6.5 mm), the beam's height

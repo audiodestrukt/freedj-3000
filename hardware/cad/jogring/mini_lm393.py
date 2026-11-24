@@ -47,7 +47,7 @@ BEAM_Z = CODE_Z0 + CODE_SLOT_H / 2 - 0.25   # 14.3: the middle of its slots
 DECK_DROP = 1.5                    # the board's underside under the carrier's deck (Dan, 2026-11-24: the first print held them too high)
 BOARD_Z = CT - DECK_DROP                   # 2.5: the board's top is flush with the deck
 SPACER = round(BEAM_Z - BEAM_H - BOARD_T - BOARD_Z, 2)   # 3.8: a spacer under the board this thick puts the beam mid-slot
-WALL_TOP = BOARD_Z + SPACER + BOARD_T + TRAY_LIP   # the pocket's walls: still 0.8 over a board on that spacer
+WALL_TOP = BOARD_Z + BOARD_T + TRAY_LIP   # the pocket's walls: 0.8 over the deck (Dan: they needn't be higher)
 DIRS = {OPTO_A: -1, OPTO_B: +1}    # each board runs off away from the other
 
 assert CODE_Z0 > BOARD_Z + SPACER + BOARD_T + BODY[2] - GAP_DEPTH + 0.5, "the fin touches the gap's floor"
