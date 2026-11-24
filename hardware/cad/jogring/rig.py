@@ -472,8 +472,8 @@ def main():
     shutil.rmtree(tmp, ignore_errors=True)       # no stale parts from an older layout
     os.makedirs(tmp, exist_ok=True)
     bad = []
-    import pioneer, mini
-    parts = printed() | pioneer.printed() | mini.printed()
+    import pioneer, mini, mini_lm393
+    parts = printed() | pioneer.printed() | mini.printed() | mini_lm393.printed()
     for name, (solid, flip, n) in parts.items():
         s = Rot(180, 0, 0) * solid if flip else solid
         bb = s.bounding_box()
@@ -491,11 +491,12 @@ def main():
     shared = {n: mesh(s, os.path.join(tmp, f"{n.replace('/', '_')}.stl")) for n, (s, _, _) in parts.items()
               if n in KEY and not n.endswith("plate") and not n.endswith("ring") and "hub" not in n}
     clashes = 0
-    for variant in ("vwheel", "608", "edge", "crossed", "pioneer", "mini"):
+    for variant in ("vwheel", "608", "edge", "crossed", "pioneer", "mini", "mini_lm393"):
         if variant == "pioneer":
             items = [(n, mesh(s, os.path.join(tmp, f"{variant}_{n.replace('/', '_')}.stl")), k) for n, s, k in pioneer.assembly()]
         elif variant.startswith("mini"):
-            items = [(n, mesh(s, os.path.join(tmp, f"{variant}_{n.replace('/', '_')}.stl")), k) for n, s, k in mini.assembly()]
+            asm = mini_lm393.assembly() if variant == "mini_lm393" else mini.assembly()
+            items = [(n, mesh(s, os.path.join(tmp, f"{variant}_{n.replace('/', '_')}.stl")), k) for n, s, k in asm]
         else:
             items = [(n, m, KEY[n]) for n, m in shared.items()]
             for part in ("plate", "ring", "hub_210"):
@@ -520,6 +521,8 @@ def main():
         if variant == "mini":
             c += mini.encoder_check(next(m for n, m, _ in items if n == "mini/ring"))
             print(mini.snap_report())
+        if variant == "mini_lm393":
+            c += mini_lm393.encoder_check(next(m for n, m, _ in items if n == "mini_lm393/ring"))
         clashes += c
         scene(items).export(os.path.join(BUILD, f"jogring_{variant}.glb"))
         cut = []

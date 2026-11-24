@@ -178,13 +178,14 @@ def sector(r0, r1, a0, a1, z0, z1):
     return Pos(0, 0, z0) * extrude(Polygon(*pts, align=None), z1 - z0)
 
 
-def carrier(bore=BEARING):
+def carrier(bore=BEARING, stations=A_W, pad=PAD, tcst=True):
     """The ring below: open in the middle, three spokes and the opto pad to
-    the hub's ring, the bearings' posts, lugs up to the deck top's posts."""
+    the hub's ring, the bearings' posts, lugs up to the deck top's posts.
+    `tcst`: the TCST brackets' screw holes and lead openings."""
     s = tube(*CAR, 0, CT) + tube(18.5, HUB_FL[0], 0, CT)
     for a in SPOKES:
         s += Rot(0, 0, a) * box(HUB_FL[0] - 1, CAR[0] + 1, -SPOKE_W / 2, SPOKE_W / 2, 0, CT)
-    s += sector(PAD[0], PAD[1], PAD[2], PAD[3], 0, CT)
+    s += sector(*pad, 0, CT)
     for a in POSTS:
         x, y = polar(POST_R, a)
         s += Rot(0, 0, a) * box(CAR[1] - 1, POST_R, -POST_D / 2, POST_D / 2, 0, CT) + cyl(x, y, 0, CT, POST_D + 2)
@@ -193,10 +194,10 @@ def carrier(bore=BEARING):
     for a in angles:
         x, y = polar(r, a)
         s -= cyl(x, y, -OVS, CT + OVS, HUB_CLR)
-    for a in A_W:
+    for a in stations:
         s += station(bore, a)
     l, w, h, g, gd = OPTO
-    for a in (OPTO_A, OPTO_B):
+    for a in ((OPTO_A, OPTO_B) if tcst else ()):
         f = opto_frame(a)
         s -= f * box(-l / 2 + 1, l / 2 - 1, -w / 2 + 1, w / 2 - 1, -CT - OVS, OVS)    # the leads
         for y in (-EAR, EAR):
@@ -223,7 +224,9 @@ def sensor_frame(a):
     return Rot(0, 0, a) * Pos(CODE_R, 0, CT + BR_T + 0.1)
 
 
-def ring():
+def ring(code_z0=CODE_Z0):
+    """`code_z0`: the fin's foot (the slots run up CODE_SLOT_H from it)."""
+    CODE_Z0 = code_z0
     s = tube(RING_BORE / 2, R_OUT, P_TOP_Z0, P_TOP_Z1)
     s += tube(R_OUT - RIM_W, R_OUT, P_TOP_Z0 - RIM_DROP, P_TOP_Z0 + 0.5)
     s += tube(*WALL, FL_Z1 - 0.5, P_TOP_Z0 + 0.5)

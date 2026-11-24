@@ -59,9 +59,9 @@ printed and handled before deck7 changes.
   two M3 thread-forming screws (holes 16 mm apart, tangential, centred on
   r 39.5), so the sensor can change without reprinting the ring or the
   carrier.  `mini/opto_bracket.stl` (print 2) takes a flangeless **Vishay
-  TCST1202** (or TCST1103).  A bracket for the premade boards uses the same
-  two holes; it gets drawn once one is calipered.  The beam must sit at
-  z 14.3 (the fin's slots run from 12.3 to 16.8 over the base's underside).
+  TCST1202** (or TCST1103).  The premade LM393 boards have their own
+  variant, below.  The beam must sit at z 14.3 (the fin's slots run from
+  12.3 to 16.8 over the base's underside).
 - **Window.** A **Ø54 × 3** laser-cut clear disc over the 1.28" GC9A01.
   The jog stands 8 mm proud of the deck top.
 - **Display mount.** The module stands on its four M2 standoffs on a floor
@@ -84,6 +84,44 @@ printed and handled before deck7 changes.
 - **Hub screws.** 3 × M3 on a **54 mm BCD**, 120° apart, in both the hub and
   the carrier.  The hub's insert holes are **Ø4.4** (4.0 printed too tight),
   and the carrier's clearance holes are Ø3.8, to take a print's error.
+
+### The mini with LM393 boards (`mini_lm393.py`)
+
+A demo of the optical quadrature on two premade LM393 slot-sensor boards,
+**14.25 × 31.25**, with the interrupter across one short end and its beam
+across the board's width.
+
+| ![lm393 open](renders/lm393_open.jpg) | ![lm393 sensor](renders/lm393_opto.jpg) |
+|---|---|
+
+- **The boards lie flat and tangential.** Each board's centre line touches
+  the fin's circle at its sensor (90° and 136.4°, 8¼ slots apart), and the
+  fin runs down the interrupter's gap.  From there the board runs off
+  straight, away from the other board.  A straight board leaves the circle,
+  so its far end passes 5 mm under the fin (clear of its chips) and out
+  under the bearing circle.
+- **The bearings moved.** The boards take 44–102° and 126–182° of the
+  bearing circle, so the ten even bearings become **nine**, at 6, 42, 104,
+  124, 184, 220, 256, 292 and 328°.  The widest gap is 62°.  The ring is
+  still held every way (`make jogring` checks it).
+- **Trays.** `mini_lm393/tray_a.stl` and `tray_b.stl` (one each, mirror
+  images: the 90° sensor's board runs off the other way): the board drops into a pocket
+  with a 0.8 mm lip over its top, open underneath for the interrupter's
+  leads, notched at the far end for the header's wires.  Two M3 × 8
+  thread-forming screws go up through the carrier into ears past the
+  board's ends.
+- **Carrier and ring.** `mini_lm393/carrier.stl` has a wider opto pad under
+  both trays, no TCST holes, and posts for the nine bearings.
+  `mini_lm393/ring.stl` is the mini's ring with its fin's foot at z 12.6
+  (the beam at z 14.6).  The retainer and the hub are the mini's.
+- ⚠ **Not calipered.** The gap (5 mm), its depth (7.5 mm), the beam's height
+  over the board (7 mm) and the sensor's distance from the board's end
+  (4.5 mm) are an ITR9608's typical numbers (`BEAM_H`, `GAP`, `GAP_DEPTH`,
+  `SENSE_AT` in `mini_lm393.py`).  Check them on a board.  Only the ring
+  and the tray depend on them.
+- ⚠ **A straight header** (8.5 mm, 3 pins) at the far end was assumed and
+  checked clear of the ring's foot.  Bending it flat or soldering wires is
+  safer.
 
 ## Five full-size versions
 
@@ -283,6 +321,8 @@ It is built to answer three questions:
 | **mini:** `mini/ring.stl`, `mini/retainer.stl`, `mini/hub_128.stl` | 1 each | its own set, all on a 165 mm square |
 | **mini:** `mini/carrier.stl` | 1 | PETG (the snap stubs) |
 | **mini:** `mini/opto_bracket.stl` | 2 | for TCST1202 / TCST1103 sensors |
+| **mini with LM393 boards:** `mini_lm393/ring.stl`, `mini_lm393/carrier.stl` | 1 each | with the mini's retainer and hub |
+| **mini with LM393 boards:** `mini_lm393/tray_a.stl`, `tray_b.stl` | 1 each | mirror images |
 | `608/tyre_fit.stl` | 1 | print first (above) |
 | `608/tyre.stl`, `608/spacer.stl`, `608/race_spacer.stl` | 3 each | the 608 version only |
 | `hub_210.stl` / `hub_128.stl` | 1 | one for the display you have |
@@ -298,7 +338,7 @@ PETG, 0.2 mm layers, 4 walls.
 |---|---|---|
 | **mini version:** MR106ZZ (10 × 6 × 3) | 10 | snap on: no pins |
 | **mini version:** Vishay TCST1202 (or a premade LM393 slot board, with its own bracket) | 2 | |
-| **mini version:** M3 × 8 thread-forming | 4 | the opto brackets, up from below |
+| **mini version:** M3 × 8 thread-forming | 4 | the opto brackets (or the LM393 trays), up from below |
 | **mini version:** M2 × 5 | 4 | the display's standoffs, up through the hub's floor |
 | **mini version:** clear acrylic, 3 mm, laser-cut Ø54 | 1 | the window |
 | **mini version:** M3 × 8 + inserts | 7 + 7 | hub (3), deck top (4) |
