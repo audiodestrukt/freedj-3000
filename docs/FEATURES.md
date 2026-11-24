@@ -123,7 +123,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Linux x86_64 / aarch64, Windows x64, macOS universal app, Android APK, iOS IPA: one `v*` tag publishes all on one GitHub release | ✅ |
 | App Store: OpenDeck DJ (iPhone + iPad) | ✅ |
 | Raspberry Pi 5 (60 fps, ~0.6 of a core playing) | ✅ |
-| Raspberry Pi Zero W (SDL renderer on KMSDRM, WSOLA, 49 fps) | ✅ |
+| Raspberry Pi Zero W (SDL renderer on KMSDRM, WSOLA): 50 fps in the XDJ-1000MK2 layout, 21 in the CDJ-3000 one (BENCHMARKS.md, 2026-11-24) | ✅ |
 | Running on a CDJ-3000 itself | 📋 designed, not built |
 | VST3 / CLAP plugin: the deck inside a DAW, its audio into the mixer, Pitch automatable; any number of decks per host, each in its own window or drawn into the host's screen (Overdeck's display contract), track saved with the project; Play / Cue / Platter automation for juggling and scratching (docs/design/plugin.md) | 🧪 REAPER 7.60 on Linux: two decks into a crossfader, a juggle + scratch routine; a crash at quit still open |
 

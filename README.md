@@ -62,32 +62,109 @@ list, by area, with what has been tested where, is
 **[docs/FEATURES.md](docs/FEATURES.md)**. What changed when is in
 [CHANGELOG.md](CHANGELOG.md).
 
-In short:
+### Features
 
-- **Deck:** PLAY / CUE, hot cues A–H (in rekordbox's colours), memory cues, loops, BEAT JUMP, SLIP,
-  QUANTIZE, jog (VINYL / CDJ), tempo ±6 to WIDE, KEY SHIFT, and MASTER TEMPO key lock
-  (Rubber Band R3, Bungee or WSOLA).
-- **Tracks:**
-  - MP3, AAC, ALAC, FLAC, WAV, AIFF and OGG at any sample rate.
-  - A track is playable as soon as the audio around the cue is decoded, and
-    the rest streams in.
-  - rekordbox USB sticks browse by rekordbox's categories, with their grids
-    and cues.
-  - Stems prepared with OverCue play with per-stem levels, from a local
-    stick or another player's USB or SD over LINK. Splitting on the device
-    is experimental.
-- **Analysis:** BPM and beat grid, key and phrases, for tracks rekordbox has
-  not analysed (BPM matches rekordbox's on 222 of 226 test tracks).
-- **Screens:** the CDJ-3000 screen and faceplate (the default; the iPhone
-  keeps the XDJ-1000MK2 layout) and the XDJ-1000MK2 screen. Waveform colour
-  is 3BAND, RGB or BLUE, and LIGHT MODE puts either screen on a white ground.
-- **Pro DJ Link:**
-  - **Sync:** SYNC, MASTER handoff both ways, and PLAYER No. AUTO.
-  - **Media:** browse and load from other players and rekordbox, and serve
-    OpenDeck's own music to them.
-  - **Lighting and timecode tools:** the playing track's analysis is served
-    from the moment it loads, and CDJ-3000 Absolute Position packets go out
-    every 30 ms.
+Everything below works today unless marked 🧪 (built and tested, but not yet
+on real hardware, or experimental) or 📋 (planned). The table version, with
+what was tested where, is [docs/FEATURES.md](docs/FEATURES.md).
+
+**Playing**
+- PLAY / CUE with hold-to-preview and back-cue; AUTO CUE with a level setting.
+- Hot cues (A–D on the XDJ screen, A–H on the CDJ-3000 faceplate) in
+  rekordbox's colours, and memory cues.
+- Loops: IN / OUT (IN/CUE), RELOOP / EXIT, beat loops 1/2–16, BEAT JUMP,
+  QUANTIZE for cues and loops.
+- SLIP: loops, held hot cues and scratches; the track runs on underneath.
+- Jog wheel in VINYL (scratch) or CDJ (nudge) mode, one turn = one record
+  turn; a paused jog plays the audio under the playhead; drag the big
+  waveform to seek.
+- Tempo ±6 / ±10 / ±16 / WIDE, MASTER TEMPO key lock, and KEY SHIFT
+  (±1 semitone a tap, up to an octave).
+- Three key-lock engines: Rubber Band R3 (default), Bungee, and WSOLA for
+  low-power boards. All three hold a tone within 0.2 cents from −16 % to
+  +16 %.
+- OUTPUT GAIN: 0 to −30 dB, never a boost, ramped so a change never clicks.
+
+**Tracks and library**
+- MP3, AAC/M4A, ALAC, FLAC, WAV, AIFF and OGG Vorbis; any sample rate;
+  16–32-bit integer and float. Details: [docs/AUDIO-FORMATS.md](docs/AUDIO-FORMATS.md).
+- Instant load: playable once 4 s past the cue are decoded, the rest
+  streams in behind playback.
+- BROWSE a music folder, LOAD, LOAD PREVIOUS TRACK, TAG LIST, track INFO,
+  cover art, and SEARCH with the on-screen keyboard. BROWSE remembers its
+  place per source, across launches.
+- USB drives plugged into the device, hot-plugged and safe to pull.
+- rekordbox USB sticks by rekordbox's categories (ARTIST, ALBUM, TRACK,
+  KEY, PLAYLIST, HISTORY, FOLDER), with its beat grids, hot and memory cues
+  (colours and comments), hot and memory loops, phrases, preview waveforms
+  and covers.
+- **Stems:**
+  - OverCue-prepared stems, from a local stick or a linked player's USB / SD,
+    with mute / solo / level per stem. They play about 0.15 s after a load.
+  - 🧪 Split on the device with HTDemucs when a track has none, from the
+    playhead outward (Linux desktop, Raspberry Pi 5, iPad).
+  - 🧪 Live stems from another OpenDeck, which splits from this deck's
+    playhead.
+  - 🧪 A stemd server, so CDJ-3000s running cdj3k-mods get stems split by
+    OpenDeck; and a stemd client for stems from a GPU box.
+- 📋 rekordbox's colour waveforms, cue comments on screen, OpenDeck cues
+  saved across launches, OneLibrary sticks, sorting / TRACK FILTER / KEY
+  SYNC.
+
+**Analysis** (for tracks rekordbox has not analysed)
+- BPM and beat grid: 222 of 226 tempos exact on a test stick, grids a median
+  1.3 ms from rekordbox's. rekordbox's own grid and cues win when present.
+- GRID ADJUST: SNAP GRID, SHIFT GRID (folds a synced nudge into the grid),
+  reset.
+- Key detection (72 % exact against rekordbox on a house stick).
+- Phrases (Intro, Up, Down, Chorus, Outro…) drawn under the overview in
+  rekordbox's colours, from the stick's analysis or OpenDeck's own.
+- Detail and overview waveforms in BLUE, RGB or 3BAND, and the blue / RGB /
+  3-band waveforms other players fetch, fitted to rekordbox's.
+- A track is analysed once and cached.
+
+**Screens and controls**
+- The CDJ-3000 screen and faceplate (the default), or the XDJ-1000MK2 screen
+  (MENU → SCREEN). LIGHT MODE puts either on a white ground.
+- iPhone and Android phone: two landscape pages, SCREEN and CONTROLS.
+- MENU → ABOUT: version, support address and every network address.
+- Keyboard control on the desktop, touch everywhere, USB MIDI controllers
+  in `controllers.toml` with LED feedback (Numark DJ2Go preset).
+- A Pi boots straight into the deck: splash, then fullscreen with no
+  desktop (`deploy/pi/autostart/install.sh`); `OPENDECK_APPLIANCE=1` for
+  the hardware deck.
+- 🧪 PCF8574 I2C button boards; a CDJ-3000 as OpenDeck's control surface
+  (HID over LINK); the CDJ-3000's own panel over its sub-CPU SPI device;
+  OpenDeck as firmware for the cdj3k-emu emulator.
+
+**Pro DJ Link**
+- Joins the network as a player, with PLAYER No. AUTO picking a free number
+  the way a CDJ does.
+- SYNC to the master's tempo and phase; MASTER handoff both ways; takes
+  master by itself when playing with no master on the network.
+- Browse and load from other players' USB / SD and from rekordbox, with
+  their grids, cues, loops, phrases, preview waveforms and covers.
+- Read a CDJ-3000's USB over LINK.
+- Serve its own music: a CDJ-3000 browses OpenDeck (ARTIST, ALBUM, TRACK,
+  KEY, PLAYLIST, HISTORY, FILE NAME), loads its tracks and plays them with
+  OpenDeck's waveforms, grid, key and cues.
+- The CDJ-3000's WAVEFORM view (the master's waveform stacked above ours),
+  and our waveform in other CDJ-3000s' WAVEFORM view when we are master.
+- For lighting, video and timecode tools: the playing track's analysis from
+  the moment it loads, and CDJ-3000 Absolute Position packets every 30 ms.
+- 🧪 FOLLOW (`--follow N`): a silent mirror of another player, showing what
+  it loads, its playhead, PLAY, pitch, MASTER and SYNC.
+- Works over Wi-Fi or ethernet, and survives iOS backgrounding.
+- 📋 DJM mixer channel assignment.
+
+**Platforms**
+- Linux x86_64 / aarch64, Windows, macOS, Android and iOS from one `v*` tag;
+  OpenDeck DJ on the App Store.
+- Raspberry Pi 5 at 60 fps; Pi Zero W at 50 fps (below).
+- 🧪 A VST3 / CLAP plugin: the deck inside a DAW, any number of decks per
+  host, Pitch, Play, Cue and Platter automatable for juggling and
+  scratching.
+- 📋 Running on a CDJ-3000 itself.
 
 **What has been tested on what:**
 - **Real XDJ-1000MK2:** every sync and master row.
@@ -103,8 +180,8 @@ In short:
   [docs/testing/cdj-3000-interop.md](docs/testing/cdj-3000-interop.md).
 
 **Next:**
-- rekordbox's phrases and colour waveforms, read from sticks and passed
-  through to CDJs (hot cue colours already are).
+- rekordbox's colour waveforms, read from sticks and passed through to CDJs
+  (its hot cue colours and loops already are).
 - A set of test sticks covering everything rekordbox writes.
 - Cues set on OpenDeck saved across launches.
 - The remaining CDJ-3000 screen work:
