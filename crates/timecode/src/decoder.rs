@@ -277,7 +277,14 @@ impl Decoder {
         self.ref_level += m / REF_PEAKS_AVG;
         if self.valid > VALID_BITS {
             let p = table(self.fmt)[self.bitstream as usize];
-            if p != NONE { self.position = p as i32; }
+            // The table names a window by its newest bit going forward.
+            // Backwards the newest bit is the window's oldest, `bits - 1`
+            // cycles earlier: without this a reversed record read 19 ms
+            // ahead of the needle, and ABS kept re-syncing (jerky reverse).
+            // freedj-esp's C++ has the same offset.
+            if p != NONE {
+                self.position = if self.forwards { p as i32 } else { (p as i32 - (self.bits as i32 - 1)).max(0) };
+            }
         }
     }
 }
@@ -388,6 +395,22 @@ mod tests {
             let expect = sig.phase as i32;
             assert!((d.position() - expect).abs() <= 2, "{sr}: position {} vs {expect}", d.position());
             assert!((d.speed() - 1.0).abs() < 0.02);
+        }
+    }
+
+    #[test]
+    fn backwards_reads_the_needle_not_19_ms_ahead() {
+        let sr = 48_000;
+        let mut sig = synth::Signal::new(Format::SeratoVinyl, sr, 100_000.0);
+        let mut d = Decoder::new(sr, Format::SeratoVinyl);
+        let mut buf = Vec::new();
+        sig.render(1.0, sr as usize / 2, &mut buf);
+        for sp in [-1.0, -0.5, -2.0] {
+            sig.render(sp, sr as usize / 2, &mut buf);
+            d.push_i16(&buf);
+            buf.clear();
+            assert!(d.locked(), "{sp}");
+            assert!((d.position() - sig.phase as i32).abs() <= 1, "at {sp}x: {} vs the needle {}", d.position(), sig.phase as i32);
         }
     }
 

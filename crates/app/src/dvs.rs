@@ -72,6 +72,9 @@ pub struct DvsShared {
     pub driving: AtomicBool,
     /// The deck's signed speed as the record drives it (f32 bits).
     pub drive_speed: AtomicU32,
+    /// ABS: jumps to the needle, and of those the small re-syncs.
+    pub seeks: AtomicU32,
+    pub trims: AtomicU32,
 }
 
 impl DvsShared {
@@ -222,6 +225,8 @@ impl DvsRender {
         self.position.store(cur as u64 * ch as u64, Ordering::Relaxed);
         self.in_flight.store(0, Ordering::Relaxed);
         self.shared.drive_speed.store((o.speed as f32).to_bits(), Ordering::Relaxed);
+        self.shared.seeks.store(self.drive.seeks, Ordering::Relaxed);
+        self.shared.trims.store(self.drive.trims, Ordering::Relaxed);
         true
     }
 }

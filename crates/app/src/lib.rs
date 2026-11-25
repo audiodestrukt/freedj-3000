@@ -757,6 +757,8 @@ struct DeckApp {
     dvs_was_driving: bool,
     dvs_last_speed: f32,
     dvs_fader_before: f32,
+    /// ABS jumps and re-syncs seen so far (logged as they happen).
+    dvs_jumps: (u32, u32),
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
@@ -1213,6 +1215,7 @@ impl DeckApp {
             dvs_was_driving:   false,
             dvs_last_speed:    0.0,
             dvs_fader_before:  1.0,
+            dvs_jumps:         (0, 0),
             fader_speed,
             beat2_bpm,
             beat2_player,
@@ -2839,6 +2842,12 @@ impl DeckApp {
             }
             let sp = self.audio.dvs.drive_speed();
             self.dvs_last_speed = sp;
+            let jumps = (self.audio.dvs.seeks.load(Ordering::Relaxed), self.audio.dvs.trims.load(Ordering::Relaxed));
+            if jumps != self.dvs_jumps {
+                log::debug!("dvs: ABS {} jump{} to the needle ({} re-sync), speed {sp:+.3}", jumps.0 - self.dvs_jumps.0,
+                            if jumps.0 - self.dvs_jumps.0 == 1 { "" } else { "s" }, jumps.1 - self.dvs_jumps.1);
+                self.dvs_jumps = jumps;
+            }
             let moving = sp.abs() > 0.05;
             self.audio.playing.store(moving, Ordering::Relaxed);
             if moving {
@@ -6357,7 +6366,7 @@ pub extern "C" fn freedj_ios_main() {
         Some(t) => log::info!("track: {}", t.display()),
         None => log::info!("no audio in Documents — booting to an empty deck; add tracks via the Files app"),
     }
-    if let Err(e) = run(Config { track, player, default_player, deck_channel: 0, link_send: true, browse_root: Some(docs), autoplay: false, controllers: None, host: None }) {
+    if let Err(e) = run(Config { track, player, default_player, deck_channel: 0, link_send: true, browse_root: Some(docs), autoplay: false, controllers: None, host: None, follow: None }) {
         log::error!("freedj_ios_main: {e:#}");
     }
 }
