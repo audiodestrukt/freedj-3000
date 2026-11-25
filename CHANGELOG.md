@@ -4,6 +4,8 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.3.39] — 2026-11-24
+
 ### Fixed
 - DVS sounded warbly, like a low bit-rate file. The record's speed went
   into the pitch almost raw: the timecode reads each 1 kHz cycle a few

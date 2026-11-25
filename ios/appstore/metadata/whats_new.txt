@@ -1,5 +1,3 @@
-STEMS FROM ANOTHER DECK: load a track from another OpenDeck and open STEMS, and that deck splits it for you, starting where you are playing, so the stems are ready in seconds instead of waiting for a full split. Finished splits are kept for the next load.
+DVS: play your tracks from a turntable with Serato Control Vinyl (or a Control CD) through a USB audio interface. MENU → DVS: ABS follows the needle (drop it anywhere), REL follows speed and direction only, INT hands the deck back. Forward, backward, back-cueing and scratching, with the record setting the tempo on LINK. OpenDeck asks for microphone access to read the record; no audio leaves the device.
 
-STEMS FOR THE NETWORK: with a separation model downloaded, OpenDeck can split tracks for other players and stemd clients on the network, using this device's own model.
-
-FIXED: tracks reached by FOLDER on a rekordbox USB drive now show their preview waveform, BPM and key.
+RGB WAVEFORMS AS ON A CDJ-3000: the RGB colour mode was far too red. It now colours the main and overall waveforms the way a CDJ-3000 does, using rekordbox's own RGB waveform when a track has one.
