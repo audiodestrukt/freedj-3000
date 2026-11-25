@@ -1600,7 +1600,20 @@ impl DeckApp {
                         let cur = self.smoothed_pos.max(0.0);
                         let new = (cur + beats as f64 * per_beat).clamp(0.0, self.audio.len() as f64);
                         let new = ((new as u64) / ch as u64) * ch as u64;
-                        self.seek_to(new);   // playing state is untouched: jump in place
+                        if self.audio.loop_active.load(Ordering::Relaxed) {
+                            self.seek_to(new);   // in a loop: the absolute path, which leaves it if need be
+                        } else {
+                            // Relative, resolved on the audio side at the very
+                            // sample it is heard (AudioHandle::jump): from the
+                            // screen's playhead it landed off the beat by that
+                            // estimate's error, a different amount each jump.
+                            let delta = (beats as f64 * per_beat / ch).round() as i64 * ch as i64;
+                            self.slip_anchor = None;
+                            self.slip_hold = None;
+                            self.audio.jump(delta);
+                            self.smoothed_pos = new as f64;   // the screen follows at once
+                            self.prev_pos     = new;
+                        }
                         log::info!("beat jump {beats:+}: → {:.2}s", new as f64 / (self.audio.sample_rate as f64 * ch));
                     }
                     _ => log::info!("beat jump: no beat grid"),

@@ -28,7 +28,7 @@ use opendeck_types::{Decoder, PipelineStage};
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -100,6 +100,27 @@ fn back_pressure_slots(speed: f32, device_ch: usize) -> usize {
 /// Sentinel for `seek_request`: no seek pending.
 const NO_SEEK: u64 = u64::MAX;
 pub(crate) const NO_SEEK_PUB: u64 = NO_SEEK;
+/// `JumpShared::request` when no jump is pending.
+const NO_JUMP: i64 = i64::MIN;
+
+/// A relative jump (BEAT JUMP): UI → processor, and the callback's count of
+/// what was still unplayed when it flushed for it.
+///
+/// An absolute seek computed in the UI is only as good as the UI's idea of
+/// what is playing: the screen's smoothed playhead, read up to a frame before
+/// the processor and the callback act on it.  A beat jump landed a few to
+/// tens of ms off the beat that way, a different amount each time — heard as
+/// a stutter.  As Mixxx does (its jump is resolved in the engine), the offset
+/// goes to the audio side, which knows exactly which source frame is playing
+/// where the jump's crossfade starts.
+#[derive(Clone)]
+struct JumpShared {
+    /// Offset in interleaved source samples, or NO_JUMP.
+    request:  Arc<AtomicI64>,
+    /// Output frames that were still in the ring after the buffer that
+    /// flushed it: the jump's crossfade starts on the first of them.
+    unplayed: Arc<AtomicU64>,
+}
 
 // ── Audio integrity counters ──────────────────────────────────────────────────
 
@@ -110,15 +131,12 @@ pub(crate) const NO_SEEK_PUB: u64 = NO_SEEK;
 #[derive(Default)]
 pub struct AudioStats {
     /// Samples of silence the callback filled because the ring was empty while
-    /// playing — audible underruns (clicks / dropouts).  Steady-state only:
-    /// the *expected* re-prime silence right after a seek is excluded (that goes
-    /// to `seek_priming_samples`), so this is a clean "the core starved" signal.
+    /// playing — audible underruns (clicks / dropouts).  A seek while playing
+    /// makes none (it crossfades, see `OutputFill`), so this is a clean "the
+    /// core starved" signal.
     pub underrun_samples: AtomicU64,
-    /// Callbacks that hit ≥1 steady-state underrun (distinct glitch events).
+    /// Callbacks that hit ≥1 underrun (distinct glitch events).
     pub underrun_events:  AtomicU64,
-    /// Silence samples the callback filled on the buffer where it flushed the
-    /// ring for a seek — expected re-prime gap, not a starvation glitch.
-    pub seek_priming_samples: AtomicU64,
     /// Frames the producer dropped because the ring was full (overrun).
     pub dropped_frames:   AtomicU64,
 }
@@ -168,6 +186,8 @@ pub struct AudioHandle {
     /// from `position` so a seek can't be clobbered by the processor's own
     /// per-block progress store and lost.
     pub seek_request: Arc<AtomicU64>,
+    /// Relative jumps (BEAT JUMP), resolved on the audio side; see `jump`.
+    jump:            JumpShared,
     /// Paused jog scrub: what the processor reads toward (see `scrub_to`).
     scrub:           ScrubShared,
     /// Stems: the loaded bank and the three stem levels (`stems.rs`).
@@ -241,6 +261,16 @@ impl AudioHandle {
         self.seek_request.store(pos, Ordering::Release);
         self.position.store(pos, Ordering::Relaxed);
         self.in_flight.store(0, Ordering::Relaxed);
+        self.proc_thread.unpark();
+    }
+
+    /// Jump by `delta` interleaved samples from what is playing, resolved
+    /// by the audio side at the very sample the jump is heard (see
+    /// `JumpShared`).  `position` is left to the processor, which publishes
+    /// the landing spot as soon as it knows it.
+    pub fn jump(&self, delta: i64) {
+        self.scrub.target.store(NO_SEEK, Ordering::Release);
+        self.jump.request.store(delta, Ordering::Release);
         self.proc_thread.unpark();
     }
 
@@ -436,6 +466,7 @@ impl AudioHandle {
         let drain_flag = Arc::new(AtomicBool::new(false));
         let in_flight  = Arc::new(AtomicU64::new(0));
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
+        let jump = JumpShared { request: Arc::new(AtomicI64::new(NO_JUMP)), unplayed: Arc::new(AtomicU64::new(0)) };
         let scrub = ScrubShared {
             target: Arc::new(AtomicU64::new(NO_SEEK)), from: Arc::new(AtomicU64::new(0)),
             seq: Arc::new(AtomicU64::new(0)), live: Arc::new(AtomicBool::new(false)),
@@ -464,6 +495,7 @@ impl AudioHandle {
         let proc_drain_flag = Arc::clone(&drain_flag);
         let proc_in_flight  = Arc::clone(&in_flight);
         let proc_seek       = Arc::clone(&seek_request);
+        let proc_jump       = jump.clone();
         let proc_stats      = Arc::clone(&stats);
         let proc_scrub      = scrub.clone();
         let stems           = Arc::new(StemControl::default());
@@ -486,6 +518,7 @@ impl AudioHandle {
                     proc_drain_flag,
                     proc_in_flight,
                     proc_seek,
+                    proc_jump,
                     proc_scrub,
                     proc_stems,
                     proc_complete,
@@ -516,7 +549,7 @@ impl AudioHandle {
             config: stream_config, device_ch, device_sr,
             consumer: Arc::clone(&consumer), playing: Arc::clone(&playing), stats: Arc::clone(&stats),
             drain_flag: Arc::clone(&drain_flag), failed: Arc::clone(&failed),
-            scrub_live: Arc::clone(&scrub.live),
+            scrub_live: Arc::clone(&scrub.live), unplayed: Arc::clone(&jump.unplayed),
             dvs: DvsParts {
                 shared: Arc::clone(&dvs), samples: Arc::clone(&samples), position: Arc::clone(&position),
                 in_flight: Arc::clone(&in_flight), seek_request: Arc::clone(&seek_request),
@@ -604,7 +637,7 @@ impl AudioHandle {
 
         log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
         Self::assemble(samples, position, playing, proc_thread, speed, key_lock, key_shift, loop_start, loop_end, loop_active,
-                       source_consumed, in_flight, seek_request, scrub, stems, stats, dvs, complete, file_sr, file_ch, tags,
+                       source_consumed, in_flight, seek_request, jump, scrub, stems, stats, dvs, complete, file_sr, file_ch, tags,
                        stream, shutdown, processor)
     }
 
@@ -633,7 +666,7 @@ impl AudioHandle {
     fn assemble(samples: Arc<ArcSwap<Vec<f32>>>, position: Arc<AtomicU64>, playing: Arc<AtomicBool>, proc_thread: thread::Thread,
                 speed: Arc<AtomicU32>, key_lock: Arc<AtomicBool>, key_shift: Arc<AtomicI32>, loop_start: Arc<AtomicU64>, loop_end: Arc<AtomicU64>,
                 loop_active: Arc<AtomicBool>, source_consumed: Arc<AtomicU64>, in_flight: Arc<AtomicU64>,
-                seek_request: Arc<AtomicU64>, scrub: ScrubShared, stems: Arc<StemControl>, stats: Arc<AudioStats>,
+                seek_request: Arc<AtomicU64>, jump: JumpShared, scrub: ScrubShared, stems: Arc<StemControl>, stats: Arc<AudioStats>,
                 dvs: Arc<crate::dvs::DvsShared>, complete: Arc<AtomicBool>, file_sr: u32, file_ch: usize, tags: TrackTags, stream: StreamOwner,
                 shutdown: Arc<AtomicBool>, processor: thread::JoinHandle<()>) -> Result<Self> {
         Ok(Self {
@@ -650,6 +683,7 @@ impl AudioHandle {
             source_consumed,
             in_flight,
             seek_request,
+            jump,
             scrub,
             stems,
             stats,
@@ -683,6 +717,8 @@ struct StreamParts {
     failed:     Arc<AtomicBool>,
     /// A paused jog scrub is feeding the ring: play it, as if playing.
     scrub_live: Arc<AtomicBool>,
+    /// Where the callback reports what a flush left unplayed (`JumpShared`).
+    unplayed:   Arc<AtomicU64>,
     /// DVS: what the callback needs to play the record's way.
     dvs: DvsParts,
 }
@@ -842,6 +878,16 @@ struct OutputFill {
     trim:       f32,
     /// DVS: renders the record's way while it has the deck.
     dvs:        crate::dvs::DvsRender,
+    /// A seek while playing (BEAT JUMP, hot cue): up to SEEK_HOLD_S of the
+    /// audio the seek threw away, played on until the new position's audio
+    /// is ready and then crossfaded into it.  `tail_at` is how far it has
+    /// played; `xf_at` the frame of the crossfade once it has begun.
+    tail:       Vec<f32>,
+    tail_at:    usize,
+    xf_at:      Option<usize>,
+    /// Equal-power crossfade gains (the new audio's), one per frame.
+    xfade:      Vec<f32>,
+    unplayed:   Arc<AtomicU64>,
 }
 
 impl OutputFill {
@@ -853,6 +899,14 @@ impl OutputFill {
         // silent and honours any pending flush.  Start is untouched — no
         // fade-in — so cue latency stays exactly as it is.
         const STOP_FADE_S: f32 = 0.003;
+        // Seek crossfade: long enough that the cut is no click, short enough
+        // to stay a jump (a 4 ms slur is below anything heard as a fade).
+        const SEEK_XFADE_S: f32 = 0.004;
+        // How long the old audio may carry on while the stretcher re-primes
+        // from the new spot (Rubber Band wants several blocks after a reset).
+        const SEEK_HOLD_S: f32 = 0.040;
+        let xf_frames = ((p.device_sr as f32 * SEEK_XFADE_S) as usize).max(1);
+        let hold_frames = ((p.device_sr as f32 * SEEK_HOLD_S) as usize).max(2 * xf_frames);
         OutputFill {
             consumer: Arc::clone(&p.consumer), playing: Arc::clone(&p.playing), scrub_live: Arc::clone(&p.scrub_live),
             drain_flag: Arc::clone(&p.drain_flag), stats: Arc::clone(&p.stats), device_ch: p.device_ch,
@@ -860,6 +914,11 @@ impl OutputFill {
             gain: 1.0,
             trim: output_gain(),
             dvs: p.dvs.render(),
+            tail: Vec::with_capacity(hold_frames * p.device_ch),
+            tail_at: 0,
+            xf_at: None,
+            unplayed: Arc::clone(&p.unplayed),
+            xfade: (0..xf_frames).map(|i| ((i as f32 + 0.5) / xf_frames as f32 * std::f32::consts::FRAC_PI_2).sin()).collect(),
         }
     }
 
@@ -887,9 +946,11 @@ impl OutputFill {
         if self.dvs.fill(out, self.device_ch) {
             while consumer.pop().is_ok() {}
             self.gain = 0.0;
+            self.tail_at = self.tail.len();   // and any jump crossfade is over
             return;
         }
         if !self.playing.load(Ordering::Relaxed) && !self.scrub_live.load(Ordering::Relaxed) {
+            self.tail_at = self.tail.len();   // a pause ends any jump crossfade
             if self.gain > 0.0 {
                 // Fading out: ring audio × a falling gain, frame by
                 // frame.  A flush requested meanwhile waits until
@@ -906,27 +967,113 @@ impl OutputFill {
                 // Fell to zero inside this buffer: the rest is
                 // silence and the flush can proceed.
             }
-            if self.drain_flag.swap(false, Ordering::AcqRel) {
-                while consumer.pop().is_ok() {}
+            if self.drain_flag.load(Ordering::Acquire) {
+                let mut flushed = 0usize;
+                while consumer.pop().is_ok() { flushed += 1; }
+                self.unplayed.store((flushed / self.device_ch) as u64, Ordering::Relaxed);
+                self.drain_flag.store(false, Ordering::Release);
             }
             out.fill(0.0);
             return;
         }
         self.gain = 1.0;   // playing: no fade-in, and a restart mid-fade snaps up
 
-        // On seek, flush stale buffered audio.  This same buffer will
-        // then fill with silence until the producer re-primes from the
-        // new position — expected, so attribute it to seek priming,
-        // not to starvation.
-        let draining = self.drain_flag.swap(false, Ordering::AcqRel);
-        if draining {
-            while consumer.pop().is_ok() {}
+        // A seek while playing (BEAT JUMP, a hot cue).  Cutting the ring here
+        // left the output silent while the processor re-primed from the new
+        // spot (a block at least, ~12 ms, more for Rubber Band), and the cut
+        // itself was a step: a stutter and a click on every jump.  Instead
+        // this buffer still plays the audio the ring already holds, up to
+        // SEEK_HOLD_S more of it is kept as a tail, and only then is the rest
+        // flushed and the flag cleared: the processor waits for the clear
+        // before it pushes the new position, so nothing new is thrown away.
+        // From the next buffer the tail plays on until the new audio is
+        // there, then crossfades into it.  The jump lands as soon as the new
+        // audio exists, where the flushed path played silence until then.
+        if self.drain_flag.load(Ordering::Acquire) {
+            let underran = Self::pop_into(&mut consumer, out);
+            self.tail.clear();
+            while self.tail.len() < self.tail.capacity() {
+                match consumer.pop() { Ok(s) => self.tail.push(s), Err(_) => break }
+            }
+            self.tail.truncate(self.tail.len() / self.device_ch * self.device_ch);
+            self.tail_at = 0;
+            self.xf_at = None;
+            let mut flushed = self.tail.len();
+            while consumer.pop().is_ok() { flushed += 1; }
+            // Published before the flag clears (Release): the processor reads
+            // it once it sees the clear, to resolve a relative jump.
+            self.unplayed.store((flushed / self.device_ch) as u64, Ordering::Relaxed);
+            self.drain_flag.store(false, Ordering::Release);
+            if underran > 0 {
+                self.stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
+                self.stats.underrun_events.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+
+        // The hold and crossfade, frame by frame: the old tail at full level
+        // until the ring holds the new audio for the whole crossfade and a
+        // buffer after it, then old out and new in, equal power (the two are
+        // unrelated music).  Starting on less ran the ring dry a buffer later:
+        // Rubber Band re-primes in bursts.  A tail about to run out before
+        // then fades out alone.
+        //
+        // On time: the new audio begins at the jump target, but the tail has
+        // already played some frames of wall-clock time past the jump.  That
+        // much of the new audio is skipped as the crossfade starts, so the
+        // deck lands where it would have been had the new audio been ready
+        // at once — a jump in a running mix stays on the beat however long
+        // the stretcher took to re-prime.
+        let mut out = out;
+        if self.tail_at < self.tail.len() {
+            let ch = self.device_ch;
+            let xf = self.xfade.len();
+            let ready = xf * ch + out.len();   // plus the frames to skip, below
+            let mut done = 0;
+            for frame in out.chunks_mut(ch) {
+                if self.tail_at >= self.tail.len() { break; }
+                let left = (self.tail.len() - self.tail_at) / ch;
+                if self.xf_at.is_none() && left >= xf && consumer.slots() >= ready + self.tail_at {
+                    for _ in 0..self.tail_at { let _ = consumer.pop(); }   // catch up: see above
+                    self.xf_at = Some(0);
+                }
+                let old = &self.tail[self.tail_at..self.tail_at + ch];
+                match self.xf_at {
+                    Some(k) => {
+                        let gin = self.xfade[k];
+                        let gout = (1.0 - gin * gin).sqrt();
+                        for (c, sample) in frame.iter_mut().enumerate() {
+                            *sample = old[c] * gout + consumer.pop().unwrap_or(0.0) * gin;
+                        }
+                        self.xf_at = Some(k + 1);
+                        // Crossfade complete: the rest of the tail is dropped.
+                        if k + 1 == xf { self.tail_at = self.tail.len(); done += ch; break; }
+                    }
+                    None => {
+                        let g = if left <= xf { left as f32 / xf as f32 } else { 1.0 };
+                        for (c, sample) in frame.iter_mut().enumerate() { *sample = old[c] * g; }
+                    }
+                }
+                self.tail_at += ch;
+                done += ch;
+            }
+            out = &mut std::mem::take(&mut out)[done..];
         }
 
         // Fill from the ring; count any sample we had to invent as
         // silence.  No allocation, and the atomics are touched only
         // when silence actually happens, so the clean path stays a
         // bare pop().
+        let underran = Self::pop_into(&mut consumer, out);
+        if underran > 0 {
+            // Genuine starvation — the core failed to keep up.
+            self.stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
+            self.stats.underrun_events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Fill `out` from the ring; the count of samples it had to make silent.
+    fn pop_into(consumer: &mut rtrb::Consumer<f32>, out: &mut [f32]) -> u64 {
         let mut underran = 0u64;
         for sample in out.iter_mut() {
             match consumer.pop() {
@@ -934,16 +1081,7 @@ impl OutputFill {
                 Err(_) => { *sample = 0.0; underran += 1; }
             }
         }
-        if underran > 0 {
-            if draining {
-                // Expected re-prime gap right after a seek/cue flush.
-                self.stats.seek_priming_samples.fetch_add(underran, Ordering::Relaxed);
-            } else {
-                // Genuine starvation — the core failed to keep up.
-                self.stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
-                self.stats.underrun_events.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        underran
     }
 }
 
@@ -975,6 +1113,17 @@ fn build_stream(device: &cpal::Device, p: &StreamParts) -> Result<cpal::Stream> 
 }
 
 // ── Processor loop ────────────────────────────────────────────────────────────
+
+/// Where a relative jump lands: the source sample heard at the first of the
+/// `unplayed` output frames (the decoder's cursor `pos`, less the queued
+/// output at `speed` source frames per output frame and the stretcher's
+/// latency, as `in_flight` reckons it), plus `delta`; clamped to the track
+/// and on a frame boundary.
+fn jump_target(pos: u64, unplayed: usize, speed: f32, latency: usize, delta: i64, ch: usize, len: usize) -> u64 {
+    let heard = pos as f64 - (unplayed as f64 * speed as f64 + latency as f64) * ch as f64;
+    let t = (heard + delta as f64).clamp(0.0, len as f64) as u64;
+    t / ch as u64 * ch as u64
+}
 
 /// The next source block from `pos`, `want` samples long, and the cursor after
 /// it.  With a loop `[ls, le)` active, a block that would run past `le` is
@@ -1291,6 +1440,7 @@ fn processor_loop(
     drain_flag: Arc<AtomicBool>,
     in_flight:  Arc<AtomicU64>,
     seek_request: Arc<AtomicU64>,
+    jump:       JumpShared,
     scrub:      ScrubShared,
     stems:      Arc<StemControl>,
     complete:   Arc<AtomicBool>,
@@ -1324,6 +1474,12 @@ fn processor_loop(
     // Internal read cursor — the processor owns this, UI/HID may jump `position`
     // to trigger a seek.
     let mut proc_pos: u64 = 0;
+    // Source frames inside the stretcher: fed in, not yet out (output frames
+    // × speed), counted since its last reset.  What is heard is `proc_pos`
+    // less this and the ring.  Counted, not `latency_frames()`: Rubber Band's
+    // reported latency is not its delay once the start pad/delay is trimmed,
+    // and a jump reckoned from it landed ~40 ms early.
+    let mut held: f64 = 0.0;
 
     // Output buffer for timestretched (file_ch interleaved) audio.
     let mut ts_out: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch * 8);
@@ -1419,10 +1575,19 @@ fn processor_loop(
             // the cursor, reset the stretcher and flush the ring (the callback
             // swaps `drain_flag` every period even while paused), so both the
             // published position and the first block after PLAY are right.
-            let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
+            let mut req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
+            let jmp = jump.request.swap(NO_JUMP, Ordering::AcqRel);
+            if req == NO_SEEK && jmp != NO_JUMP {
+                // Paused, nothing is consumed: what is heard next is the
+                // ring's head, as the UI's playhead has it.
+                let queued = (ring_len - producer.slots()) / device_ch;
+                let spd = f32::from_bits(speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
+                req = jump_target(proc_pos, queued, spd, held.round() as usize, jmp, file_ch, samples.load().len());
+            }
             if req != NO_SEEK {
                 log::debug!("proc: seek {proc_pos} → {req} (paused)");
                 stretcher.reset();
+                held = 0.0;
                 proc_pos = req;
                 position.store(proc_pos, Ordering::Relaxed);
                 in_flight.store(0, Ordering::Relaxed);
@@ -1447,11 +1612,21 @@ fn processor_loop(
 
         // ── Seek detection ────────────────────────────────────────────────────
         let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
-        if req != NO_SEEK {
-            log::debug!("proc: seek {proc_pos} → {req}");
+        let jmp = jump.request.swap(NO_JUMP, Ordering::AcqRel);
+        if req != NO_SEEK || jmp != NO_JUMP {
+            // For a relative jump: where the audio stands now, before the
+            // flush (an absolute seek pending at the same time wins).
+            let before  = proc_pos;
+            let latency = held.round() as usize;
+            let spd_now = f32::from_bits(speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
+            let queued  = (ring_len - producer.slots()) / device_ch;
             stretcher.reset();
-            proc_pos = req;
-            position.store(proc_pos, Ordering::Relaxed);   // reflect immediately
+            held = 0.0;
+            if req != NO_SEEK {
+                log::debug!("proc: seek {proc_pos} → {req}");
+                proc_pos = req;
+                position.store(proc_pos, Ordering::Relaxed);   // reflect immediately
+            }
             // Tell the cpal callback to flush stale buffered audio.
             drain_flag.store(true, Ordering::Release);
             // Then WAIT for it to actually flush before pushing the first
@@ -1466,6 +1641,16 @@ fn processor_loop(
             while drain_flag.load(Ordering::Acquire) && spins < 50 {
                 thread::sleep(Duration::from_millis(1));
                 spins += 1;
+            }
+            if req == NO_SEEK {
+                // The jump's crossfade starts on the first frame the flush
+                // left unplayed (the callback counted them); no callback in
+                // time (no device): the ring as it stood.
+                let unplayed = if drain_flag.load(Ordering::Acquire) { queued }
+                               else { jump.unplayed.load(Ordering::Relaxed) as usize };
+                proc_pos = jump_target(before, unplayed, spd_now, latency, jmp, file_ch, samples.len());
+                log::debug!("proc: jump {jmp:+} from {before} ({unplayed} frames unplayed) → {proc_pos}");
+                position.store(proc_pos, Ordering::Relaxed);
             }
         }
 
@@ -1565,12 +1750,15 @@ fn processor_loop(
         // ── Timestretch ───────────────────────────────────────────────────────
         ts_out.clear();
         stretcher.process(src_block, &mut ts_out);
+        held += (src_block.len() / file_ch) as f64;
 
         if final_block && ts_out.is_empty() {
             // Flush RubberBand's tail at end of track.
             let silence = vec![0.0f32; BLOCK_FRAMES * file_ch];
             stretcher.process(&silence, &mut ts_out);
+            held += BLOCK_FRAMES as f64;
         }
+        held = (held - (ts_out.len() / file_ch) as f64 * spd as f64).max(0.0);
 
         // ── Channel mix & push to ring buffer ─────────────────────────────────
         // Cap to available slots so we never silently drop frames.
@@ -1599,7 +1787,7 @@ fn processor_loop(
         // can subtract it directly.
         let ring_out_frames = (RING_BUFFER_SAMPLES - producer.slots()) / device_ch;
         let src_frames_ahead =
-            (ring_out_frames as f32 * spd) as u64 + stretcher.latency_frames() as u64;
+            (ring_out_frames as f32 * spd) as u64 + held.round() as u64;
         in_flight.store(src_frames_ahead * file_ch as u64, Ordering::Relaxed);
     }
 }
@@ -1824,7 +2012,7 @@ mod output_gain_tests {
             device_ch: 2, device_sr: 48_000,
             consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
             drain_flag: Arc::new(AtomicBool::new(false)), failed: Arc::new(AtomicBool::new(false)),
-            scrub_live: Arc::new(AtomicBool::new(false)),
+            scrub_live: Arc::new(AtomicBool::new(false)), unplayed: Arc::new(AtomicU64::new(0)),
             dvs: DvsParts::idle(),
         };
         set_output_gain_db(0.0);
@@ -1988,5 +2176,182 @@ mod host_output_tests {
         }
         assert!(pa > 0.3, "deck A's output carries A's track ({pa})");
         assert_eq!(pb, 0.0, "deck B's output carries nothing of A's");
+    }
+}
+
+/// A beat jump while playing: what the listener hears across the jump.
+#[cfg(test)]
+mod seek_while_playing_tests {
+    use super::*;
+
+    /// Play a steady tone through a host-pulled deck, jump 8 beats ahead
+    /// mid-play, and measure the longest run of silence and the biggest
+    /// sample-to-sample step in the output around the jump.
+    fn jump_gap_and_step() -> (usize, f32) {
+        let sr = 44_100usize;
+        let slot: HostSlot = Arc::new(Mutex::new(None));
+        let deck = AudioHandle::open_host(sr as u32, &slot, None).unwrap();
+        let mut out = slot.lock().unwrap().take().unwrap();
+        // 110 Hz: a step between neighbouring samples is at most ~0.008.
+        let tone: Vec<f32> = (0..sr * 20).flat_map(|i| {
+            let s = 0.5 * (i as f32 * 110.0 * std::f32::consts::TAU / sr as f32).sin();
+            [s, s]
+        }).collect();
+        deck.load_samples(Arc::new(tone), sr as u32, 2).unwrap();
+        deck.set_playing(true);
+        let mut buf = vec![0f32; 512 * 2];
+        let mut pull = |n: usize, rec: &mut Vec<f32>| for _ in 0..n {
+            out.fill(&mut buf);
+            rec.extend(buf.iter().step_by(2));
+            thread::sleep(Duration::from_micros(512 * 1_000_000 / 44_100));
+        };
+        let mut warm = Vec::new();
+        pull(60, &mut warm);                                   // steady playback
+        let mut rec = Vec::new();
+        pull(4, &mut rec);
+        deck.jump((8.0 * 60.0 / 128.0 * sr as f64) as i64 * 2);
+        pull(40, &mut rec);
+        let (mut run, mut gap) = (0, 0);
+        for s in &rec { if s.abs() < 1e-4 { run += 1; gap = gap.max(run); } else { run = 0; } }
+        // The step is measured around the jump: the buffer it lands in, the
+        // crossfade on the next and one buffer past it.  (Bungee also fades
+        // its first ~50 ms in after any reset, in grain-sized steps; that is
+        // the engine's start-up, not the jump.)
+        let at = 4 * 512;
+        let step = rec[at - 1..at + 3 * 512].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+        (gap, step)
+    }
+
+    /// The jump stays on time: with the old audio holding on while the new
+    /// position re-primes, the new audio comes in exactly as far past the
+    /// jump target as the wall clock has moved since the jump.  Samples are
+    /// their own frame numbers (old: 0, 1, 2..; new: 10 000, 10 001..), so
+    /// the output says which frame of which stream it is playing.
+    #[test]
+    fn a_jump_lands_where_the_wall_clock_says() {
+        let (mut tx, rx) = rtrb::RingBuffer::<f32>::new(1 << 15);
+        let parts = StreamParts {
+            config: cpal::StreamConfig { channels: 1, sample_rate: cpal::SampleRate(48_000), buffer_size: cpal::BufferSize::Default },
+            device_ch: 1, device_sr: 48_000,
+            consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
+            drain_flag: Arc::new(AtomicBool::new(false)), failed: Arc::new(AtomicBool::new(false)),
+            scrub_live: Arc::new(AtomicBool::new(false)), unplayed: Arc::new(AtomicU64::new(0)),
+            dvs: DvsParts::idle(),
+        };
+        let mut fill = OutputFill { trim: 1.0, ..OutputFill::new(&parts) };
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let xf = fill.xfade.len();
+        let mut buf = vec![0f32; 256];
+        for i in 0..4_000 { tx.push(i as f32).unwrap(); }        // old stream, 4 000 frames queued
+        fill.fill(&mut buf);                                      // plays 0..256
+        parts.drain_flag.store(true, Ordering::Release);          // the jump
+        fill.fill(&mut buf);                                      // still old: 256..512, then the hold
+        assert_eq!(buf[255], 511.0, "the jump buffer plays on, no silence");
+        assert!(!parts.drain_flag.load(Ordering::Acquire), "flush done, the processor may push");
+        // The processor is slow to re-prime: one buffer passes on the hold alone.
+        fill.fill(&mut buf);
+        assert_eq!(buf[0], 512.0, "the hold carries on from where the jump buffer stopped");
+        // Now the new audio arrives; the wall clock is 256 frames past the jump.
+        for i in 0..4_000 { tx.push(10_000.0 + i as f32).unwrap(); }
+        fill.fill(&mut buf);
+        let first_pure = buf[xf];                                 // right after the crossfade
+        assert_eq!(first_pure, 10_000.0 + (256 + xf) as f32,
+                   "lands 256 + crossfade frames past the target, as the clock says");
+        set_output_gain_db(0.0);
+    }
+
+    /// A click on every beat at 128 BPM; play, jump 8 beats mid-beat, and
+    /// return how far the beat after the jump is from where the steady clicks
+    /// say it should be (ms; 0 = on the beat).  `relative`: the deck's jump
+    /// (resolved on the audio side); otherwise the old way, an absolute seek
+    /// from the heard position as the UI reckons it (`position − in_flight`).
+    fn jump_beat_error_ms(relative: bool, speed: f32) -> (f64, f64) {
+        let sr = 44_100usize;
+        let period = sr as f64 * 60.0 / 128.0;
+        let slot: HostSlot = Arc::new(Mutex::new(None));
+        let deck = AudioHandle::open_host(sr as u32, &slot, None).unwrap();
+        let mut out = slot.lock().unwrap().take().unwrap();
+        let len = sr * 30;
+        let mut track = vec![0f32; len * 2];
+        let mut k = 0.0;
+        while (k * period) as usize + 220 < len {
+            let at = (k * period).round() as usize;
+            for i in 0..220 {
+                let v = 0.8 * (i as f32 * 1_000.0 * std::f32::consts::TAU / sr as f32).sin();
+                track[(at + i) * 2] = v; track[(at + i) * 2 + 1] = v;
+            }
+            k += 1.0;
+        }
+        deck.load_samples(Arc::new(track), sr as u32, 2).unwrap();
+        deck.speed.store(speed.to_bits(), Ordering::Relaxed);
+        deck.key_lock.store(true, Ordering::Relaxed);
+        deck.set_playing(true);
+        let mut buf = vec![0f32; 512 * 2];
+        let mut rec: Vec<f32> = Vec::new();
+        let mut pull = |n: usize, rec: &mut Vec<f32>| for _ in 0..n {
+            out.fill(&mut buf);
+            rec.extend(buf.iter().step_by(2));
+            thread::sleep(Duration::from_micros(512 * 1_000_000 / 44_100));
+        };
+        pull(130, &mut rec);                                   // ~1.5 s, mid-beat
+        let jump_frame = rec.len();
+        let delta = (8.0 * period).round() as i64 * 2;
+        if relative {
+            deck.jump(delta);
+        } else {
+            let heard = deck.position.load(Ordering::Relaxed) as i64 - deck.in_flight.load(Ordering::Relaxed) as i64;
+            deck.seek(((heard + delta).max(0) as u64) & !1);
+        }
+        pull(130, &mut rec);
+        // Click onsets: the first loud sample after a quiet stretch.
+        let mut onsets: Vec<usize> = Vec::new();
+        let mut last_loud: Option<usize> = None;
+        for (i, x) in rec.iter().enumerate() {
+            if x.abs() > 0.2 {
+                if last_loud.map_or(true, |l| i > l + 2_000) { onsets.push(i); }
+                last_loud = Some(i);
+            }
+        }
+        // The clicks before the jump, past the first 0.3 s of the stretcher's start-up.
+        let before: Vec<usize> = onsets.iter().copied().filter(|&o| o > sr * 3 / 10 && o < jump_frame).collect();
+        let after = onsets.iter().copied().find(|&o| o > jump_frame + 1_000).expect("a click after the jump");
+        assert!(before.len() >= 2, "clicks before the jump");
+        // Where the steady clicks put the beat after the jump: their mean
+        // phase on an even grid (one beat of output is the track's beat over
+        // the speed).  The spread of the steady clicks about that grid is the
+        // stretcher's own (WSOLA places grains up to a ms or two either way
+        // off 1x) and comes back as the second value.
+        let beat = period / speed as f64;
+        let first = before[0] as f64;
+        let offs: Vec<f64> = before.iter().map(|&o| { let o = o as f64 - first; o - (o / beat).round() * beat }).collect();
+        let phase = first + offs.iter().sum::<f64>() / offs.len() as f64;
+        let spread = offs.iter().fold(f64::MIN, |a, &b| a.max(b)) - offs.iter().fold(f64::MAX, |a, &b| a.min(b));
+        let n = ((after as f64 - phase) / beat).round();
+        let ms = |f: f64| f / sr as f64 * 1000.0;
+        (ms(after as f64 - (phase + n * beat)), ms(spread))
+    }
+
+    #[test]
+    fn a_jump_while_playing_stays_on_the_beat() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let (old, _) = jump_beat_error_ms(false, 1.0);
+        for speed in [1.0, 1.08, 0.94] {
+            let (new, spread) = jump_beat_error_ms(true, speed);
+            eprintln!("beat after the jump at {speed}x: {new:+.2} ms off (steady clicks spread {spread:.2} ms; at 1x an absolute seek from the heard position: {old:+.2} ms)");
+            assert!(new.abs() < 1.0 + spread, "at {speed}x the jump lands {new:+.2} ms off the beat");
+        }
+    }
+
+    #[test]
+    fn a_jump_while_playing_has_no_gap_and_no_click() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let (gap, step) = jump_gap_and_step();
+        eprintln!("beat jump: longest silence {gap} frames ({:.1} ms), biggest step {step:.3}", gap as f64 / 44.1);
+        // A 110 Hz tone crosses zero, so a few silent samples are natural.
+        assert!(gap < 8, "silence across the jump: {gap} frames");
+        assert!(step < 0.05, "click across the jump: step {step}");
     }
 }
