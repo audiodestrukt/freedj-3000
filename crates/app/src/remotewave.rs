@@ -165,6 +165,17 @@ pub(crate) fn pwv5_entries(section: &[u8]) -> Vec<[u8; 4]> {
     data[..data.len().min(count * 2)].chunks_exact(2).map(|e| pwv5_entry(u16::from_be_bytes([e[0], e[1]]))).collect()
 }
 
+/// A PWV4 section as it is in the `.EXT` (the RGB preview: 1,200 columns
+/// of 6 bytes) as entries; empty if it is not that shape.
+pub(crate) fn pwv4_entries(section: &[u8]) -> Vec<[u8; 6]> {
+    if section.len() < 20 { return Vec::new(); }
+    let be = |i: usize| u32::from_be_bytes([section[i], section[i + 1], section[i + 2], section[i + 3]]) as usize;
+    let (head, size, count) = (be(4), be(12), be(16));
+    if size != 6 { return Vec::new(); }
+    let Some(data) = section.get(head..) else { return Vec::new() };
+    data[..data.len().min(count * 6)].chunks_exact(6).map(|e| [e[0], e[1], e[2], e[3], e[4], e[5]]).collect()
+}
+
 /// The entries of an ANLZ tag section as the player sends it: a 4-byte
 /// prefix, the tag name, the header length, the section length, the entry
 /// size and the entry count, then the entries.
@@ -180,6 +191,15 @@ fn anlz_entries(b: &[u8], entry: usize) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `.EXT`'s PWV4 (the RGB preview), 6 bytes a column.
+    #[test]
+    fn pwv4_from_the_file() {
+        let want = vec![[120, 150, 60, 9, 52, 46], [0; 6], [127, 128, 122, 122, 77, 31]];
+        let file = opendeck_rekordbox::fixtures::anlz_file(&[opendeck_rekordbox::fixtures::pwv4(&want)]);
+        assert_eq!(pwv4_entries(opendeck_rekordbox::anlz_section(&file, b"PWV4").unwrap()), want);
+        assert!(pwv4_entries(&opendeck_rekordbox::fixtures::pwv5(&[[1, 2, 3, 4]])).is_empty(), "a PWV5 is not a PWV4");
+    }
 
     /// The `.EXT`'s PWV5 read straight from the file (no reply prefix):
     /// every entry, in order, unpacked.

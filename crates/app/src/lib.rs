@@ -750,7 +750,7 @@ struct DeckApp {
     script: Option<(devscript::Script, Instant)>,
     /// The loaded track's RGB waveform from rekordbox, kept for a renderer
     /// made later (`apply_wave_color` hands it over).
-    rb_rgb: Option<Arc<Vec<[u8; 4]>>>,
+    rb_rgb: Option<Arc<waveform_cpu::RbWave>>,
     /// DVS (MENU → DVS): the interface's input while it is on.
     dvs_input: Option<dvs::DvsInput>,
     /// This deck can take an input (not inside a plugin host).
@@ -2324,8 +2324,10 @@ impl DeckApp {
         let a = opendeck_rekordbox::read_anlz(anlz)
             .map_err(|e| log::warn!("ANLZ {}: {e:#}", anlz.display())).ok()?;
         let mut l = Self::anlz_to_grid(a, deck_sr, ch)?;
-        l.rgb = opendeck_rekordbox::read_anlz_section(&anlz.with_extension("EXT"), b"PWV5")
-            .map(|s| remotewave::pwv5_entries(&s)).unwrap_or_default();
+        if let Ok(ext) = std::fs::read(anlz.with_extension("EXT")) {
+            l.rgb = opendeck_rekordbox::anlz_section(&ext, b"PWV5").map(remotewave::pwv5_entries).unwrap_or_default();
+            l.rgb_preview = opendeck_rekordbox::anlz_section(&ext, b"PWV4").map(remotewave::pwv4_entries).unwrap_or_default();
+        }
         Some(l)
     }
 
@@ -2355,6 +2357,7 @@ impl DeckApp {
         }
         let mut l = Self::anlz_to_grid(a, deck_sr, ch)?;
         l.rgb = ext.and_then(|e| opendeck_rekordbox::anlz_section(e, b"PWV5")).map(remotewave::pwv5_entries).unwrap_or_default();
+        l.rgb_preview = ext.and_then(|e| opendeck_rekordbox::anlz_section(e, b"PWV4")).map(remotewave::pwv4_entries).unwrap_or_default();
         Some(l)
     }
 
@@ -2394,7 +2397,7 @@ impl DeckApp {
             .map(|c| (to_samples(c.time_ms), to_samples(c.loop_ms))).collect();
         // The stick's phrases (the .EXT's PSSI), on its own beat grid.
         let phrases = phrases::spans(&a.phrases, |n| a.beats.get((n as usize).checked_sub(1)?).map(|b| b.time_ms), u64::MAX, deck_sr, ch as u16);
-        Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks, phrases, rgb: Vec::new() })
+        Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks, phrases, rgb: Vec::new(), rgb_preview: Vec::new() })
     }
 
     /// Dispatch a browser selection: a local file, or a track on a linked player.
@@ -3402,10 +3405,10 @@ impl DeckApp {
             r.set_waveform(&p.waveform);
             // RGB colours from rekordbox's own RGB waveform when the track
             // came with one (a stick, a linked player); else from our bands.
-            r.set_rgb((!p.rgb.is_empty()).then(|| Arc::clone(&p.rgb)));
+            r.set_rgb(p.rgb.clone());
         }
-        if !p.rgb.is_empty() { log::info!("waveform: rekordbox's RGB colours ({} entries)", p.rgb.len()); }
-        self.rb_rgb = (!p.rgb.is_empty()).then(|| Arc::clone(&p.rgb));
+        if let Some(w) = &p.rgb { log::info!("waveform: rekordbox's RGB colours ({} entries, preview {})", w.detail.len(), w.preview.len()); }
+        self.rb_rgb = p.rgb.clone();
         self.stem_wave_key = None;
         self.waveform     = p.waveform;
         self.grid_orig    = p.beat_grid.clone();
@@ -4365,6 +4368,8 @@ struct AnlzLoad {
     /// The track's RGB waveform from rekordbox (`.EXT` PWV5: red, green,
     /// blue 0-7, height 0-31, 150 a second); empty without one.
     rgb: Vec<[u8; 4]>,
+    /// Its RGB preview (`.EXT` PWV4, 1,200 × 6 bytes): the overall waveform.
+    rgb_preview: Vec<[u8; 6]>,
 }
 
 /// A cue's colour and comment from rekordbox (see [`opendeck_rekordbox::RbCue`]).
@@ -4560,8 +4565,8 @@ struct Prepared {
     beat_grid: Option<BeatGrid>, cue_pt: u64, memory_cues: Vec<u64>, hot_cues: [Option<u64>; 8], looks: CueLooks,
     /// The stick's phrases, when the track came with rekordbox analysis.
     phrases: Vec<phrases::PhraseSpan>,
-    /// Its RGB waveform from rekordbox (PWV5 entries), or empty.
-    rgb: Arc<Vec<[u8; 4]>>,
+    /// Its RGB waveforms from rekordbox (PWV5, PWV4), or None.
+    rgb: Option<Arc<waveform_cpu::RbWave>>,
     grid_src: &'static str, t0: Instant,
     /// Still decoding: the expected length in samples (the rest arrives as
     /// [`Grow`]s).  0 = `samples` is the whole track.
@@ -4652,10 +4657,12 @@ impl Prep {
         let per_sec = (deck_sr as usize * ch) as f64;
 
         let (beat_grid, rb_cue, memory_cues, hot_cues, (looks, rb_phrases), grid_src, rb_rgb) = match grid_cue {
-            Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks, phrases, rgb }) => (Some(grid), cue, memory_cues, hot_cues, (looks, phrases), "rekordbox", rgb),
-            None => (None, 0, Vec::new(), [None; 8], (CueLooks::default(), Vec::new()), "freedj", Vec::new()),
+            Some(AnlzLoad { grid, cue, memory_cues, hot_cues, looks, phrases, rgb, rgb_preview }) =>
+                (Some(grid), cue, memory_cues, hot_cues, (looks, phrases), "rekordbox", (rgb, rgb_preview)),
+            None => (None, 0, Vec::new(), [None; 8], (CueLooks::default(), Vec::new()), "freedj", (Vec::new(), Vec::new())),
         };
-        let rb_rgb = Arc::new(rb_rgb);
+        let rb_rgb = (!rb_rgb.0.is_empty() || !rb_rgb.1.is_empty())
+            .then(|| Arc::new(waveform_cpu::RbWave { detail: rb_rgb.0, preview: rb_rgb.1 }));
         let grid_src = match (&local, grid_src) { (Some(Some(_)), "rekordbox") => "cache", (_, g) => g };
         // AUTO CUE only when rekordbox gave no cue: then the first sound.
         let auto = self.auto_cue && rb_cue == 0;
@@ -4716,7 +4723,7 @@ impl Prep {
                     name: name.clone(), path: path.clone(), tags: tags.clone(),
                     samples: Arc::new(out.clone()), ch, waveform: if eof { wb.snapshot() } else { partial(&wb) },
                     beat_grid: beat_grid.clone(), cue_pt, memory_cues: memory_cues.clone(), hot_cues, looks: looks.clone(),
-                    phrases: rb_phrases.clone(), rgb: Arc::clone(&rb_rgb), grid_src, t0, total,
+                    phrases: rb_phrases.clone(), rgb: rb_rgb.clone(), grid_src, t0, total,
                 };
                 log::info!("load: playable in {} ms ({:.1}s decoded)", t0.elapsed().as_millis(), out.len() as f64 / per_sec);
                 if tx.send(LoadMsg::Ready(p)).is_err() { return Ok(()); }
@@ -7775,12 +7782,14 @@ mod rb_rgb_tests {
         let dat = dir.path().join("ANLZ0000.DAT");
         let rgb: Vec<[u8; 4]> = (0..450).map(|k| [(k % 8) as u8, 2, 7, 25]).collect();
         std::fs::write(&dat, anlz_file(&[pqtz(120.0, 0, 6)])).unwrap();
-        std::fs::write(dat.with_extension("EXT"), anlz_file(&[pwv5(&rgb)])).unwrap();
+        let preview: Vec<[u8; 6]> = (0..1200).map(|i| [0, 0, 0, (i % 128) as u8, 40, 80]).collect();
+        std::fs::write(dat.with_extension("EXT"), anlz_file(&[pwv5(&rgb), opendeck_rekordbox::fixtures::pwv4(&preview)])).unwrap();
 
         let mut d = deck(2.0);
         d.load_track(&a, Some(&dat)).unwrap();
         wait_for(&mut d, &a);
-        assert_eq!(d.rb_rgb.as_deref(), Some(&rgb), "the stick's PWV5 is the deck's RGB colouring");
+        assert_eq!(d.rb_rgb.as_deref().map(|w| &w.detail), Some(&rgb), "the stick's PWV5 is the deck's RGB colouring");
+        assert_eq!(d.rb_rgb.as_deref().map(|w| &w.preview), Some(&preview), "and its PWV4 the overall waveform's");
 
         d.load_track(&b, None).unwrap();
         wait_for(&mut d, &b);

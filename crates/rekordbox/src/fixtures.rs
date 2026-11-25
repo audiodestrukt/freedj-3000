@@ -102,3 +102,13 @@ pub fn pwv5(entries: &[[u8; 4]]) -> Vec<u8> {
     s.extend(b);
     s
 }
+
+/// rekordbox's RGB preview (PWV4, in the `.EXT`): 6 bytes per column,
+/// 1,200 columns for the whole track.
+pub fn pwv4(entries: &[[u8; 6]]) -> Vec<u8> {
+    let b: Vec<u8> = entries.iter().flatten().copied().collect();
+    let mut s = b"PWV4".to_vec(); s.extend(be32(0x18)); s.extend(be32(0x18 + b.len() as u32));
+    s.extend(be32(6)); s.extend(be32(entries.len() as u32)); s.extend(be32(0));
+    s.extend(b);
+    s
+}

@@ -22,9 +22,20 @@ All notable changes to this project will be documented in this file.
   colour, and their mean height draws the core in the colour of the
   pixel's own tallest entry; heights are rekordbox's, on the CDJ's scale.
   Side by side with the emulated CDJ-3000 on the same track, the colours
-  match. Tracks without it use the fitted curves. Still different: the
-  overall waveform, which the CDJ draws from rekordbox's colour preview
-  (PWV4), not yet read.
+  match. Tracks without it use the fitted curves.
+- The CDJ-3000 screen's overall waveform in RGB is drawn as the unit draws
+  it (fitted on cdj3k-emu against the track's PWV4): from the bottom up to
+  the highest of the preview's red, green and blue (bytes 3-5), in their
+  hue, brighter below the blue's height and darker going up. From the
+  stick's PWV4, or for other tracks the preview we make for CDJs from our
+  analysis. Side by side with the emulated CDJ-3000 it matches, greens
+  and cyans in the intro, reds and oranges in the drops. (In BLUE and
+  3BAND the overview is still mirrored about the middle where the unit
+  grows it from the bottom.)
+- RGB costs no more to draw than BLUE: our bands are converted to RGB
+  levels once at load (1 ms for a 4-minute track), not per pixel per
+  frame. CPU renderer, this desktop: RGB waveform 1.42 ms (BLUE 1.68),
+  overall waveform 0.40 ms (BLUE 0.45).
 
 ### Added
 - DVS (MENU → DVS: OFF / ABS / REL / INT): a Serato Control Vinyl (or

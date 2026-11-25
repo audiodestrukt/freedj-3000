@@ -393,6 +393,19 @@ pub fn rgb_waveforms(wave: &WaveformCache, frames: u64, sr: u32) -> (Vec<u8>, Ve
         let h = f(c[3] as f64, &RMS_DETAIL, &RGB_H).min(31) as u16;
         detail.extend_from_slice(&((r << 13) | (g << 10) | (b << 7) | (h << 2)).to_be_bytes());
     }
+    (rgb_preview(wave, frames, sr), detail)
+}
+
+/// The RGB preview alone (PWV4: 1,200 columns of 6 bytes), as
+/// [`rgb_waveforms`] makes it: what a CDJ-3000's overall waveform draws in
+/// RGB (bytes 3-5 its colour and height, fitted on cdj3k-emu).
+pub fn rgb_preview(wave: &WaveformCache, frames: u64, sr: u32) -> Vec<u8> {
+    let _ = sr;
+    let cols = &wave.columns;
+    if cols.is_empty() || frames == 0 { return Vec::new(); }
+    let (hop, half) = (wave.hop_size.max(1) as u64, opendeck_analysis::waveform::FFT_SIZE as u64 / 2);
+    let col_at = |frame: u64| ((frame.saturating_sub(half) / hop) as usize).min(cols.len() - 1);
+    let f = |x: f64, ours: &[u8; 21], rb: &[u8; 21]| band_curve(x, &(*ours, *rb));
     let mut preview = Vec::with_capacity(BAND_PREVIEW_COLUMNS * 6);
     for i in 0..BAND_PREVIEW_COLUMNS {
         let s = col_at(frames * i as u64 / BAND_PREVIEW_COLUMNS as u64);
@@ -412,7 +425,7 @@ pub fn rgb_waveforms(wave: &WaveformCache, frames: u64, sr: u32) -> (Vec<u8>, Ve
             f(m(2), &BAND_PREVIEW[2].0, &PV4_B5),
         ]);
     }
-    (preview, detail)
+    preview
 }
 
 /// Percentile ranks 0, 5, ..., 100 % on a 0-127 scale.

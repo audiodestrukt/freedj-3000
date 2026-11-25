@@ -343,7 +343,7 @@ pub struct SdlRenderer {
     num_cols:   u32,
     /// The track's rekordbox RGB entries (`set_rgb`), laid on the column
     /// grid after the track's columns in `cols` (from `num_cols` on).
-    rb_rgb:     Option<std::sync::Arc<Vec<[u8; 4]>>>,
+    rb_rgb:     Option<std::sync::Arc<crate::waveform_cpu::RbWave>>,
     col_hop:    (usize, u32),
     amp_gain:   f32,
     color_mode: ColorMode,
@@ -373,12 +373,15 @@ pub struct SdlRenderer {
 
 impl SdlRenderer {
     /// `cols` = the track's columns, then its RGB levels (`rgb_for`:
-    /// rekordbox's or ours, converted once here, not per frame).
+    /// rekordbox's or ours, converted once here, not per frame), then the
+    /// overall waveform's RGB data (`preview_for`).
     fn append_rgb(&mut self) {
         let n = self.num_cols as usize;
         self.cols.truncate(n);
         let rgb = crate::waveform_cpu::rgb_for(&self.cols, self.rb_rgb.as_deref(), self.col_hop.0, self.col_hop.1);
+        let prev = crate::waveform_cpu::preview_for(self.rb_rgb.as_deref(), &self.cols, self.col_hop.0, self.col_hop.1);
         self.cols.extend(rgb);
+        self.cols.extend(prev);
     }
 
     pub fn new(mut canvas: Canvas<Window>, waveform: &WaveformCache) -> Result<Self> {
@@ -648,7 +651,7 @@ impl Renderer for SdlRenderer {
         log::info!("waveform reloaded: {} columns, peak {:.2} → gain {:.2}", self.num_cols, peak, gain);
     }
 
-    fn set_rgb(&mut self, rgb: Option<std::sync::Arc<Vec<[u8; 4]>>>) {
+    fn set_rgb(&mut self, rgb: Option<std::sync::Arc<crate::waveform_cpu::RbWave>>) {
         self.rb_rgb = rgb;
         self.append_rgb();
         self.over_key = None;
@@ -691,6 +694,7 @@ impl Renderer for SdlRenderer {
                                                     self.num_cols, out_w, sh);
         if self.detail.is_some() { params.detail_off = self.num_cols as f32; }
         params.rgb_off = self.num_cols as f32;
+        params.ov_off = self.num_cols as f32 * 2.0;
         if self.rb_rgb.is_some() { params.rgb_heights = 1.0; }
 
         // ── Ground + waveforms (the shader's pass 1) ─────────────────────

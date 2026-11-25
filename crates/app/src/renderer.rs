@@ -82,8 +82,9 @@ pub struct WaveformParams {
     /// 1 = those are rekordbox's, with its heights (the CDJ's scale); 0 =
     /// ours, drawn at our heights.
     pub rgb_heights:      f32,
-    /// The uniform's size rounds up to 16 bytes.
-    pub _pad:             [f32; 1],
+    /// Where the overall waveform's RGB data starts in the buffer
+    /// (`waveform_cpu::preview_for`, `PREVIEW_N` words); 0 = none.
+    pub ov_off:           f32,
 }
 
 /// Output pixels per layout pixel across: 1, except fullscreen fill on a
@@ -181,7 +182,7 @@ pub trait Renderer {
     /// second: red, green, blue 0-7, height 0-31): RGB mode colours from it
     /// instead of our bands. `None` = a track without one. Kept across
     /// `set_waveform` (a streaming track grows).
-    fn set_rgb(&mut self, rgb: Option<std::sync::Arc<Vec<[u8; 4]>>>);
+    fn set_rgb(&mut self, rgb: Option<std::sync::Arc<crate::waveform_cpu::RbWave>>);
     fn resize(&mut self, width: u32, height: u32);
     /// Write the next rendered frame to `path` as a PNG.
     fn request_capture(&mut self, path: std::path::PathBuf);
@@ -261,7 +262,7 @@ impl WaveformParams {
             light:             if vp.light { 1.0 } else { 0.0 },
             rgb_off:           0.0,
             rgb_heights:       0.0,
-            _pad:              [0.0; 1],
+            ov_off:            0.0,
         }
     }
 }
@@ -269,11 +270,13 @@ impl WaveformParams {
 // ── wgpu renderer ─────────────────────────────────────────────────────────────
 
 /// The column buffer: `data`, then as many zero columns for the stem mix,
-/// then the RGB levels (`rgb`, one per column).
-fn column_buffer(device: &wgpu::Device, data: &[u32], rgb: &[u32]) -> wgpu::Buffer {
+/// then the RGB levels (`rgb`, one per column), then the overall waveform's
+/// RGB data (`prev`, `PREVIEW_N` words).
+fn column_buffer(device: &wgpu::Device, data: &[u32], rgb: &[u32], prev: &[u32]) -> wgpu::Buffer {
     let mut both = data.to_vec();
     both.resize(data.len() * 2, 0);
     both.extend(rgb.iter().copied().chain(std::iter::repeat(0)).take(data.len()));
+    both.extend(prev.iter().copied().chain(std::iter::repeat(0)).take(crate::waveform_cpu::PREVIEW_N));
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label:    Some("waveform_data"),
         contents: bytemuck::cast_slice(&both),
@@ -306,7 +309,7 @@ pub struct WgpuRenderer {
     detail_on:           bool,
     /// The track's rekordbox RGB entries (`set_rgb`) and the column grid
     /// they were last laid on; the third part of the buffer holds them.
-    rb_rgb:              Option<std::sync::Arc<Vec<[u8; 4]>>>,
+    rb_rgb:              Option<std::sync::Arc<crate::waveform_cpu::RbWave>>,
     col_hop:             (usize, u32),
     /// The track's columns as uploaded, to convert again when `set_rgb`
     /// takes rekordbox's away.
@@ -515,7 +518,8 @@ impl WgpuRenderer {
         let (peak, amp_gain) = display_gain(&waveform_data);
         log::info!("waveform peak {:.2} → display gain {:.2}", peak, amp_gain);
 
-        let waveform_buf = column_buffer(&device, &waveform_data, &crate::waveform_cpu::own_rgb_columns(&waveform_data));
+        let waveform_buf = column_buffer(&device, &waveform_data, &crate::waveform_cpu::own_rgb_columns(&waveform_data),
+                                         &crate::waveform_cpu::preview_for(None, &waveform_data, waveform.hop_size, waveform.sample_rate));
 
         // ── Params uniform buffer ─────────────────────────────────────────────
         let initial_params = WaveformParams {
@@ -544,7 +548,7 @@ impl WgpuRenderer {
             light:            0.0,
             rgb_off:          0.0,
             rgb_heights:      0.0,
-            _pad:             [0.0; 1],
+            ov_off:           0.0,
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -725,7 +729,8 @@ impl Renderer for WgpuRenderer {
 
         self.col_hop = (waveform.hop_size, waveform.sample_rate);
         let rgb = crate::waveform_cpu::rgb_for(&data, self.rb_rgb.as_deref(), waveform.hop_size, waveform.sample_rate);
-        let waveform_buf = column_buffer(&self.device, &data, &rgb);
+        let prev = crate::waveform_cpu::preview_for(self.rb_rgb.as_deref(), &data, waveform.hop_size, waveform.sample_rate);
+        let waveform_buf = column_buffer(&self.device, &data, &rgb, &prev);
         self.own_data = data.clone();
         self.waveform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:  Some("waveform_bg"),
@@ -752,12 +757,14 @@ impl Renderer for WgpuRenderer {
         }
     }
 
-    fn set_rgb(&mut self, rgb: Option<std::sync::Arc<Vec<[u8; 4]>>>) {
+    fn set_rgb(&mut self, rgb: Option<std::sync::Arc<crate::waveform_cpu::RbWave>>) {
         self.rb_rgb = rgb;
         let n = self.num_cols as usize;
         if n == 0 { return; }
         let cols = crate::waveform_cpu::rgb_for(&self.own_data, self.rb_rgb.as_deref(), self.col_hop.0, self.col_hop.1);
         self.queue.write_buffer(&self.waveform_buf, (n * 2 * 4) as u64, bytemuck::cast_slice(&cols));
+        let prev = crate::waveform_cpu::preview_for(self.rb_rgb.as_deref(), &self.own_data, self.col_hop.0, self.col_hop.1);
+        self.queue.write_buffer(&self.waveform_buf, (n * 3 * 4) as u64, bytemuck::cast_slice(&prev));
     }
 
     fn resize(&mut self, width: u32, height: u32) {
@@ -803,6 +810,7 @@ impl Renderer for WgpuRenderer {
                                                 self.num_cols, self.surface_config.width, self.surface_config.height);
         if self.detail_on { params.detail_off = self.num_cols as f32; }
         params.rgb_off = self.num_cols as f32 * 2.0;
+        params.ov_off = self.num_cols as f32 * 3.0;
         if self.rb_rgb.is_some() { params.rgb_heights = 1.0; }
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
@@ -1050,7 +1058,7 @@ struct Params {
     light:              f32,  // 1 = LIGHT MODE: mirror lightness, anti-alias bar edges
     rgb_off:            f32,  // RGB levels in the buffer (waveform_cpu::rb_pack); 0 = none
     rgb_heights:        f32,  // 1 = rekordbox's heights with them
-    _pad2:              f32,
+    ov_off:             f32,  // the overall waveform's RGB data (waveform_cpu::preview_for); 0 = none
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
@@ -1212,6 +1220,28 @@ fn rgb_bar_color(col_f: f32, off: u32, dist: f32, span: f32) -> vec4<f32> {
     if dist < hs / f32(2u * n) { return vec4<f32>(rgb_norm(own_c, 224.0).rgb, 1.0); }
     if dist < top { return vec4<f32>(rgb_norm(top_c, 109.0).rgb, 1.0); }
     return vec4<f32>(0.0);
+}
+
+// The RGB overall waveform, waveform_cpu::overview_rgb: the entry under the
+// pixel with the most height (of the preview's bytes 3-5), from the bottom
+// up, normalised, brighter below byte 5's height, darker going up.
+fn overview_rgb(sx: f32, y: f32, w: f32) -> vec4<f32> {
+    let n  = 1200u;
+    let a  = min(u32(sx * f32(n)), n - 1u);
+    let b  = clamp(u32((sx + 1.0 / max(w, 1.0)) * f32(n)), a + 1u, n);
+    var best = 0u;
+    var bh   = -1.0;
+    for (var i = a; i < b; i++) {
+        let v = waveform[u32(p.ov_off) + i];
+        let h = f32(max(v & 255u, max((v >> 8u) & 255u, (v >> 16u) & 255u)));
+        if h > bh { bh = h; best = v; }
+    }
+    let c = vec3<f32>(f32(best & 255u), f32((best >> 8u) & 255u), f32((best >> 16u) & 255u));
+    let h = bh / 127.0 * 0.93;
+    if y >= h || h <= 0.0 { return vec4<f32>(0.0); }
+    let rel = y / h;
+    let bright = select(244.0 - 127.0 * rel, 240.0 - 69.0 * rel, y < c.z / 127.0 * 0.93);
+    return vec4<f32>(rgb_norm(c, bright).rgb, 1.0);
 }
 
 // LIGHT MODE's last step: theme::flip_rgb on the sRGB-encoded pixel.
@@ -1389,9 +1419,10 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
 
     let dist = abs(sy - 0.5) * 2.0;
     var bar  = bar_color(c, dist, fw);
-    if u32(p.color_mode + 0.5) == 0u && p.rgb_off > 0.5 {
-        let span = p.num_cols / r.z;
-        bar = rgb_bar_color((sx + 0.5 / r.z) * p.num_cols, 0u, dist, max(span, 1.0));
+    if u32(p.color_mode + 0.5) == 0u && p.ov_off > 0.5 {
+        // RGB as the CDJ-3000 draws its overall waveform: from the bottom
+        // up, from the preview's bytes 3-5 (waveform_cpu::overview_rgb).
+        bar = overview_rgb(sx, 1.0 - sy, r.z);
     }
     // REMAIN mode: the played part turns off from the left.  TIME mode
     // leaves the whole graph lit.

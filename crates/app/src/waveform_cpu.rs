@@ -134,6 +134,70 @@ pub fn rgb_norm(v: [f32; 3], top: f32) -> [f32; 3] {
     [v[0] / m * top, v[1] / m * top, v[2] / m * top]
 }
 
+/// A track's RGB waveforms from rekordbox (its `.EXT`): the detail (PWV5:
+/// red, green, blue 0-7 and height 0-31, 150 a second) and the preview
+/// (PWV4: 1,200 columns of 6 bytes). Either may be empty.
+#[derive(Debug, Default, PartialEq)]
+pub struct RbWave { pub detail: Vec<[u8; 4]>, pub preview: Vec<[u8; 6]> }
+
+/// Columns in an RGB preview (PWV4), the overall waveform's data.
+pub const PREVIEW_N: usize = 1200;
+
+/// The overall waveform's RGB data, `PREVIEW_N` packed words of the
+/// preview's bytes 3, 4, 5 (what the CDJ draws from): rekordbox's when the
+/// track came with a PWV4, else made once from our columns the way we make
+/// the PWV4 we serve (`opendeck_mediaserver::rgb_preview`).
+pub fn preview_for(rb: Option<&RbWave>, cols: &[u32], hop: usize, sr: u32) -> Vec<u32> {
+    let pack = |e: &[u8]| u32::from_le_bytes([e[3], e[4], e[5], 0]);
+    if let Some(p) = rb.map(|r| &r.preview).filter(|p| !p.is_empty()) {
+        return (0..PREVIEW_N).map(|i| pack(&p[(i * p.len() / PREVIEW_N).min(p.len() - 1)])).collect();
+    }
+    let wave = opendeck_analysis::WaveformCache { columns: cols.iter().map(|v| v.to_le_bytes()).collect(), sample_rate: sr, hop_size: hop };
+    let bytes = opendeck_mediaserver::rgb_preview(&wave, (cols.len() * hop) as u64, sr);
+    if bytes.len() < PREVIEW_N * 6 { return vec![0; PREVIEW_N]; }
+    bytes.chunks_exact(6).take(PREVIEW_N).map(pack).collect()
+}
+
+/// The CDJ-3000's RGB overall waveform at a pixel, from `preview_for`'s
+/// words (fitted on cdj3k-emu against the track's PWV4, 2026-11-24): from
+/// the bottom up, to max(b3, b4, b5) (r = 0.995; 127 = 93 % of the strip),
+/// coloured by (b3, b4, b5) normalised (within 1/255), brightest at the
+/// bottom and darker up: below b5's height (r = 0.99) from 240 to 171 of
+/// 255, above it from 244 to 117, by the fraction of the column's height.
+/// `sx` = where across (0-1), `w` = the strip's width in pixels, `y` = how
+/// far up (0 bottom, 1 top). Author units, or None above the column.
+pub fn overview_rgb(prev: &[u32], sx: f32, w: f32, y: f32) -> Option<[f32; 3]> {
+    overview_col(prev, sx, w)?.at(y)
+}
+
+/// One pixel column of the RGB overall waveform (`overview_rgb`), picked
+/// once; `at` gives each row.
+#[derive(Clone, Copy, Debug)]
+pub struct OvCol { hue: [f32; 3], h: f32, inner: f32 }
+
+impl OvCol {
+    #[inline]
+    pub fn at(&self, y: f32) -> Option<[f32; 3]> {
+        if y >= self.h { return None; }
+        let rel = y / self.h;
+        let bright = if y < self.inner { 240.0 - 69.0 * rel } else { 244.0 - 127.0 * rel };
+        Some([self.hue[0] * bright, self.hue[1] * bright, self.hue[2] * bright])
+    }
+}
+
+/// The entry under the pixel with the most height, as an `OvCol`.
+pub fn overview_col(prev: &[u32], sx: f32, w: f32) -> Option<OvCol> {
+    if prev.is_empty() { return None; }
+    let n = prev.len();
+    let a = ((sx * n as f32) as usize).min(n - 1);
+    let b = (((sx + 1.0 / w.max(1.0)) * n as f32) as usize).clamp(a + 1, n);
+    let v = prev[a..b].iter().copied().max_by_key(|v| { let c = v.to_le_bytes(); c[0].max(c[1]).max(c[2]) })?;
+    let c = v.to_le_bytes();
+    let h = c[0].max(c[1]).max(c[2]) as f32 / 127.0 * 0.93;
+    if h <= 0.0 { return None; }
+    Some(OvCol { hue: rgb_norm([c[0] as f32, c[1] as f32, c[2] as f32], 1.0), h, inner: c[2] as f32 / 127.0 * 0.93 })
+}
+
 /// A rekordbox height of 31 fills this much of the field (the CDJ's outer
 /// layer: 6.3 px per step of a 240 px field, fitted on cdj3k-emu).
 pub const RB_FULL: f32 = 0.81;
@@ -189,8 +253,8 @@ pub fn own_rgb_columns(cols: &[u32]) -> Vec<u32> {
 
 /// The RGB levels a renderer keeps beside a track's columns: rekordbox's
 /// own when the track came with them (`rgb_columns`), else ours.
-pub fn rgb_for(cols: &[u32], rb: Option<&Vec<[u8; 4]>>, hop: usize, sr: u32) -> Vec<u32> {
-    match rb {
+pub fn rgb_for(cols: &[u32], rb: Option<&RbWave>, hop: usize, sr: u32) -> Vec<u32> {
+    match rb.map(|r| &r.detail) {
         Some(e) if !e.is_empty() => rgb_columns(e, cols.len(), hop, sr),
         _ => own_rgb_columns(cols),
     }
@@ -702,7 +766,7 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
     let dim = p.dim_played > 0.5;
 
     // Per column: a solid marker, or (bar, field, played) for the rows.
-    enum Over { Solid(Rgba), Body { bar: Bar, field: Rgba, played: bool } }
+    enum Over { Solid(Rgba), Body { bar: Bar, field: Rgba, played: bool }, Rgb { col: Option<OvCol>, field: Rgba, played: bool } }
     let columns: Vec<Over> = (0..w).map(|x| {
         let qx = rect.x as f32 + x as f32 + 0.5;
         let sx = (qx - r[0]) / r[2];
@@ -735,7 +799,11 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
             let side = |d: f32| Bar::new(peak(sx + d / r[2]), p);
             bar = bar.with_widths(2.0 / r[3], &side(-1.0), &side(1.0));
         }
-        if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, num_cols as i64, (sx + 0.5 / r[2]) * p.num_cols, cols_per_px, p.amp_gain, p.rgb_off as usize, p.rgb_heights > 0.5)); }
+        if bar.mode == 0 && p.ov_off > 0.5 {
+            // RGB: the CDJ-3000's overall waveform, from the bottom up.
+            let prev = cols.get(p.ov_off as usize..(p.ov_off as usize + PREVIEW_N)).unwrap_or(&[]);
+            return Over::Rgb { col: overview_col(prev, sx, r[2]), field, played: qx < ph_x && dim };
+        }
         Over::Body { bar, field, played: qx < ph_x && dim }
     }).collect();
 
@@ -748,6 +816,11 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
                 Over::Solid(c) => *c,
                 Over::Body { bar, field, played } if pal.light => match bar.at_aa(l, pal, dist) {
                     Some((c, a)) => blend(*field, if *played { dim_bar(c) } else { c }, a),
+                    None => *field,
+                },
+                Over::Rgb { col, field, played } => match col.and_then(|c| c.at(1.0 - (qy - r[1]) / r[3])) {
+                    Some(c) if *played => dim_bar(l.rgb(c[0], c[1], c[2])),
+                    Some(c) => l.rgb(c[0], c[1], c[2]),
                     None => *field,
                 },
                 Over::Body { bar, field, played } => match bar.at(l, pal, dist) {
@@ -778,7 +851,7 @@ mod tests {
             downbeat_offset: 0.0, beats_per_bar: 4.0, beat2_phase_beats: 0.0, beat2_period_cols: 0.0,
             color_mode: ColorMode::Blue as u32 as f32, wave_rect: wave, over_rect: over, amp_gain: 1.0,
             dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 0.0, detail_off: 0.0,
-            light: 0.0, rgb_off: 0.0, rgb_heights: 0.0, _pad: [0.0; 1],
+            light: 0.0, rgb_off: 0.0, rgb_heights: 0.0, ov_off: 0.0,
         }
     }
 
@@ -1054,6 +1127,41 @@ mod rgb_tests {
         }
     }
 
+    /// The overall waveform, as fitted on the CDJ-3000: from the bottom up
+    /// to max(b3, b4, b5), coloured by them normalised, brighter below b5's
+    /// height and darker going up.
+    #[test]
+    fn overview_rgb_grows_from_the_bottom_in_the_previews_colour() {
+        let prev = vec![u32::from_le_bytes([127, 64, 32, 0]); PREVIEW_N];
+        let h = 0.93;                                   // 127 = 93 % of the strip
+        assert!(overview_rgb(&prev, 0.5, 1000.0, h + 0.01).is_none(), "nothing above the column");
+        let low = overview_rgb(&prev, 0.5, 1000.0, 0.0).unwrap();
+        assert_eq!(low, rgb_norm([127.0, 64.0, 32.0], 240.0), "at the bottom, inside b5's height: 240");
+        let high = overview_rgb(&prev, 0.5, 1000.0, h * 0.9).unwrap();
+        assert!((high[0] - (244.0 - 127.0 * 0.9)).abs() < 1e-3, "near the top, above b5: darker ({high:?})");
+        assert!(high[1] / high[0] - 64.0 / 127.0 < 1e-4, "one hue all the way up");
+        // A blue-heavy column is mostly the brighter inner part.
+        let blue = vec![u32::from_le_bytes([20, 40, 100, 0]); PREVIEW_N];
+        let at = |y: f32| overview_rgb(&blue, 0.1, 1000.0, y).unwrap()[2];
+        assert!(at(0.6) > 240.0 - 69.0 * 0.82 - 1.0, "below b5's height: the inner, brighter ramp");
+    }
+
+    /// The overall waveform's data: rekordbox's PWV4 bytes 3-5 when the track
+    /// came with them, else made from our columns as the PWV4 we serve is.
+    #[test]
+    fn the_overview_takes_the_sticks_preview_else_ours() {
+        let cols: Vec<u32> = (0..4000).map(|i| u32::from_le_bytes([(i % 200) as u8, 60, 20, 200])).collect();
+        let ours = preview_for(None, &cols, 512, 44_100);
+        assert_eq!(ours.len(), PREVIEW_N);
+        assert!(ours.iter().any(|&v| v != 0), "made from our columns");
+        let stick: Vec<[u8; 6]> = (0..PREVIEW_N).map(|i| [0, 0, 1, (i % 128) as u8, 50, 90]).collect();
+        let rb = RbWave { detail: Vec::new(), preview: stick };
+        let theirs = preview_for(Some(&rb), &cols, 512, 44_100);
+        assert_eq!(theirs[5].to_le_bytes(), [5, 50, 90, 0], "bytes 3, 4, 5 of the stick's column");
+        let empty = RbWave { detail: vec![[1, 1, 1, 1]], preview: Vec::new() };
+        assert_eq!(preview_for(Some(&empty), &cols, 512, 44_100), ours, "a stick without a preview: ours");
+    }
+
     /// The shader compiles and validates.
     #[test]
     fn the_waveform_shader_validates() {
@@ -1081,14 +1189,18 @@ mod bench {
         let t0 = std::time::Instant::now();
         let rgb = own_rgb_columns(&cols);
         println!("RGB levels for {n} columns, once at load: {:.2} ms", t0.elapsed().as_secs_f64() * 1000.0);
-        cols.extend(rgb);   // as the renderers keep them (`rgb_off`)
+        let t1 = std::time::Instant::now();
+        let prev = preview_for(None, &cols, 512, 44_100);
+        println!("overview RGB data, once at load: {:.2} ms", t1.elapsed().as_secs_f64() * 1000.0);
+        cols.extend(rgb);   // as the renderers keep them (`rgb_off`, `ov_off`)
+        cols.extend(prev);
         for (name, mode) in [("BLUE", ColorMode::Blue), ("3BAND", ColorMode::ThreeBand), ("RGB", ColorMode::Rgb)] {
             let p = WaveformParams {
                 playhead_col: n as f32 / 2.0, cols_visible: 2900.0, num_cols: n as f32, screen_w: 1280.0, screen_h: 720.0,
                 beat_anchor_col: 0.0, beat_period_cols: 40.0, downbeat_offset: 0.0, beats_per_bar: 4.0, beat2_phase_beats: 0.0,
                 beat2_period_cols: 0.0, color_mode: mode as u32 as f32, wave_rect: [0.0, 200.0, 1280.0, 240.0], over_rect: [130.0, 600.0, 1020.0, 70.0],
                 amp_gain: 1.0, dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 1.0,
-                detail_off: 0.0, light: 0.0, rgb_off: n as f32, rgb_heights: 0.0, _pad: [0.0; 1],
+                detail_off: 0.0, light: 0.0, rgb_off: n as f32, rgb_heights: 0.0, ov_off: 2.0 * n as f32,
             };
             let mut out = Vec::new();
             for (kind, rect, label) in [(Kind::Wave, PxRect { x: 0, y: 200, w: 1280, h: 240 }, "wave"), (Kind::Overview, PxRect { x: 130, y: 600, w: 1020, h: 70 }, "overview")] {
