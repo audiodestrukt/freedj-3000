@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Fixed
+- DVS sounded warbly, like a low bit-rate file. The record's speed went
+  into the pitch almost raw: the timecode reads each 1 kHz cycle a few
+  cents off, and the deck took a new speed every audio block, so the pitch
+  stepped about 4.5 cents a hundred times a second. In ABS the correction
+  toward the needle also switched on and off at its dead band, stepping
+  the pitch by up to 34 cents. Now, while the record holds its speed, the
+  speed is smoothed over 200 ms (13.5 ms still while a hand moves it); it
+  glides frame by frame instead of stepping each block; and the ABS
+  correction grows from zero and glides (at most 2 % per second). The
+  track is read with 4-point Hermite interpolation instead of linear.
+  Measured on a recording of the turntable: block-to-block pitch change
+  4.5 → 0.25 cents (median). Key lock was never in the DVS path (the
+  record plays the track varispeed, as vinyl does), and the jog's vinyl
+  mode and Rubber Band are untouched.
 - WAVEFORM COLOR → RGB looked all red: it showed our raw band energies as
   red/green/blue, and the bass always wins. It now colours the way a
   CDJ-3000 does (measured against cdj3k-emu on the same track): the bands

@@ -718,7 +718,7 @@ impl DvsParts {
         crate::dvs::DvsRender {
             shared: p.shared, samples: p.samples, position: p.position, in_flight: p.in_flight, seek_request: p.seek_request,
             loop_start: p.loop_start, loop_end: p.loop_end, loop_active: p.loop_active, file_ch: p.file_ch,
-            sample_rate: p.sample_rate, drive: Default::default(), cur: None, buf_id: 0, clock: 0,
+            sample_rate: p.sample_rate, drive: Default::default(), cur: None, buf_id: 0, clock: 0, last_speed: None,
         }
     }
 }

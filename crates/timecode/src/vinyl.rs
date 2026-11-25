@@ -206,14 +206,30 @@ pub const SEEK_GAP_MS: f64 = 250.0;
 /// Steady: forward or back at 0.5–2×, the reading within 3 % of the
 /// smoothed speed, this long.
 pub const STEADY_MS: f64 = 300.0;
-/// A gap under this is left alone.
-pub const DEAD_MS: f64 = 4.0;
-/// The bend closes a gap with this time constant, at most BEND_MAX.
-pub const BEND_TAU_MS: f64 = 800.0;
+/// A gap under this is left alone; past it the bend grows from zero (no
+/// step in pitch at the edge).
+pub const DEAD_MS: f64 = 2.0;
+/// The bend closes a gap with this time constant, at most BEND_MAX, and
+/// glides there at BEND_SLEW per second: a bend that switched on and off at
+/// the dead band stepped the pitch by up to 34 cents (heard on the
+/// turntable as "a little weird", 2026-11-24).
+pub const BEND_TAU_MS: f64 = 1500.0;
 pub const BEND_MAX: f64 = 0.02;
-/// The record's speed, smoothed with this time constant (the P4's 0.35 per
-/// 5.8 ms block): quick enough for a hand on the platter.
+pub const BEND_SLEW: f64 = 0.02;
+/// The gap is read through this low-pass: the needle's position comes in
+/// whole cycles (1 ms) and wanders with them.
+pub const ERR_SMOOTH_MS: f64 = 100.0;
+/// The record's speed, smoothed with this time constant while it changes
+/// (the P4's 0.35 per 5.8 ms block): quick enough for a hand on the
+/// platter...
 pub const SMOOTH_MS: f64 = 13.5;
+/// ...and with this one while it holds within STILL_DEV of the smoothed
+/// speed: a reading wanders about 10 cents from cycle to cycle, and 13.5 ms
+/// let all of it into the pitch. Between STILL_DEV and MOVE_DEV the two
+/// blend.
+pub const SMOOTH_STEADY_MS: f64 = 200.0;
+pub const STILL_DEV: f64 = 0.01;
+pub const MOVE_DEV: f64 = 0.03;
 
 /// What the deck does this block.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -232,6 +248,8 @@ pub struct Drive {
     placed: bool,
     drops_seen: u32,
     last_seek: Option<f64>,
+    err: Option<f64>,
+    bend: f64,
     /// Stats: jumps taken, and of those needle drops (and first locks).
     pub seeks: u32,
     pub drops: u32,
@@ -247,14 +265,17 @@ impl Drive {
     /// holds the deck.
     #[allow(clippy::too_many_arguments)]
     pub fn step(&mut self, st: &VinylState, follow: bool, now_ms: f64, dt_ms: f64, pos_ms: f64, lead_ms: f64, len_ms: f64) -> DriveOut {
-        let a = 1.0 - (-dt_ms / SMOOTH_MS).exp();
-        self.speed += a * (st.speed as f64 - self.speed);
-        if st.speed == 0.0 && self.speed.abs() < 0.002 { self.speed = 0.0; }
-        let m = (st.speed as f64).abs();
-        let steady = (0.5..=2.0).contains(&m) && (st.speed as f64 - self.speed).abs() <= 0.03 * m;
+        let raw = st.speed as f64;
+        let dev = (raw - self.speed).abs() / self.speed.abs().max(0.05);
+        let k = ((dev - STILL_DEV) / (MOVE_DEV - STILL_DEV)).clamp(0.0, 1.0);
+        let tau = SMOOTH_STEADY_MS * (SMOOTH_MS / SMOOTH_STEADY_MS).powf(k);
+        self.speed += (1.0 - (-dt_ms / tau).exp()) * (raw - self.speed);
+        if raw == 0.0 && self.speed.abs() < 0.002 { self.speed = 0.0; }
+        let m = raw.abs();
+        let steady = (0.5..=2.0).contains(&m) && (raw - self.speed).abs() <= 0.03 * m;
         self.steady_ms = if steady { self.steady_ms + dt_ms } else { 0.0 };
         let mut out = DriveOut { speed: self.speed, seek_ms: None };
-        let Some(p) = st.pos_ms.filter(|_| follow) else { return out };
+        let Some(p) = st.pos_ms.filter(|_| follow) else { self.err = None; self.bend = 0.0; return out };
         let target = p as f64 + lead_ms * self.speed;
         let err = target - pos_ms;                    // > 0: the deck is behind the needle
         let dropped = st.drops != self.drops_seen;
@@ -270,11 +291,22 @@ impl Drive {
             if dropped { self.drops += 1; }
             self.last_seek = Some(now_ms);
             out.seek_ms = Some(target.max(0.0));
-        } else if self.steady_ms >= STEADY_MS && err.abs() >= DEAD_MS {
-            // Bend toward the needle: the speed's sign is the direction, so
-            // the bend goes with it.
-            let bend = (err / BEND_TAU_MS).clamp(-BEND_MAX, BEND_MAX) * m;
-            out.speed = self.speed + bend;
+            self.err = None;
+            self.bend = 0.0;
+        } else if self.steady_ms >= STEADY_MS {
+            // Bend toward the needle, gliding: the speed's sign is the
+            // direction, so the bend goes with it.
+            let e = match self.err { Some(e) => e + (1.0 - (-dt_ms / ERR_SMOOTH_MS).exp()) * (err - e), None => err };
+            self.err = Some(e);
+            let want = (e.signum() * (e.abs() - DEAD_MS).max(0.0) / BEND_TAU_MS).clamp(-BEND_MAX, BEND_MAX);
+            let slew = BEND_SLEW * dt_ms / 1000.0;
+            self.bend += (want - self.bend).clamp(-slew, slew);
+            out.speed = self.speed + self.bend * m;
+        } else {
+            // Handled: speed alone; the bend lets go (the pitch is moving
+            // under the hand anyway).
+            self.err = None;
+            self.bend = 0.0;
         }
         out
     }
@@ -397,6 +429,37 @@ mod tests {
         assert!(v.state().armed && v.state().locked);
     }
 
+    /// What the deck plays, cent by cent, from a record turning at a steady
+    /// 33: the decoder reads each cycle a few cents off, and that wander
+    /// must not reach the pitch (it did: 4.5 cents from block to block,
+    /// and the ABS bend stepped it by up to 34; heard as "a little weird").
+    #[test]
+    fn a_steady_record_plays_at_a_steady_pitch() {
+        let mut v = Vinyl::new(SR, Format::SeratoVinyl);
+        let mut sig = Signal::new(Format::SeratoVinyl, SR, at_ms(30_000.0));
+        let mut d = Drive::default();
+        let (mut buf, mut pos, mut prev, mut steps) = (Vec::new(), 0.0, None::<f64>, Vec::new());
+        for n in 0..1000 {
+            buf.clear();
+            // A real platter wanders a little: 0.1 % wow at 0.55 Hz.
+            let sp = 1.0 + 0.001 * (n as f64 * 0.01 * 0.55 * std::f64::consts::TAU).sin();
+            sig.render(sp, SR as usize / 100, &mut buf);
+            v.push_i16(&buf);
+            let s = v.state();
+            if !s.armed { continue; }
+            let o = d.step(&s, true, n as f64 * 10.0, 10.0, pos, 20.0, 1e9);
+            if let Some(m) = o.seek_ms { pos = m; }
+            pos += o.speed * 10.0;
+            let c = 1200.0 * o.speed.log2();
+            if n > 300 { if let Some(p) = prev { steps.push((c - p).abs()); } }
+            prev = Some(c);
+        }
+        steps.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let (med, worst) = (steps[steps.len() / 2], steps[steps.len() - 1]);
+        assert!(med < 0.5 && worst < 2.0, "cents from block to block: median {med:.2}, worst {worst:.2}");
+        assert!(d.seeks == 1, "placed once, then followed: {} jumps", d.seeks);
+    }
+
     fn steady(pos: i32) -> VinylState { VinylState { armed: true, signal: true, speed: 1.0, locked: true, pos_ms: Some(pos), ..Default::default() } }
 
     #[test]
@@ -441,19 +504,25 @@ mod tests {
         d.step(&steady(10_000), true, 0.0, 10.0, 10_000.0, 0.0, 300_000.0);
         let mut pos = 10_000.0 - 40.0;                    // 40 ms behind after a scratch
         let mut bent = false;
-        for i in 1..400 {
+        let mut last = 0.0;
+        for i in 1..800 {
             let o = d.step(&steady(10_000 + i * 10), true, i as f64 * 10.0, 10.0, pos, 0.0, 300_000.0);
             assert!(o.seek_ms.is_none());
             if o.speed > 1.001 { bent = true; }
             assert!(o.speed <= 1.0 + BEND_MAX + 1e-9);
+            // Once steady the pitch glides: never more than BEND_SLEW per
+            // second.
+            let bend = o.speed - d.speed();
+            assert!((bend - last).abs() <= BEND_SLEW * 0.01 + 1e-9, "{i}: a step of {:.4}", bend - last);
+            last = bend;
             pos += o.speed * 10.0;
         }
-        // The needle at the next step is 10 000 + 400 × 10.
-        assert!(bent && (14_000.0 - pos).abs() < DEAD_MS + 1.0, "closed by bending: {}", 14_000.0 - pos);
+        // The needle at the next step is 10 000 + 800 × 10.
+        assert!(bent && (18_000.0 - pos).abs() < DEAD_MS + 1.0, "closed by bending: {}", 18_000.0 - pos);
         // Moved 30 s under a steady record: one jump.
-        let o = d.step(&steady(14_000), true, 4_000.0, 10.0, 44_000.0, 0.0, 300_000.0);
-        assert_eq!(o.seek_ms.map(|m| m.round()), Some(14_000.0));
+        let o = d.step(&steady(18_000), true, 8_000.0, 10.0, 48_000.0, 0.0, 300_000.0);
+        assert_eq!(o.seek_ms.map(|m| m.round()), Some(18_000.0));
         // REL never seeks.
-        assert!(d.step(&VinylState { drops: 9, ..steady(90_000) }, false, 5_000.0, 10.0, 0.0, 0.0, 300_000.0).seek_ms.is_none());
+        assert!(d.step(&VinylState { drops: 9, ..steady(90_000) }, false, 9_000.0, 10.0, 0.0, 0.0, 300_000.0).seek_ms.is_none());
     }
 }

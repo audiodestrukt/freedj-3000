@@ -149,6 +149,8 @@ pub(crate) struct DvsRender {
     pub buf_id: usize,
     /// Output frames rendered, ever: the drive's clock.
     pub clock: u64,
+    /// The speed the last block ended on: the next ramps from it.
+    pub last_speed: Option<f64>,
 }
 
 impl DvsRender {
@@ -169,6 +171,7 @@ impl DvsRender {
                 self.position.store(at, Ordering::Relaxed);
                 self.shared.driving.store(false, Ordering::Release);
                 self.drive.reset();
+                self.last_speed = None;
                 log::info!("dvs: the deck has it back at frame {}", at / ch as u64);
             }
             return false;
@@ -210,28 +213,25 @@ impl DvsRender {
             log::info!("dvs: ABS jump {:+.0} ms", ms - cur * 1000.0 / sr);
             cur = ms * sr / 1000.0;
         }
+        // The speed ramps across the block from where the last one ended: a
+        // step each block put a ~100 Hz staircase on the pitch (a warble
+        // like a low bit-rate file).
+        let from = self.last_speed.unwrap_or(o.speed);
+        let step = (o.speed - from) / n.max(1) as f64;
+        let mut speed = from;
         let (ls, le) = (self.loop_start.load(Ordering::Relaxed) / ch as u64, self.loop_end.load(Ordering::Relaxed) / ch as u64);
         let lp = (looping && le > ls).then_some((ls as f64, le as f64));
-        let last = (frames - 1) as f64;
         // Below a crawl the sound fades out: a still record is silence, not
         // a held sample.
         let gain = (o.speed.abs() / 0.05).min(1.0) as f32;
-        for f in out.chunks_mut(device_ch.max(1)) {
-            let i = cur.floor() as usize;
-            let j = (i + 1).min(frames - 1);
-            let t = (cur - i as f64) as f32;
-            for (d, s) in f.iter_mut().enumerate() {
-                let c = d.min(ch - 1);
-                let a = buf[i * ch + c];
-                let b = buf[j * ch + c];
-                *s = (a + (b - a) * t) * gain;
-            }
-            cur += o.speed;
-            if let Some((s, e)) = lp { if o.speed > 0.0 && cur >= e { cur -= e - s; } }
-            cur = cur.clamp(0.0, last);
-        }
+        // The speed ramps across the block from where the last one ended: a
+        // step each block put a ~100 Hz staircase on the pitch (a warble
+        // like a low bit-rate file, 2026-11-24).
+        let from = self.last_speed.unwrap_or(o.speed);
+        read(&buf, ch, &mut cur, from, o.speed, gain, lp, out, device_ch);
         self.clock += n as u64;
         self.cur = Some(cur);
+        self.last_speed = Some(o.speed);
         self.position.store(cur as u64 * ch as u64, Ordering::Relaxed);
         self.in_flight.store(0, Ordering::Relaxed);
         self.shared.drive_speed.store((o.speed as f32).to_bits(), Ordering::Relaxed);
@@ -239,6 +239,42 @@ impl DvsRender {
         self.shared.drop_jumps.store(self.drive.drops, Ordering::Relaxed);
         true
     }
+}
+
+/// Read `out` (interleaved, `device_ch`) from `buf` (`ch` channels) at
+/// `cur`, the speed going from `from` to `to` frame by frame, looping in
+/// `lp` going forward.
+#[allow(clippy::too_many_arguments)]
+fn read(buf: &[f32], ch: usize, cur: &mut f64, from: f64, to: f64, gain: f32, lp: Option<(f64, f64)>, out: &mut [f32], device_ch: usize) {
+    let frames = buf.len() / ch;
+    let last = (frames - 1) as f64;
+    let n = out.len() / device_ch.max(1);
+    let step = (to - from) / n.max(1) as f64;
+    let mut speed = from;
+    // 4-point Hermite between samples: linear dulled the top end and let
+    // images of it fold back down.
+    for f in out.chunks_mut(device_ch.max(1)) {
+        let i = cur.floor() as usize;
+        let (h, j, k) = (i.saturating_sub(1), (i + 1).min(frames - 1), (i + 2).min(frames - 1));
+        let t = (*cur - i as f64) as f32;
+        for (d, s) in f.iter_mut().enumerate() {
+            let c = d.min(ch - 1);
+            *s = hermite(buf[h * ch + c], buf[i * ch + c], buf[j * ch + c], buf[k * ch + c], t) * gain;
+        }
+        speed += step;
+        *cur += speed;
+        if let Some((s, e)) = lp { if speed > 0.0 && *cur >= e { *cur -= e - s; } }
+        *cur = cur.clamp(0.0, last);
+    }
+}
+
+/// Catmull-Rom through y0..y3, at t in [0, 1) between y1 and y2.
+#[inline]
+fn hermite(y0: f32, y1: f32, y2: f32, y3: f32, t: f32) -> f32 {
+    let c1 = 0.5 * (y2 - y0);
+    let c2 = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+    let c3 = 0.5 * (y3 - y0) + 1.5 * (y1 - y2);
+    ((c3 * t + c2) * t + c1) * t + y1
 }
 
 /// The interface's input, decoded. Dropping it closes the stream.
@@ -395,6 +431,43 @@ mod tests {
     fn pos_ms(d: &AudioHandle) -> f64 { d.position.load(Ordering::Relaxed) as f64 / 2.0 / SR as f64 * 1000.0 }
 
     fn wait(secs: f64) { std::thread::sleep(Duration::from_secs_f64(secs)); }
+
+    /// A 10 kHz tone read at 33 +3 %: linear interpolation put it out
+    /// 1–2 dB low with images folded back; Hermite keeps it within 0.5 dB.
+    #[test]
+    fn varispeed_keeps_the_top_end() {
+        let sr = 48_000.0f64;
+        let src: Vec<f32> = (0..48_000).map(|n| (n as f64 * 10_000.0 / sr * std::f64::consts::TAU).sin() as f32).collect();
+        let sp = 1.03;
+        let out: Vec<f32> = (100..20_000).map(|n| {
+            let x = n as f64 * sp; let i = x.floor() as usize; let t = (x - i as f64) as f32;
+            super::hermite(src[i - 1], src[i], src[i + 1], src[i + 2], t)
+        }).collect();
+        let rms = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        let db = 20.0 * (rms / std::f32::consts::FRAC_1_SQRT_2).log10();
+        assert!(db.abs() < 0.5, "10 kHz at +3 %: {db:.2} dB");
+    }
+
+    /// The record's speed changes every block; inside the renderer it must
+    /// glide frame by frame, never step at a block edge. The track here is
+    /// its own frame number, so what comes out is where it was read.
+    #[test]
+    fn the_speed_glides_across_blocks() {
+        let buf: Vec<f32> = (0..20_000).map(|i| i as f32).collect();
+        let (mut cur, mut out, mut heard) = (100.0, vec![0.0f32; 480], Vec::new());
+        let mut last = 1.0;
+        for (b, sp) in [1.0, 1.003, 0.997, 1.003, 1.0].into_iter().enumerate() {
+            let _ = b;
+            super::read(&buf, 1, &mut cur, last, sp, 1.0, None, &mut out, 1);
+            heard.extend_from_slice(&out);
+            last = sp;
+        }
+        let steps: Vec<f64> = heard.windows(2).map(|w| (w[1] - w[0]) as f64).collect();
+        let worst = steps.windows(2).map(|w| (w[1] - w[0]).abs()).fold(0.0, f64::max);
+        // 0.6 % over a block of 480 frames, at most, and f32 rounding.
+        assert!(worst < 0.006 / 480.0 + 2e-3, "the speed stepped by {worst:.5} between frames");
+        assert!(steps.iter().all(|s| (0.996..1.004).contains(s)));
+    }
 
     #[test]
     fn rel_the_record_plays_the_deck_forward_backward_and_still() {
