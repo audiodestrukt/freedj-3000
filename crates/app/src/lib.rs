@@ -3720,6 +3720,72 @@ impl DeckApp {
         } else { h.max(0) as f64 }
     }
 
+    /// One frame of the on-screen playhead (`smoothed_pos`): free-run at the
+    /// playback rate and phase-lock to `heard` (see `render_frame`).
+    fn step_playhead(&mut self, heard: f64, sr_ch: f64, wrapped: bool, frame_dt: Duration, playing: bool, speed: f32) {
+        let far_off = (heard - self.smoothed_pos).abs() > sr_ch * 0.5;
+        if far_off { self.resync_frames += 1; } else { self.resync_frames = 0; }
+        if self.audio.dvs.driving() {
+            // DVS: the record drives the playhead, backwards as well as
+            // forwards, and the output callback publishes it every buffer
+            // (no ring in between). Free-run at the record's SIGNED speed and
+            // pull firmly toward it; never clamp to forward motion. (Running
+            // on at the unsigned tempo, clamped forward, made a reversed
+            // record's waveform stall, drift and snap back every ~0.5 s.)
+            let period  = self.refresh_interval.as_secs_f64();
+            let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
+            self.smoothed_pos += periods * period * sr_ch * self.audio.dvs.drive_speed() as f64;
+            self.smoothed_pos += (heard - self.smoothed_pos) * 0.3;
+            if far_off || wrapped { self.smoothed_pos = heard; }
+            self.resync_frames = 0;
+        } else if self.smoothed_pos <= 0.0 || self.resync_frames >= 4 || wrapped {
+            // First frame, or a sustained desync — snap and reset the filter.
+            self.smoothed_pos  = heard;
+            self.resync_frames = 0;
+        } else if far_off {
+            // Transient outlier: hold the free-run, don't poison the reference.
+            let period  = self.refresh_interval.as_secs_f64();
+            let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
+            if playing {
+                self.smoothed_pos += periods * period * sr_ch * speed as f64;
+                self.smoothed_pos  = self.smoothed_pos.max(self.prev_pos as f64);
+            }
+        } else {
+            // The phase-lock only runs while PLAYING.  When paused the audio is
+            // silent (the cpal callback fills zeros without draining the ring),
+            // so the playhead must simply hold where it stopped — running the
+            // low-pass + pull while paused made it ease toward the reference for
+            // ~1–2 s after STOP, the visible "drift".  While paused, smoothed_pos
+            // holds its value (and is moved directly by seek_to for scrub/cue).
+            // A proper spin-down (vinyl brake) replaces the hold later — see
+            // docs/design/varispeed-engine.md.
+            if playing {
+                // Free-run at the true playback rate.  Advance by whole display
+                // periods, not measured wall-clock: each frame is shown for an
+                // integer number of refreshes and the CPU-side frame_dt carries
+                // ±2 ms of wake-up slop.  This is the velocity model.
+                let period  = self.refresh_interval.as_secs_f64();
+                let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
+                self.smoothed_pos += periods * period * sr_ch * speed as f64;
+
+                // Phase-correct toward the FRESH heard position.  The free-run
+                // above already supplies the velocity, so this pull only has to
+                // null a constant phase offset — which means it has *zero*
+                // steady-state lag on the moving playhead.  (The old code pulled
+                // toward a 0.05-LPF of `heard`, τ≈0.33 s, which dragged the whole
+                // playhead ~0.33 s behind the audio — the perceptible beat-counter
+                // delay.)  The low gain still averages `heard`'s ±35 ms block
+                // jitter (0.08·35 ≈ 3 ms, sub-pixel) without adding lag, because
+                // the averaging is of the *offset*, not the position.
+                self.smoothed_pos += (heard - self.smoothed_pos) * 0.08;
+
+                // Never run backwards during playback: a stall reads as a hitch,
+                // a reversal as a glitch (worse).
+                self.smoothed_pos = self.smoothed_pos.max(self.prev_pos as f64);
+            }
+        }
+    }
+
     fn render_frame(&mut self) {
         // While occluded (iOS background) don't touch the GPU: the surface is
         // invalid and any acquire/present risks the background scene-update
@@ -3833,54 +3899,7 @@ impl DeckApp {
         // ever follows is an unexpected jump we do NOT want on screen.  Require
         // the deviation to persist for a few frames before believing it; a
         // one-frame spike is ignored and the free-run carries through it.
-        let far_off = (heard - self.smoothed_pos).abs() > sr_ch * 0.5;
-        if far_off { self.resync_frames += 1; } else { self.resync_frames = 0; }
-        if self.smoothed_pos <= 0.0 || self.resync_frames >= 4 || wrapped {
-            // First frame, or a sustained desync — snap and reset the filter.
-            self.smoothed_pos  = heard;
-            self.resync_frames = 0;
-        } else if far_off {
-            // Transient outlier: hold the free-run, don't poison the reference.
-            let period  = self.refresh_interval.as_secs_f64();
-            let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
-            if playing {
-                self.smoothed_pos += periods * period * sr_ch * speed as f64;
-                self.smoothed_pos  = self.smoothed_pos.max(self.prev_pos as f64);
-            }
-        } else {
-            // The phase-lock only runs while PLAYING.  When paused the audio is
-            // silent (the cpal callback fills zeros without draining the ring),
-            // so the playhead must simply hold where it stopped — running the
-            // low-pass + pull while paused made it ease toward the reference for
-            // ~1–2 s after STOP, the visible "drift".  While paused, smoothed_pos
-            // holds its value (and is moved directly by seek_to for scrub/cue).
-            // A proper spin-down (vinyl brake) replaces the hold later — see
-            // docs/design/varispeed-engine.md.
-            if playing {
-                // Free-run at the true playback rate.  Advance by whole display
-                // periods, not measured wall-clock: each frame is shown for an
-                // integer number of refreshes and the CPU-side frame_dt carries
-                // ±2 ms of wake-up slop.  This is the velocity model.
-                let period  = self.refresh_interval.as_secs_f64();
-                let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
-                self.smoothed_pos += periods * period * sr_ch * speed as f64;
-
-                // Phase-correct toward the FRESH heard position.  The free-run
-                // above already supplies the velocity, so this pull only has to
-                // null a constant phase offset — which means it has *zero*
-                // steady-state lag on the moving playhead.  (The old code pulled
-                // toward a 0.05-LPF of `heard`, τ≈0.33 s, which dragged the whole
-                // playhead ~0.33 s behind the audio — the perceptible beat-counter
-                // delay.)  The low gain still averages `heard`'s ±35 ms block
-                // jitter (0.08·35 ≈ 3 ms, sub-pixel) without adding lag, because
-                // the averaging is of the *offset*, not the position.
-                self.smoothed_pos += (heard - self.smoothed_pos) * 0.08;
-
-                // Never run backwards during playback: a stall reads as a hitch,
-                // a reversal as a glitch (worse).
-                self.smoothed_pos = self.smoothed_pos.max(self.prev_pos as f64);
-            }
-        }
+        self.step_playhead(heard, sr_ch, wrapped, frame_dt, playing, speed);
         // ── End of track ──────────────────────────────────────────────────────
         // The decoder pins at the end and the ring buffer drains, so the last
         // sample becomes audible; without this the playhead free-runs past the
@@ -7658,6 +7677,35 @@ mod dvs_app_tests {
         let b = d.at();
         d.run(0.5);
         assert!(d.at() > b + 0.4, "still playing on its own: {} → {}", b, d.at());
+    }
+
+    /// The waveform under a reversed record: the screen's playhead follows
+    /// the heard one backwards, frame by frame, with no stall-and-snap.
+    #[test]
+    fn the_screen_playhead_runs_backwards_with_the_record() {
+        let mut d = deck_harness::deck_on(AudioHandle::open_test(deck_harness::track(60.0), deck_harness::SR).unwrap());
+        d.settings.dvs = DvsMode::Rel;
+        d.apply_dvs();
+        d.audio.seek(deck_harness::deck_samples(30.0));
+        let _tt = Turntable::play(Arc::clone(&d.audio.dvs), 40_000.0, |t| Some((if t < 0.8 { 1.0 } else { -1.0 }, f64::NAN)));
+        d.run(1.2);                                       // into the reverse
+        let sr_ch = deck_harness::SR as f64 * 2.0;
+        let frame = d.refresh_interval;
+        let mut prev = d.smoothed_pos;
+        let mut worst_gap = 0.0f64;
+        let mut back = 0;
+        for _ in 0..90 {                                  // 1.5 s of frames
+            std::thread::sleep(frame);
+            d.dvs_tick();
+            let heard = d.heard_pos(d.audio.position.load(Ordering::Relaxed), d.audio.in_flight.load(Ordering::Relaxed));
+            let playing = d.audio.playing.load(Ordering::Relaxed);
+            d.step_playhead(heard, sr_ch, false, frame, playing, d.audio.speed_load());
+            worst_gap = worst_gap.max((d.smoothed_pos - heard).abs() / sr_ch);
+            if d.smoothed_pos < prev { back += 1; }
+            prev = d.smoothed_pos;
+        }
+        assert!(back > 80, "the waveform moves backwards nearly every frame: {back} of 90");
+        assert!(worst_gap < 0.05, "and stays on the sound: worst {:.0} ms off", worst_gap * 1000.0);
     }
 
     #[test]

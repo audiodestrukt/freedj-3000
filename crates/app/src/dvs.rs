@@ -184,6 +184,7 @@ impl DvsRender {
                     self.position.load(Ordering::Relaxed).saturating_sub(self.in_flight.load(Ordering::Relaxed))
                 };
                 if self.cur.is_none() { log::info!("dvs: the record drives the deck ({:?})", mode); }
+                else { log::info!("dvs: new buffer under the record: from frame {} (was {:.0})", p / ch as u64, self.cur.unwrap_or(0.0)); }
                 self.buf_id = id;
                 self.shared.driving.store(true, Ordering::Release);
                 (p / ch as u64) as f64
@@ -192,7 +193,10 @@ impl DvsRender {
         // A jump on the deck (cue, hot cue, search): REL takes it; in ABS
         // the needle decides.
         let req = self.seek_request.swap(NO_SEEK, Ordering::AcqRel);
-        if req != NO_SEEK && mode == DvsMode::Rel { cur = (req / ch as u64) as f64; }
+        if req != NO_SEEK {
+            log::info!("dvs: a deck jump to frame {} {}", req / ch as u64, if mode == DvsMode::Rel { "taken (REL)" } else { "ignored (ABS)" });
+            if mode == DvsMode::Rel { cur = (req / ch as u64) as f64; }
+        }
 
         let n = out.len() / device_ch.max(1);
         let sr = self.sample_rate as f64;
@@ -202,7 +206,10 @@ impl DvsRender {
         let looping = self.loop_active.load(Ordering::Relaxed);
         let o = self.drive.step(&st, mode == DvsMode::Abs && !looping, now_ms, dt_ms,
                                 cur * 1000.0 / sr, lead_ms, frames as f64 * 1000.0 / sr);
-        if let Some(ms) = o.seek_ms { cur = ms * sr / 1000.0; }
+        if let Some(ms) = o.seek_ms {
+            log::info!("dvs: ABS jump {:+.0} ms", ms - cur * 1000.0 / sr);
+            cur = ms * sr / 1000.0;
+        }
         let (ls, le) = (self.loop_start.load(Ordering::Relaxed) / ch as u64, self.loop_end.load(Ordering::Relaxed) / ch as u64);
         let lp = (looping && le > ls).then_some((ls as f64, le as f64));
         let last = (frames - 1) as f64;
