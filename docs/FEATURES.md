@@ -69,7 +69,7 @@ Formats, bit depths, sample rates, tags and key-lock accuracy in detail:
 | Tempo fader ±6 / ±10 / ±16 / WIDE; MASTER TEMPO key lock | ✅ | All |
 | KEY SHIFT (CDJ-3000 screen): ±1 semitone per tap up to an octave, RESET; the tempo stays put; the KEY readouts show the shifted key; a new track starts unshifted. Within 0.2 cents in all three key-lock engines, MASTER TEMPO on or off | ✅ | All (CDJ-3000 screen) |
 | Key-lock engines: Rubber Band R3 (default), Bungee, WSOLA (low-power boards); a tone holds its pitch within 0.2 cents from −16 % to +16 % in all three | ✅ | All (WSOLA for Pi Zero) |
-| DVS: Serato Control Vinyl / CD on a turntable plays the deck (MENU → DVS: ABS / REL / INT), forward, backward and still, from the interface's input; needle drops in ABS; the record is the tempo on Link. Tested with synthetic records in real time and Dan's record through a PCM2902 (bit lock at 33 and 45, a needle drop relocked within a second) | ✅ desktop; 🧪 iPad (untested on a device) | Desktop, iOS |
+| DVS: Serato Control Vinyl / CD on a turntable plays the deck (MENU → DVS: ABS / REL / INT), forward, backward and still, from the interface's input; needle drops in ABS; the record is the tempo on Link. Tested with synthetic records in real time, and on a turntable with Serato Control Vinyl through a PCM2902 (2026-11-24): play at 33 and 45, needle drops, backwards and back-cueing without skips | ✅ desktop; 🧪 iPad (untested on a device) | Desktop, iOS |
 | Vinyl brake, key lock off (varispeed), real-time sample-rate conversion | 📋 | — |
 
 ## Screens and controls

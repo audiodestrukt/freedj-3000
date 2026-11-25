@@ -22,7 +22,13 @@ All notable changes to this project will be documented in this file.
   permission is asked). Not yet on Android, nor in plugin decks. Stems and
   SLIP are not applied while the record drives. Bench: `OPENDECK_DVS`,
   `OPENDECK_DVS_DEVICE`, `OPENDECK_DVS_INPUTS=3/4`, and the `tc_analyze`
-  example, which reads a recording the deck's way.
+  example, which reads a recording the deck's way. Played on a turntable
+  (Serato Control Vinyl, PCM2902): fixed on the way, a reversed record read
+  19 ms ahead of the needle; a hand holding the platter between strokes was
+  taken for a needle lift (silent, then a jump); ABS re-synced while the
+  platter was handled (now it jumps only on a needle drop or a steady
+  record, and bends small gaps shut); the waveform stalled and snapped back
+  under a reversed record.
 - FOLLOW: `--follow N` (`OPENDECK_FOLLOW`, or a plugin deck's saved
   `follow`) makes the deck a mirror of Link player N. It loads whatever
   that player loads over LINK, never plays, and draws that player's
