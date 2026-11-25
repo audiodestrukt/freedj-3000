@@ -2,13 +2,11 @@ pub mod beat;
 pub mod cue;
 pub mod engine;
 pub mod media;
-pub mod timecode;
 
 pub use beat::*;
 pub use cue::*;
 pub use engine::*;
 pub use media::*;
-pub use timecode::*;
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -58,14 +56,6 @@ pub trait BeatAnalyzer: Send {
 
     /// True when the analyzer has converged and the grid is reliable for quantize.
     fn is_stable(&self) -> bool;
-}
-
-// ── Timecode decoder trait ─────────────────────────────────────────────────────
-
-pub trait TimecodeDecoder: Send {
-    /// Feed one block of stereo timecode audio from the line input.
-    fn process(&mut self, left: &[f32], right: &[f32]) -> TimecodeOutput;
-    fn reset(&mut self);
 }
 
 // ── Processing pipeline stage trait ───────────────────────────────────────────

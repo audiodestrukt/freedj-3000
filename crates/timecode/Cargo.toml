@@ -1,9 +1,9 @@
 [package]
 name        = "opendeck-timecode"
-description = "DVS timecode decoders — Serato, Traktor, Mixvibes, Pioneer rekordbox"
+description = "DVS: Serato Control Vinyl / CD decoding and the record-drives-the-deck logic"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 
 [dependencies]
-opendeck-types = { workspace = true }
+log = { workspace = true }
