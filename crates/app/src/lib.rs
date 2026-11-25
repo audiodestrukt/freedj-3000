@@ -757,7 +757,7 @@ struct DeckApp {
     dvs_was_driving: bool,
     dvs_last_speed: f32,
     dvs_fader_before: f32,
-    /// ABS jumps and re-syncs seen so far (logged as they happen).
+    /// ABS jumps and needle drops seen so far (logged as they happen).
     dvs_jumps: (u32, u32),
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
@@ -2842,9 +2842,9 @@ impl DeckApp {
             }
             let sp = self.audio.dvs.drive_speed();
             self.dvs_last_speed = sp;
-            let jumps = (self.audio.dvs.seeks.load(Ordering::Relaxed), self.audio.dvs.trims.load(Ordering::Relaxed));
+            let jumps = (self.audio.dvs.seeks.load(Ordering::Relaxed), self.audio.dvs.drop_jumps.load(Ordering::Relaxed));
             if jumps != self.dvs_jumps {
-                log::info!("dvs: ABS {} jump{} to the needle ({} re-sync), speed {sp:+.3}", jumps.0 - self.dvs_jumps.0,
+                log::info!("dvs: ABS {} jump{} to the needle ({} needle drop), speed {sp:+.3}", jumps.0 - self.dvs_jumps.0,
                             if jumps.0 - self.dvs_jumps.0 == 1 { "" } else { "s" }, jumps.1 - self.dvs_jumps.1);
                 self.dvs_jumps = jumps;
             }

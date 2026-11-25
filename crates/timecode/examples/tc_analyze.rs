@@ -52,7 +52,7 @@ fn main() {
             if let Some(m) = o.seek_ms { println!("{:8.2} s  jump {:+.0} ms (to {m:.0}), speed {:+.3}, record {:?}", t / 1000.0, m - cur_ms, o.speed, s.pos_ms); cur_ms = m; }
             cur_ms += o.speed * 10.0;
         }
-        println!("{} jumps, {} of them re-syncs", d.seeks, d.trims);
+        println!("{} jumps, {} of them needle drops", d.seeks, d.drops);
         return;
     }
     let hop = rate as usize * hop_ms / 1000 * 2;

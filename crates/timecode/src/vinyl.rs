@@ -54,6 +54,8 @@ pub struct VinylState {
     pub pos_ms: Option<i32>,
     /// The decoder's position before the start offset.
     pub raw_ms: Option<i32>,
+    /// Needle drops placed so far (settling ended on a bit lock).
+    pub drops: u32,
 }
 
 const MIN_PEAK: i16 = 600;         // about -35 dBFS
@@ -161,6 +163,7 @@ impl Vinyl {
             let ms = self.ms(now - self.landed);
             if self.dec.locked() && self.dec.position() >= 0 {
                 self.state.settling = false;
+                self.state.drops += 1;
                 log::info!("vinyl: needle down, bit lock in {ms} ms");
             } else if ms >= SETTLE_MAX_MS as u64 || !self.signal {
                 self.state.settling = false;
@@ -191,12 +194,23 @@ impl Vinyl {
     }
 }
 
-/// Absolute mode: jump when this far off the record, at most this often.
+/// Absolute mode, how the deck keeps to the needle. On the turntable, back
+/// cueing and scratching jumped the deck about whenever it re-synced (the
+/// deck's speed trails the hand), so a jump is taken only where one is
+/// meant: a needle drop, the first lock, or a gap of ≥300 ms once the record
+/// has played steadily for STEADY_MS (the deck was moved under it). Smaller
+/// gaps, once steady, close by bending the speed (at most ±2 %); while the
+/// platter is handled the deck follows speed alone, as Serato does.
 pub const SEEK_MS: f64 = 300.0;
 pub const SEEK_GAP_MS: f64 = 250.0;
-/// Smaller errors are re-synced once they have held this long.
-pub const TRIM_MS: f64 = 25.0;
-pub const TRIM_HOLD_MS: f64 = 200.0;
+/// Steady: forward or back at 0.5–2×, the reading within 3 % of the
+/// smoothed speed, this long.
+pub const STEADY_MS: f64 = 300.0;
+/// A gap under this is left alone.
+pub const DEAD_MS: f64 = 4.0;
+/// The bend closes a gap with this time constant, at most BEND_MAX.
+pub const BEND_TAU_MS: f64 = 800.0;
+pub const BEND_MAX: f64 = 0.02;
 /// The record's speed, smoothed with this time constant (the P4's 0.35 per
 /// 5.8 ms block): quick enough for a hand on the platter.
 pub const SMOOTH_MS: f64 = 13.5;
@@ -214,51 +228,55 @@ pub struct DriveOut {
 #[derive(Default)]
 pub struct Drive {
     speed: f64,
+    steady_ms: f64,
+    placed: bool,
+    drops_seen: u32,
     last_seek: Option<f64>,
-    off_since: Option<f64>,
-    /// Stats: jumps and trims taken.
+    /// Stats: jumps taken, and of those needle drops (and first locks).
     pub seeks: u32,
-    pub trims: u32,
+    pub drops: u32,
 }
 
 impl Drive {
     pub fn speed(&self) -> f64 { self.speed }
-    pub fn reset(&mut self) { self.speed = 0.0; self.last_seek = None; self.off_since = None; }
+    pub fn reset(&mut self) { *self = Drive { seeks: self.seeks, drops: self.drops, ..Default::default() }; }
 
-    /// One block of `dt_ms` at `now_ms`. `pos_ms` is the deck's heard
-    /// playhead; `lead_ms` how far the sound trails the record (input and
-    /// output buffers); `follow` = ABS and nothing (a loop) holds the deck.
+    /// One block of `dt_ms` at `now_ms`. `pos_ms` is the deck's playhead
+    /// (what it renders now); `lead_ms` how far the sound trails the record
+    /// (input and output buffers); `follow` = ABS and nothing (a loop)
+    /// holds the deck.
     #[allow(clippy::too_many_arguments)]
     pub fn step(&mut self, st: &VinylState, follow: bool, now_ms: f64, dt_ms: f64, pos_ms: f64, lead_ms: f64, len_ms: f64) -> DriveOut {
         let a = 1.0 - (-dt_ms / SMOOTH_MS).exp();
         self.speed += a * (st.speed as f64 - self.speed);
         if st.speed == 0.0 && self.speed.abs() < 0.002 { self.speed = 0.0; }
-        let mut seek_ms = None;
-        match st.pos_ms.filter(|_| follow) {
-            Some(p) => {
-                let target = p as f64 + lead_ms * self.speed;
-                let drift = (pos_ms - target).abs();
-                let go = if drift >= SEEK_MS {
-                    self.off_since = None;
-                    self.last_seek.is_none_or(|t| now_ms - t >= SEEK_GAP_MS)
-                } else if drift >= TRIM_MS {
-                    let since = *self.off_since.get_or_insert(now_ms);
-                    now_ms - since >= TRIM_HOLD_MS
-                } else {
-                    self.off_since = None;
-                    false
-                };
-                if go && target < len_ms {
-                    if drift < SEEK_MS { self.trims += 1; }
-                    self.seeks += 1;
-                    self.last_seek = Some(now_ms);
-                    self.off_since = None;
-                    seek_ms = Some(target.max(0.0));
-                }
-            }
-            None => self.off_since = None,
+        let m = (st.speed as f64).abs();
+        let steady = (0.5..=2.0).contains(&m) && (st.speed as f64 - self.speed).abs() <= 0.03 * m;
+        self.steady_ms = if steady { self.steady_ms + dt_ms } else { 0.0 };
+        let mut out = DriveOut { speed: self.speed, seek_ms: None };
+        let Some(p) = st.pos_ms.filter(|_| follow) else { return out };
+        let target = p as f64 + lead_ms * self.speed;
+        let err = target - pos_ms;                    // > 0: the deck is behind the needle
+        let dropped = st.drops != self.drops_seen;
+        self.drops_seen = st.drops;
+        let jump = if dropped || !self.placed {
+            err.abs() >= DEAD_MS
+        } else {
+            self.steady_ms >= STEADY_MS && err.abs() >= SEEK_MS && self.last_seek.is_none_or(|t| now_ms - t >= SEEK_GAP_MS)
+        };
+        self.placed = true;
+        if jump && target < len_ms {
+            self.seeks += 1;
+            if dropped { self.drops += 1; }
+            self.last_seek = Some(now_ms);
+            out.seek_ms = Some(target.max(0.0));
+        } else if self.steady_ms >= STEADY_MS && err.abs() >= DEAD_MS {
+            // Bend toward the needle: the speed's sign is the direction, so
+            // the bend goes with it.
+            let bend = (err / BEND_TAU_MS).clamp(-BEND_MAX, BEND_MAX) * m;
+            out.speed = self.speed + bend;
         }
-        DriveOut { speed: self.speed, seek_ms }
+        out
     }
 }
 
@@ -379,26 +397,63 @@ mod tests {
         assert!(v.state().armed && v.state().locked);
     }
 
+    fn steady(pos: i32) -> VinylState { VinylState { armed: true, signal: true, speed: 1.0, locked: true, pos_ms: Some(pos), ..Default::default() } }
+
     #[test]
-    fn drive_follows_speed_and_jumps_on_a_drop_but_not_on_jitter() {
+    fn drive_places_on_first_lock_then_follows_speed() {
         let mut d = Drive::default();
-        let st = VinylState { armed: true, signal: true, speed: 1.0, locked: true, pos_ms: Some(10_000), ..Default::default() };
-        // Steady: speed converges, no seek within a few ms.
-        let mut out = DriveOut { speed: 0.0, seek_ms: None };
-        for i in 0..20 { out = d.step(&st, true, i as f64 * 10.0, 10.0, 10_000.0 + 10.0, 10.0, 300_000.0); assert!(out.seek_ms.is_none()); }
-        assert!((out.speed - 1.0).abs() < 1e-3);
-        // A needle drop: 50 s away → jump at once, to the record plus the lead.
-        let drop = VinylState { pos_ms: Some(60_000), ..st };
-        let o = d.step(&drop, true, 300.0, 10.0, 10_200.0, 10.0, 300_000.0);
-        assert_eq!(o.seek_ms.map(|m| m.round()), Some(60_010.0));
-        // 40 ms off: only after it has held 200 ms.
-        let near = VinylState { pos_ms: Some(60_000), ..st };
-        let mut seeks = vec![];
-        for i in 0..30 { if let Some(m) = d.step(&near, true, 400.0 + i as f64 * 10.0, 10.0, 60_050.0, 10.0, 300_000.0).seek_ms { seeks.push((i, m)); } }
-        assert_eq!(seeks.len(), 1, "{seeks:?}");
-        assert!(seeks[0].0 >= 19);
-        // REL: never seeks.
-        assert!(d.step(&drop, false, 2000.0, 10.0, 0.0, 10.0, 300_000.0).seek_ms.is_none());
+        let o = d.step(&steady(10_000), true, 0.0, 10.0, 0.0, 10.0, 300_000.0);
+        assert!(o.seek_ms.is_some(), "the first lock places the deck");
+        let mut pos = o.seek_ms.unwrap();
+        for i in 1..50 {
+            let o = d.step(&steady(10_000 + i * 10), true, i as f64 * 10.0, 10.0, pos, 10.0, 300_000.0);
+            assert!(o.seek_ms.is_none(), "{i}: no jumps while it keeps up");
+            pos += o.speed * 10.0;
+        }
+    }
+
+    #[test]
+    fn drive_jumps_on_a_needle_drop() {
+        let mut d = Drive::default();
+        d.step(&steady(10_000), true, 0.0, 10.0, 10_000.0, 0.0, 300_000.0);
+        let drop = VinylState { drops: 1, ..steady(60_000) };
+        let o = d.step(&drop, true, 10.0, 10.0, 10_010.0, 10.0, 300_000.0);
+        let m = o.seek_ms.expect("a needle drop jumps");
+        assert!((m - 60_008.0).abs() < 3.0, "to the needle plus the lead at the deck's speed: {m}");
+    }
+
+    /// Back-cueing: the deck trails the hand and the gap swings hundreds of
+    /// ms; it must not jump while the platter is handled.
+    #[test]
+    fn drive_never_jumps_while_the_platter_is_handled() {
+        let mut d = Drive::default();
+        d.step(&steady(10_000), true, 0.0, 10.0, 10_000.0, 0.0, 300_000.0);
+        for i in 0..200 {
+            let sp = if (i / 15) % 2 == 0 { 1.8 } else { -1.8 };
+            let st = VinylState { speed: sp, ..steady(10_000 + (i % 7) * 120) };
+            assert!(d.step(&st, true, 10.0 + i as f64 * 10.0, 10.0, 10_000.0, 10.0, 300_000.0).seek_ms.is_none(), "{i}");
+        }
+    }
+
+    #[test]
+    fn drive_bends_small_gaps_shut_once_steady_and_jumps_big_ones() {
+        let mut d = Drive::default();
+        d.step(&steady(10_000), true, 0.0, 10.0, 10_000.0, 0.0, 300_000.0);
+        let mut pos = 10_000.0 - 40.0;                    // 40 ms behind after a scratch
+        let mut bent = false;
+        for i in 1..400 {
+            let o = d.step(&steady(10_000 + i * 10), true, i as f64 * 10.0, 10.0, pos, 0.0, 300_000.0);
+            assert!(o.seek_ms.is_none());
+            if o.speed > 1.001 { bent = true; }
+            assert!(o.speed <= 1.0 + BEND_MAX + 1e-9);
+            pos += o.speed * 10.0;
+        }
+        // The needle at the next step is 10 000 + 400 × 10.
+        assert!(bent && (14_000.0 - pos).abs() < DEAD_MS + 1.0, "closed by bending: {}", 14_000.0 - pos);
+        // Moved 30 s under a steady record: one jump.
+        let o = d.step(&steady(14_000), true, 4_000.0, 10.0, 44_000.0, 0.0, 300_000.0);
+        assert_eq!(o.seek_ms.map(|m| m.round()), Some(14_000.0));
+        // REL never seeks.
+        assert!(d.step(&VinylState { drops: 9, ..steady(90_000) }, false, 5_000.0, 10.0, 0.0, 0.0, 300_000.0).seek_ms.is_none());
     }
 }
-

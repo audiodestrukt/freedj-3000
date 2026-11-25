@@ -62,6 +62,7 @@ pub struct DvsShared {
     peak: AtomicU32,
     pos_ms: AtomicI32,
     raw_ms: AtomicI32,
+    drops: AtomicU32,
     /// Input buffer length, µs (half the sound's lag behind the record).
     pub in_us: AtomicU32,
     /// Bumped on every input buffer: the app sees the input is alive.
@@ -72,9 +73,9 @@ pub struct DvsShared {
     pub driving: AtomicBool,
     /// The deck's signed speed as the record drives it (f32 bits).
     pub drive_speed: AtomicU32,
-    /// ABS: jumps to the needle, and of those the small re-syncs.
+    /// ABS: jumps to the needle, and of those needle drops.
     pub seeks: AtomicU32,
-    pub trims: AtomicU32,
+    pub drop_jumps: AtomicU32,
 }
 
 impl DvsShared {
@@ -90,6 +91,7 @@ impl DvsShared {
         self.peak.store(s.peak.to_bits(), Ordering::Relaxed);
         self.pos_ms.store(s.pos_ms.unwrap_or(-1), Ordering::Relaxed);
         self.raw_ms.store(s.raw_ms.unwrap_or(-1), Ordering::Relaxed);
+        self.drops.store(s.drops, Ordering::Relaxed);
     }
 
     pub fn load(&self) -> VinylState {
@@ -103,6 +105,7 @@ impl DvsShared {
             peak: f32::from_bits(self.peak.load(Ordering::Relaxed)),
             pos_ms: opt(self.pos_ms.load(Ordering::Relaxed)),
             raw_ms: opt(self.raw_ms.load(Ordering::Relaxed)),
+            drops: self.drops.load(Ordering::Relaxed),
         }
     }
 
@@ -226,7 +229,7 @@ impl DvsRender {
         self.in_flight.store(0, Ordering::Relaxed);
         self.shared.drive_speed.store((o.speed as f32).to_bits(), Ordering::Relaxed);
         self.shared.seeks.store(self.drive.seeks, Ordering::Relaxed);
-        self.shared.trims.store(self.drive.trims, Ordering::Relaxed);
+        self.shared.drop_jumps.store(self.drive.drops, Ordering::Relaxed);
         true
     }
 }
@@ -427,6 +430,29 @@ mod tests {
         wait(1.0);                                // 1.9 s: landed at 2:00 + ~0.6 s
         let q = pos_ms(&d);
         assert!((q - 120_600.0).abs() < 200.0, "after the drop: {q}");
+    }
+
+    /// Back-cueing in ABS: the hand rocks the record back and forth over a
+    /// beat; the deck follows the hand and never jumps.
+    #[test]
+    fn abs_back_cueing_follows_the_hand_without_jumps() {
+        let d = deck();
+        d.dvs.set_mode(DvsMode::Abs);
+        let _tt = Turntable::play(Arc::clone(&d.dvs), 30_000.0, |t| {
+            Some((if t < 0.6 { 1.0 } else if t < 2.6 { 1.8 * (t * 6.0).sin() } else { 1.0 }, f64::NAN))
+        });
+        wait(0.6);
+        let placed = d.dvs.seeks.load(Ordering::Relaxed);
+        let mut last = pos_ms(&d);
+        let mut biggest = 0.0f64;
+        for _ in 0..200 {
+            wait(0.01);
+            let p = pos_ms(&d);
+            biggest = biggest.max((p - last).abs());
+            last = p;
+        }
+        assert_eq!(d.dvs.seeks.load(Ordering::Relaxed), placed, "no jumps while rocking");
+        assert!(biggest < 40.0, "the playhead only moved as the hand did: biggest step {biggest:.1} ms in 10 ms");
     }
 
     #[test]
