@@ -372,14 +372,13 @@ pub struct SdlRenderer {
 }
 
 impl SdlRenderer {
-    /// `cols` = the track's columns, then (with `rb_rgb`) its RGB levels.
+    /// `cols` = the track's columns, then its RGB levels (`rgb_for`:
+    /// rekordbox's or ours, converted once here, not per frame).
     fn append_rgb(&mut self) {
         let n = self.num_cols as usize;
         self.cols.truncate(n);
-        if let Some(e) = &self.rb_rgb {
-            let rgb = crate::waveform_cpu::rgb_columns(e, n, self.col_hop.0, self.col_hop.1);
-            self.cols.extend(rgb);
-        }
+        let rgb = crate::waveform_cpu::rgb_for(&self.cols, self.rb_rgb.as_deref(), self.col_hop.0, self.col_hop.1);
+        self.cols.extend(rgb);
     }
 
     pub fn new(mut canvas: Canvas<Window>, waveform: &WaveformCache) -> Result<Self> {
@@ -389,7 +388,7 @@ impl SdlRenderer {
         let cols: Vec<u32> = waveform.columns.iter().map(|c| u32::from_le_bytes(*c)).collect();
         let (peak, amp_gain) = display_gain(&cols);
         log::info!("waveform peak {:.2} → display gain {:.2}", peak, amp_gain);
-        Ok(Self {
+        let mut me = Self {
             canvas, tc, size,
             textures: HashMap::new(),
             verts: Vec::new(),
@@ -417,7 +416,9 @@ impl SdlRenderer {
             fb: std::env::var("OPENDECK_FBDEV").ok().filter(|p| !p.is_empty()).and_then(|p| {
                 crate::fbdev::Fb::open(&p).map_err(|e| log::error!("fbdev: {e:#}")).ok()
             }),
-        })
+        };
+        me.append_rgb();
+        Ok(me)
     }
 
     /// What we draw into: the logical size when one is set (fullscreen on a
@@ -659,7 +660,7 @@ impl Renderer for SdlRenderer {
         self.detail = detail.map(|d| {
             let mut v: Vec<u32> = d.iter().take(n).map(|c| u32::from_le_bytes(*c)).collect();
             v.resize(n, 0);
-            if self.rb_rgb.is_some() { v.extend_from_slice(&self.cols[n..]); }   // the track's RGB levels after it, as in `cols`
+            v.extend_from_slice(&self.cols[n..]);   // the track's RGB levels after it, as in `cols`
             v
         });
         if let Some(c) = self.wave_cache.as_mut() { c.invalidate(); }
@@ -689,7 +690,8 @@ impl Renderer for SdlRenderer {
         let mut params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
                                                     self.num_cols, out_w, sh);
         if self.detail.is_some() { params.detail_off = self.num_cols as f32; }
-        if self.rb_rgb.is_some() { params.rgb_off = self.num_cols as f32; }
+        params.rgb_off = self.num_cols as f32;
+        if self.rb_rgb.is_some() { params.rgb_heights = 1.0; }
 
         // ── Ground + waveforms (the shader's pass 1) ─────────────────────
         self.canvas.set_clip_rect(None);

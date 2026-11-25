@@ -176,10 +176,31 @@ pub fn rgb_columns(entries: &[[u8; 4]], n_cols: usize, hop: usize, sr: u32) -> V
     }).collect()
 }
 
+/// Our band columns as RGB levels, once (at load, not per frame): each
+/// column's bands through the curves fitted to rekordbox's RGB waveforms,
+/// `rb_pack`ed with no heights (ours are drawn at our own heights).
+pub fn own_rgb_columns(cols: &[u32]) -> Vec<u32> {
+    cols.iter().map(|&v| {
+        let c = v.to_le_bytes();
+        let lv = opendeck_mediaserver::rgb_levels(c[0] as f32, c[1] as f32, c[2] as f32);
+        rb_pack([lv[0].round() as u8, lv[1].round() as u8, lv[2].round() as u8, 0], 0.0)
+    }).collect()
+}
+
+/// The RGB levels a renderer keeps beside a track's columns: rekordbox's
+/// own when the track came with them (`rgb_columns`), else ours.
+pub fn rgb_for(cols: &[u32], rb: Option<&Vec<[u8; 4]>>, hop: usize, sr: u32) -> Vec<u32> {
+    match rb {
+        Some(e) if !e.is_empty() => rgb_columns(e, cols.len(), hop, sr),
+        _ => own_rgb_columns(cols),
+    }
+}
+
 /// The pixel at `col_f` covering `span` columns (sampled at up to 12). With
-/// `rgb_off` > 0 the colours are the track's own rekordbox levels, stored
-/// from there in `cols` (`rgb_columns`); 0 = from our bands.
-pub fn rgb_bar(cols: &[u32], num_cols: i64, col_f: f32, span: f32, gain: f32, rgb_off: usize) -> RgbBar {
+/// `rgb_off` > 0 the levels are stored from there in `cols` (`rgb_for`):
+/// rekordbox's, drawn at its heights when `rb_heights`, or ours converted at
+/// load. 0 = converted here from our bands (tests).
+pub fn rgb_bar(cols: &[u32], num_cols: i64, col_f: f32, span: f32, gain: f32, rgb_off: usize, rb_heights: bool) -> RgbBar {
     let span = span.max(1.0);
     let n = (span.ceil() as usize).clamp(1, 12);
     let last = (num_cols - 1).max(0) as f32;
@@ -189,12 +210,15 @@ pub fn rgb_bar(cols: &[u32], num_cols: i64, col_f: f32, span: f32, gain: f32, rg
     for i in 0..2 * n {
         let cf = (col_f - span * 0.5 + (i as f32 + 0.5) * span / n as f32).clamp(0.0, last) as usize;
         // (levels, height to pick the tallest by, height to average)
+        let ours = || (unpack(cols[cf.min(cols.len() - 1)])[3] * gain).min(1.0);
         let (lv, tall_h, mean_h) = match cols.get(rgb_off + cf).filter(|_| rgb_off > 0) {
-            // The track's own: rekordbox's heights, on the CDJ's scale.
-            Some(&v) => { let (lv, t, m) = rb_unpack(v); (lv, t / 31.0 * RB_FULL, m / 31.0 * RB_FULL) }
+            // rekordbox's, with its heights on the CDJ's scale.
+            Some(&v) if rb_heights => { let (lv, t, m) = rb_unpack(v); (lv, t / 31.0 * RB_FULL, m / 31.0 * RB_FULL) }
+            // Levels ready, at our heights.
+            Some(&v) => { let h = ours(); (rb_unpack(v).0, h, h) }
             None => {
                 let c = unpack(cols[cf.min(cols.len() - 1)]);
-                let h = (c[3] * gain).min(1.0);
+                let h = ours();
                 (opendeck_mediaserver::rgb_levels(c[0] * 255.0, c[1] * 255.0, c[2] * 255.0), h, h)
             }
         };
@@ -431,7 +455,7 @@ fn classify(pal: &Palette, p: &WaveformParams, g: &WaveGeom, cols: &[u32], rect:
                 let side = |d: f32| Bar::new(wave_sample(cols, g.num_cols, col_f + d), p);
                 bar = bar.with_widths(2.0 / g.wave_h, &side(-g.cue_per_px), &side(g.cue_per_px));
             }
-            if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, g.num_cols, col_f, g.cue_per_px, p.amp_gain, p.rgb_off as usize)); }
+            if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, g.num_cols, col_f, g.cue_per_px, p.amp_gain, p.rgb_off as usize, p.rgb_heights > 0.5)); }
             Column::Field { bar: Some(bar), bg, tick }
         }
     }
@@ -711,7 +735,7 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
             let side = |d: f32| Bar::new(peak(sx + d / r[2]), p);
             bar = bar.with_widths(2.0 / r[3], &side(-1.0), &side(1.0));
         }
-        if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, num_cols as i64, (sx + 0.5 / r[2]) * p.num_cols, cols_per_px, p.amp_gain, p.rgb_off as usize)); }
+        if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, num_cols as i64, (sx + 0.5 / r[2]) * p.num_cols, cols_per_px, p.amp_gain, p.rgb_off as usize, p.rgb_heights > 0.5)); }
         Over::Body { bar, field, played: qx < ph_x && dim }
     }).collect();
 
@@ -754,7 +778,7 @@ mod tests {
             downbeat_offset: 0.0, beats_per_bar: 4.0, beat2_phase_beats: 0.0, beat2_period_cols: 0.0,
             color_mode: ColorMode::Blue as u32 as f32, wave_rect: wave, over_rect: over, amp_gain: 1.0,
             dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 0.0, detail_off: 0.0,
-            light: 0.0, rgb_off: 0.0, _pad: [0.0; 2],
+            light: 0.0, rgb_off: 0.0, rgb_heights: 0.0, _pad: [0.0; 1],
         }
     }
 
@@ -947,12 +971,12 @@ mod rgb_tests {
     fn colours_are_normalised_hues_not_raw_energy() {
         // A bass-heavy column with some highs: raw it is mostly red; on the
         // CDJ the hue comes from rekordbox's levels, brightest channel 224.
-        let b = rgb_bar(&[col(200, 40, 25, 255)], 1, 0.0, 1.0, 1.0, 0);
+        let b = rgb_bar(&[col(200, 40, 25, 255)], 1, 0.0, 1.0, 1.0, 0, false);
         let m = b.core_rgb.iter().cloned().fold(0.0, f32::max);
         assert!((m - 224.0).abs() < 1e-3, "the brightest channel is 224: {:?}", b.core_rgb);
         assert!(b.core_rgb[2] > 112.0, "the highs show as blue (magenta, as the unit draws a kick), not red alone: {:?}", b.core_rgb);
         // A quiet column with little bass: blue.
-        let q = rgb_bar(&[col(20, 30, 30, 80)], 1, 0.0, 1.0, 1.0, 0);
+        let q = rgb_bar(&[col(20, 30, 30, 80)], 1, 0.0, 1.0, 1.0, 0, false);
         assert!(q.core_rgb[2] >= q.core_rgb[0], "quiet and bright on top reads blue: {:?}", q.core_rgb);
     }
 
@@ -965,7 +989,7 @@ mod rgb_tests {
         let (kick, hat, loud_next) = (col(200, 40, 25, 200), col(30, 60, 40, 120), col(10, 120, 60, 255));
         let cols = [hat, kick, hat, hat, hat, loud_next, hat, hat];
         // The pixel covers columns 0-3 (centre 2, span 4); the next, 4-7.
-        let b = rgb_bar(&cols, 8, 2.0, 4.0, 1.0, 0);
+        let b = rgb_bar(&cols, 8, 2.0, 4.0, 1.0, 0, false);
         assert!((b.outer - 1.0).abs() < 1e-6, "outer = the tallest over both pixels (the next one's loud column)");
         assert_eq!(b.outer_rgb, rgb_norm(opendeck_mediaserver::rgb_levels(10.0, 120.0, 60.0), 109.0), "in that column's colour");
         let mean = (200.0 + 255.0 + 6.0 * 120.0) / 8.0 / 255.0;
@@ -1005,21 +1029,74 @@ mod rgb_tests {
     #[test]
     fn the_sticks_levels_win_over_our_bands() {
         let mut cols = vec![col(200, 40, 25, 100); 4];
-        let ours = rgb_bar(&cols, 4, 1.0, 1.0, 1.0, 0);
+        let ours = rgb_bar(&cols, 4, 1.0, 1.0, 1.0, 0, false);
         assert!(ours.core_rgb[0] > 200.0, "our bands alone: red-heavy {:?}", ours.core_rgb);
         cols.extend(std::iter::repeat(rb_pack([0, 0, 7, 31], 31.0)).take(4));
-        let rb = rgb_bar(&cols, 4, 1.0, 1.0, 1.0, 4);
+        let rb = rgb_bar(&cols, 4, 1.0, 1.0, 1.0, 4, true);
         assert_eq!(rb.core_rgb, [0.0, 0.0, 224.0], "the stick's blue");
         assert_eq!(rb.outer_rgb, [0.0, 0.0, 109.0]);
         assert!((rb.outer - RB_FULL).abs() < 1e-6 && (rb.core - RB_FULL).abs() < 1e-6, "rekordbox's heights on the CDJ's scale");
     }
 
-    /// The shader, with the curves injected, compiles and validates.
+    /// Our bands converted once at load draw the colours converting them
+    /// per frame did (to rekordbox's 0-7 steps), at our heights.
+    #[test]
+    fn levels_converted_at_load_match_converting_per_frame() {
+        let mut cols: Vec<u32> = (0..64).map(|i| col((i * 37 % 230) as u8, (i * 11 % 120) as u8, (i * 5 % 50) as u8, (40 + i * 3) as u8)).collect();
+        let fresh: Vec<RgbBar> = (0..60).map(|i| rgb_bar(&cols, 64, i as f32, 2.0, 1.0, 0, false)).collect();
+        cols.extend(own_rgb_columns(&cols.clone()));
+        for (i, f) in fresh.iter().enumerate() {
+            let s = rgb_bar(&cols, 64, i as f32, 2.0, 1.0, 64, false);
+            assert_eq!((s.core, s.outer), (f.core, f.outer), "pixel {i}: our heights");
+            for k in 0..3 {
+                assert!((s.core_rgb[k] - f.core_rgb[k]).abs() <= 224.0 / 7.0 * 0.6 + 1.0, "pixel {i}: core {:?} vs {:?}", s.core_rgb, f.core_rgb);
+            }
+        }
+    }
+
+    /// The shader compiles and validates.
     #[test]
     fn the_waveform_shader_validates() {
         let src = crate::renderer::waveform_wgsl();
         let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module).expect("valid WGSL");
+    }
+}
+
+/// How long a full raster of each kind takes, per colour mode (the CPU
+/// renderer, as the Pi Zero runs it): `cargo test --release -p opendeck-app
+/// raster_cost -- --ignored --nocapture`.
+#[cfg(test)]
+mod bench {
+    use super::*;
+    use crate::renderer::{ColorMode, WaveformParams};
+
+    #[test]
+    #[ignore]
+    fn raster_cost() {
+        let lut = Lut::new();
+        let n = 20_000usize;
+        let mut cols: Vec<u32> = (0..n).map(|i| u32::from_le_bytes([(i * 7 % 230) as u8, (i * 13 % 120) as u8, (i * 5 % 50) as u8, (i * 3 % 255) as u8])).collect();
+        let t0 = std::time::Instant::now();
+        let rgb = own_rgb_columns(&cols);
+        println!("RGB levels for {n} columns, once at load: {:.2} ms", t0.elapsed().as_secs_f64() * 1000.0);
+        cols.extend(rgb);   // as the renderers keep them (`rgb_off`)
+        for (name, mode) in [("BLUE", ColorMode::Blue), ("3BAND", ColorMode::ThreeBand), ("RGB", ColorMode::Rgb)] {
+            let p = WaveformParams {
+                playhead_col: n as f32 / 2.0, cols_visible: 2900.0, num_cols: n as f32, screen_w: 1280.0, screen_h: 720.0,
+                beat_anchor_col: 0.0, beat_period_cols: 40.0, downbeat_offset: 0.0, beats_per_bar: 4.0, beat2_phase_beats: 0.0,
+                beat2_period_cols: 0.0, color_mode: mode as u32 as f32, wave_rect: [0.0, 200.0, 1280.0, 240.0], over_rect: [130.0, 600.0, 1020.0, 70.0],
+                amp_gain: 1.0, dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 1.0,
+                detail_off: 0.0, light: 0.0, rgb_off: n as f32, rgb_heights: 0.0, _pad: [0.0; 1],
+            };
+            let mut out = Vec::new();
+            for (kind, rect, label) in [(Kind::Wave, PxRect { x: 0, y: 200, w: 1280, h: 240 }, "wave"), (Kind::Overview, PxRect { x: 130, y: 600, w: 1020, h: 70 }, "overview")] {
+                let t0 = std::time::Instant::now();
+                let reps = 20;
+                for _ in 0..reps { draw(&lut, &p, &cols, kind, rect, &mut out); }
+                println!("{name:5} {label:8} {:.2} ms a raster", t0.elapsed().as_secs_f64() * 1000.0 / reps as f64);
+            }
+        }
     }
 }

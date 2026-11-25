@@ -75,11 +75,15 @@ pub struct WaveformParams {
     /// (`theme::flip_rgb`) and bar edges are anti-aliased, since a hard
     /// stair-stepped edge that hides on black shows on white.
     pub light:            f32,
-    /// Where the track's own rekordbox RGB levels start in the column
-    /// buffer (`set_rgb`); 0 = none, RGB comes from our bands.
+    /// Where the RGB levels start in the column buffer (`rb_pack` per
+    /// column: the track's own from rekordbox, or our bands converted once
+    /// at load); 0 = none.
     pub rgb_off:          f32,
+    /// 1 = those are rekordbox's, with its heights (the CDJ's scale); 0 =
+    /// ours, drawn at our heights.
+    pub rgb_heights:      f32,
     /// The uniform's size rounds up to 16 bytes.
-    pub _pad:             [f32; 2],
+    pub _pad:             [f32; 1],
 }
 
 /// Output pixels per layout pixel across: 1, except fullscreen fill on a
@@ -256,7 +260,8 @@ impl WaveformParams {
             detail_off:        0.0,
             light:             if vp.light { 1.0 } else { 0.0 },
             rgb_off:           0.0,
-            _pad:              [0.0; 2],
+            rgb_heights:       0.0,
+            _pad:              [0.0; 1],
         }
     }
 }
@@ -264,11 +269,11 @@ impl WaveformParams {
 // ── wgpu renderer ─────────────────────────────────────────────────────────────
 
 /// The column buffer: `data`, then as many zero columns for the stem mix,
-/// then as many for the track's rekordbox RGB levels (`rgb`, or zeros).
-fn column_buffer(device: &wgpu::Device, data: &[u32], rgb: Option<&[u32]>) -> wgpu::Buffer {
+/// then the RGB levels (`rgb`, one per column).
+fn column_buffer(device: &wgpu::Device, data: &[u32], rgb: &[u32]) -> wgpu::Buffer {
     let mut both = data.to_vec();
     both.resize(data.len() * 2, 0);
-    match rgb { Some(r) => both.extend(r.iter().copied().chain(std::iter::repeat(0)).take(data.len())), None => both.resize(data.len() * 3, 0) }
+    both.extend(rgb.iter().copied().chain(std::iter::repeat(0)).take(data.len()));
     device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
         label:    Some("waveform_data"),
         contents: bytemuck::cast_slice(&both),
@@ -303,6 +308,9 @@ pub struct WgpuRenderer {
     /// they were last laid on; the third part of the buffer holds them.
     rb_rgb:              Option<std::sync::Arc<Vec<[u8; 4]>>>,
     col_hop:             (usize, u32),
+    /// The track's columns as uploaded, to convert again when `set_rgb`
+    /// takes rekordbox's away.
+    own_data:            Vec<u32>,
 
     // egui pass
     egui_renderer:  egui_wgpu::Renderer,
@@ -507,7 +515,7 @@ impl WgpuRenderer {
         let (peak, amp_gain) = display_gain(&waveform_data);
         log::info!("waveform peak {:.2} → display gain {:.2}", peak, amp_gain);
 
-        let waveform_buf = column_buffer(&device, &waveform_data, None);
+        let waveform_buf = column_buffer(&device, &waveform_data, &crate::waveform_cpu::own_rgb_columns(&waveform_data));
 
         // ── Params uniform buffer ─────────────────────────────────────────────
         let initial_params = WaveformParams {
@@ -535,7 +543,8 @@ impl WgpuRenderer {
             detail_off:       0.0,
             light:            0.0,
             rgb_off:          0.0,
-            _pad:             [0.0; 2],
+            rgb_heights:      0.0,
+            _pad:             [0.0; 1],
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -656,6 +665,7 @@ impl WgpuRenderer {
             detail_on: false,
             rb_rgb: None,
             col_hop: (waveform.hop_size, waveform.sample_rate),
+            own_data: waveform_data.clone(),
             egui_renderer,
             egui_screen,
             max_dim,
@@ -714,8 +724,9 @@ impl Renderer for WgpuRenderer {
         log::info!("waveform reloaded: {} columns, peak {:.2} → gain {:.2}", num_cols, peak, self.amp_gain);
 
         self.col_hop = (waveform.hop_size, waveform.sample_rate);
-        let rgb = self.rb_rgb.as_ref().map(|e| crate::waveform_cpu::rgb_columns(e, data.len(), waveform.hop_size, waveform.sample_rate));
-        let waveform_buf = column_buffer(&self.device, &data, rgb.as_deref());
+        let rgb = crate::waveform_cpu::rgb_for(&data, self.rb_rgb.as_deref(), waveform.hop_size, waveform.sample_rate);
+        let waveform_buf = column_buffer(&self.device, &data, &rgb);
+        self.own_data = data.clone();
         self.waveform_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label:  Some("waveform_bg"),
             layout: &self.waveform_bgl,
@@ -745,10 +756,7 @@ impl Renderer for WgpuRenderer {
         self.rb_rgb = rgb;
         let n = self.num_cols as usize;
         if n == 0 { return; }
-        let cols = match &self.rb_rgb {
-            Some(e) => crate::waveform_cpu::rgb_columns(e, n, self.col_hop.0, self.col_hop.1),
-            None => vec![0; n],
-        };
+        let cols = crate::waveform_cpu::rgb_for(&self.own_data, self.rb_rgb.as_deref(), self.col_hop.0, self.col_hop.1);
         self.queue.write_buffer(&self.waveform_buf, (n * 2 * 4) as u64, bytemuck::cast_slice(&cols));
     }
 
@@ -794,7 +802,8 @@ impl Renderer for WgpuRenderer {
         let mut params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
                                                 self.num_cols, self.surface_config.width, self.surface_config.height);
         if self.detail_on { params.detail_off = self.num_cols as f32; }
-        if self.rb_rgb.is_some() { params.rgb_off = self.num_cols as f32 * 2.0; }
+        params.rgb_off = self.num_cols as f32 * 2.0;
+        if self.rb_rgb.is_some() { params.rgb_heights = 1.0; }
         self.queue.write_buffer(&self.params_buf, 0, bytemuck::bytes_of(&params));
 
         // ── Get surface texture ───────────────────────────────────────────────
@@ -1005,8 +1014,8 @@ impl Renderer for WgpuRenderer {
 
 // ── WGSL shader ───────────────────────────────────────────────────────────────
 
-/// The waveform shader with the RGB curves injected (`fit_*`).
-pub(crate) fn waveform_wgsl() -> String { opendeck_mediaserver::rgb_fit_wgsl() + WAVEFORM_WGSL }
+/// The waveform shader.
+pub(crate) fn waveform_wgsl() -> String { WAVEFORM_WGSL.to_string() }
 
 pub(crate) const WAVEFORM_WGSL: &str = r#"
 // Waveform display shader — draws the enlarged waveform and the overview
@@ -1039,8 +1048,8 @@ struct Params {
     style:              f32,  // 0 XDJ look, 1 CDJ-3000 look
     detail_off:         f32,  // enlarged waveform's first column in the buffer; > 0 = stem mix
     light:              f32,  // 1 = LIGHT MODE: mirror lightness, anti-alias bar edges
-    rgb_off:            f32,  // the track's rekordbox RGB levels in the buffer; 0 = none
-    _pad1:              f32,
+    rgb_off:            f32,  // RGB levels in the buffer (waveform_cpu::rb_pack); 0 = none
+    rgb_heights:        f32,  // 1 = rekordbox's heights with them
     _pad2:              f32,
 };
 
@@ -1161,29 +1170,14 @@ fn bar_color(c_in: vec4<f32>, dist: f32, fw: vec4<f32>) -> vec4<f32> {
 }
 
 // RGB, as a CDJ-3000 draws it (fitted to cdj3k-emu's screen against the
-// track's PWV5, 2026-11-24). Colours are rekordbox's RGB levels: the
-// track's own (rgb_off) or our bands through the curves fitted to them
-// (opendeck_mediaserver::RGB_FIT, injected as fit_*), each normalised so
-// its brightest channel is fixed: hue is the ratio of the channels. Over
-// the pixel and the next one: the outer layer is the tallest column's
-// height in its colour at 109 (r = 0.985, colour within 1.3/255); the core
-// is their mean height in the colour of the tallest column of the pixel's
-// own span, at 224 (r = 0.88, colour within 10/255).
-fn fit(x: f32, ours: array<f32, 21>, rb: array<f32, 21>) -> f32 {
-    var o = ours;
-    var r = rb;
-    if x <= o[0] { return r[0]; }
-    for (var k = 1u; k < 21u; k++) {
-        if x <= o[k] && o[k] > o[k - 1u] {
-            return r[k - 1u] + (x - o[k - 1u]) / (o[k] - o[k - 1u]) * (r[k] - r[k - 1u]);
-        }
-    }
-    return r[20];
-}
-fn rgb_levels(c: vec3<f32>) -> vec3<f32> {
-    let b = c * 255.0;
-    return min(vec3<f32>(fit(b.x, fit_ours_0, fit_rb_0), fit(b.y, fit_ours_1, fit_rb_1), fit(b.z, fit_ours_2, fit_rb_2)), vec3<f32>(7.0));
-}
+// track's PWV5, 2026-11-24). The colours are rekordbox's RGB levels per
+// column, ready in the buffer (waveform_cpu::rb_pack): the track's own, or
+// our bands converted once at load through the curves fitted to them. Each
+// is normalised so its brightest channel is fixed: hue is the ratio of the
+// channels. Over the pixel and the next one: the outer layer is the tallest
+// column's height in its colour at 109 (r = 0.985, colour within 1.3/255);
+// the core is their mean height in the colour of the tallest column of the
+// pixel's own span, at 224 (r = 0.88, colour within 10/255).
 fn rgb_norm(v: vec3<f32>, top: f32) -> vec4<f32> {
     let m = max(v.x, max(v.y, v.z));
     let n = select(vec3<f32>(1.0), v / m, m > 0.0) * top;
@@ -1198,21 +1192,17 @@ fn rgb_bar_color(col_f: f32, off: u32, dist: f32, span: f32) -> vec4<f32> {
     var own_c = vec3<f32>(0.0);
     var hs   = 0.0;
     for (var i = 0u; i < 2u * n; i++) {
-        let cf = clamp(col_f - span * 0.5 + (f32(i) + 0.5) * span / f32(n), 0.0, last);
-        var lv: vec3<f32>;
+        let cf = u32(clamp(col_f - span * 0.5 + (f32(i) + 0.5) * span / f32(n), 0.0, last));
+        let v  = waveform[u32(p.rgb_off) + cf];
+        let lv = vec3<f32>(f32(v & 7u), f32((v >> 3u) & 7u), f32((v >> 6u) & 7u));
         var h: f32;        // height to pick the tallest by
         var hm: f32;       // height to average
-        if p.rgb_off > 0.5 {
-            // The track's own (waveform_cpu::rb_pack): the tallest entry's
-            // levels and height, the mean height, on the CDJ's scale.
-            let v = waveform[u32(p.rgb_off) + u32(cf)];
-            lv = vec3<f32>(f32(v & 7u), f32((v >> 3u) & 7u), f32((v >> 6u) & 7u));
+        if p.rgb_heights > 0.5 {
+            // rekordbox's: the tallest entry's and the mean, on the CDJ's scale.
             h  = f32((v >> 9u) & 31u) / 31.0 * 0.81;
             hm = f32((v >> 14u) & 255u) / 8.0 / 31.0 * 0.81;
         } else {
-            let c = unpack(waveform[u32(cf) + off]);
-            lv = rgb_levels(c.xyz);
-            h  = min(c.w * p.amp_gain, 1.0);
+            h  = min(unpack(waveform[cf + off]).w * p.amp_gain, 1.0);
             hm = h;
         }
         if h > top { top = h; top_c = lv; }
@@ -1291,7 +1281,7 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
 
     let dist = abs(sy - 0.5) * 2.0;
     var bar  = bar_color(c, dist, fw);
-    if u32(p.color_mode + 0.5) == 0u { bar = rgb_bar_color(col_f, off, dist, max(cue_per_px, 1.0)); }
+    if u32(p.color_mode + 0.5) == 0u && p.rgb_off > 0.5 { bar = rgb_bar_color(col_f, off, dist, max(cue_per_px, 1.0)); }
     if bar.a >= 1.0 {
         return bar;
     }
@@ -1399,7 +1389,7 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
 
     let dist = abs(sy - 0.5) * 2.0;
     var bar  = bar_color(c, dist, fw);
-    if u32(p.color_mode + 0.5) == 0u {
+    if u32(p.color_mode + 0.5) == 0u && p.rgb_off > 0.5 {
         let span = p.num_cols / r.z;
         bar = rgb_bar_color((sx + 0.5 / r.z) * p.num_cols, 0u, dist, max(span, 1.0));
     }

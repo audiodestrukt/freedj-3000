@@ -373,14 +373,6 @@ pub fn rgb_levels_from_preview(low: f32, mid: f32, high: f32) -> [f32; 3] {
     [f(low, &BAND_PREVIEW[0].1, &RGB_R).min(7.0), f(mid, &BAND_PREVIEW[1].1, &RGB_G).min(7.0), f(high, &BAND_PREVIEW[2].1, &RGB_B).min(7.0)]
 }
 
-/// `RGB_FIT` as WGSL constants, for a shader that colours the same way
-/// (`fit_ours_N` / `fit_rb_N`, N = 0 red, 1 green, 2 blue).
-pub fn rgb_fit_wgsl() -> String {
-    let arr = |t: &[u8; 21]| t.iter().map(|v| format!("{v}.0")).collect::<Vec<_>>().join(", ");
-    (0..3).map(|n| format!("const fit_ours_{n} = array<f32, 21>({});\nconst fit_rb_{n} = array<f32, 21>({});\n",
-                          arr(&RGB_FIT[n].0), arr(&RGB_FIT[n].1))).collect()
-}
-
 /// RGB waveforms as a nexus-2-class player reads them from a `.EXT` file:
 /// the 1,200-column preview (PWV4, 6 bytes a column) and the 150-a-second
 /// detail (PWV5, 2 bytes big-endian: red 3 bits, green 3, blue 3, height 5,
