@@ -7,9 +7,11 @@
 //!   at 0.6–1.5× (33 or 45). An interface plugged in only for its output, or
 //!   music on its input, never stops the deck. Once armed, no carrier means
 //!   a stopped record.
-//! - **Needle drops (ABS).** Carrier back after ≥150 ms without it: the
-//!   decoder starts fresh and the deck holds silent until bit lock gives a
-//!   position (≤1 s, then speed only), rather than scratching the old spot.
+//! - **Needle drops (ABS).** Carrier back after ≥500 ms without it: the
+//!   decoder drops its bit history (keeping its level) and the deck holds
+//!   silent until bit lock gives a position (~25 cycles; ≤1 s, then speed
+//!   only), rather than scratching the old spot. A shorter stop is a hand
+//!   on the platter and plays straight on.
 //! - **Following (ABS).** Jump when the track is ≥300 ms off the record (at
 //!   most every 250 ms); re-sync 25–300 ms errors once they have held 200 ms.
 //!   Steady play stays within a few ms on speed alone.
@@ -60,7 +62,10 @@ const MIN_SPEED: f32 = 0.02;
 const ARM_MS: u32 = 300;
 const DROP_MS: u32 = 40;
 const WINDOW_MS: u32 = 10;
-const LIFT_MS: u32 = 150;
+/// A gap this long counts as a needle lift. Shorter is a hand holding the
+/// platter between strokes, which must never go silent (150 ms, the P4's,
+/// made a scratch skip on every stop).
+const LIFT_MS: u32 = 500;
 const SETTLE_MAX_MS: u32 = 1000;
 /// Dan's Serato Control Vinyl: the first groove reads ~24.0 s.
 pub const START_MS: i32 = 24_000;
@@ -150,7 +155,7 @@ impl Vinyl {
         if self.signal && !was && gap_ms >= LIFT_MS as u64 && self.absolute {
             self.state.settling = true;
             self.landed = now;
-            self.dec.reset();
+            self.dec.relock();
         }
         if self.state.settling {
             let ms = self.ms(now - self.landed);
@@ -316,19 +321,38 @@ mod tests {
     }
 
     #[test]
-    fn needle_drop_settles_silent_then_reads_the_new_place() {
+    fn needle_drop_settles_silent_briefly_then_reads_the_new_place() {
         let mut v = Vinyl::new(SR, Format::SeratoVinyl);
         let mut sig = Signal::new(Format::SeratoVinyl, SR, at_ms(10_000.0));
         play(&mut v, &mut sig, 1.0, 0.6);
-        silence(&mut v, 0.3);                        // lift
+        silence(&mut v, 0.6);                        // lift
         let mut sig = Signal::new(Format::SeratoVinyl, SR, at_ms(200_000.0));
         play(&mut v, &mut sig, 1.0, 0.02);
         assert!(v.state().settling, "silent while it finds its place");
         assert_eq!(v.state().speed, 0.0);
-        play(&mut v, &mut sig, 1.0, 0.5);
+        play(&mut v, &mut sig, 1.0, 0.04);
         let s = v.state();
-        assert!(!s.settling);
-        assert!((s.pos_ms.unwrap() - 200_520).abs() < 30, "{:?}", s.pos_ms);
+        assert!(!s.settling, "placed within 60 ms (the bit level is kept)");
+        assert!((s.pos_ms.unwrap() - 200_060).abs() < 15, "{:?}", s.pos_ms);
+    }
+
+    /// A scratch: strokes back and forth with the hand holding the platter
+    /// still for 300 ms between them. Every stroke plays at once; nothing
+    /// is taken for a needle drop.
+    #[test]
+    fn a_hand_holding_the_platter_is_not_a_needle_lift() {
+        let mut v = Vinyl::new(SR, Format::SeratoVinyl);
+        let mut sig = Signal::new(Format::SeratoVinyl, SR, at_ms(60_000.0));
+        v.set_absolute(true);
+        play(&mut v, &mut sig, 1.0, 0.6);
+        for dir in [-1.5, 1.5, -1.0, 2.0] {
+            silence(&mut v, 0.3);
+            play(&mut v, &mut sig, dir, 0.03);
+            let s = v.state();
+            assert!(!s.settling, "{dir}: not settling");
+            assert!((s.speed as f64 - dir).abs() < 0.3, "{dir}: plays at once, read {}", s.speed);
+            play(&mut v, &mut sig, dir, 0.2);
+        }
     }
 
     #[test]

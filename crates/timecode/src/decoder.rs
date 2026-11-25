@@ -186,6 +186,18 @@ impl Decoder {
         self.locked = false;
     }
 
+    /// Forget the bit history (a needle drop: the next bits are from
+    /// somewhere else) but keep the learned bit level and the channels'
+    /// DC: it reads a position again in ~25 cycles instead of the ~200 ms a
+    /// full [`reset`](Self::reset) takes to learn the level back.
+    pub fn relock(&mut self) {
+        self.bitstream = 0;
+        self.expected = 0;
+        self.valid = 0;
+        self.position = -1;
+        self.locked = false;
+    }
+
     /// SWITCH_* flags, replacing the old ones; resets the decoder.
     pub fn set_flags(&mut self, flags: u32) { self.flags = flags; self.reset(); }
     pub fn flags(&self) -> u32 { self.flags }

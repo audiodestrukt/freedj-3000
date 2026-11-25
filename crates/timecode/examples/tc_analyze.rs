@@ -6,7 +6,7 @@
 //! vinyl logic's view (armed, signal, settling, track ms). The Rust twin
 //! of freedj-esp's native/timecode_analyze, for a recording of your own
 //! record through your own interface.
-use opendeck_timecode::{Decoder, Format, Vinyl};
+use opendeck_timecode::{vinyl::Drive, Decoder, Format, Vinyl};
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
@@ -37,6 +37,24 @@ fn main() {
     dec.set_flags(flags);
     let mut v = Vinyl::new(rate, fmt);
     v.set_flags(flags);
+    if std::env::var("TC_DRIVE").is_ok() {
+        // The deck in ABS: a cursor moved by the drive's speed, 10 ms
+        // blocks, 20 ms lead; print every jump.
+        let blk = rate as usize / 100;
+        let mut d = Drive::default();
+        let mut cur_ms = 0.0f64;
+        for (n, c) in pcm.chunks(blk * 2).enumerate() {
+            v.push_i16(c);
+            let s = v.state();
+            if !s.armed { continue; }
+            let t = n as f64 * 10.0;
+            let o = d.step(&s, true, t, 10.0, cur_ms, 20.0, 1e9);
+            if let Some(m) = o.seek_ms { println!("{:8.2} s  jump {:+.0} ms (to {m:.0}), speed {:+.3}, record {:?}", t / 1000.0, m - cur_ms, o.speed, s.pos_ms); cur_ms = m; }
+            cur_ms += o.speed * 10.0;
+        }
+        println!("{} jumps, {} of them re-syncs", d.seeks, d.trims);
+        return;
+    }
     let hop = rate as usize * hop_ms / 1000 * 2;
     println!("{path}: {rate} Hz, {:.1} s, {}", pcm.len() as f64 / 2.0 / rate as f64, fmt.label());
     println!("{:>8}  {:>7}  {:>4}  {:>8}   {:>5} {:>6} {:>5}  {:>9}", "t s", "speed", "lock", "pos ms", "armed", "signal", "settl", "track ms");

@@ -2844,7 +2844,7 @@ impl DeckApp {
             self.dvs_last_speed = sp;
             let jumps = (self.audio.dvs.seeks.load(Ordering::Relaxed), self.audio.dvs.trims.load(Ordering::Relaxed));
             if jumps != self.dvs_jumps {
-                log::debug!("dvs: ABS {} jump{} to the needle ({} re-sync), speed {sp:+.3}", jumps.0 - self.dvs_jumps.0,
+                log::info!("dvs: ABS {} jump{} to the needle ({} re-sync), speed {sp:+.3}", jumps.0 - self.dvs_jumps.0,
                             if jumps.0 - self.dvs_jumps.0 == 1 { "" } else { "s" }, jumps.1 - self.dvs_jumps.1);
                 self.dvs_jumps = jumps;
             }
