@@ -4,6 +4,19 @@ Dan's open list, newest first.  Topic lists: [TODO-cdj-3000.md](TODO-cdj-3000.md
 [TODO-analysis.md](TODO-analysis.md); ideas not yet work:
 [design/product-ideas.md](design/product-ideas.md).
 
+## DVS
+
+- **Key lock with the record (optional, #92).**  The record plays the
+  track varispeed (pitch follows the platter); Rubber Band is bypassed
+  while it has the deck.  That is the rekordbox DVS / Serato default and
+  stays the default.  Later: with MASTER TEMPO on, keep the key while the
+  record turns steadily, and drop straight to varispeed the moment a hand
+  moves the platter (no stretcher delay under a scratch), handing over
+  without a jump or click.  Design and tests in the issue.
+- iPad test on TestFlight (PCM2902), then the App Store submission.
+- P4: port the steady-pitch fixes (bbe097e: smoothed held speed, gliding
+  ABS bend) to `src/vinyl_rules.h`.
+
 ## iOS
 
 - **iPad app silent with the ring/silent switch on: fixed in 0.3.28.**  The
