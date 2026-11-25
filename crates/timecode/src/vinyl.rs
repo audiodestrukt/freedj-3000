@@ -9,7 +9,7 @@
 //!   a stopped record.
 //! - **Needle drops (ABS).** Carrier back after ≥500 ms without it: the
 //!   decoder drops its bit history (keeping its level) and the deck holds
-//!   silent until bit lock gives a position (~25 cycles; ≤1 s, then speed
+//!   silent until bit lock gives a position (~45 cycles; ≤1 s, then speed
 //!   only), rather than scratching the old spot. A shorter stop is a hand
 //!   on the platter and plays straight on.
 //! - **Following (ABS).** Jump when the track is ≥300 ms off the record (at

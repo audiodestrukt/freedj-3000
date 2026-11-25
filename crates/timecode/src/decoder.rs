@@ -188,7 +188,7 @@ impl Decoder {
 
     /// Forget the bit history (a needle drop: the next bits are from
     /// somewhere else) but keep the learned bit level and the channels'
-    /// DC: it reads a position again in ~25 cycles instead of the ~200 ms a
+    /// DC: it reads a position again in ~45 cycles instead of the ~200 ms a
     /// full [`reset`](Self::reset) takes to learn the level back.
     pub fn relock(&mut self) {
         self.bitstream = 0;
