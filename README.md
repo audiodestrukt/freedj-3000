@@ -78,6 +78,8 @@ what was tested where, is [docs/FEATURES.md](docs/FEATURES.md).
 - Jog wheel in VINYL (scratch) or CDJ (nudge) mode, one turn = one record
   turn; a paused jog plays the audio under the playhead; drag the big
   waveform to seek.
+- DVS: a Serato Control Vinyl on a turntable plays the deck through an
+  audio interface (MENU → DVS: ABS, REL or INT).
 - Tempo ±6 / ±10 / ±16 / WIDE, MASTER TEMPO key lock, and KEY SHIFT
   (±1 semitone a tap, up to an octave).
 - Three key-lock engines: Rubber Band R3 (default), Bungee, and WSOLA for
@@ -626,7 +628,7 @@ crates/
   stemd/        — A stemd-compatible stem server (stems for CDJ-3000s running cdj3k-mods)
   plugin/       — OpenDeck as a VST3 / CLAP plugin
   protocol/     — Control events; MCU serial protocol for the RP2350 control surface
-  timecode/     — DVS vinyl timecode decoder (stub; not a current priority)
+  timecode/     — DVS: Serato Control Vinyl / CD decoder and the record-drives-the-deck rules
   db/           — SQLite track library (not yet used by the app)
   ui/           — Shared UI components
   app/          — Main binary: the deck, both screens and faceplates, browser, Link

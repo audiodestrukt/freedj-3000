@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 ## [Unreleased]
 
 ### Added
+- DVS (MENU → DVS: OFF / ABS / REL / INT): a Serato Control Vinyl (or
+  Control CD, `OPENDECK_DVS_FORMAT=cd`) on a turntable, through an audio
+  interface's input, plays the deck. ABS follows the needle (track 0:00 at
+  the first groove, and a needle drop jumps); REL takes the record's speed
+  and direction and keeps cues and jumps on the deck; INT hands the deck
+  back at the record's last speed. The record takes over only after 0.3 s of
+  a steady 33 or 45 carrier, so music on the input never stops the deck.
+  While it drives, the pitch follows the platter (key lock off), the record
+  is the tempo on screen and on Link, PLAY follows the platter, SYNC goes
+  off, and a still record is silent. The decoder and these rules are
+  freedj-esp's, from its P4 deck, ported to Rust (`crates/timecode`; the
+  same positions as the C++ on the Control CD recording). The menu row shows
+  NO INPUT / NO SIGNAL / STOPPED / SPEED / LOCKED. Off by default: the
+  input opens only when DVS is on (on iOS that is when the microphone
+  permission is asked). Not yet on Android, nor in plugin decks. Stems and
+  SLIP are not applied while the record drives. Bench: `OPENDECK_DVS`,
+  `OPENDECK_DVS_DEVICE`, `OPENDECK_DVS_INPUTS=3/4`, and the `tc_analyze`
+  example, which reads a recording the deck's way.
 - FOLLOW: `--follow N` (`OPENDECK_FOLLOW`, or a plugin deck's saved
   `follow`) makes the deck a mirror of Link player N. It loads whatever
   that player loads over LINK, never plays, and draws that player's
