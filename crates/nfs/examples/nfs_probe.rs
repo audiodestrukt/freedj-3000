@@ -7,7 +7,8 @@
 //!   cargo run -p opendeck-nfs --example nfs_probe -- 169.254.5.55 111 PIONEER/USBANLZ/   (list a folder)
 //!
 //! With a third argument the file is looked up under the first export and read
-//! in full (timed) — the path a dbserver 0x2102 reply gives for a track.
+//! in full (timed) — the path a dbserver 0x2102 reply gives for a track;
+//! NFS_OUT=<file> saves what was read.
 use opendeck_nfs::{Nfs, PORTMAP_PLAYER, PORTMAP_REKORDBOX};
 use std::net::Ipv4Addr;
 
@@ -50,6 +51,7 @@ fn main() -> anyhow::Result<()> {
         let data = nfs.read_file(&fh, size)?;
         let dt = t1.elapsed().as_secs_f64();
         println!("read {} bytes in {:.2} s = {:.1} MB/s; head {:02x?}", data.len(), dt, data.len() as f64 / dt / 1e6, &data[..data.len().min(8)]);
+        if let Ok(out) = std::env::var("NFS_OUT") { std::fs::write(&out, &data)?; println!("saved to {out}"); }
     }
     Ok(())
 }

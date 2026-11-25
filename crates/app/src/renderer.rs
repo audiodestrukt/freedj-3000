@@ -568,7 +568,7 @@ impl WgpuRenderer {
         // ── Waveform render pipeline ──────────────────────────────────────────
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label:  Some("waveform_shader"),
-            source: wgpu::ShaderSource::Wgsl(WAVEFORM_WGSL.into()),
+            source: wgpu::ShaderSource::Wgsl(waveform_wgsl().into()),
         });
 
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -973,6 +973,9 @@ impl Renderer for WgpuRenderer {
 
 // ── WGSL shader ───────────────────────────────────────────────────────────────
 
+/// The waveform shader with the RGB curves injected (`fit_*`).
+pub(crate) fn waveform_wgsl() -> String { opendeck_mediaserver::rgb_fit_wgsl() + WAVEFORM_WGSL }
+
 pub(crate) const WAVEFORM_WGSL: &str = r#"
 // Waveform display shader — draws the enlarged waveform and the overview
 // waveform into two rects; everything outside them is ground for egui.
@@ -1125,6 +1128,54 @@ fn bar_color(c_in: vec4<f32>, dist: f32, fw: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(pow(c.xyz * shade, vec3<f32>(2.2)), a);
 }
 
+// RGB, as a CDJ-3000 draws it (measured against cdj3k-emu, 2026-11-24): our
+// band bytes go through the curves fitted to rekordbox's RGB waveforms
+// (opendeck_mediaserver::RGB_FIT, injected as fit_*), then every column
+// under the pixel counts: the tallest draws the outer layer in its colour,
+// normalised so its brightest channel is 109; their mean height draws the
+// core in their mean colour, brightest channel 224. Hue is the ratio of the
+// channels, so the bass (which saturates red) no longer turns it all red.
+fn fit(x: f32, ours: array<f32, 21>, rb: array<f32, 21>) -> f32 {
+    var o = ours;
+    var r = rb;
+    if x <= o[0] { return r[0]; }
+    for (var k = 1u; k < 21u; k++) {
+        if x <= o[k] && o[k] > o[k - 1u] {
+            return r[k - 1u] + (x - o[k - 1u]) / (o[k] - o[k - 1u]) * (r[k] - r[k - 1u]);
+        }
+    }
+    return r[20];
+}
+fn rgb_levels(c: vec3<f32>) -> vec3<f32> {
+    let b = c * 255.0;
+    return min(vec3<f32>(fit(b.x, fit_ours_0, fit_rb_0), fit(b.y, fit_ours_1, fit_rb_1), fit(b.z, fit_ours_2, fit_rb_2)), vec3<f32>(7.0));
+}
+fn rgb_norm(v: vec3<f32>, top: f32) -> vec4<f32> {
+    let m = max(v.x, max(v.y, v.z));
+    let n = select(vec3<f32>(1.0), v / m, m > 0.0) * top;
+    return srgb(n.x, n.y, n.z);
+}
+fn rgb_bar_color(col_f: f32, off: u32, dist: f32, span: f32) -> vec4<f32> {
+    let n    = clamp(u32(ceil(span)), 1u, 12u);
+    let last = p.num_cols - 1.0;
+    var top  = -1.0;
+    var top_c = vec3<f32>(0.0);
+    var sum  = vec3<f32>(0.0);
+    var hs   = 0.0;
+    for (var i = 0u; i < n; i++) {
+        let cf = clamp(col_f - span * 0.5 + (f32(i) + 0.5) * span / f32(n), 0.0, last);
+        let c  = unpack(waveform[u32(cf) + off]);
+        let lv = rgb_levels(c.xyz);
+        let h  = min(c.w * p.amp_gain, 1.0);
+        if h > top { top = h; top_c = lv; }
+        sum += lv;
+        hs  += h;
+    }
+    if dist < hs / f32(n) { return vec4<f32>(rgb_norm(sum, 224.0).rgb, 1.0); }
+    if dist < top { return vec4<f32>(rgb_norm(top_c, 109.0).rgb, 1.0); }
+    return vec4<f32>(0.0);
+}
+
 // LIGHT MODE's last step: theme::flip_rgb on the sRGB-encoded pixel.
 fn enc(l: f32) -> f32 { return select(1.055 * pow(l, 1.0 / 2.4) - 0.055, l * 12.92, l <= 0.0031308); }
 fn dec(e: f32) -> f32 { return select(pow((e + 0.055) / 1.055, 2.4), e / 12.92, e <= 0.04045); }
@@ -1191,7 +1242,8 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
     }
 
     let dist = abs(sy - 0.5) * 2.0;
-    let bar  = bar_color(c, dist, fw);
+    var bar  = bar_color(c, dist, fw);
+    if u32(p.color_mode + 0.5) == 0u { bar = rgb_bar_color(col_f, off, dist, max(cue_per_px, 1.0)); }
     if bar.a >= 1.0 {
         return bar;
     }
@@ -1298,7 +1350,11 @@ fn draw_overview(q: vec2<f32>) -> vec4<f32> {
     }
 
     let dist = abs(sy - 0.5) * 2.0;
-    let bar  = bar_color(c, dist, fw);
+    var bar  = bar_color(c, dist, fw);
+    if u32(p.color_mode + 0.5) == 0u {
+        let span = p.num_cols / r.z;
+        bar = rgb_bar_color((sx + 0.5 / r.z) * p.num_cols, 0u, dist, max(span, 1.0));
+    }
     // REMAIN mode: the played part turns off from the left.  TIME mode
     // leaves the whole graph lit.
     let lit = select(bar.rgb, bar.rgb * 0.18, q.x < ph_x && p.dim_played > 0.5);

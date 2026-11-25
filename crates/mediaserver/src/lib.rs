@@ -336,6 +336,51 @@ const PV4_B3: [u8; 21] = [0, 1, 4, 10, 15, 21, 28, 38, 49, 60, 68, 75, 81, 87, 9
 const PV4_B4: [u8; 21] = [0, 8, 13, 17, 20, 24, 27, 30, 33, 36, 39, 42, 45, 49, 52, 56, 61, 67, 75, 88, 127];
 const PV4_B5: [u8; 21] = [0, 3, 8, 12, 15, 18, 21, 24, 28, 31, 34, 37, 40, 43, 46, 49, 53, 57, 62, 73, 127];
 
+/// The curves from our band bytes (low, mid, high) to rekordbox's RGB
+/// channel levels (red, green, blue, 0-7), as `rgb_waveforms` packs them:
+/// one (ours, rekordbox) percentile table per channel.
+pub const RGB_FIT: [([u8; 21], [u8; 21]); 3] = [
+    (BAND_DETAIL[0].0, RGB_R), (BAND_DETAIL[1].0, RGB_G), (BAND_DETAIL[2].0, RGB_B),
+];
+
+/// A column's rekordbox RGB levels (0-7 each, not rounded), from our band
+/// bytes: what a CDJ's RGB waveform colours, before it normalises them.
+pub fn rgb_levels(low: f32, mid: f32, high: f32) -> [f32; 3] {
+    let f = |x: f32, (ours, rb): &([u8; 21], [u8; 21])| -> f32 {
+        if x <= ours[0] as f32 { return rb[0] as f32; }
+        for k in 1..21 {
+            let (x0, x1) = (ours[k - 1] as f32, ours[k] as f32);
+            if x <= x1 && x1 > x0 { return rb[k - 1] as f32 + (x - x0) / (x1 - x0) * (rb[k] as f32 - rb[k - 1] as f32); }
+        }
+        rb[20] as f32
+    };
+    [f(low, &RGB_FIT[0]).min(7.0), f(mid, &RGB_FIT[1]).min(7.0), f(high, &RGB_FIT[2]).min(7.0)]
+}
+
+/// A rekordbox 3-band preview entry (PWV6: low, mid, high) to RGB levels
+/// (0-7), matching percentiles: rekordbox's preview values and its RGB
+/// levels at the same ranks of the 30 fitted tracks. For a list whose only
+/// colour data is the 3-band preview.
+pub fn rgb_levels_from_preview(low: f32, mid: f32, high: f32) -> [f32; 3] {
+    let f = |x: f32, pv: &[u8; 21], rb: &[u8; 21]| -> f32 {
+        if x <= pv[0] as f32 { return rb[0] as f32; }
+        for k in 1..21 {
+            let (x0, x1) = (pv[k - 1] as f32, pv[k] as f32);
+            if x <= x1 && x1 > x0 { return rb[k - 1] as f32 + (x - x0) / (x1 - x0) * (rb[k] as f32 - rb[k - 1] as f32); }
+        }
+        rb[20] as f32
+    };
+    [f(low, &BAND_PREVIEW[0].1, &RGB_R).min(7.0), f(mid, &BAND_PREVIEW[1].1, &RGB_G).min(7.0), f(high, &BAND_PREVIEW[2].1, &RGB_B).min(7.0)]
+}
+
+/// `RGB_FIT` as WGSL constants, for a shader that colours the same way
+/// (`fit_ours_N` / `fit_rb_N`, N = 0 red, 1 green, 2 blue).
+pub fn rgb_fit_wgsl() -> String {
+    let arr = |t: &[u8; 21]| t.iter().map(|v| format!("{v}.0")).collect::<Vec<_>>().join(", ");
+    (0..3).map(|n| format!("const fit_ours_{n} = array<f32, 21>({});\nconst fit_rb_{n} = array<f32, 21>({});\n",
+                          arr(&RGB_FIT[n].0), arr(&RGB_FIT[n].1))).collect()
+}
+
 /// RGB waveforms as a nexus-2-class player reads them from a `.EXT` file:
 /// the 1,200-column preview (PWV4, 6 bytes a column) and the 150-a-second
 /// detail (PWV5, 2 bytes big-endian: red 3 bits, green 3, blue 3, height 5,

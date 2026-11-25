@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- WAVEFORM COLOR → RGB looked all red: it showed our raw band energies as
+  red/green/blue, and the bass always wins. It now colours the way a
+  CDJ-3000 does (measured against cdj3k-emu on the same track): the bands
+  go through the curves fitted to rekordbox's RGB waveforms, each colour is
+  normalised so its brightest channel is fixed, and every column under a
+  pixel counts: the tallest draws a dim outer layer (brightest channel
+  109), their mean a bright core (224). Kicks come out pink and magenta,
+  quiet passages blue, as on the unit. The same in the overall waveform,
+  the CPU renderer (Pi Zero), the browser's PREVIEW column and the other
+  player's waveform view.
+
 ### Added
 - DVS (MENU → DVS: OFF / ABS / REL / INT): a Serato Control Vinyl (or
   Control CD, `OPENDECK_DVS_FORMAT=cd`) on a turntable, through an audio

@@ -801,11 +801,15 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, cx: f32, wave_w: f32, u
             let (a, b) = ((a.floor().max(0.0)) as usize, (b.ceil().max(0.0)) as usize);
             if draw_rgb {
                 if a < rgb.len() {
-                    let m = rgb[a..b.max(a + 1).min(rgb.len())].iter().fold([0u8; 4], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2]), m[3].max(v[3])]);
-                    if m[3] > 0 {
-                        let col = Color32::from_rgb(m[0] * 36, m[1] * 36, m[2] * 36);
-                        let hh = half * m[3] as f32 / 31.0;
-                        p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0_f32, col));
+                    // The player's own RGB levels, drawn as a CDJ-3000 draws
+                    // them: the tallest entry under the pixel as the outer
+                    // layer, the mean as the core (`pwv5_layers`).
+                    let (outer, outer_c, core, core_c) = pwv5_layers(&rgb[a..b.max(a + 1).min(rgb.len())]);
+                    for (frac, col) in [(outer, outer_c), (core, core_c)] {
+                        if frac > 0.0 {
+                            let hh = half * frac;
+                            p.line_segment([Pos2::new(x + 0.5, mid - hh), Pos2::new(x + 0.5, mid + hh)], Stroke::new(1.0_f32, col));
+                        }
                     }
                 }
             } else if coloured {
@@ -2256,6 +2260,21 @@ fn file_art(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::Texture
 /// (unit: 192×44 at x 92), then the cover in the 47 px square at x 284.
 /// The colour mode of the waveforms (the renderer's `ColorMode` as a number:
 /// 0 RGB, 1 3-band, 2 blue), for the track table's previews.
+/// RGB waveform entries ([red, green, blue] 0-7 and height 0-31, as a
+/// player's PWV5) under one pixel, as a CDJ-3000 draws them (measured on
+/// cdj3k-emu, 2026-11-24): the tallest entry's height and colour, its
+/// brightest channel at 109, and the mean height and mean colour, brightest
+/// at 224. Heights as fractions of full.
+pub(crate) fn pwv5_layers(span: &[[u8; 4]]) -> (f32, Color32, f32, Color32) {
+    let n = span.len().max(1) as f32;
+    let tall = span.iter().max_by_key(|e| e[3]).copied().unwrap_or([0; 4]);
+    let mut sum = [0.0f32; 3];
+    for e in span { for k in 0..3 { sum[k] += e[k] as f32; } }
+    let c = |v: [f32; 3], top: f32| { let n = crate::waveform_cpu::rgb_norm(v, top); Color32::from_rgb(n[0] as u8, n[1] as u8, n[2] as u8) };
+    let mean_h = span.iter().map(|e| e[3] as f32).sum::<f32>() / n;
+    (tall[3] as f32 / 31.0, c([tall[0] as f32, tall[1] as f32, tall[2] as f32], 109.0), mean_h / 31.0, c(sum, 224.0))
+}
+
 static WAVE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
 pub fn set_wave_mode(m: u8) { WAVE_MODE.store(m, std::sync::atomic::Ordering::Relaxed); }
 
@@ -2351,10 +2370,6 @@ fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0
     let step = wave.width() / cols as f32;
     if let Some(w) = bands {
         let n = w.len().max(1);
-        let col_max = |c: usize| {
-            let (a, z) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
-            w[a..z].iter().fold([0u8; 3], |m, v| [m[0].max(v[0]), m[1].max(v[1]), m[2].max(v[2])])
-        };
         // Filled bars that meet edge to edge (a column-wide anti-aliased line
         // bleeds into its neighbours).
         let bar = |c: usize, h: f32, col: Color32| if h > 0.0 {
@@ -2389,13 +2404,19 @@ fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0
             }
         } else {
         for c in 0..cols {
-            let m = col_max(c);
-            let top = *m.iter().max().unwrap_or(&0) as f32;
-            if top <= 0.0 { continue; }
-            // RGB: bass red, mid green, high blue, scaled to full brightness.
-            let k = 255.0 / top;
-            let col = Color32::from_rgb((m[0] as f32 * k) as u8, (m[1] as f32 * k) as u8, (m[2] as f32 * k) as u8);
-            bar(c, wave.height() * (top / 127.0).min(1.0), col);
+            // RGB as a CDJ-3000 draws it: each entry's RGB levels (from the
+            // 3-band preview by percentile, `rgb_levels_from_preview`); the
+            // tallest entry under the pixel is the outer layer, the mean the
+            // core (`pwv5_layers`), standing on the baseline.
+            let (a, z) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
+            let span: Vec<[u8; 4]> = w[a..z].iter().map(|v| {
+                let lv = opendeck_mediaserver::rgb_levels_from_preview(v[0] as f32, v[1] as f32, v[2] as f32);
+                let top = *v.iter().max().unwrap_or(&0) as f32;
+                [lv[0].round() as u8, lv[1].round() as u8, lv[2].round() as u8, (top / 127.0 * 31.0).round().min(31.0) as u8]
+            }).collect();
+            let (outer, outer_c, core, core_c) = pwv5_layers(&span);
+            bar(c, wave.height() * outer, outer_c);
+            bar(c, wave.height() * core, core_c);
         }
         }
     } else if let Some(w) = anlz.as_deref().filter(|_| wave_on).and_then(|a| rb_wave(ui.ctx(), a)).or_else(|| e.load().filter(|_| wave_on).and_then(|l| b.db_wave(l))) {

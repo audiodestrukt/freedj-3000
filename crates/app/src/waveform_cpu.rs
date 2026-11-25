@@ -116,6 +116,40 @@ fn mix4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t]
 }
 
+/// RGB as a CDJ-3000 draws it, the shader's `rgb_bar_color` (measured on
+/// cdj3k-emu, 2026-11-24): our bands through the curves fitted to
+/// rekordbox's RGB waveforms (`opendeck_mediaserver::rgb_levels`); of the
+/// columns under a pixel, the tallest draws the outer layer in its colour
+/// with the brightest channel at 109, their mean height the core in their
+/// mean colour with the brightest channel at 224. Colours in author units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RgbBar { pub core: f32, pub core_rgb: [f32; 3], pub outer: f32, pub outer_rgb: [f32; 3] }
+
+/// `v` scaled so its brightest channel is `top` (white for a silent column).
+pub fn rgb_norm(v: [f32; 3], top: f32) -> [f32; 3] {
+    let m = v[0].max(v[1]).max(v[2]);
+    if m <= 0.0 { return [top; 3]; }
+    [v[0] / m * top, v[1] / m * top, v[2] / m * top]
+}
+
+/// The pixel at `col_f` covering `span` columns (sampled at up to 12).
+pub fn rgb_bar(cols: &[u32], num_cols: i64, col_f: f32, span: f32, gain: f32) -> RgbBar {
+    let span = span.max(1.0);
+    let n = (span.ceil() as usize).clamp(1, 12);
+    let last = (num_cols - 1).max(0) as f32;
+    let (mut top, mut top_c, mut sum, mut hs) = (-1.0f32, [0.0f32; 3], [0.0f32; 3], 0.0f32);
+    for i in 0..n {
+        let cf = (col_f - span * 0.5 + (i as f32 + 0.5) * span / n as f32).clamp(0.0, last);
+        let c = unpack(cols[(cf as usize).min(cols.len() - 1)]);
+        let lv = opendeck_mediaserver::rgb_levels(c[0] * 255.0, c[1] * 255.0, c[2] * 255.0);
+        let h = (c[3] * gain).min(1.0);
+        if h > top { top = h; top_c = lv; }
+        for k in 0..3 { sum[k] += lv[k]; }
+        hs += h;
+    }
+    RgbBar { core: hs / n as f32, core_rgb: rgb_norm(sum, 224.0), outer: top, outer_rgb: rgb_norm(top_c, 109.0) }
+}
+
 /// `bar_color` with the per-column part hoisted: everything that does not
 /// depend on the row.
 struct Bar {
@@ -128,6 +162,8 @@ struct Bar {
     // LIGHT MODE: each edge's width (low, mid, high, outline) in `dist`
     // units, the shader's `edge_widths`; all 0 = hard edges.
     fw: [f32; 4],
+    // RGB: the CDJ-3000's two layers (set by `with_rgb`).
+    rgb: Option<RgbBar>,
 }
 
 impl Bar {
@@ -146,8 +182,11 @@ impl Bar {
         } else {
             base = [c_in[0] * 255.0, c_in[1] * 255.0, c_in[2] * 255.0];
         }
-        Self { mode, amp, h, base, fw: [0.0; 4] }
+        Self { mode, amp, h, base, fw: [0.0; 4], rgb: None }
     }
+
+    /// RGB mode: draw the CDJ-3000's two layers instead.
+    fn with_rgb(mut self, rb: RgbBar) -> Self { if self.mode == 0 { self.rgb = Some(rb); } self }
 
     /// The shader's `bar_edges`: 3 BAND's band bounds and the outline.
     fn edges(&self) -> [f32; 4] {
@@ -165,6 +204,11 @@ impl Bar {
     /// outside the bar.
     #[inline(always)]
     fn at(&self, l: &Lut, pal: &Palette, dist: f32) -> Option<Rgba> {
+        if let Some(rb) = &self.rgb {
+            if dist < rb.core { return Some(l.rgb(rb.core_rgb[0], rb.core_rgb[1], rb.core_rgb[2])); }
+            if dist < rb.outer { return Some(l.rgb(rb.outer_rgb[0], rb.outer_rgb[1], rb.outer_rgb[2])); }
+            return None;
+        }
         if self.mode == 1 {
             if dist < self.h[2] { return Some(pal.white); }
             if dist < self.h[1] { return Some(pal.band_mid); }
@@ -180,6 +224,7 @@ impl Bar {
     /// covers, edges blended over `px` (one pixel in `dist` units), as the
     /// shader's `bar_color` with `px` > 0.
     fn at_aa(&self, l: &Lut, pal: &Palette, dist: f32) -> Option<(Rgba, f32)> {
+        if self.rgb.is_some() { return self.at(l, pal, dist).map(|c| (c, 1.0)); }
         let e = self.edges();
         let cover = |k: usize| ((e[k] - dist) / self.fw[k] + 0.5).clamp(0.0, 1.0);
         if self.mode == 1 {
@@ -331,6 +376,7 @@ fn classify(pal: &Palette, p: &WaveformParams, g: &WaveGeom, cols: &[u32], rect:
                 let side = |d: f32| Bar::new(wave_sample(cols, g.num_cols, col_f + d), p);
                 bar = bar.with_widths(2.0 / g.wave_h, &side(-g.cue_per_px), &side(g.cue_per_px));
             }
+            if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, g.num_cols, col_f, g.cue_per_px, p.amp_gain)); }
             Column::Field { bar: Some(bar), bg, tick }
         }
     }
@@ -610,6 +656,7 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
             let side = |d: f32| Bar::new(peak(sx + d / r[2]), p);
             bar = bar.with_widths(2.0 / r[3], &side(-1.0), &side(1.0));
         }
+        if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, num_cols as i64, (sx + 0.5 / r[2]) * p.num_cols, cols_per_px, p.amp_gain)); }
         Over::Body { bar, field, played: qx < ph_x && dim }
     }).collect();
 
@@ -830,5 +877,49 @@ mod tests {
     fn empty_rects_are_rejected() {
         assert!(PxRect::from_f32([0.0, 0.0, 0.0, 0.0]).is_none());
         assert!(PxRect::from_f32([f32::INFINITY, 0.0, 10.0, 10.0]).is_none());
+    }
+}
+
+/// RGB as the CDJ-3000 draws it (cdj3k-emu, 2026-11-24), on the model both
+/// renderers share.
+#[cfg(test)]
+mod rgb_tests {
+    use super::*;
+
+    fn col(low: u8, mid: u8, high: u8, amp: u8) -> u32 { u32::from_le_bytes([low, mid, high, amp]) }
+
+    #[test]
+    fn colours_are_normalised_hues_not_raw_energy() {
+        // A bass-heavy column with some highs: raw it is mostly red; on the
+        // CDJ the hue comes from rekordbox's levels, brightest channel 224.
+        let b = rgb_bar(&[col(200, 40, 25, 255)], 1, 0.0, 1.0, 1.0);
+        let m = b.core_rgb.iter().cloned().fold(0.0, f32::max);
+        assert!((m - 224.0).abs() < 1e-3, "the brightest channel is 224: {:?}", b.core_rgb);
+        assert!(b.core_rgb[2] > 112.0, "the highs show as blue (magenta, as the unit draws a kick), not red alone: {:?}", b.core_rgb);
+        // A quiet column with little bass: blue.
+        let q = rgb_bar(&[col(20, 30, 30, 80)], 1, 0.0, 1.0, 1.0);
+        assert!(q.core_rgb[2] >= q.core_rgb[0], "quiet and bright on top reads blue: {:?}", q.core_rgb);
+    }
+
+    #[test]
+    fn outer_is_the_tallest_column_core_the_mean() {
+        let cols = [col(200, 40, 25, 100), col(30, 60, 40, 255), col(200, 40, 25, 100), col(200, 40, 25, 100)];
+        let b = rgb_bar(&cols, 4, 2.0, 4.0, 1.0);
+        assert!((b.outer - 1.0).abs() < 1e-6, "outer = the tallest column");
+        assert!((b.core - (255.0 + 300.0) / 4.0 / 255.0).abs() < 1e-3, "core = the mean height: {}", b.core);
+        let m = b.outer_rgb.iter().cloned().fold(0.0, f32::max);
+        assert!((m - 109.0).abs() < 1e-3, "outer's brightest channel is 109");
+        let tall = rgb_bar(&[cols[1]], 1, 0.0, 1.0, 1.0);
+        assert_eq!(b.outer_rgb, rgb_norm(rgb_norm(opendeck_mediaserver::rgb_levels(30.0, 60.0, 40.0), 1.0), 109.0), "in the tallest column's colour");
+        assert!(tall.outer > 0.99);
+    }
+
+    /// The shader, with the curves injected, compiles and validates.
+    #[test]
+    fn the_waveform_shader_validates() {
+        let src = crate::renderer::waveform_wgsl();
+        let module = naga::front::wgsl::parse_str(&src).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&src)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module).expect("valid WGSL");
     }
 }
