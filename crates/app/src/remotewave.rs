@@ -152,6 +152,19 @@ fn pwv5_entry(v: u16) -> [u8; 4] {
     [(v >> 13 & 7) as u8, (v >> 10 & 7) as u8, (v >> 7 & 7) as u8, (v >> 2 & 31) as u8]
 }
 
+/// A PWV5 section as it is in the `.EXT` file (`anlz_section`: the tag,
+/// header length, section length, entry size, entry count, then the entries
+/// after the header) as entries. A player's reply has 4 bytes more in front
+/// (`anlz_entries`).
+pub(crate) fn pwv5_entries(section: &[u8]) -> Vec<[u8; 4]> {
+    if section.len() < 20 { return Vec::new(); }
+    let be = |i: usize| u32::from_be_bytes([section[i], section[i + 1], section[i + 2], section[i + 3]]) as usize;
+    let (head, size, count) = (be(4), be(12), be(16));
+    if size != 2 { return Vec::new(); }
+    let Some(data) = section.get(head..) else { return Vec::new() };
+    data[..data.len().min(count * 2)].chunks_exact(2).map(|e| pwv5_entry(u16::from_be_bytes([e[0], e[1]]))).collect()
+}
+
 /// The entries of an ANLZ tag section as the player sends it: a 4-byte
 /// prefix, the tag name, the header length, the section length, the entry
 /// size and the entry count, then the entries.
@@ -167,6 +180,19 @@ fn anlz_entries(b: &[u8], entry: usize) -> Option<&[u8]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `.EXT`'s PWV5 read straight from the file (no reply prefix):
+    /// every entry, in order, unpacked.
+    #[test]
+    fn pwv5_from_the_file_unpacks_every_entry() {
+        let want = [[7, 4, 7, 31], [0, 0, 7, 5], [3, 2, 1, 0], [7, 0, 0, 16]];
+        let sec = opendeck_rekordbox::fixtures::pwv5(&want);
+        assert_eq!(pwv5_entries(&sec), want.to_vec());
+        let file = opendeck_rekordbox::fixtures::anlz_file(&[sec]);
+        let found = opendeck_rekordbox::anlz_section(&file, b"PWV5").expect("found in the file");
+        assert_eq!(pwv5_entries(found), want.to_vec());
+        assert!(pwv5_entries(&found[..10]).is_empty(), "a cut-short section reads as none");
+    }
 
     /// A tag reply as a player sends it: 4 bytes before the tag, the tag
     /// name, header length, section length, entry size, entry count, then

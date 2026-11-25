@@ -15,6 +15,16 @@ All notable changes to this project will be documented in this file.
   quiet passages blue, as on the unit. The same in the overall waveform,
   the CPU renderer (Pi Zero), the browser's PREVIEW column and the other
   player's waveform view.
+- A track with rekordbox analysis (a stick, or a linked player's) draws
+  its RGB waveform from rekordbox's own (the `.EXT`'s PWV5), the way the
+  CDJ-3000 does, fitted to cdj3k-emu's screen against that data: over a
+  pixel and the next, the tallest entry draws the outer layer in its
+  colour, and their mean height draws the core in the colour of the
+  pixel's own tallest entry; heights are rekordbox's, on the CDJ's scale.
+  Side by side with the emulated CDJ-3000 on the same track, the colours
+  match. Tracks without it use the fitted curves. Still different: the
+  overall waveform, which the CDJ draws from rekordbox's colour preview
+  (PWV4), not yet read.
 
 ### Added
 - DVS (MENU → DVS: OFF / ABS / REL / INT): a Serato Control Vinyl (or

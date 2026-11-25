@@ -87,3 +87,18 @@ pub fn dat_and_ext(grid: Vec<u8>, memory: &[FxCue], hot: &[FxCue]) -> (Vec<u8>, 
     (anlz_file(&[grid, pcob(false, memory), pcob(true, hot)]),
      anlz_file(&[pco2(false, memory), pco2(true, hot)]))
 }
+
+/// rekordbox's RGB detail waveform (PWV5, in the `.EXT`): one entry per
+/// 1/150 s, each red, green, blue (0-7) and height (0-31), packed big-endian
+/// as r:3 g:3 b:3 h:5 and 2 unused bits.
+pub fn pwv5(entries: &[[u8; 4]]) -> Vec<u8> {
+    let mut b = Vec::new();
+    for e in entries {
+        let v = ((e[0] as u16 & 7) << 13) | ((e[1] as u16 & 7) << 10) | ((e[2] as u16 & 7) << 7) | ((e[3] as u16 & 31) << 2);
+        b.extend(v.to_be_bytes());
+    }
+    let mut s = b"PWV5".to_vec(); s.extend(be32(0x18)); s.extend(be32(0x18 + b.len() as u32));
+    s.extend(be32(2)); s.extend(be32(entries.len() as u32)); s.extend(be32(0x0096_0305));
+    s.extend(b);
+    s
+}

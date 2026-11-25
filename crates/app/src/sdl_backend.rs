@@ -341,6 +341,10 @@ pub struct SdlRenderer {
     /// The stem mix the enlarged waveform draws instead of `cols` (`set_detail`).
     detail:     Option<Vec<u32>>,
     num_cols:   u32,
+    /// The track's rekordbox RGB entries (`set_rgb`), laid on the column
+    /// grid after the track's columns in `cols` (from `num_cols` on).
+    rb_rgb:     Option<std::sync::Arc<Vec<[u8; 4]>>>,
+    col_hop:    (usize, u32),
     amp_gain:   f32,
     color_mode: ColorMode,
     cols_visible: f32,
@@ -368,6 +372,16 @@ pub struct SdlRenderer {
 }
 
 impl SdlRenderer {
+    /// `cols` = the track's columns, then (with `rb_rgb`) its RGB levels.
+    fn append_rgb(&mut self) {
+        let n = self.num_cols as usize;
+        self.cols.truncate(n);
+        if let Some(e) = &self.rb_rgb {
+            let rgb = crate::waveform_cpu::rgb_columns(e, n, self.col_hop.0, self.col_hop.1);
+            self.cols.extend(rgb);
+        }
+    }
+
     pub fn new(mut canvas: Canvas<Window>, waveform: &WaveformCache) -> Result<Self> {
         let size = Self::drawable_size(&canvas)?;
         canvas.set_blend_mode(BlendMode::Blend);
@@ -380,6 +394,8 @@ impl SdlRenderer {
             textures: HashMap::new(),
             verts: Vec::new(),
             num_cols: cols.len() as u32,
+            rb_rgb: None,
+            col_hop: (waveform.hop_size, waveform.sample_rate),
             detail: None,
             cols,
             amp_gain,
@@ -621,7 +637,9 @@ impl Renderer for SdlRenderer {
     fn set_waveform(&mut self, waveform: &WaveformCache) {
         self.cols = waveform.columns.iter().map(|c| u32::from_le_bytes(*c)).collect();
         self.num_cols = self.cols.len() as u32;
+        self.col_hop = (waveform.hop_size, waveform.sample_rate);
         let (peak, gain) = display_gain(&self.cols);
+        self.append_rgb();
         self.amp_gain = gain;
         self.over_key = None;   // new columns: both waveforms must be drawn again
         self.detail = None;     // the app sends the stem mix again
@@ -629,10 +647,19 @@ impl Renderer for SdlRenderer {
         log::info!("waveform reloaded: {} columns, peak {:.2} → gain {:.2}", self.num_cols, peak, gain);
     }
 
+    fn set_rgb(&mut self, rgb: Option<std::sync::Arc<Vec<[u8; 4]>>>) {
+        self.rb_rgb = rgb;
+        self.append_rgb();
+        self.over_key = None;
+        if let Some(c) = self.wave_cache.as_mut() { c.invalidate(); }
+    }
+
     fn set_detail(&mut self, detail: Option<&[WaveformColumn]>) {
+        let n = self.num_cols as usize;
         self.detail = detail.map(|d| {
-            let mut v: Vec<u32> = d.iter().take(self.cols.len()).map(|c| u32::from_le_bytes(*c)).collect();
-            v.resize(self.cols.len(), 0);
+            let mut v: Vec<u32> = d.iter().take(n).map(|c| u32::from_le_bytes(*c)).collect();
+            v.resize(n, 0);
+            if self.rb_rgb.is_some() { v.extend_from_slice(&self.cols[n..]); }   // the track's RGB levels after it, as in `cols`
             v
         });
         if let Some(c) = self.wave_cache.as_mut() { c.invalidate(); }
@@ -662,6 +689,7 @@ impl Renderer for SdlRenderer {
         let mut params = WaveformParams::from_frame(snap, vp, self.cols_visible, self.color_mode, self.amp_gain,
                                                     self.num_cols, out_w, sh);
         if self.detail.is_some() { params.detail_off = self.num_cols as f32; }
+        if self.rb_rgb.is_some() { params.rgb_off = self.num_cols as f32; }
 
         // ── Ground + waveforms (the shader's pass 1) ─────────────────────
         self.canvas.set_clip_rect(None);

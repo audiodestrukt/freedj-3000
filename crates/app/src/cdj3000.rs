@@ -804,7 +804,9 @@ fn draw_wave_view(ui: &Ui, snap: &DeckSnapshot, r: Rect, cx: f32, wave_w: f32, u
                     // The player's own RGB levels, drawn as a CDJ-3000 draws
                     // them: the tallest entry under the pixel as the outer
                     // layer, the mean as the core (`pwv5_layers`).
-                    let (outer, outer_c, core, core_c) = pwv5_layers(&rgb[a..b.max(a + 1).min(rgb.len())]);
+                    let own_end = b.max(a + 1).min(rgb.len());
+                    let both_end = (own_end + (own_end - a)).min(rgb.len());
+                    let (outer, outer_c, core, core_c) = pwv5_layers(&rgb[a..own_end], &rgb[a..both_end]);
                     for (frac, col) in [(outer, outer_c), (core, core_c)] {
                         if frac > 0.0 {
                             let hh = half * frac;
@@ -2261,18 +2263,18 @@ fn file_art(ctx: &egui::Context, path: &std::path::Path) -> Option<egui::Texture
 /// The colour mode of the waveforms (the renderer's `ColorMode` as a number:
 /// 0 RGB, 1 3-band, 2 blue), for the track table's previews.
 /// RGB waveform entries ([red, green, blue] 0-7 and height 0-31, as a
-/// player's PWV5) under one pixel, as a CDJ-3000 draws them (measured on
-/// cdj3k-emu, 2026-11-24): the tallest entry's height and colour, its
-/// brightest channel at 109, and the mean height and mean colour, brightest
-/// at 224. Heights as fractions of full.
-pub(crate) fn pwv5_layers(span: &[[u8; 4]]) -> (f32, Color32, f32, Color32) {
-    let n = span.len().max(1) as f32;
-    let tall = span.iter().max_by_key(|e| e[3]).copied().unwrap_or([0; 4]);
-    let mut sum = [0.0f32; 3];
-    for e in span { for k in 0..3 { sum[k] += e[k] as f32; } }
-    let c = |v: [f32; 3], top: f32| { let n = crate::waveform_cpu::rgb_norm(v, top); Color32::from_rgb(n[0] as u8, n[1] as u8, n[2] as u8) };
-    let mean_h = span.iter().map(|e| e[3] as f32).sum::<f32>() / n;
-    (tall[3] as f32 / 31.0, c([tall[0] as f32, tall[1] as f32, tall[2] as f32], 109.0), mean_h / 31.0, c(sum, 224.0))
+/// player's PWV5) for one pixel, as a CDJ-3000 draws them (fitted on
+/// cdj3k-emu, 2026-11-24; `waveform_cpu::rgb_bar` is the same model):
+/// `own` = the pixel's entries, `both` = its and the next pixel's. The outer
+/// layer is the tallest of `both` in its colour at 109; the core is their
+/// mean height in the colour of the tallest of `own`, at 224. Heights as
+/// fractions of full: (outer, its colour, core, its colour).
+pub(crate) fn pwv5_layers(own: &[[u8; 4]], both: &[[u8; 4]]) -> (f32, Color32, f32, Color32) {
+    let tallest = |s: &[[u8; 4]]| s.iter().max_by_key(|e| e[3]).copied().unwrap_or([0; 4]);
+    let (outer, core_c) = (tallest(both), tallest(own));
+    let c = |e: [u8; 4], top: f32| { let n = crate::waveform_cpu::rgb_norm([e[0] as f32, e[1] as f32, e[2] as f32], top); Color32::from_rgb(n[0] as u8, n[1] as u8, n[2] as u8) };
+    let mean_h = both.iter().map(|e| e[3] as f32).sum::<f32>() / both.len().max(1) as f32;
+    (outer[3] as f32 / 31.0, c(outer, 109.0), mean_h / 31.0, c(core_c, 224.0))
 }
 
 static WAVE_MODE: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(1);
@@ -2409,12 +2411,13 @@ fn draw_row_preview(ui: &Ui, b: &Browser, e: &crate::browser::Entry, x0: f32, y0
             // tallest entry under the pixel is the outer layer, the mean the
             // core (`pwv5_layers`), standing on the baseline.
             let (a, z) = (c * n / cols, ((c + 1) * n / cols).max(c * n / cols + 1).min(n));
-            let span: Vec<[u8; 4]> = w[a..z].iter().map(|v| {
+            let z2 = (z + (z - a)).min(n);
+            let span: Vec<[u8; 4]> = w[a..z2].iter().map(|v| {
                 let lv = opendeck_mediaserver::rgb_levels_from_preview(v[0] as f32, v[1] as f32, v[2] as f32);
                 let top = *v.iter().max().unwrap_or(&0) as f32;
                 [lv[0].round() as u8, lv[1].round() as u8, lv[2].round() as u8, (top / 127.0 * 31.0).round().min(31.0) as u8]
             }).collect();
-            let (outer, outer_c, core, core_c) = pwv5_layers(&span);
+            let (outer, outer_c, core, core_c) = pwv5_layers(&span[..z - a], &span);
             bar(c, wave.height() * outer, outer_c);
             bar(c, wave.height() * core, core_c);
         }

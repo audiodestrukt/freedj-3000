@@ -116,12 +116,14 @@ fn mix4(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
     [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t, a[3] + (b[3] - a[3]) * t]
 }
 
-/// RGB as a CDJ-3000 draws it, the shader's `rgb_bar_color` (measured on
-/// cdj3k-emu, 2026-11-24): our bands through the curves fitted to
-/// rekordbox's RGB waveforms (`opendeck_mediaserver::rgb_levels`); of the
-/// columns under a pixel, the tallest draws the outer layer in its colour
-/// with the brightest channel at 109, their mean height the core in their
-/// mean colour with the brightest channel at 224. Colours in author units.
+/// RGB as a CDJ-3000 draws it, the shader's `rgb_bar_color` (fitted to
+/// cdj3k-emu's screen against the track's PWV5, 2026-11-24): colours are
+/// rekordbox's RGB levels (the track's own, or our bands through
+/// `opendeck_mediaserver::rgb_levels`) normalised to a fixed brightest
+/// channel. Over the pixel and the next one, the outer layer is the tallest
+/// column's height in its colour at 109; the core is their mean height in
+/// the colour of the tallest column of the pixel's own span, at 224.
+/// Colours in author units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct RgbBar { pub core: f32, pub core_rgb: [f32; 3], pub outer: f32, pub outer_rgb: [f32; 3] }
 
@@ -132,22 +134,75 @@ pub fn rgb_norm(v: [f32; 3], top: f32) -> [f32; 3] {
     [v[0] / m * top, v[1] / m * top, v[2] / m * top]
 }
 
-/// The pixel at `col_f` covering `span` columns (sampled at up to 12).
-pub fn rgb_bar(cols: &[u32], num_cols: i64, col_f: f32, span: f32, gain: f32) -> RgbBar {
+/// A rekordbox height of 31 fills this much of the field (the CDJ's outer
+/// layer: 6.3 px per step of a 240 px field, fitted on cdj3k-emu).
+pub const RB_FULL: f32 = 0.81;
+
+/// One of our columns of a track's rekordbox RGB waveform, packed in a u32:
+/// the tallest entry the column spans (red, green, blue 0-7 at bits 0, 3,
+/// 6; its height 0-31 at bit 9) and the span's mean height × 8 (bits
+/// 14-21). The CDJ picks the tallest entry for colour and averages heights,
+/// so a column keeps both rather than one blended entry.
+pub fn rb_pack(e: [u8; 4], mean_h: f32) -> u32 {
+    (e[0] as u32 & 7) | (e[1] as u32 & 7) << 3 | (e[2] as u32 & 7) << 6 | (e[3] as u32 & 31) << 9
+        | ((mean_h * 8.0).round().clamp(0.0, 255.0) as u32) << 14
+}
+/// `rb_pack` back: ([r, g, b] levels, tallest height, mean height), heights 0-31.
+pub fn rb_unpack(v: u32) -> ([f32; 3], f32, f32) {
+    ([(v & 7) as f32, (v >> 3 & 7) as f32, (v >> 6 & 7) as f32], (v >> 9 & 31) as f32, (v >> 14 & 255) as f32 / 8.0)
+}
+
+/// A track's rekordbox RGB entries (PWV5, 150 a second) laid on our column
+/// grid (`rb_pack` per column). A column's span starts half an FFT after
+/// its first sample, as the waveforms we serve are shifted to line up with
+/// rekordbox's; an entry counts for the part of it the span covers.
+pub fn rgb_columns(entries: &[[u8; 4]], n_cols: usize, hop: usize, sr: u32) -> Vec<u32> {
+    if entries.is_empty() || sr == 0 { return vec![0; n_cols]; }
+    let half = opendeck_analysis::waveform::FFT_SIZE as f64 / 2.0;
+    let last = entries.len() - 1;
+    (0..n_cols).map(|i| {
+        let e0 = ((i as f64 * hop as f64 + half - hop as f64 / 2.0).max(0.0) / sr as f64 * 150.0).min(last as f64);
+        let e1 = (e0 + hop as f64 / sr as f64 * 150.0).min(last as f64 + 1.0).max(e0 + 1e-6);
+        let (mut hs, mut w, mut tall) = (0.0f64, 0.0f64, entries[e0.floor() as usize]);
+        let mut k = e0.floor() as usize;
+        while (k as f64) < e1 && k <= last {
+            let cover = (e1.min(k as f64 + 1.0) - e0.max(k as f64)).max(0.0);
+            hs += entries[k][3] as f64 * cover;
+            w += cover;
+            if entries[k][3] > tall[3] { tall = entries[k]; }
+            k += 1;
+        }
+        rb_pack(tall, (hs / w.max(1e-9)) as f32)
+    }).collect()
+}
+
+/// The pixel at `col_f` covering `span` columns (sampled at up to 12). With
+/// `rgb_off` > 0 the colours are the track's own rekordbox levels, stored
+/// from there in `cols` (`rgb_columns`); 0 = from our bands.
+pub fn rgb_bar(cols: &[u32], num_cols: i64, col_f: f32, span: f32, gain: f32, rgb_off: usize) -> RgbBar {
     let span = span.max(1.0);
     let n = (span.ceil() as usize).clamp(1, 12);
     let last = (num_cols - 1).max(0) as f32;
-    let (mut top, mut top_c, mut sum, mut hs) = (-1.0f32, [0.0f32; 3], [0.0f32; 3], 0.0f32);
-    for i in 0..n {
-        let cf = (col_f - span * 0.5 + (i as f32 + 0.5) * span / n as f32).clamp(0.0, last);
-        let c = unpack(cols[(cf as usize).min(cols.len() - 1)]);
-        let lv = opendeck_mediaserver::rgb_levels(c[0] * 255.0, c[1] * 255.0, c[2] * 255.0);
-        let h = (c[3] * gain).min(1.0);
-        if h > top { top = h; top_c = lv; }
-        for k in 0..3 { sum[k] += lv[k]; }
-        hs += h;
+    // Over the pixel and the next: the tallest (outer) and the mean height
+    // (core); over the pixel alone: the tallest, whose colour the core takes.
+    let (mut top, mut top_c, mut own, mut own_c, mut hs) = (-1.0f32, [0.0f32; 3], -1.0f32, [0.0f32; 3], 0.0f32);
+    for i in 0..2 * n {
+        let cf = (col_f - span * 0.5 + (i as f32 + 0.5) * span / n as f32).clamp(0.0, last) as usize;
+        // (levels, height to pick the tallest by, height to average)
+        let (lv, tall_h, mean_h) = match cols.get(rgb_off + cf).filter(|_| rgb_off > 0) {
+            // The track's own: rekordbox's heights, on the CDJ's scale.
+            Some(&v) => { let (lv, t, m) = rb_unpack(v); (lv, t / 31.0 * RB_FULL, m / 31.0 * RB_FULL) }
+            None => {
+                let c = unpack(cols[cf.min(cols.len() - 1)]);
+                let h = (c[3] * gain).min(1.0);
+                (opendeck_mediaserver::rgb_levels(c[0] * 255.0, c[1] * 255.0, c[2] * 255.0), h, h)
+            }
+        };
+        if tall_h > top { top = tall_h; top_c = lv; }
+        if i < n && tall_h > own { own = tall_h; own_c = lv; }
+        hs += mean_h;
     }
-    RgbBar { core: hs / n as f32, core_rgb: rgb_norm(sum, 224.0), outer: top, outer_rgb: rgb_norm(top_c, 109.0) }
+    RgbBar { core: hs / (2 * n) as f32, core_rgb: rgb_norm(own_c, 224.0), outer: top, outer_rgb: rgb_norm(top_c, 109.0) }
 }
 
 /// `bar_color` with the per-column part hoisted: everything that does not
@@ -376,7 +431,7 @@ fn classify(pal: &Palette, p: &WaveformParams, g: &WaveGeom, cols: &[u32], rect:
                 let side = |d: f32| Bar::new(wave_sample(cols, g.num_cols, col_f + d), p);
                 bar = bar.with_widths(2.0 / g.wave_h, &side(-g.cue_per_px), &side(g.cue_per_px));
             }
-            if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, g.num_cols, col_f, g.cue_per_px, p.amp_gain)); }
+            if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, g.num_cols, col_f, g.cue_per_px, p.amp_gain, p.rgb_off as usize)); }
             Column::Field { bar: Some(bar), bg, tick }
         }
     }
@@ -656,7 +711,7 @@ fn draw_overview(l: &Lut, pal: &Palette, p: &WaveformParams, cols: &[u32], rect:
             let side = |d: f32| Bar::new(peak(sx + d / r[2]), p);
             bar = bar.with_widths(2.0 / r[3], &side(-1.0), &side(1.0));
         }
-        if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, num_cols as i64, (sx + 0.5 / r[2]) * p.num_cols, cols_per_px, p.amp_gain)); }
+        if bar.mode == 0 { bar = bar.with_rgb(rgb_bar(cols, num_cols as i64, (sx + 0.5 / r[2]) * p.num_cols, cols_per_px, p.amp_gain, p.rgb_off as usize)); }
         Over::Body { bar, field, played: qx < ph_x && dim }
     }).collect();
 
@@ -699,7 +754,7 @@ mod tests {
             downbeat_offset: 0.0, beats_per_bar: 4.0, beat2_phase_beats: 0.0, beat2_period_cols: 0.0,
             color_mode: ColorMode::Blue as u32 as f32, wave_rect: wave, over_rect: over, amp_gain: 1.0,
             dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 0.0, detail_off: 0.0,
-            light: 0.0, _pad: [0.0; 3],
+            light: 0.0, rgb_off: 0.0, _pad: [0.0; 2],
         }
     }
 
@@ -892,26 +947,71 @@ mod rgb_tests {
     fn colours_are_normalised_hues_not_raw_energy() {
         // A bass-heavy column with some highs: raw it is mostly red; on the
         // CDJ the hue comes from rekordbox's levels, brightest channel 224.
-        let b = rgb_bar(&[col(200, 40, 25, 255)], 1, 0.0, 1.0, 1.0);
+        let b = rgb_bar(&[col(200, 40, 25, 255)], 1, 0.0, 1.0, 1.0, 0);
         let m = b.core_rgb.iter().cloned().fold(0.0, f32::max);
         assert!((m - 224.0).abs() < 1e-3, "the brightest channel is 224: {:?}", b.core_rgb);
         assert!(b.core_rgb[2] > 112.0, "the highs show as blue (magenta, as the unit draws a kick), not red alone: {:?}", b.core_rgb);
         // A quiet column with little bass: blue.
-        let q = rgb_bar(&[col(20, 30, 30, 80)], 1, 0.0, 1.0, 1.0);
+        let q = rgb_bar(&[col(20, 30, 30, 80)], 1, 0.0, 1.0, 1.0, 0);
         assert!(q.core_rgb[2] >= q.core_rgb[0], "quiet and bright on top reads blue: {:?}", q.core_rgb);
     }
 
+    /// The CDJ's two layers, as fitted on cdj3k-emu: over this pixel's 4
+    /// columns and the next pixel's 4, the outer is the tallest (its height,
+    /// its colour at 109) and the core is the mean height, coloured as the
+    /// tallest of this pixel's own 4 (at 224).
     #[test]
-    fn outer_is_the_tallest_column_core_the_mean() {
-        let cols = [col(200, 40, 25, 100), col(30, 60, 40, 255), col(200, 40, 25, 100), col(200, 40, 25, 100)];
-        let b = rgb_bar(&cols, 4, 2.0, 4.0, 1.0);
-        assert!((b.outer - 1.0).abs() < 1e-6, "outer = the tallest column");
-        assert!((b.core - (255.0 + 300.0) / 4.0 / 255.0).abs() < 1e-3, "core = the mean height: {}", b.core);
+    fn outer_is_the_tallest_of_two_pixels_core_the_mean_in_its_own_tallest_colour() {
+        let (kick, hat, loud_next) = (col(200, 40, 25, 200), col(30, 60, 40, 120), col(10, 120, 60, 255));
+        let cols = [hat, kick, hat, hat, hat, loud_next, hat, hat];
+        // The pixel covers columns 0-3 (centre 2, span 4); the next, 4-7.
+        let b = rgb_bar(&cols, 8, 2.0, 4.0, 1.0, 0);
+        assert!((b.outer - 1.0).abs() < 1e-6, "outer = the tallest over both pixels (the next one's loud column)");
+        assert_eq!(b.outer_rgb, rgb_norm(opendeck_mediaserver::rgb_levels(10.0, 120.0, 60.0), 109.0), "in that column's colour");
+        let mean = (200.0 + 255.0 + 6.0 * 120.0) / 8.0 / 255.0;
+        assert!((b.core - mean).abs() < 1e-3, "core = the mean height over both: {} vs {mean}", b.core);
+        assert_eq!(b.core_rgb, rgb_norm(opendeck_mediaserver::rgb_levels(200.0, 40.0, 25.0), 224.0), "coloured as this pixel's tallest (the kick)");
         let m = b.outer_rgb.iter().cloned().fold(0.0, f32::max);
-        assert!((m - 109.0).abs() < 1e-3, "outer's brightest channel is 109");
-        let tall = rgb_bar(&[cols[1]], 1, 0.0, 1.0, 1.0);
-        assert_eq!(b.outer_rgb, rgb_norm(rgb_norm(opendeck_mediaserver::rgb_levels(30.0, 60.0, 40.0), 1.0), 109.0), "in the tallest column's colour");
-        assert!(tall.outer > 0.99);
+        assert!((m - 109.0).abs() < 1e-3 && (b.core_rgb.iter().cloned().fold(0.0, f32::max) - 224.0).abs() < 1e-3);
+    }
+
+    /// rekordbox's entries (150 a second) land on our columns: each keeps
+    /// the tallest entry its span covers and the span's mean height.
+    #[test]
+    fn stick_rgb_lands_on_our_columns_keeping_the_tallest_and_the_mean() {
+        let (hop, sr) = (512usize, 48_000u32);
+        // Entry k: height = k % 32 (a sawtooth), green = (k / 100) % 8.
+        let entries: Vec<[u8; 4]> = (0..2000).map(|k| [7, ((k / 100) % 8) as u8, 3, (k % 32) as u8]).collect();
+        let cols = rgb_columns(&entries, 1000, hop, sr);
+        for i in [0usize, 1, 37, 500, 999] {
+            let start = (i * hop + opendeck_analysis::waveform::FFT_SIZE / 2 - hop / 2) as f64 / sr as f64 * 150.0;
+            let (lv, tall, mean) = rb_unpack(cols[i]);
+            assert_eq!((lv[0], lv[2]), (7.0, 3.0), "column {i}: an entry's colour");
+            assert!((lv[1] - ((start as usize / 100) % 8) as f32).abs() <= 1.0, "column {i} is around entry {start:.0}");
+            assert!(tall >= mean, "column {i}: tallest {tall} ≥ mean {mean}");
+        }
+        // The tallest wins, the mean is the mean: heights 31 and 1 alternating.
+        let alt: Vec<[u8; 4]> = (0..600).map(|k| if k % 2 == 0 { [7, 0, 0, 31] } else { [0, 0, 7, 1] }).collect();
+        let (lv, tall, mean) = rb_unpack(rgb_columns(&alt, 100, hop, sr)[50]);
+        assert_eq!((lv, tall), ([7.0, 0.0, 0.0], 31.0), "the tall entry's colour and height, not a blend");
+        assert!(mean > 8.0 && mean < 24.0, "the mean height of the span: {mean}");
+        assert_eq!(rgb_columns(&[], 4, hop, sr), vec![0; 4], "none: zeros");
+        assert_eq!(rb_unpack(rb_pack([5, 6, 7, 30], 12.5)), ([5.0, 6.0, 7.0], 30.0, 12.5), "packs both ways");
+    }
+
+    /// With the stick's columns after the track's, RGB takes rekordbox's
+    /// colours and heights, not our bands': here bands that read red-heavy,
+    /// a stick that says a blue column of height 31.
+    #[test]
+    fn the_sticks_levels_win_over_our_bands() {
+        let mut cols = vec![col(200, 40, 25, 100); 4];
+        let ours = rgb_bar(&cols, 4, 1.0, 1.0, 1.0, 0);
+        assert!(ours.core_rgb[0] > 200.0, "our bands alone: red-heavy {:?}", ours.core_rgb);
+        cols.extend(std::iter::repeat(rb_pack([0, 0, 7, 31], 31.0)).take(4));
+        let rb = rgb_bar(&cols, 4, 1.0, 1.0, 1.0, 4);
+        assert_eq!(rb.core_rgb, [0.0, 0.0, 224.0], "the stick's blue");
+        assert_eq!(rb.outer_rgb, [0.0, 0.0, 109.0]);
+        assert!((rb.outer - RB_FULL).abs() < 1e-6 && (rb.core - RB_FULL).abs() < 1e-6, "rekordbox's heights on the CDJ's scale");
     }
 
     /// The shader, with the curves injected, compiles and validates.
