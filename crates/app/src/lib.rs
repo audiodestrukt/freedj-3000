@@ -8,6 +8,7 @@
 //!   Esc / Q  — quit
 
 mod audio;
+mod dvs;
 pub use audio::{HostOutput, HostSlot};
 mod browser;
 mod dbsession;
@@ -747,6 +748,15 @@ struct DeckApp {
     cue_set: bool,
     /// Dev: OPENDECK_SCRIPT, timed actions for end-to-end tests.
     script: Option<(devscript::Script, Instant)>,
+    /// DVS (MENU → DVS): the interface's input while it is on.
+    dvs_input: Option<dvs::DvsInput>,
+    /// This deck can take an input (not inside a plugin host).
+    dvs_allowed: bool,
+    /// The record had the deck last frame; its last speed; the fader's
+    /// speed before it took over (back when DVS goes OFF).
+    dvs_was_driving: bool,
+    dvs_last_speed: f32,
+    dvs_fader_before: f32,
 
     // Second beat grid — tempo controlled by Deck B on the MIDI controller.
     fader_speed:  Arc<AtomicU32>,  // f32 bits; pitch-fader speed (no jog nudge)
@@ -1198,6 +1208,11 @@ impl DeckApp {
             history_cursor:    None,
             cue_set:           false,
             script:            devscript::Script::from_env().map(|s| (s, Instant::now())),
+            dvs_input:         None,
+            dvs_allowed:       false,
+            dvs_was_driving:   false,
+            dvs_last_speed:    0.0,
+            dvs_fader_before:  1.0,
             fader_speed,
             beat2_bpm,
             beat2_player,
@@ -2786,6 +2801,61 @@ impl DeckApp {
         }
     }
 
+    /// MENU → DVS: open the interface's input when DVS is on (the first
+    /// time on iOS, the microphone permission prompt), close it when OFF.
+    fn apply_dvs(&mut self) {
+        let mode = self.settings.dvs;
+        self.audio.dvs.set_mode(mode);
+        if mode == dvs::DvsMode::Off || !self.dvs_allowed {
+            if self.dvs_input.take().is_some() { log::info!("dvs: off, input closed"); }
+            self.audio.dvs.clear();
+            #[cfg(target_os = "ios")]
+            unsafe { freedj_audio_session_input(false) };
+            return;
+        }
+        if self.dvs_input.is_none() {
+            #[cfg(target_os = "ios")]
+            unsafe { freedj_audio_session_input(true) };
+            match dvs::DvsInput::open(Arc::clone(&self.audio.dvs)) {
+                Ok(i) => { log::info!("dvs: {:?} on {}", mode, i.device); self.dvs_input = Some(i); }
+                Err(e) => log::warn!("dvs: no input: {e:#}"),
+            }
+        }
+    }
+
+    /// Once a frame: while the record has the deck it is the tempo (the
+    /// fader, nudge and SYNC don't apply) and PLAY follows the platter, so
+    /// the screen and Link show what is heard. Handing back, INT carries on
+    /// at the record's speed (as Serato and freedj-esp's P4 do); OFF goes
+    /// back to the fader.
+    fn dvs_tick(&mut self) {
+        let status = self.audio.dvs.status();
+        if status != self.settings.dvs_status { self.settings.dvs_status = status; }
+        let driving = self.audio.dvs.driving();
+        if driving {
+            if !self.dvs_was_driving {
+                self.dvs_fader_before = f32::from_bits(self.fader_speed.load(Ordering::Relaxed));
+                if self.link.sync.swap(false, Ordering::Relaxed) { log::info!("dvs: SYNC off, the record has the tempo"); }
+            }
+            let sp = self.audio.dvs.drive_speed();
+            self.dvs_last_speed = sp;
+            let moving = sp.abs() > 0.05;
+            self.audio.playing.store(moving, Ordering::Relaxed);
+            if moving {
+                self.fader_speed.store(sp.abs().to_bits(), Ordering::Relaxed);
+                self.audio.speed_store(sp.abs());
+            }
+        } else if self.dvs_was_driving {
+            let moving = self.dvs_last_speed.abs() > 0.05;
+            let speed = if self.settings.dvs == dvs::DvsMode::Int && moving { self.dvs_last_speed.abs() } else { self.dvs_fader_before };
+            self.fader_speed.store(speed.to_bits(), Ordering::Relaxed);
+            self.audio.speed_store(speed);
+            self.audio.set_playing(moving && self.dvs_last_speed > 0.0);
+            log::info!("dvs: handed back, {} at {:+.2}%", if moving { "playing" } else { "paused" }, (speed - 1.0) * 100.0);
+        }
+        self.dvs_was_driving = driving;
+    }
+
     /// Step a MENU setting and apply whatever it controls at runtime.
     fn cycle_setting(&mut self, s: settings::Setting) {
         // ABOUT is a screen, not a value: the row opens it, BACK closes it.
@@ -2804,6 +2874,7 @@ impl DeckApp {
         if s == settings::Setting::DeckView { self.apply_deck_view(); }
         if s == settings::Setting::WaveColor { self.apply_wave_color(); }
         if s == settings::Setting::OutputGain { audio::set_output_gain_db(self.settings.output_gain_db); }
+        if s == settings::Setting::Dvs { self.apply_dvs(); }
         if s == settings::Setting::Stems {
             // On: look for the loaded track's stems now.  Off: drop them,
             // back to the plain track, and leave the STEMS pad mode.
@@ -3657,6 +3728,7 @@ impl DeckApp {
             }
         }
         self.run_script();
+        self.dvs_tick();
         let frame_start = Instant::now();
         let frame_dt    = frame_start.duration_since(self.last_render);
         self.last_render = frame_start;
@@ -4219,6 +4291,9 @@ extern "C" {
     fn freedj_set_idle_timer_disabled(disabled: bool);
     fn freedj_is_phone() -> bool;
     fn freedj_memory_warnings() -> i32;
+    /// main.m: PlayAndRecord in measurement mode (no input processing) while
+    /// DVS is on, back to Playback when it is off.
+    fn freedj_audio_session_input(on: bool);
 }
 
 /// iOS memory warnings so far (ios/freedj/main.m counts them); 0 elsewhere.
@@ -5439,6 +5514,12 @@ fn build(cfg: Config) -> Result<DeckApp> {
     let has_track = track.is_some();
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
     app.tile = cfg.host.as_ref().and_then(|h| h.tile);
+    app.dvs_allowed = cfg.host.is_none();
+    // Dev / bench: OPENDECK_DVS=abs|rel|int turns DVS on for this run (not saved).
+    if let Ok(v) = std::env::var("OPENDECK_DVS") {
+        if let Some(m) = dvs::DvsMode::ALL.iter().find(|m| m.label().eq_ignore_ascii_case(&v)) { app.settings.dvs = *m; }
+    }
+    app.apply_dvs();
     app.follow = cfg.follow;
     if let Some(p) = cfg.follow { log::info!("follow: mirroring Link player {p}"); }
     app.display = cfg.host.as_ref().and_then(|h| h.display.clone());
@@ -6420,6 +6501,7 @@ pub(crate) mod deck_harness {
             self.smoothed_pos = self.heard_pos(raw, fl);
             self.follow_poll();
             if let Some(p) = self.follow_pos() { self.smoothed_pos = p; }
+            self.dvs_tick();
         }
 
         /// Let the deck run for `secs`, ticking as frames would.
@@ -7514,5 +7596,71 @@ mod wave_view_tests {
         link.master_player.store(3, Ordering::Relaxed);
         link.master.store(true, Ordering::Relaxed);
         assert_eq!(wave_view_player(&link), None, "we are master: MASTER PLAYER");
+    }
+}
+
+/// MENU → DVS, as the user meets it: the row, and a record driving the deck.
+#[cfg(test)]
+mod dvs_app_tests {
+    use super::*;
+    use crate::dvs::{turntable::Turntable, DvsMode};
+    use settings::Setting;
+
+    #[test]
+    fn the_menu_row_steps_off_abs_rel_int_and_shows_the_record() {
+        assert!(settings::MENU.iter().any(|(s, n)| *s == Setting::Dvs && *n == "DVS"));
+        let mut d = deck_harness::deck(2.0);
+        assert_eq!(d.settings.dvs, DvsMode::Off, "off until turned on");
+        assert_eq!(d.settings.value(Setting::Dvs), "OFF");
+        let mut seen = vec![];
+        for _ in 0..4 { d.cycle_setting(Setting::Dvs); d.tick(); seen.push(d.audio.dvs.mode()); }
+        assert_eq!(seen, [DvsMode::Abs, DvsMode::Rel, DvsMode::Int, DvsMode::Off]);
+        d.cycle_setting(Setting::Dvs);
+        d.tick();
+        // No input in a test deck: the row says so.
+        assert_eq!(d.settings.value(Setting::Dvs), "ABS   (NO INPUT)");
+    }
+
+    #[test]
+    fn the_record_is_the_tempo_and_play_until_int_hands_it_back() {
+        let mut d = deck_harness::deck_on(AudioHandle::open_test(deck_harness::track(60.0), deck_harness::SR).unwrap());
+        d.settings.dvs = DvsMode::Rel;
+        d.apply_dvs();
+        d.link.sync.store(true, Ordering::Relaxed);
+        // A record at +5 %.
+        let tt = Turntable::play(Arc::clone(&d.audio.dvs), 40_000.0, |_| Some((1.05, f64::NAN)));
+        d.run(0.8);
+        assert!(d.audio.dvs.driving());
+        assert!(d.audio.playing.load(Ordering::Relaxed), "PLAY follows the platter");
+        let tempo = f32::from_bits(d.fader_speed.load(Ordering::Relaxed));
+        assert!((tempo - 1.05).abs() < 0.01, "the screen and Link show the record's +5 %: {tempo}");
+        assert!(!d.link.sync.load(Ordering::Relaxed), "SYNC off: the record has the tempo");
+        assert_eq!(d.settings.value(Setting::Dvs), "REL   (LOCKED)");
+        let a = d.at();
+        d.run(0.5);
+        assert!((d.at() - a - 0.525).abs() < 0.05, "plays at +5 %: {}", d.at() - a);
+        // INT: the deck plays on, at the record's speed.
+        d.cycle_setting(Setting::Dvs);
+        d.run(0.2);
+        drop(tt);
+        assert!(!d.audio.dvs.driving());
+        assert!(d.audio.playing.load(Ordering::Relaxed));
+        assert!((f32::from_bits(d.fader_speed.load(Ordering::Relaxed)) - 1.05).abs() < 0.01);
+        let b = d.at();
+        d.run(0.5);
+        assert!(d.at() > b + 0.4, "still playing on its own: {} → {}", b, d.at());
+    }
+
+    #[test]
+    fn a_stopped_record_pauses_the_deck() {
+        let mut d = deck_harness::deck_on(AudioHandle::open_test(deck_harness::track(60.0), deck_harness::SR).unwrap());
+        d.settings.dvs = DvsMode::Rel;
+        d.apply_dvs();
+        let _tt = Turntable::play(Arc::clone(&d.audio.dvs), 40_000.0, |t| Some((if t < 0.8 { 1.0 } else { 0.0 }, f64::NAN)));
+        d.run(0.7);
+        assert!(d.audio.playing.load(Ordering::Relaxed));
+        d.run(0.5);
+        assert!(!d.audio.playing.load(Ordering::Relaxed), "the platter stopped: paused");
+        assert!(d.audio.dvs.driving(), "and the record still has the deck");
     }
 }

@@ -459,12 +459,29 @@ void freedj_device_model(char *buf, size_t len) {
 // output device, and re-activate when an interruption (a call, Siri) ends.
 #import <AVFoundation/AVFoundation.h>
 
+// DVS on (MENU → DVS): PlayAndRecord, so the interface's input reaches the
+// deck, in Measurement mode (no gain control, echo cancelling or other voice
+// processing, which would wreck a timecode signal), still to the speaker or
+// the interface rather than the earpiece. The first time, iOS asks for the
+// microphone (NSMicrophoneUsageDescription); DVS off goes back to Playback.
+static bool freedj_input_on = false;
+
 static void freedj_audio_session_activate(void) {
     NSError *e = nil;
     AVAudioSession *s = [AVAudioSession sharedInstance];
-    if (![s setCategory:AVAudioSessionCategoryPlayback error:&e]) NSLog(@"audio session category: %@", e);
+    BOOL ok = freedj_input_on
+        ? [s setCategory:AVAudioSessionCategoryPlayAndRecord mode:AVAudioSessionModeMeasurement
+                 options:AVAudioSessionCategoryOptionDefaultToSpeaker | AVAudioSessionCategoryOptionAllowBluetoothA2DP error:&e]
+        : [s setCategory:AVAudioSessionCategoryPlayback mode:AVAudioSessionModeDefault options:0 error:&e];
+    if (!ok) NSLog(@"audio session category: %@", e);
     e = nil;
     if (![s setActive:YES error:&e]) NSLog(@"audio session activate: %@", e);
+}
+
+void freedj_audio_session_input(bool on) {
+    if (on == freedj_input_on) return;
+    freedj_input_on = on;
+    freedj_audio_session_activate();
 }
 
 static void freedj_audio_session_setup(void) {

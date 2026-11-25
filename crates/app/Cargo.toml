@@ -28,6 +28,7 @@ opendeck-nfs         = { path = "../nfs" }
 opendeck-dbserver    = { path = "../dbserver" }
 opendeck-mediaserver = { path = "../mediaserver" }
 opendeck-stems       = { path = "../stems" }
+opendeck-timecode    = { workspace = true }
 opendeck-stemd = { path = "../stemd" }
 opendeck-demucs      = { path = "../demucs", optional = true }
 rayon                = { version = "1", optional = true }

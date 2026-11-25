@@ -59,6 +59,8 @@
     <key>LSSupportsOpeningDocumentsInPlace</key>
     <true/>
     <!-- ProDJ Link: any local-network access prompts the user with this string. -->
+    <key>NSMicrophoneUsageDescription</key>
+    <string>With DVS turned on in MENU, OpenDeck DJ listens to your audio interface's input for a timecode record on a turntable, which then plays the deck. Nothing is recorded or sent anywhere.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>OpenDeck DJ discovers and beat-syncs with Pro DJ Link players (CDJ/XDJ) on your local network.</string>
 </dict>

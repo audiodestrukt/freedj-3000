@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, OutputGain, Player, Skin, Light, WaveColor, Divisions, DeckView, Stems, PerfLog, About }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, OutputGain, Player, Skin, Light, WaveColor, Divisions, DeckView, Stems, Dvs, PerfLog, About }
 
 /// DECK VIEW is a desktop row: the iPad always shows the whole deck and the
 /// phone has its two pages.
@@ -26,10 +26,28 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::DeckView,     "DECK VIEW"),
     (Setting::Stems,        "STEMS"),
+    (Setting::Dvs,          "DVS"),
     (Setting::PerfLog,      "PERF LOG"),
     (Setting::About,        "ABOUT"),
 ];
-#[cfg(any(target_os = "ios", target_os = "android"))]
+#[cfg(target_os = "ios")]
+pub const MENU: &[(Setting, &str)] = &[
+    (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
+    (Setting::Quantize,     "QUANTIZE"),
+    (Setting::TempoRange,   "TEMPO RANGE"),
+    (Setting::OutputGain,   "OUTPUT GAIN"),
+    (Setting::Player,       "PLAYER No."),
+    (Setting::Skin,         "SCREEN"),
+    (Setting::Light,        "LIGHT MODE"),
+    (Setting::WaveColor,    "WAVEFORM COLOR"),
+    (Setting::Divisions,    "WAVEFORM DIVISIONS"),
+    (Setting::Stems,        "STEMS"),
+    (Setting::Dvs,          "DVS"),
+    (Setting::PerfLog,      "PERF LOG"),
+    (Setting::About,        "ABOUT"),
+];
+/// Android: no DVS row yet (the input needs the RECORD_AUDIO permission flow).
+#[cfg(target_os = "android")]
 pub const MENU: &[(Setting, &str)] = &[
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
@@ -162,6 +180,14 @@ pub struct Settings {
     /// STEMS panel is opened.  On by default since seed 4 (people install
     /// the app for stems); OFF gives the stock units' look.
     pub stems: bool,
+    /// DVS: a timecode record on a turntable drives the deck, through the
+    /// audio interface's input (`dvs.rs`). OFF by default: the input is
+    /// opened (and on iOS the microphone permission asked) only when it is
+    /// turned on.
+    pub dvs: crate::dvs::DvsMode,
+    /// The record's state for the DVS row (not saved; the app sets it).
+    #[serde(skip)]
+    pub dvs_status: &'static str,
     /// Which player-number seeding this file has had (0 = written before
     /// 0.2.1, when every iOS device was seeded to 3).  Lets a later default
     /// re-seed a device once without touching a number the user chose.
@@ -184,7 +210,7 @@ const SEED: u8 = 4;
 impl Default for Settings {
     fn default() -> Self {
         Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000,
-               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, divisions: Divisions::Phrase, output_gain_db: 0.0, light: false, stems: true, seed: 0, phone: false }
+               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, divisions: Divisions::Phrase, output_gain_db: 0.0, light: false, stems: true, dvs: crate::dvs::DvsMode::Off, dvs_status: "", seed: 0, phone: false }
     }
 }
 
@@ -277,6 +303,7 @@ impl Settings {
             Setting::WaveColor    => c.wave_color = step(&[WaveColor::Blue, WaveColor::Rgb, WaveColor::ThreeBand], c.wave_color, dir),
             Setting::Divisions    => c.divisions = step(&[Divisions::TimeScale, Divisions::Phrase], c.divisions, dir),
             Setting::Stems        => c.stems = !c.stems,
+            Setting::Dvs          => c.dvs = step(&crate::dvs::DvsMode::ALL, c.dvs, dir),
             Setting::Light        => c.light = !c.light,
             Setting::PerfLog      => c.perf_log = !c.perf_log,
             // Not a setting: the row opens the ABOUT screen.
@@ -298,6 +325,8 @@ impl Settings {
             Setting::Skin         => self.skin.label().into(),
             Setting::WaveColor    => format!("{}   (C)", self.wave_color.label()),
             Setting::Divisions    => self.divisions.label().into(),
+            Setting::Dvs if self.dvs_status.is_empty() => self.dvs.label().into(),
+            Setting::Dvs          => format!("{}   ({})", self.dvs.label(), self.dvs_status),
             Setting::DeckView     => if self.full_deck { "FULL DECK   (F)".into() } else { "SCREEN ONLY   (F)".into() },
             Setting::Stems        => if self.stems { "ON".into() } else { "OFF".into() },
             Setting::Light        => if self.light { "ON".into() } else { "OFF".into() },

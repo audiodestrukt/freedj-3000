@@ -99,6 +99,7 @@ fn back_pressure_slots(speed: f32, device_ch: usize) -> usize {
 /// treats it as a seek and resets the timestretch engine.
 /// Sentinel for `seek_request`: no seek pending.
 const NO_SEEK: u64 = u64::MAX;
+pub(crate) const NO_SEEK_PUB: u64 = NO_SEEK;
 
 // ── Audio integrity counters ──────────────────────────────────────────────────
 
@@ -173,6 +174,8 @@ pub struct AudioHandle {
     pub stems:       Arc<StemControl>,
     /// Real-time glitch counters (underruns / dropped frames).
     pub stats:       Arc<AudioStats>,
+    /// DVS: the record's state and whether it has the deck (`dvs.rs`).
+    pub dvs:         Arc<crate::dvs::DvsShared>,
     /// The buffer holds the whole track.  False while a streaming load is
     /// still decoding: the processor waits at the end of `samples` instead
     /// of ending the track there (see `load_streaming`).
@@ -443,6 +446,7 @@ impl AudioHandle {
         if ring_len != RING_BUFFER_SAMPLES { log::info!("audio ring: {} samples ({:.0} ms)", ring_len, ring_len as f64 / device_ch as f64 / device_sr as f64 * 1000.0); }
         let (producer, consumer) = rtrb::RingBuffer::<f32>::new(ring_len);
         let stats = Arc::new(AudioStats::default());
+        let dvs = Arc::new(crate::dvs::DvsShared::default());
 
         // ── 5. Processor thread ────────────────────────────────────────────────
         let proc_samples    = Arc::clone(&samples);
@@ -466,6 +470,7 @@ impl AudioHandle {
         let proc_stems      = Arc::clone(&stems);
         let complete        = Arc::new(AtomicBool::new(true));
         let proc_complete   = Arc::clone(&complete);
+        let proc_dvs        = Arc::clone(&dvs);
 
         let processor = thread::Builder::new()
             .name("audio-proc".into())
@@ -484,6 +489,7 @@ impl AudioHandle {
                     proc_scrub,
                     proc_stems,
                     proc_complete,
+                    proc_dvs,
                     file_sr,
                     file_ch,
                     device_ch,
@@ -511,6 +517,12 @@ impl AudioHandle {
             consumer: Arc::clone(&consumer), playing: Arc::clone(&playing), stats: Arc::clone(&stats),
             drain_flag: Arc::clone(&drain_flag), failed: Arc::clone(&failed),
             scrub_live: Arc::clone(&scrub.live),
+            dvs: DvsParts {
+                shared: Arc::clone(&dvs), samples: Arc::clone(&samples), position: Arc::clone(&position),
+                in_flight: Arc::clone(&in_flight), seek_request: Arc::clone(&seek_request),
+                loop_start: Arc::clone(&loop_start), loop_end: Arc::clone(&loop_end), loop_active: Arc::clone(&loop_active),
+                file_ch, sample_rate: file_sr,
+            },
         };
         let stream = match output {
             Output::Test => {
@@ -592,7 +604,7 @@ impl AudioHandle {
 
         log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
         Self::assemble(samples, position, playing, proc_thread, speed, key_lock, key_shift, loop_start, loop_end, loop_active,
-                       source_consumed, in_flight, seek_request, scrub, stems, stats, complete, file_sr, file_ch, tags,
+                       source_consumed, in_flight, seek_request, scrub, stems, stats, dvs, complete, file_sr, file_ch, tags,
                        stream, shutdown, processor)
     }
 
@@ -622,7 +634,7 @@ impl AudioHandle {
                 speed: Arc<AtomicU32>, key_lock: Arc<AtomicBool>, key_shift: Arc<AtomicI32>, loop_start: Arc<AtomicU64>, loop_end: Arc<AtomicU64>,
                 loop_active: Arc<AtomicBool>, source_consumed: Arc<AtomicU64>, in_flight: Arc<AtomicU64>,
                 seek_request: Arc<AtomicU64>, scrub: ScrubShared, stems: Arc<StemControl>, stats: Arc<AudioStats>,
-                complete: Arc<AtomicBool>, file_sr: u32, file_ch: usize, tags: TrackTags, stream: StreamOwner,
+                dvs: Arc<crate::dvs::DvsShared>, complete: Arc<AtomicBool>, file_sr: u32, file_ch: usize, tags: TrackTags, stream: StreamOwner,
                 shutdown: Arc<AtomicBool>, processor: thread::JoinHandle<()>) -> Result<Self> {
         Ok(Self {
             samples,
@@ -641,6 +653,7 @@ impl AudioHandle {
             scrub,
             stems,
             stats,
+            dvs,
             complete,
             total_hint: Arc::new(AtomicU64::new(0)),
             sample_rate: file_sr,
@@ -670,6 +683,44 @@ struct StreamParts {
     failed:     Arc<AtomicBool>,
     /// A paused jog scrub is feeding the ring: play it, as if playing.
     scrub_live: Arc<AtomicBool>,
+    /// DVS: what the callback needs to play the record's way.
+    dvs: DvsParts,
+}
+
+/// The deck state the output callback reads while the record drives.
+#[derive(Clone)]
+struct DvsParts {
+    shared: Arc<crate::dvs::DvsShared>,
+    samples: Arc<ArcSwap<Vec<f32>>>,
+    position: Arc<AtomicU64>,
+    in_flight: Arc<AtomicU64>,
+    seek_request: Arc<AtomicU64>,
+    loop_start: Arc<AtomicU64>,
+    loop_end: Arc<AtomicU64>,
+    loop_active: Arc<AtomicBool>,
+    file_ch: usize,
+    sample_rate: u32,
+}
+
+impl DvsParts {
+    /// DVS off and nothing loaded (tests of the output path alone).
+    #[cfg(test)]
+    fn idle() -> DvsParts {
+        DvsParts {
+            shared: Default::default(), samples: Arc::new(ArcSwap::from_pointee(Vec::new())), position: Default::default(),
+            in_flight: Default::default(), seek_request: Arc::new(AtomicU64::new(NO_SEEK)), loop_start: Default::default(),
+            loop_end: Default::default(), loop_active: Default::default(), file_ch: 2, sample_rate: 48_000,
+        }
+    }
+
+    fn render(&self) -> crate::dvs::DvsRender {
+        let p = self.clone();
+        crate::dvs::DvsRender {
+            shared: p.shared, samples: p.samples, position: p.position, in_flight: p.in_flight, seek_request: p.seek_request,
+            loop_start: p.loop_start, loop_end: p.loop_end, loop_active: p.loop_active, file_ch: p.file_ch,
+            sample_rate: p.sample_rate, drive: Default::default(), cur: None, buf_id: 0, clock: 0,
+        }
+    }
 }
 
 /// Who holds the cpal stream: the supervisor thread (Linux) or the handle.
@@ -789,6 +840,8 @@ struct OutputFill {
     gain:       f32,
     /// The output trim as last applied; a change ramps across one buffer.
     trim:       f32,
+    /// DVS: renders the record's way while it has the deck.
+    dvs:        crate::dvs::DvsRender,
 }
 
 impl OutputFill {
@@ -806,6 +859,7 @@ impl OutputFill {
             fade_step: 1.0 / (p.device_sr as f32 * STOP_FADE_S).max(1.0),   // per frame
             gain: 1.0,
             trim: output_gain(),
+            dvs: p.dvs.render(),
         }
     }
 
@@ -828,6 +882,13 @@ impl OutputFill {
         // Only ever contended for the instant a replacement stream
         // takes over; silence is the right answer then.
         let Ok(mut consumer) = self.consumer.try_lock() else { out.fill(0.0); return; };
+        // DVS: the record has the deck; what the processor left in the ring
+        // is stale (it stands aside while the record drives).
+        if self.dvs.fill(out, self.device_ch) {
+            while consumer.pop().is_ok() {}
+            self.gain = 0.0;
+            return;
+        }
         if !self.playing.load(Ordering::Relaxed) && !self.scrub_live.load(Ordering::Relaxed) {
             if self.gain > 0.0 {
                 // Fading out: ring audio × a falling gain, frame by
@@ -1233,6 +1294,7 @@ fn processor_loop(
     scrub:      ScrubShared,
     stems:      Arc<StemControl>,
     complete:   Arc<AtomicBool>,
+    dvs:        Arc<crate::dvs::DvsShared>,
     sample_rate: u32,
     file_ch:    usize,
     device_ch:  usize,
@@ -1281,6 +1343,19 @@ fn processor_loop(
     let mut mix_buf: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch);
 
     loop {
+        // ── DVS ───────────────────────────────────────────────────────────────
+        // The record has the deck: the output callback plays it. Stand aside
+        // (and leave seek_request to it) until it hands back.
+        if dvs.driving() {
+            stretcher.reset();
+            thread::park_timeout(Duration::from_millis(5));
+            if !dvs.driving() {
+                let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
+                if req != NO_SEEK { proc_pos = req; position.store(proc_pos, Ordering::Relaxed); }
+                in_flight.store(0, Ordering::Relaxed);
+            }
+            continue;
+        }
         // ── Paused jog scrub ──────────────────────────────────────────────────
         // Read straight from the track toward the wheel's position (no
         // stretcher: the pitch follows the wheel, as on a record), a couple of
@@ -1750,6 +1825,7 @@ mod output_gain_tests {
             consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
             drain_flag: Arc::new(AtomicBool::new(false)), failed: Arc::new(AtomicBool::new(false)),
             scrub_live: Arc::new(AtomicBool::new(false)),
+            dvs: DvsParts::idle(),
         };
         set_output_gain_db(0.0);
         let mut fill = OutputFill::new(&parts);

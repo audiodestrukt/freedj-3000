@@ -223,6 +223,7 @@ impl Drive {
     /// One block of `dt_ms` at `now_ms`. `pos_ms` is the deck's heard
     /// playhead; `lead_ms` how far the sound trails the record (input and
     /// output buffers); `follow` = ABS and nothing (a loop) holds the deck.
+    #[allow(clippy::too_many_arguments)]
     pub fn step(&mut self, st: &VinylState, follow: bool, now_ms: f64, dt_ms: f64, pos_ms: f64, lead_ms: f64, len_ms: f64) -> DriveOut {
         let a = 1.0 - (-dt_ms / SMOOTH_MS).exp();
         self.speed += a * (st.speed as f64 - self.speed);
