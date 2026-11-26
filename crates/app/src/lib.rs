@@ -111,6 +111,9 @@ const HISTORY_MAX: usize = 100;
 #[derive(Clone, Copy, Debug)]
 struct SlipHold { pos: f64, since: Instant, per_sec: f64, hot: Option<u8> }
 
+/// `SlipHold::hot` for the lever's SLIP REV (hot cues are 0–7, None the platter).
+const SLIP_REV_HOLD: Option<u8> = Some(0xFE);
+
 impl SlipHold {
     fn shadow(&self, now: Instant) -> f64 { self.pos + now.duration_since(self.since).as_secs_f64() * self.per_sec }
 }
@@ -897,8 +900,17 @@ struct DeckApp {
     /// SLIP for a held action (a hot cue held, the platter held in VINYL),
     /// where the audio stops counting: the shadow runs in wall time.
     slip_hold:         Option<SlipHold>,
-    /// Keyboard: a Shift key is down (Shift+W/E steps the BEAT JUMP value).
+    /// The direction lever latched at REV (reverse play while it stays).
+    reverse:           bool,
+    /// SLIP REV held: reverse for now, the track running on forward under it.
+    slip_reversing:    bool,
+    /// That SLIP REV turns on the QUANTIZE grid: the audio side lands it
+    /// (`AudioHandle::set_reverse_on_grid`), not the slip shadow.
+    slip_rev_on_grid:  bool,
+    /// Keyboard: a Shift key is down (Shift+W/E steps the BEAT JUMP value,
+    /// Shift+R holds SLIP REV), and SLIP REV is held from the keyboard.
     shift_held:        bool,
+    key_slip_rev:      bool,
     exit_after_capture: bool,
     /// Dev script: buttons held (`hold=`), and the lamp report / screenshot
     /// due this frame (`lamps=`, `shot=`).
@@ -992,10 +1004,13 @@ struct UiFlags {
     slip_shadow: Option<u64>,
 }
 
-/// The deck settings the screen and the faceplate show.
-fn fill_deck_settings(snap: &mut DeckSnapshot, settings: &settings::Settings) {
+/// The deck settings the screen and the faceplate show, and the direction:
+/// `reverse` the lever latched at REV, `slip_reversing` SLIP REV held.
+fn fill_deck_settings(snap: &mut DeckSnapshot, settings: &settings::Settings, reverse: bool, slip_reversing: bool) {
     snap.quantize_beats  = settings.quantize_beats;
     snap.beat_jump_beats = settings.beat_jump_beats;
+    snap.reverse         = reverse != slip_reversing;
+    snap.slip_reverse    = slip_reversing;
     // A CDJ-3000 setting; the XDJ's screen keeps its playhead centred.
     snap.playhead_frac   = if settings.skin == settings::Skin::Cdj3000 { settings.wave_position.frac() } else { 0.5 };
 }
@@ -1062,7 +1077,7 @@ fn make_snapshot<'a>(
         loop_beats:    f.loop_beats,
         tempo_range:   f.tempo_range,
         quantize:      f.quantize,
-        quantize_beats: 1.0, beat_jump_beats: 16.0, playhead_frac: 0.5,
+        quantize_beats: 1.0, beat_jump_beats: 16.0, reverse: false, slip_reverse: false, playhead_frac: 0.5,
         slip_shadow:   f.slip_shadow,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
@@ -1303,7 +1318,11 @@ impl DeckApp {
             loop_in_set:       false,
             slip_anchor:       None,
             slip_hold:         None,
+            reverse:           false,
+            slip_reversing:    false,
+            slip_rev_on_grid:  false,
             shift_held:        false,
+            key_slip_rev:      false,
             exit_after_capture: false,
             script_held: Vec::new(),
             panel_held: Vec::new(),
@@ -1647,6 +1666,45 @@ impl DeckApp {
                     self.settings.save();
                 }
                 log::info!("beat jump value: {}", settings::beats_text(self.settings.beat_jump_beats));
+            }
+            // The direction lever.  REV latches; SLIP REV reverses while held
+            // and then lands where forward play would have been, SLIP on or
+            // not (the manual, p.70 and p.91).
+            Event::Deck(ControlEvent::ReverseToggle) => {
+                self.reverse = !self.reverse;
+                if !self.slip_reversing { self.audio.set_reverse(self.reverse); }
+                log::info!("direction: {}", if self.reverse { "REV" } else { "FWD" });
+            }
+            Event::Deck(ControlEvent::SlipReverse { held }) => {
+                if held && !self.slip_reversing {
+                    self.slip_reversing = true;
+                    // QUANTIZE on: it turns on the next grid point and,
+                    // let go, turns back on one and lands where forward
+                    // play would be, so what plays backwards is whole beats
+                    // (or the QUANTIZE value), in time.
+                    if let Some((anchor, step)) = self.slip_rev_grid() {
+                        self.slip_rev_on_grid = true;
+                        self.audio.set_reverse_on_grid(!self.reverse, anchor, step, false);
+                        log::info!("slip reverse, on the grid");
+                    } else {
+                        if self.audio.playing.load(Ordering::Relaxed) {
+                            self.slip_hold_start(self.smoothed_pos, SLIP_REV_HOLD, true);
+                        }
+                        self.audio.set_reverse(!self.reverse);
+                        log::info!("slip reverse");
+                    }
+                } else if !held && self.slip_reversing && self.slip_rev_on_grid {
+                    // Turned on the grid: the audio side lands it on the grid
+                    // too (paused or looping by now: it turns back at once).
+                    self.slip_reversing = false;
+                    self.slip_rev_on_grid = false;
+                    let (anchor, step) = self.slip_rev_grid().unwrap_or((0.0, 0.0));
+                    self.audio.set_reverse_on_grid(self.reverse, anchor, step, true);
+                } else if !held && self.slip_reversing {
+                    self.slip_reversing = false;
+                    self.audio.set_reverse(self.reverse);
+                    self.slip_hold_end(SLIP_REV_HOLD);
+                }
             }
             Event::Deck(ControlEvent::NeedleSearch { position }) => {
                 let total = self.audio.len() as f64;
@@ -2218,6 +2276,18 @@ impl DeckApp {
         ((snapped as u64) / ch) * ch
     }
 
+    /// SLIP REV's turns on the QUANTIZE grid: its anchor and step in source
+    /// frames, when QUANTIZE is on, the track has a grid, and it is playing
+    /// outside a loop (paused or looping it turns at once, as without).
+    fn slip_rev_grid(&self) -> Option<(f64, f64)> {
+        let g = self.beat_grid.as_ref()?;
+        let per_beat = self.samples_per_beat()?;
+        if !self.settings.quantize || !self.audio.playing.load(Ordering::Relaxed)
+            || self.audio.loop_active.load(Ordering::Relaxed) { return None; }
+        let step = per_beat / self.audio.channels as f64 * self.settings.quantize_beats.clamp(0.125, 1.0) as f64;
+        Some((g.anchor_sample as f64, step))
+    }
+
     /// A point the DJ just set (CUE, hot cue, LOOP IN/OUT): the nearest beat on
     /// the grid when QUANTIZE is on, else the exact position; frame-aligned.
     fn quantized(&self, pos: f64) -> u64 {
@@ -2283,8 +2353,11 @@ impl DeckApp {
 
     /// SLIP on and a held action starts at `from` (interleaved samples):
     /// shadow from there at the fader's speed.
-    fn slip_hold_begin(&mut self, from: f64, hot: Option<u8>) {
-        if !self.slip || self.slip_hold.is_some() { return; }
+    fn slip_hold_begin(&mut self, from: f64, hot: Option<u8>) { self.slip_hold_start(from, hot, false) }
+
+    /// `slip_hold_begin`; `force` shadows with SLIP off too (SLIP REV does).
+    fn slip_hold_start(&mut self, from: f64, hot: Option<u8>, force: bool) {
+        if !(self.slip || force) || self.slip_hold.is_some() { return; }
         let speed = f32::from_bits(self.fader_speed.load(Ordering::Relaxed)) as f64;
         let per_sec = self.audio.sample_rate as f64 * self.audio.channels as f64 * speed;
         self.slip_anchor = None;
@@ -2569,6 +2642,11 @@ impl DeckApp {
                     _ if self.script_held.iter().any(|h| h == "CALL_DELETE") && k.with_call_delete().is_some() => {
                         if let Some(e) = k.with_call_delete() { self.apply(e); }
                     }
+                    // Held keys (SLIP REV): the press now, the release later.
+                    _ if k.held(true).is_some() => {
+                        if let Some(e) = k.held(true) { self.apply(e); }
+                        return release();
+                    }
                     Key::SearchPrev | Key::SearchNext => {
                         // Scan as far as the held key would.
                         let total = self.audio.len().max(1) as f64;
@@ -2594,6 +2672,9 @@ impl DeckApp {
         self.script_held.retain(|h| h != b);
         match b {
             "CUE" => self.apply(Event::Deck(ControlEvent::Cue { pressed: false })),
+            _ if cdjface::Key::from_emu_name(b).and_then(|k| k.held(false)).is_some() => {
+                if let Some(e) = cdjface::Key::from_emu_name(b).and_then(|k| k.held(false)) { self.apply(e); }
+            }
             _ if b.starts_with("HOT_") => {
                 let slot = b.as_bytes()[4].wrapping_sub(b'A');
                 self.apply(Event::Deck(ControlEvent::HotCueRelease { slot }));
@@ -3505,6 +3586,16 @@ impl DeckApp {
             return false;
         }
         if matches!(code, ShiftLeft | ShiftRight) { self.shift_held = pressed; return false; }
+        // SLIP REV is momentary too: Shift+R down holds it, R up lets go
+        // (whether or not Shift is still down).
+        if code == KeyR && (self.key_slip_rev || (pressed && self.shift_held && self.screen_mode == ScreenMode::Playback)) {
+            if !repeat && pressed != self.key_slip_rev {
+                self.key_slip_rev = pressed;
+                self.events.push(Event::Deck(ControlEvent::SlipReverse { held: pressed }));
+                self.request_redraw();
+            }
+            return false;
+        }
         // Everything else acts on key-down only.
         if !pressed { return false; }
         // Phone preview: Tab flips SCREEN / CONTROLS (the swipe on device).
@@ -3582,6 +3673,7 @@ impl DeckApp {
             BracketRight => Some(Event::Deck(ControlEvent::MemoryCueCall { next: true })),
             Delete       => Some(Event::Deck(ControlEvent::MemoryCueDelete)),
             KeyS => Some(Event::Deck(ControlEvent::SlipToggle)),
+            KeyR => Some(Event::Deck(ControlEvent::ReverseToggle)),
             // BEAT JUMP ◀ / ▶; with Shift the value down / up (CALL/DELETE + BEAT JUMP).
             KeyW if self.shift_held => Some(Event::Deck(ControlEvent::BeatJumpValue { up: false })),
             KeyE if self.shift_held => Some(Event::Deck(ControlEvent::BeatJumpValue { up: true })),
@@ -3785,11 +3877,12 @@ impl DeckApp {
     fn heard_pos(&self, raw_pos: u64, in_flight: u64) -> f64 {
         let loop_active = self.audio.loop_active.load(Ordering::Relaxed);
         let (ls, le) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
-        let h = raw_pos as i64 - in_flight as i64;
-        if loop_active && le > ls && h < ls as i64 {
+        // In reverse the cursor reads backwards, so what is heard lies after it.
+        let h = if self.audio.reading_reverse() { raw_pos as i64 + in_flight as i64 } else { raw_pos as i64 - in_flight as i64 };
+        if loop_active && le > ls && (h < ls as i64 || (self.audio.reading_reverse() && h >= le as i64 && (raw_pos as i64) < le as i64)) {
             let len = (le - ls) as i64;
             (ls as i64 + ((h - ls as i64) % len + len) % len) as f64
-        } else { h.max(0) as f64 }
+        } else { h.clamp(0, self.audio.len() as i64) as f64 }
     }
 
     /// One frame of the on-screen playhead (`smoothed_pos`): free-run at the
@@ -3797,6 +3890,8 @@ impl DeckApp {
     fn step_playhead(&mut self, heard: f64, sr_ch: f64, wrapped: bool, frame_dt: Duration, playing: bool, speed: f32) {
         let far_off = (heard - self.smoothed_pos).abs() > sr_ch * 0.5;
         if far_off { self.resync_frames += 1; } else { self.resync_frames = 0; }
+        // Reverse play (the direction lever) runs the playhead backwards.
+        let dir = if self.audio.reading_reverse() { -1.0 } else { 1.0 };
         if self.audio.dvs.driving() {
             // DVS: the record drives the playhead, backwards as well as
             // forwards, and the output callback publishes it every buffer
@@ -3819,8 +3914,8 @@ impl DeckApp {
             let period  = self.refresh_interval.as_secs_f64();
             let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
             if playing {
-                self.smoothed_pos += periods * period * sr_ch * speed as f64;
-                self.smoothed_pos  = self.smoothed_pos.max(self.prev_pos as f64);
+                self.smoothed_pos += periods * period * sr_ch * dir * speed as f64;
+                self.smoothed_pos  = self.onward(self.smoothed_pos, dir);
             }
         } else {
             // The phase-lock only runs while PLAYING.  When paused the audio is
@@ -3838,7 +3933,7 @@ impl DeckApp {
                 // ±2 ms of wake-up slop.  This is the velocity model.
                 let period  = self.refresh_interval.as_secs_f64();
                 let periods = (frame_dt.as_secs_f64() / period).round().max(1.0);
-                self.smoothed_pos += periods * period * sr_ch * speed as f64;
+                self.smoothed_pos += periods * period * sr_ch * dir * speed as f64;
 
                 // Phase-correct toward the FRESH heard position.  The free-run
                 // above already supplies the velocity, so this pull only has to
@@ -3851,11 +3946,17 @@ impl DeckApp {
                 // the averaging is of the *offset*, not the position.
                 self.smoothed_pos += (heard - self.smoothed_pos) * 0.08;
 
-                // Never run backwards during playback: a stall reads as a hitch,
-                // a reversal as a glitch (worse).
-                self.smoothed_pos = self.smoothed_pos.max(self.prev_pos as f64);
+                // Never run against the direction of play: a stall reads as a
+                // hitch, a reversal as a glitch (worse).
+                self.smoothed_pos = self.onward(self.smoothed_pos, dir);
             }
         }
+    }
+
+    /// `pos`, held from going back past the last frame's playhead against the
+    /// direction of play (`dir` = ±1).
+    fn onward(&self, pos: f64, dir: f64) -> f64 {
+        if dir < 0.0 { pos.min(self.prev_pos as f64) } else { pos.max(self.prev_pos as f64) }
     }
 
     fn render_frame(&mut self) {
@@ -3960,7 +4061,9 @@ impl DeckApp {
         let heard = self.heard_pos(raw_pos, in_flight);
         // The audible wrap (end → start) is an EXPECTED backward jump: snap the
         // playhead to it instead of riding it out as a transient.
-        let wrapped = loop_active && le > ls && (self.smoothed_pos - heard) > (le - ls) as f64 * 0.5;
+        // (In reverse the wrap is start → end, an expected forward jump.)
+        let wrap_jump = if self.audio.reading_reverse() { heard - self.smoothed_pos } else { self.smoothed_pos - heard };
+        let wrapped = loop_active && le > ls && wrap_jump > (le - ls) as f64 * 0.5;
 
         // A far-off reference is almost always a transient: `in_flight` is
         // sampled at decode-block boundaries and spikes for a frame whenever the
@@ -4072,7 +4175,7 @@ impl DeckApp {
         let ip_line = if self.screen_mode == ScreenMode::Menu { Self::ip_line(&mut self.ip_cache, &self.link) } else { String::new() };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
-        fill_deck_settings(&mut snap, &self.settings);
+        fill_deck_settings(&mut snap, &self.settings, self.reverse, self.slip_reversing);
         snap.phrases      = &self.phrases;
         snap.divisions    = self.settings.divisions;
         if self.screen_mode == ScreenMode::Info {
@@ -4335,7 +4438,7 @@ impl DeckApp {
         let ip_line = if self.screen_mode == ScreenMode::Menu { Self::ip_line(&mut self.ip_cache, &self.link) } else { String::new() };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
-        fill_deck_settings(&mut snap, &self.settings);
+        fill_deck_settings(&mut snap, &self.settings, self.reverse, self.slip_reversing);
         snap.phrases      = &self.phrases;
         snap.divisions    = self.settings.divisions;
         if self.screen_mode == ScreenMode::Info {
@@ -6634,6 +6737,8 @@ pub(crate) mod deck_harness {
 
         /// The audible position in seconds.
         pub fn at(&self) -> f64 { self.smoothed_pos / (SR as f64 * 2.0) }
+        /// Whether the deck shows reverse play (the lever's lamp).
+        pub fn snapshot_reverse(&self) -> bool { self.reverse != self.slip_reversing && self.audio.reverse() }
         /// Seconds → interleaved samples.
         pub fn samples(secs: f64) -> u64 { (secs * SR as f64) as u64 * 2 }
     }
@@ -6883,6 +6988,102 @@ mod deck_tests {
 
     fn near(got: f64, want: f64, what: &str) {
         assert!((got - want).abs() < 0.15, "{what}: at {got:.2}s, want {want:.2}s");
+    }
+
+    /// REV latches reverse play; a second press plays forward again.
+    #[test]
+    fn reverse_plays_backwards_and_back() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(3.0);
+        let at = d.at();
+        d.send(C::ReverseToggle);
+        d.run(1.0);
+        near(d.at(), at - 1.0, "REV: a second back");
+        assert!(d.snapshot_reverse(), "the lever's lamp is lit");
+        d.send(C::ReverseToggle);
+        d.run(1.0);
+        near(d.at(), at, "FWD again: a second on");
+    }
+
+    /// SLIP REV, with SLIP off: reverse while held, and on release the deck
+    /// is where it would have been had it played on (the manual, p.70, p.91).
+    #[test]
+    fn slip_reverse_lands_where_forward_play_would_be() {
+        let mut d = deck(30.0);
+        d.send(C::Play);
+        d.run(3.0);
+        let at = d.at();
+        d.send(C::SlipReverse { held: true });
+        d.run(1.0);
+        near(d.at(), at - 1.0, "held: playing backwards");
+        d.send(C::SlipReverse { held: false });
+        near(d.at(), at + 1.0, "released: where forward play would be");
+        d.run(0.5);
+        near(d.at(), at + 1.5, "and playing forward");
+    }
+
+    /// SLIP REV with QUANTIZE turns on the beat nearest what is heard (120
+    /// BPM: beats every 0.5 s).  Pressed at 3.35 s it plays on to 3.5 s and
+    /// turns; let go at 3.1 s (heard) it reverses on to 3.0 s, then lands at
+    /// 4.0 s, where forward play is: a whole beat backwards, in time.
+    #[test]
+    fn slip_reverse_with_quantize_turns_on_the_nearest_beat_ahead() {
+        let mut d = deck(30.0);
+        d.settings.quantize = true;
+        d.settings.quantize_beats = 1.0;
+        d.send(C::Play);
+        d.run(3.35);
+        let t0 = d.at();
+        assert!(t0 > 3.25 && t0 < 3.45, "{t0}");
+        d.send(C::SlipReverse { held: true });
+        d.run(0.1);
+        near(d.at(), t0 + 0.1, "waits for the beat");
+        d.run(0.45);
+        near(d.at(), 3.5 - (t0 + 0.55 - 3.5), "turned at 3.5 s");
+        d.send(C::SlipReverse { held: false });
+        d.run(0.05);
+        near(d.at(), 3.5 - (t0 + 0.6 - 3.5), "let go: still back, to the beat");
+        d.run(0.45);
+        near(d.at(), t0 + 1.05, "landed in time and playing on");
+        assert!(!d.audio.reading_reverse());
+    }
+
+    /// A beat just heard is not waited a whole step for: pressed at 3.05 s
+    /// it turns now, as if it had turned on 3.0 s (reading from 2.95 s), and
+    /// let go just past a beat it lands at once where forward play is.
+    #[test]
+    fn slip_reverse_with_quantize_turns_at_once_on_a_beat_just_heard() {
+        let mut d = deck(30.0);
+        d.settings.quantize = true;
+        d.settings.quantize_beats = 1.0;
+        d.send(C::Play);
+        d.run(3.05);
+        let t0 = d.at();
+        assert!(t0 > 3.0 && t0 < 3.2, "{t0}");
+        d.send(C::SlipReverse { held: true });
+        d.run(0.3);
+        near(d.at(), 3.0 - (t0 + 0.3 - 3.0), "turned now, as on 3.0 s");
+        d.run(0.65);
+        d.send(C::SlipReverse { held: false });   // heard ≈ 2.05 s: the beat at 2.0 s is just ahead
+        d.run(0.45);
+        near(d.at(), t0 + 1.4, "landed in time and playing on");
+        assert!(!d.audio.reading_reverse());
+    }
+
+    /// Let go before its beat came, SLIP REV with QUANTIZE does nothing.
+    #[test]
+    fn a_quantized_slip_reverse_let_go_before_the_beat_does_nothing() {
+        let mut d = deck(30.0);
+        d.settings.quantize = true;
+        d.send(C::Play);
+        d.run(3.35);
+        let t0 = d.at();
+        d.send(C::SlipReverse { held: true });
+        d.run(0.05);   // the beat at 3.5 s is still ahead
+        d.send(C::SlipReverse { held: false });
+        d.run(0.95);
+        near(d.at(), t0 + 1.0, "played straight on");
     }
 
     /// BEAT JUMP ◀ / ▶ jump by the value; CALL/DELETE + BEAT JUMP steps it
@@ -7429,9 +7630,10 @@ mod keyboard_tests {
         assert!((d.tempo() - 1.06).abs() < 0.001, "held at +6 %: {}", d.tempo());
     }
 
-    /// W / E = BEAT JUMP ◀ / ▶, Shift+W / E steps the value.
+    /// W / E = BEAT JUMP ◀ / ▶, Shift+W / E steps the value, R latches
+    /// REV and Shift+R holds SLIP REV until R comes up.
     #[test]
-    fn beat_jump_keys() {
+    fn beat_jump_and_reverse_keys() {
         let near = |got: f64, want: f64, what: &str|
             assert!((got - want).abs() < 0.15, "{what}: at {got:.2}s, want {want:.2}s");
         let mut d = deck(60.0);
@@ -7453,6 +7655,22 @@ mod keyboard_tests {
         d.key(KeyCode::KeyW);
         d.run(0.1);
         near(d.at(), at - 4.0, "W: 8 beats back");
+
+        d.key(KeyCode::KeyR);
+        assert!(d.snapshot_reverse(), "R latches REV");
+        d.key(KeyCode::KeyR);
+        assert!(!d.snapshot_reverse(), "R again: forward");
+
+        d.key(KeyCode::Space);
+        d.run(1.0);
+        d.key_edge(KeyCode::ShiftLeft, true);
+        d.key_edge(KeyCode::KeyR, true);
+        assert!(d.slip_reversing, "Shift+R holds SLIP REV");
+        assert!(!d.key_input(KeyCode::KeyR, true, true) && d.events.is_empty(), "OS repeat adds nothing");
+        d.key_edge(KeyCode::ShiftLeft, false);
+        assert!(d.slip_reversing, "letting go of Shift first keeps it held");
+        d.key_edge(KeyCode::KeyR, false);
+        assert!(!d.slip_reversing && !d.reverse, "R up lets go, REV stays off");
     }
 
     #[test]

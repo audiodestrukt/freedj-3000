@@ -106,7 +106,7 @@ Size: S < 1 day, M 1–3 days, L > 3 days.
 | | Key detection + KEY readout (green when compatible) | missing | L |
 | | KEY SHIFT (semitones) + KEY SYNC | missing (stretcher can) | M |
 | | Beat Jump beat value 1/2–64, Quantize beat value | done (CALL/DELETE + BEAT JUMP; MENU rows) | ✓ |
-| | Slip reverse lever, reverse | missing | M |
+| | Slip reverse lever, reverse | done (faceplate lever keys, XDJ panel REV, `R`; CDJ-3000 panel lever bits unmapped) | ✓ |
 | | Active loop, emergency loop, loop slip | partial | M |
 | | Vinyl speed adjust (touch/release) | planned (varispeed) | M |
 | | 6 players on PRO DJ LINK | 4 | M |

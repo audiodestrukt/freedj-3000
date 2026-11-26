@@ -39,6 +39,8 @@ use std::{
 
 /// Frames fed to the timestretch engine per iteration.
 const BLOCK_FRAMES: usize = 512;
+/// A quantized SLIP REV's landing crossfade (into forward play, at the grid).
+const LAND_XFADE_S: f32 = 0.005;
 
 /// Ring buffer capacity in device samples (not frames).
 ///
@@ -120,6 +122,31 @@ struct JumpShared {
     /// Output frames that were still in the ring after the buffer that
     /// flushed it: the jump's crossfade starts on the first of them.
     unplayed: Arc<AtomicU64>,
+    /// Reverse play (the direction lever).  A change is resolved as a jump
+    /// of nothing: from the frame being heard, crossfaded, the other way.
+    reverse:  Arc<AtomicBool>,
+    /// SLIP REV with QUANTIZE: the turn waits for the grid, `anchor` +
+    /// k·`step` (source frames, f64 bits; a step of 0 turns at once), and
+    /// turning back with `land` it lands where forward play would be.
+    q_anchor: Arc<AtomicU64>,
+    q_step:   Arc<AtomicU64>,
+    q_land:   Arc<AtomicBool>,
+    /// The way the processor reads now (a quantized turn waits for its beat).
+    reading_rev: Arc<AtomicBool>,
+}
+
+/// A quantized turn's spot: the grid point (`anchor` + k·`step`, frames)
+/// nearest frame `pos`.
+fn grid_nearest(pos: f64, anchor: f64, step: f64) -> f64 {
+    (anchor + ((pos - anchor) / step).round() * step).max(0.0)
+}
+
+/// SLIP REV's landing, turning back at `at` after turning at `from`: as far
+/// past `from` as the reverse went before it (the same source frames, so the
+/// same time at any speed), clamped and frame-aligned.
+fn mirror(from: u64, at: u64, ch: usize, len: usize) -> u64 {
+    let t = (2 * from as i64 - at as i64).clamp(0, len as i64) as u64;
+    t / ch as u64 * ch as u64
 }
 
 // ── Audio integrity counters ──────────────────────────────────────────────────
@@ -273,6 +300,32 @@ impl AudioHandle {
         self.jump.request.store(delta, Ordering::Release);
         self.proc_thread.unpark();
     }
+
+    /// Play backwards (or forwards again) from the frame being heard.
+    pub fn set_reverse(&self, on: bool) {
+        self.jump.q_step.store(0f64.to_bits(), Ordering::Relaxed);
+        self.jump.reverse.store(on, Ordering::Release);
+        self.proc_thread.unpark();
+    }
+
+    /// SLIP REV with QUANTIZE: turn at the next grid point the read reaches
+    /// (`anchor` + k·`step`, source frames), not at once; `land` (letting
+    /// go) then lands where forward play would be.  Called back before the
+    /// beat, the turn is off.  Paused, in a loop, it turns at once.
+    pub fn set_reverse_on_grid(&self, on: bool, anchor: f64, step: f64, land: bool) {
+        self.jump.q_anchor.store(anchor.to_bits(), Ordering::Relaxed);
+        self.jump.q_step.store(step.max(0.0).to_bits(), Ordering::Relaxed);
+        self.jump.q_land.store(land, Ordering::Relaxed);
+        self.jump.reverse.store(on, Ordering::Release);
+        self.proc_thread.unpark();
+    }
+
+    /// Playing in reverse (as asked; the audio turns within a buffer).
+    pub fn reverse(&self) -> bool { self.jump.reverse.load(Ordering::Relaxed) }
+
+    /// The way the audio reads now: as asked, but a quantized turn only
+    /// once its beat comes.
+    pub fn reading_reverse(&self) -> bool { self.jump.reading_rev.load(Ordering::Relaxed) }
 
     /// Convenience: read current speed.
     pub fn speed_load(&self) -> f32 {
@@ -466,7 +519,10 @@ impl AudioHandle {
         let drain_flag = Arc::new(AtomicBool::new(false));
         let in_flight  = Arc::new(AtomicU64::new(0));
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
-        let jump = JumpShared { request: Arc::new(AtomicI64::new(NO_JUMP)), unplayed: Arc::new(AtomicU64::new(0)) };
+        let jump = JumpShared { request: Arc::new(AtomicI64::new(NO_JUMP)), unplayed: Arc::new(AtomicU64::new(0)),
+                               reverse: Arc::new(AtomicBool::new(false)),
+                               q_anchor: Arc::new(AtomicU64::new(0)), q_step: Arc::new(AtomicU64::new(0)),
+                               q_land: Arc::new(AtomicBool::new(false)), reading_rev: Arc::new(AtomicBool::new(false)) };
         let scrub = ScrubShared {
             target: Arc::new(AtomicU64::new(NO_SEEK)), from: Arc::new(AtomicU64::new(0)),
             seq: Arc::new(AtomicU64::new(0)), live: Arc::new(AtomicBool::new(false)),
@@ -1115,12 +1171,15 @@ fn build_stream(device: &cpal::Device, p: &StreamParts) -> Result<cpal::Stream> 
 // ── Processor loop ────────────────────────────────────────────────────────────
 
 /// Where a relative jump lands: the source sample heard at the first of the
-/// `unplayed` output frames (the decoder's cursor `pos`, less the queued
+/// `unplayed` output frames (the decoder's cursor `pos`, less (more, in
+/// reverse) the queued
 /// output at `speed` source frames per output frame and the stretcher's
 /// latency, as `in_flight` reckons it), plus `delta`; clamped to the track
 /// and on a frame boundary.
-fn jump_target(pos: u64, unplayed: usize, speed: f32, latency: usize, delta: i64, ch: usize, len: usize) -> u64 {
-    let heard = pos as f64 - (unplayed as f64 * speed as f64 + latency as f64) * ch as f64;
+fn jump_target(pos: u64, unplayed: usize, speed: f32, latency: usize, delta: i64, rev: bool, ch: usize, len: usize) -> u64 {
+    // Read backwards (`rev`), the queued audio lies after the cursor.
+    let queued = (unplayed as f64 * speed as f64 + latency as f64) * ch as f64;
+    let heard = if rev { pos as f64 + queued } else { pos as f64 - queued };
     let t = (heard + delta as f64).clamp(0.0, len as f64) as u64;
     t / ch as u64 * ch as u64
 }
@@ -1130,6 +1189,26 @@ fn jump_target(pos: u64, unplayed: usize, speed: f32, latency: usize, delta: i64
 fn seek_plus(pos: u64, delta: i64, ch: usize, len: usize) -> u64 {
     let t = (pos as i64 + delta).clamp(0, len as i64) as u64;
     t / ch as u64 * ch as u64
+}
+
+/// Reverse play's next block, into `scratch`: the `want` samples before
+/// `pos`, frame by frame from the last one back, `src(i)` giving sample `i`.
+/// Inside a loop `[ls, le)` the read wraps from its start to its end, as a
+/// forward read wraps the other way; at the track's start it stops short.
+/// Returns the cursor after it (where the next block reads back from).
+fn read_block_rev(src: &dyn Fn(usize) -> f32, len: usize, pos: usize, want: usize, ch: usize,
+                  lp: Option<(usize, usize)>, scratch: &mut Vec<f32>) -> usize {
+    scratch.clear();
+    let mut cur = pos.min(len) / ch * ch;
+    // Only a cursor inside (or past) the loop wraps in it.
+    let wraps = lp.filter(|&(ls, le)| le > ls && cur > ls);
+    for _ in 0..want / ch {
+        if let Some((ls, le)) = wraps { if cur <= ls { cur = le / ch * ch; } }
+        if cur < ch { break; }
+        cur -= ch;
+        for c in 0..ch { scratch.push(src(cur + c)); }
+    }
+    cur
 }
 
 /// The next source block from `pos`, `want` samples long, and the cursor after
@@ -1487,6 +1566,22 @@ fn processor_loop(
     // reported latency is not its delay once the start pad/delay is trimmed,
     // and a jump reckoned from it landed ~40 ms early.
     let mut held: f64 = 0.0;
+    // Reading backwards (the direction lever's REV / SLIP REV).
+    let mut rev = false;
+    // A quantized turn waiting for its grid point: the source sample it
+    // turns at and, turning back from SLIP REV, where it lands.
+    let mut turn_at: Option<(u64, Option<u64>)> = None;
+    // Where the last quantized turn was (SLIP REV's landing mirrors it), and
+    // a landing's crossfade still to make: from the old read (its spot and
+    // way) into the new one.
+    let mut turned_from: u64 = 0;
+    let mut land_xf: Option<(u64, bool)> = None;
+    // Until a quantized turn is heard, the queued audio still runs the old
+    // way: the UI is shown the cursor as if it had gone on (the turn's
+    // spot, the old way, the source samples read since) so that its
+    // `position` less (more) `in_flight` stays what is heard.
+    let mut turn_view: Option<(u64, bool, u64)> = None;
+    let mut xf_buf: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch);
 
     // Output buffer for timestretched (file_ch interleaved) audio.
     let mut ts_out: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch * 8);
@@ -1583,7 +1678,13 @@ fn processor_loop(
             // swaps `drain_flag` every period even while paused), so both the
             // published position and the first block after PLAY are right.
             let mut req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
-            let jmp = jump.request.swap(NO_JUMP, Ordering::AcqRel);
+            let mut jmp = jump.request.swap(NO_JUMP, Ordering::AcqRel);
+            // A turn of the lever is a jump of nothing, the other way.
+            let want_rev = jump.reverse.load(Ordering::Acquire);
+            if jmp == NO_JUMP && want_rev != rev { jmp = 0; }
+            turn_at = None;
+            land_xf = None;
+            turn_view = None;
             if req != NO_SEEK && jmp != NO_JUMP {
                 // A jump right behind a seek: from the spot just sought.
                 req = seek_plus(req, jmp, file_ch, samples.load().len());
@@ -1592,8 +1693,10 @@ fn processor_loop(
                 // ring's head, as the UI's playhead has it.
                 let queued = (ring_len - producer.slots()) / device_ch;
                 let spd = f32::from_bits(speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
-                req = jump_target(proc_pos, queued, spd, held.round() as usize, jmp, file_ch, samples.load().len());
+                req = jump_target(proc_pos, queued, spd, held.round() as usize, jmp, rev, file_ch, samples.load().len());
             }
+            rev = want_rev;
+            jump.reading_rev.store(rev, Ordering::Relaxed);
             if req != NO_SEEK {
                 log::debug!("proc: seek {proc_pos} → {req} (paused)");
                 stretcher.reset();
@@ -1622,8 +1725,63 @@ fn processor_loop(
 
         // ── Seek detection ────────────────────────────────────────────────────
         let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
-        let jmp = jump.request.swap(NO_JUMP, Ordering::AcqRel);
+        let mut jmp = jump.request.swap(NO_JUMP, Ordering::AcqRel);
+        // A turn of the lever: a jump of nothing, then reading the other way.
+        // SLIP REV with QUANTIZE waits for the grid instead (see below).
+        let want_rev = jump.reverse.load(Ordering::Acquire);
+        let q_step = f64::from_bits(jump.q_step.load(Ordering::Relaxed));
+        let in_loop = lp.active.load(Ordering::Relaxed) && lp.end.load(Ordering::Relaxed) > lp.start.load(Ordering::Relaxed);
+        // How a jump below turns: `flip` reads the other way after it, and
+        // `mirror_about` lands it mirrored about that spot from what is heard
+        // (a quantized turn whose beat has just been heard: as if it had
+        // turned on it).  `reread` is a jump of nothing the same way, to
+        // read again from what is heard up to a beat already read past.
+        let mut flip = false;
+        let mut mirror_about: Option<u64> = None;
+        let mut reread = false;
+        if want_rev == rev {
+            if turn_at.take().is_some() { log::debug!("proc: quantized turn called off"); }
+        } else if q_step > 0.0 && !in_loop && req == NO_SEEK && jmp == NO_JUMP {
+            if turn_at.is_none() {
+                // The grid point nearest what is heard now: at most half a
+                // step to wait, or (just heard) none.
+                let len = samples.len();
+                let queued = (ring_len - producer.slots()) / device_ch;
+                let spd = f32::from_bits(speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
+                let heard = jump_target(proc_pos, queued, spd, held.round() as usize, 0, rev, file_ch, len);
+                let anchor = f64::from_bits(jump.q_anchor.load(Ordering::Relaxed));
+                let g = grid_nearest(heard as f64 / file_ch as f64, anchor, q_step).round() as u64 * file_ch as u64;
+                let g = g.min(len as u64 / file_ch as u64 * file_ch as u64);
+                let land = jump.q_land.load(Ordering::Relaxed);
+                let ahead = if rev { g < heard } else { g > heard };
+                if !ahead {
+                    // Heard already: turn now, mirrored about the beat (or,
+                    // turning back, about where the reverse began: where
+                    // forward play would be).
+                    jmp = 0;
+                    flip = true;
+                    mirror_about = Some(if land { turned_from } else { g });
+                    if !land { turned_from = g; }
+                    log::debug!("proc: beat {g} just heard (at {heard}): turning now");
+                } else {
+                    let land = land.then(|| mirror(turned_from, g, file_ch, len));
+                    turn_at = Some((g, land));
+                    // The read is past it already: read again from what is
+                    // heard, then turn on it.
+                    if if rev { proc_pos < g } else { proc_pos > g } { jmp = 0; reread = true; }
+                    log::debug!("proc: turn at {g} (heard {heard}, read {proc_pos}){}{}",
+                                land.map_or(String::new(), |l| format!(", landing at {l}")),
+                                if reread { ", reading again" } else { "" });
+                }
+            }
+        } else {
+            if jmp == NO_JUMP { jmp = 0; }
+            flip = true;
+        }
         if req != NO_SEEK || jmp != NO_JUMP {
+            if !reread { turn_at = None; }
+            land_xf = None;
+            turn_view = None;
             // For a relative jump: where the audio stands now, before the
             // flush (an absolute seek pending at the same time wins).
             let before  = proc_pos;
@@ -1659,9 +1817,36 @@ fn processor_loop(
                 // time (no device): the ring as it stood.
                 let unplayed = if drain_flag.load(Ordering::Acquire) { queued }
                                else { jump.unplayed.load(Ordering::Relaxed) as usize };
-                proc_pos = jump_target(before, unplayed, spd_now, latency, jmp, file_ch, samples.len());
-                log::debug!("proc: jump {jmp:+} from {before} ({unplayed} frames unplayed) → {proc_pos}");
+                proc_pos = match mirror_about {
+                    Some(about) => mirror(about, jump_target(before, unplayed, spd_now, latency, 0, rev, file_ch, samples.len()), file_ch, samples.len()),
+                    None => jump_target(before, unplayed, spd_now, latency, jmp, rev, file_ch, samples.len()),
+                };
+                log::debug!("proc: jump {jmp:+} from {before} ({unplayed} frames unplayed) → {proc_pos}{}",
+                            if flip { ", turning" } else { "" });
                 position.store(proc_pos, Ordering::Relaxed);
+            }
+            if flip { rev = want_rev; }
+            jump.reading_rev.store(rev, Ordering::Relaxed);
+        }
+
+        // ── A quantized turn on its grid point ────────────────────────────────
+        // The read stops right on it (blocks are cut short below), turns, and
+        // goes on the other way from the same sample: no gap, nothing to
+        // crossfade.  Turning back from SLIP REV, it lands where forward play
+        // would be instead, crossfaded from the reverse.
+        if let Some((at, land)) = turn_at {
+            if (!rev && proc_pos >= at) || (rev && proc_pos <= at) {
+                turn_at = None;
+                turn_view = Some((at, rev, 0));
+                rev = !rev;
+                match land {
+                    None => turned_from = at,
+                    Some(to) => {
+                        land_xf = Some((at, !rev));
+                        proc_pos = to;
+                    }
+                }
+                log::debug!("proc: turned at {at}{}", land.map_or(String::new(), |l| format!(", landed at {l}")));
             }
         }
 
@@ -1698,7 +1883,7 @@ fn processor_loop(
         if !complete_now {
             let (ls, le) = (lp.start.load(Ordering::Relaxed) as usize, lp.end.load(Ordering::Relaxed) as usize);
             let in_loop = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
-            if !in_loop && proc_pos as usize + BLOCK_FRAMES * file_ch > samples.len() {
+            if !in_loop && !rev && proc_pos as usize + BLOCK_FRAMES * file_ch > samples.len() {
                 thread::sleep(Duration::from_millis(2));
                 continue;
             }
@@ -1710,7 +1895,8 @@ fn processor_loop(
         // drain distance so the UI's audible-position estimate can actually
         // reach the end (otherwise in_flight freezes ~93 ms short and the deck
         // never registers end-of-track).
-        if proc_pos >= samples.len() as u64 {
+        // In reverse, the start of the track is its end.
+        if (!rev && proc_pos >= samples.len() as u64) || (rev && proc_pos == 0) {
             let ring_out_frames = (ring_len - producer.slots()) / device_ch;
             in_flight.store(ring_out_frames as u64 * file_ch as u64, Ordering::Relaxed);
             thread::sleep(Duration::from_millis(5));
@@ -1718,31 +1904,70 @@ fn processor_loop(
         }
 
         // ── Read a block from the source (loop-aware) ─────────────────────────
-        let want = BLOCK_FRAMES * file_ch;
+        let mut want = BLOCK_FRAMES * file_ch;
+        // A quantized turn ahead: read no further than its grid point.
+        if let Some((at, _)) = turn_at {
+            let d = if rev { proc_pos.saturating_sub(at) } else { at.saturating_sub(proc_pos) } as usize;
+            if d > 0 { want = want.min(d); }
+        }
         let (ls, le) = (lp.start.load(Ordering::Relaxed) as usize, lp.end.load(Ordering::Relaxed) as usize);
         let looping  = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
-        let (src_block, src_end) = read_block(samples, proc_pos as usize, want,
-                                              looping.then_some((ls, le)), &mut loop_buf);
-
-        // Stems: the same ranges through the stem mix, before the stretcher
-        // (one stretcher whatever the stems do).  Untouched when no bank is
-        // loaded for this track or every stem is at full.
         let bank = stems.bank().filter(|b| b.is_for(&current));
-        let src_block: &[f32] = if bank.is_some() || mixer.active() {
-            let (ranges, _) = block_ranges(samples.len(), proc_pos as usize, want, looping.then_some((ls, le)));
-            if mixer.mix(samples, bank.as_deref(), stems.gains(), &ranges, &mut mix_buf) { &mix_buf } else { src_block }
+        let (src_block, src_end): (&[f32], usize) = if rev {
+            // Backwards: the frames before the cursor, last first, through
+            // the stem mix sample by sample when it is in play.
+            let stemmed = bank.is_some() || mixer.active();
+            let src = |i: usize| if stemmed { mixer.at(&current, bank.as_deref(), i) } else { samples[i] };
+            let end = read_block_rev(&src, samples.len(), proc_pos as usize, want, file_ch,
+                                     looping.then_some((ls, le)), &mut loop_buf);
+            (&loop_buf[..], end)
+        } else {
+            let (src_block, src_end) = read_block(samples, proc_pos as usize, want,
+                                                  looping.then_some((ls, le)), &mut loop_buf);
+
+            // Stems: the same ranges through the stem mix, before the stretcher
+            // (one stretcher whatever the stems do).  Untouched when no bank is
+            // loaded for this track or every stem is at full.
+            let src_block: &[f32] = if bank.is_some() || mixer.active() {
+                let (ranges, _) = block_ranges(samples.len(), proc_pos as usize, want, looping.then_some((ls, le)));
+                if mixer.mix(samples, bank.as_deref(), stems.gains(), &ranges, &mut mix_buf) { &mix_buf } else { src_block }
+            } else { src_block };
+            (src_block, src_end)
+        };
+
+        // A SLIP REV landing: its first few ms crossfade (equal power) from
+        // the reverse going on past the turn into the forward read.
+        let src_block: &[f32] = if let Some((from, from_rev)) = land_xf.take() {
+            let stemmed = bank.is_some() || mixer.active();
+            let src = |i: usize| if stemmed { mixer.at(&current, bank.as_deref(), i) } else { samples[i] };
+            let frames = samples.len() / file_ch;
+            let n = ((sample_rate as f32 * LAND_XFADE_S) as usize).max(1).min(src_block.len() / file_ch);
+            xf_buf.clear();
+            xf_buf.extend_from_slice(src_block);
+            let f0 = (from / file_ch as u64) as i64;
+            for i in 0..n {
+                let fr = if from_rev { f0 - 1 - i as i64 } else { f0 + i as i64 };
+                let t = (i as f32 + 0.5) / n as f32 * std::f32::consts::FRAC_PI_2;
+                for c in 0..file_ch {
+                    let old = if fr >= 0 && (fr as usize) < frames { src(fr as usize * file_ch + c) } else { 0.0 };
+                    let k = i * file_ch + c;
+                    xf_buf[k] = xf_buf[k] * t.sin() + old * t.cos();
+                }
+            }
+            &xf_buf
         } else { src_block };
 
         lp.consumed.fetch_add(src_block.len() as u64, Ordering::Relaxed);
 
-        let final_block = !looping && src_end >= samples.len() && complete_now;
+        let final_block = !looping && complete_now && if rev { src_end == 0 } else { src_end >= samples.len() };
 
         // Advance the shared position so the UI/renderer sees it — unless a
         // seek arrived during this block: then the UI already published the
         // new spot and this store would overwrite it with the stale cursor.
         proc_pos = src_end as u64;
+        if let Some(v) = turn_view.as_mut() { v.2 += src_block.len() as u64; }
         if seek_request.load(Ordering::Acquire) == NO_SEEK {
-            position.store(proc_pos, Ordering::Relaxed);
+            position.store(shown_pos(proc_pos, turn_view), Ordering::Relaxed);
         }
 
         // ── Update speed + key-lock mode ─────────────────────────────────────────
@@ -1800,6 +2025,26 @@ fn processor_loop(
         let src_frames_ahead =
             (ring_out_frames as f32 * spd) as u64 + held.round() as u64;
         in_flight.store(src_frames_ahead * file_ch as u64, Ordering::Relaxed);
+        // A quantized turn is heard once what was read since it is all that
+        // is queued: from then on the real cursor, and the new way.
+        if let Some((_, _, n)) = turn_view {
+            if n >= src_frames_ahead * file_ch as u64 {
+                turn_view = None;
+                jump.reading_rev.store(rev, Ordering::Relaxed);
+                if seek_request.load(Ordering::Acquire) == NO_SEEK { position.store(proc_pos, Ordering::Relaxed); }
+            }
+        }
+    }
+}
+
+/// The cursor the UI is shown: the real one, or while a quantized turn is
+/// still queued (`turn_view`: its spot, the old way, samples read since),
+/// where the old way would have got to.
+fn shown_pos(proc_pos: u64, turn_view: Option<(u64, bool, u64)>) -> u64 {
+    match turn_view {
+        Some((at, true, n))  => at.saturating_sub(n),
+        Some((at, false, n)) => at + n,
+        None => proc_pos,
     }
 }
 
@@ -2187,6 +2432,105 @@ mod host_output_tests {
         }
         assert!(pa > 0.3, "deck A's output carries A's track ({pa})");
         assert_eq!(pb, 0.0, "deck B's output carries nothing of A's");
+    }
+}
+
+/// Reverse play's reads.
+#[cfg(test)]
+mod reverse_tests {
+    use super::*;
+
+    /// A quantized turn goes to the grid point nearest what is heard.
+    #[test]
+    fn a_quantized_turn_takes_the_nearest_grid_point() {
+        // Beats every 100 frames from frame 30.
+        assert_eq!(grid_nearest(250.0, 30.0, 100.0), 230.0);
+        assert_eq!(grid_nearest(290.0, 30.0, 100.0), 330.0);
+        assert_eq!(grid_nearest(230.0, 30.0, 100.0), 230.0);
+        assert_eq!(grid_nearest(-20.0, 30.0, 100.0), 0.0, "not before the track");
+        // SLIP REV turned at 1000, back at 800: lands at 1200 (stereo).
+        assert_eq!(mirror(1000, 800, 2, 100_000), 1200);
+        assert_eq!(mirror(1000, 800, 2, 1100), 1100, "not past the end");
+    }
+
+    /// A mono ramp read backwards: the samples before the cursor, last first.
+    #[test]
+    fn reads_backwards_from_the_cursor() {
+        let s: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let mut buf = Vec::new();
+        let end = read_block_rev(&|i| s[i], s.len(), 50, 5, 1, None, &mut buf);
+        assert_eq!(buf, vec![49.0, 48.0, 47.0, 46.0, 45.0]);
+        assert_eq!(end, 45);
+        // Stereo stays interleaved, frame by frame.
+        let st: Vec<f32> = (0..20).map(|i| i as f32).collect();
+        let end = read_block_rev(&|i| st[i], st.len(), 10, 4, 2, None, &mut buf);
+        assert_eq!(buf, vec![8.0, 9.0, 6.0, 7.0]);
+        assert_eq!(end, 6);
+    }
+
+    /// At the track's start it stops short; inside a loop it wraps to the end.
+    #[test]
+    fn stops_at_the_start_and_wraps_in_a_loop() {
+        let s: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let mut buf = Vec::new();
+        let end = read_block_rev(&|i| s[i], s.len(), 3, 10, 1, None, &mut buf);
+        assert_eq!((buf.clone(), end), (vec![2.0, 1.0, 0.0], 0));
+        let end = read_block_rev(&|i| s[i], s.len(), 22, 5, 1, Some((20, 30)), &mut buf);
+        assert_eq!(buf, vec![21.0, 20.0, 29.0, 28.0, 27.0], "loop [20, 30): 20 → 29");
+        assert_eq!(end, 27);
+        // A cursor before the loop does not wrap into it.
+        let end = read_block_rev(&|i| s[i], s.len(), 12, 3, 1, Some((20, 30)), &mut buf);
+        assert_eq!((buf.clone(), end), (vec![11.0, 10.0, 9.0], 9));
+    }
+
+    /// Reversed, what is heard lies after the cursor: a jump (or a turn of
+    /// the lever, a jump of 0) is measured from there.
+    #[test]
+    fn a_jump_in_reverse_is_measured_after_the_cursor() {
+        // 100 frames queued at 1x, 10 inside the stretcher, stereo.
+        assert_eq!(jump_target(10_000, 100, 1.0, 10, 0, false, 2, 100_000), 10_000 - 220);
+        assert_eq!(jump_target(10_000, 100, 1.0, 10, 0, true, 2, 100_000), 10_000 + 220);
+        assert_eq!(jump_target(10_000, 100, 1.0, 10, 1_000, true, 2, 100_000), 11_220);
+    }
+
+    /// Turning the lever while a tone plays: no silence and no click.
+    #[test]
+    fn a_turn_has_no_gap_and_no_click() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let sr = 44_100usize;
+        let slot: HostSlot = Arc::new(Mutex::new(None));
+        let deck = AudioHandle::open_host(sr as u32, &slot, None).unwrap();
+        let mut out = slot.lock().unwrap().take().unwrap();
+        let tone: Vec<f32> = (0..sr * 20).flat_map(|i| {
+            let s = 0.5 * (i as f32 * 110.0 * std::f32::consts::TAU / sr as f32).sin();
+            [s, s]
+        }).collect();
+        deck.load_samples(Arc::new(tone), sr as u32, 2).unwrap();
+        deck.seek(5 * sr as u64 * 2);   // room to play backwards (it stops at the start)
+        deck.set_playing(true);
+        let mut buf = vec![0f32; 512 * 2];
+        let mut rec = Vec::new();
+        let mut pull = |n: usize, rec: &mut Vec<f32>| for _ in 0..n {
+            out.fill(&mut buf);
+            rec.extend(buf.iter().step_by(2));
+            thread::sleep(Duration::from_micros(512 * 1_000_000 / 44_100));
+        };
+        pull(60, &mut rec);
+        let p0 = deck.position.load(Ordering::Relaxed);
+        rec.clear();
+        pull(4, &mut rec);
+        deck.set_reverse(true);
+        pull(60, &mut rec);
+        let p1 = deck.position.load(Ordering::Relaxed);
+        assert!(p1 < p0, "reading backwards: {p0} → {p1}");
+        let (mut run, mut gap) = (0, 0);
+        for s in &rec { if s.abs() < 1e-4 { run += 1; gap = gap.max(run); } else { run = 0; } }
+        let at = 4 * 512;
+        let step = rec[at - 1..at + 3 * 512].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+        eprintln!("turn: longest silence {gap} frames, biggest step {step:.3}");
+        assert!(gap < 8, "silence at the turn: {gap} frames");
+        assert!(step < 0.05, "click at the turn: step {step}");
     }
 }
 

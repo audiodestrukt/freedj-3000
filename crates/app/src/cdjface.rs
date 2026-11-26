@@ -103,6 +103,9 @@ pub enum Key {
     // The left column.
     TimeMode, Slip, Quantize, CallDelete,
     LoopIn, LoopOut, Reloop, Loop4, Loop8, JumpPrev, JumpNext,
+    // The direction lever: SLIP REV (momentary) and REV (latching); FWD is
+    // the lever's rest between them.
+    SlipRev, Rev,
     TrackPrev, TrackNext, SearchPrev, SearchNext,
     // Over the jog.
     CallPrev, CallNext, Delete, Memory,
@@ -124,11 +127,12 @@ enum Shape {
 
 impl Key {
     /// Every key, for the lamp report and the tests.
-    pub const ALL: [Key; 35] = [
+    pub const ALL: [Key; 37] = [
         Key::Source, Key::Browse, Key::TagList, Key::Playlist, Key::Search, Key::Menu,
         Key::Back, Key::TagTrack, Key::TrackFilter, Key::Shortcut,
         Key::TimeMode, Key::Slip, Key::Quantize, Key::CallDelete,
         Key::LoopIn, Key::LoopOut, Key::Reloop, Key::Loop4, Key::Loop8, Key::JumpPrev, Key::JumpNext,
+        Key::SlipRev, Key::Rev,
         Key::TrackPrev, Key::TrackNext, Key::SearchPrev, Key::SearchNext,
         Key::CallPrev, Key::CallNext, Key::Delete, Key::Memory,
         Key::JogMode, Key::BeatSync, Key::Master, Key::KeySync, Key::TempoRange, Key::TempoReset,
@@ -161,6 +165,8 @@ impl Key {
             Key::BeatSync => ("BEAT", "SYNC"),
             Key::Master => ("MASTER", ""),
             Key::KeySync => ("KEY SYNC", ""),
+            Key::SlipRev => ("SLIP", "REV"),
+            Key::Rev => ("REV", ""),
             Key::CallDelete | Key::TimeMode | Key::LoopIn | Key::LoopOut | Key::Reloop | Key::Delete | Key::Memory
             | Key::TempoRange | Key::TempoReset => ("", ""),
         }
@@ -197,6 +203,7 @@ impl Key {
             Key::Delete => "DELETE", Key::Memory => "MEMORY", Key::JogMode => "JOG_MODE",
             Key::BeatSync => "BEAT_SYNC", Key::Master => "MASTER", Key::KeySync => "KEY_SYNC",
             Key::TempoRange => "TEMPO_RANGE", Key::TempoReset => "TEMPO_RESET",
+            Key::SlipRev => "SLIP_REV", Key::Rev => "REV",
         }
     }
 
@@ -240,6 +247,7 @@ impl Key {
             // By the deck's BEAT JUMP value (CALL/DELETE + these keys sets it).
             Key::JumpPrev => deck(ControlEvent::BeatJumpKey { forward: false }),
             Key::JumpNext => deck(ControlEvent::BeatJumpKey { forward: true }),
+            Key::Rev => deck(ControlEvent::ReverseToggle),
             Key::TrackPrev => ui(UiEvent::TrackSearch { next: false }),
             Key::TrackNext => ui(UiEvent::TrackSearch { next: true }),
             Key::CallPrev => deck(ControlEvent::MemoryCueCall { next: false }),
@@ -254,7 +262,7 @@ impl Key {
             Key::TempoReset => deck(ControlEvent::TempoFader { position: 0.5 }),
             // Held, not tapped (CALL / DELETE is a modifier for the pads,
             // SEARCH scans while held), or inert.
-            Key::CallDelete | Key::SearchPrev | Key::SearchNext
+            Key::CallDelete | Key::SearchPrev | Key::SearchNext | Key::SlipRev
             | Key::TrackFilter | Key::Shortcut | Key::KeySync => None,
         }
     }
@@ -265,6 +273,14 @@ impl Key {
         match self {
             Key::JumpPrev => Some(Event::Deck(ControlEvent::BeatJumpValue { up: false })),
             Key::JumpNext => Some(Event::Deck(ControlEvent::BeatJumpValue { up: true })),
+            _ => None,
+        }
+    }
+
+    /// Held, not tapped: what the press and the release send (SLIP REV).
+    pub fn held(self, down: bool) -> Option<Event> {
+        match self {
+            Key::SlipRev => Some(Event::Deck(ControlEvent::SlipReverse { held: down })),
             _ => None,
         }
     }
@@ -322,6 +338,9 @@ impl Key {
             Key::Menu => level(matches!(view, ScreenView::Menu(..))),
             Key::TagTrack => bit(sel_tagged),
             Key::Slip => level(snap.slip),
+            // The lever lights while the deck plays in reverse (p.70).
+            Key::Rev => bit(snap.reverse && !snap.slip_reverse),
+            Key::SlipRev => bit(snap.slip_reverse),
             Key::Quantize => level(snap.quantize),
             Key::BeatSync => bit(snap.sync),
             Key::Master => bit(snap.master),
@@ -429,6 +448,8 @@ pub fn deck_layout(base: Rect) -> (Rect, CdjFace) {
     keys.push((disk(165.0, 833.0, 22.0), Key::Loop8));
     keys.push((r(38.0, 900.0, 93.0, 948.0), Key::JumpPrev));
     keys.push((r(138.0, 900.0, 194.0, 948.0), Key::JumpNext));
+    keys.push((r(38.0, 1010.0, 110.0, 1050.0), Key::SlipRev));
+    keys.push((r(122.0, 1010.0, 194.0, 1050.0), Key::Rev));
     keys.push((disk(67.0, 1193.0, 28.0), Key::TrackPrev));
     keys.push((disk(143.0, 1193.0, 28.0), Key::TrackNext));
     keys.push((disk(67.0, 1295.0, 28.0), Key::SearchPrev));
@@ -668,6 +689,17 @@ fn draw_keys(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, keys: &[(Rect, K
 
         if k.inert() { continue; }
         if *k == Key::CallDelete { call_delete_held = down; continue; }
+        // Held keys (SLIP REV): their press and release, from any finger.
+        if k.held(true).is_some() {
+            let was = Id::new(("cdjface-held", k.emu_name()));
+            let before: bool = ctx.data(|d| d.get_temp(was)).unwrap_or(false);
+            if down != before {
+                ctx.data_mut(|d| d.insert_temp(was, down));
+                if let Some(e) = k.held(down) { out.push(e); }
+            }
+            if down { ctx.request_repaint(); }
+            continue;
+        }
         // A tap acts on the release. A key with a long press acts at the
         // threshold instead, and then not again on the release.
         let pid = id.with("press");
@@ -847,6 +879,10 @@ mod tests {
         assert!(matches!(Key::JumpNext.tap(None), Some(Event::Deck(ControlEvent::BeatJumpKey { forward: true }))));
         assert!(matches!(Key::JumpPrev.with_call_delete(), Some(Event::Deck(ControlEvent::BeatJumpValue { up: false }))));
         assert!(Key::Loop4.with_call_delete().is_none());
+        // The lever: REV latches, SLIP REV is held.
+        assert!(matches!(Key::Rev.tap(None), Some(Event::Deck(ControlEvent::ReverseToggle))));
+        assert!(Key::SlipRev.tap(None).is_none());
+        assert!(matches!(Key::SlipRev.held(false), Some(Event::Deck(ControlEvent::SlipReverse { held: false }))));
         assert!(matches!(Key::Playlist.tap(None), Some(Event::Ui(UiEvent::Screen(TopScreen::Playlist)))));
         for k in [Key::TrackFilter, Key::Shortcut, Key::KeySync] { assert!(k.tap(None).is_none()); }
     }
