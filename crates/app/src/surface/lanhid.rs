@@ -140,8 +140,9 @@ fn map_button(btn: CdjButton, pressed: bool) -> Option<Event> {
         B::Reloop => deck(CE::Reloop),
         B::Back => deck(CE::Back),
         B::RotaryPush => deck(CE::Load), // rotary push loads the selected track
-        B::BeatJumpFwd => deck(CE::BeatJump { beats: 1.0 }),
-        B::BeatJumpRev => deck(CE::BeatJump { beats: -1.0 }),
+        // The unit's BEAT JUMP ◀ / ▶: by the deck's beat-jump value.
+        B::BeatJumpFwd => deck(CE::BeatJumpKey { forward: true }),
+        B::BeatJumpRev => deck(CE::BeatJumpKey { forward: false }),
         // Modifiers / settings with no direct deck event yet.
         B::Shift | B::Quantize | B::TempoRange => None,
     }

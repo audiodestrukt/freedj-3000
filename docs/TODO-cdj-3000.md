@@ -65,7 +65,7 @@ exceptions:
 | KEY SYNC | all | M |
 | ~~Hot-cue colours from rekordbox (PCO2 in the `.EXT`)~~ done: read, drawn, served. Comments are read and served, not yet shown on our screen | all | S |
 | Gate Cue, Smart Cue | all | S |
-| Beat-jump value settable (CALL/DELETE + BEAT JUMP); quantize beat value | all | S |
+| ~~Beat-jump value settable (CALL/DELETE + BEAT JUMP); quantize beat value~~ done: CALL/DELETE + BEAT JUMP ◀ / ▶ steps 1/2–64, MENU → QUANTIZE BEAT VALUE (1/8–1) and BEAT JUMP BEAT VALUE, both in the readouts | all | ✓ |
 | Slip reverse, reverse | all | M |
 | Active loop, emergency loop, loop slip | all | M |
 | Vinyl speed adjust (touch/release) (`varispeed-engine.md`) | all | M |

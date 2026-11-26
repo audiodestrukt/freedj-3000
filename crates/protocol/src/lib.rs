@@ -160,6 +160,10 @@ pub enum ControlEvent {
     Reloop,
     BeatLoop     { beats: f32, held: bool },
     BeatJump     { beats: f32 },
+    /// BEAT JUMP ◀ / ▶: jump (or move the loop) by the deck's beat-jump value.
+    BeatJumpKey  { forward: bool },
+    /// CALL/DELETE + BEAT JUMP ◀ / ▶: step the beat-jump value down / up.
+    BeatJumpValue { up: bool },
     SlipToggle,
     KeyLockToggle,
     /// JOG MODE button: VINYL (drag = direct playhead manipulation) ↔ CDJ (drag = nudge).

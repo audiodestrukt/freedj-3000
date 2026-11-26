@@ -2754,12 +2754,14 @@ fn draw_info_block(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut
         let r = lay.quantize;
         outline(ui, r, RED, u);
         label(ui, Pos2::new(r.center().x, r.min.y + 14.0 * u), Align2::CENTER_CENTER, "QUANTIZE", 13.0, u, RED);
-        label(ui, Pos2::new(r.center().x, r.min.y + 36.0 * u), Align2::CENTER_CENTER, "1", 24.0, u, RED);
+        label(ui, Pos2::new(r.center().x, r.min.y + 36.0 * u), Align2::CENTER_CENTER,
+              crate::settings::beats_text(snap.quantize_beats), 24.0, u, RED);
     }
     let r = lay.beat_jump;
     outline(ui, r, TEXT, u);
     label(ui, Pos2::new(r.center().x, r.min.y + 14.0 * u), Align2::CENTER_CENTER, "BEAT JUMP", 13.0, u, TEXT);
-    label(ui, Pos2::new(r.center().x, r.min.y + 36.0 * u), Align2::CENTER_CENTER, "16", 26.0, u, TEXT);
+    label(ui, Pos2::new(r.center().x, r.min.y + 36.0 * u), Align2::CENTER_CENTER,
+          crate::settings::beats_text(snap.beat_jump_beats), 26.0, u, TEXT);
 
     // Time: REMAIN (elapsed time has no caption), SINGLE, mm:ss + .msec
     let r = lay.time;

@@ -1125,6 +1125,13 @@ fn jump_target(pos: u64, unplayed: usize, speed: f32, latency: usize, delta: i64
     t / ch as u64 * ch as u64
 }
 
+/// An absolute seek `pos` moved on by a jump `delta` that came right behind
+/// it (nothing has played from `pos` yet), clamped and frame-aligned.
+fn seek_plus(pos: u64, delta: i64, ch: usize, len: usize) -> u64 {
+    let t = (pos as i64 + delta).clamp(0, len as i64) as u64;
+    t / ch as u64 * ch as u64
+}
+
 /// The next source block from `pos`, `want` samples long, and the cursor after
 /// it.  With a loop `[ls, le)` active, a block that would run past `le` is
 /// assembled in `scratch` as the loop's tail then its head — one continuous
@@ -1577,7 +1584,10 @@ fn processor_loop(
             // published position and the first block after PLAY are right.
             let mut req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
             let jmp = jump.request.swap(NO_JUMP, Ordering::AcqRel);
-            if req == NO_SEEK && jmp != NO_JUMP {
+            if req != NO_SEEK && jmp != NO_JUMP {
+                // A jump right behind a seek: from the spot just sought.
+                req = seek_plus(req, jmp, file_ch, samples.load().len());
+            } else if req == NO_SEEK && jmp != NO_JUMP {
                 // Paused, nothing is consumed: what is heard next is the
                 // ring's head, as the UI's playhead has it.
                 let queued = (ring_len - producer.slots()) / device_ch;
@@ -1624,7 +1634,8 @@ fn processor_loop(
             held = 0.0;
             if req != NO_SEEK {
                 log::debug!("proc: seek {proc_pos} → {req}");
-                proc_pos = req;
+                // A jump right behind it lands from the spot just sought.
+                proc_pos = if jmp != NO_JUMP { seek_plus(req, jmp, file_ch, samples.len()) } else { req };
                 position.store(proc_pos, Ordering::Relaxed);   // reflect immediately
             }
             // Tell the cpal callback to flush stale buffered audio.

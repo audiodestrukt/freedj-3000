@@ -237,8 +237,9 @@ impl Key {
             Key::Reloop => deck(ControlEvent::Reloop),
             Key::Loop4 => loop_by(4.0, 0.5),
             Key::Loop8 => loop_by(8.0, 2.0),
-            Key::JumpPrev => deck(ControlEvent::BeatJump { beats: -16.0 }),
-            Key::JumpNext => deck(ControlEvent::BeatJump { beats: 16.0 }),
+            // By the deck's BEAT JUMP value (CALL/DELETE + these keys sets it).
+            Key::JumpPrev => deck(ControlEvent::BeatJumpKey { forward: false }),
+            Key::JumpNext => deck(ControlEvent::BeatJumpKey { forward: true }),
             Key::TrackPrev => ui(UiEvent::TrackSearch { next: false }),
             Key::TrackNext => ui(UiEvent::TrackSearch { next: true }),
             Key::CallPrev => deck(ControlEvent::MemoryCueCall { next: false }),
@@ -255,6 +256,16 @@ impl Key {
             // SEARCH scans while held), or inert.
             Key::CallDelete | Key::SearchPrev | Key::SearchNext
             | Key::TrackFilter | Key::Shortcut | Key::KeySync => None,
+        }
+    }
+
+    /// What the key sends while CALL/DELETE is held, where that differs:
+    /// BEAT JUMP ◀ / ▶ step the beat-jump value (the manual, p.89).
+    pub fn with_call_delete(self) -> Option<Event> {
+        match self {
+            Key::JumpPrev => Some(Event::Deck(ControlEvent::BeatJumpValue { up: false })),
+            Key::JumpNext => Some(Event::Deck(ControlEvent::BeatJumpValue { up: true })),
+            _ => None,
         }
     }
 
@@ -673,7 +684,9 @@ fn draw_keys(ui: &Ui, ctx: &egui::Context, snap: &DeckSnapshot, keys: &[(Rect, K
         }
         let fire = if k.on_press() { resp.drag_started() || tap || sec[n].pressed }
                    else { (resp.drag_stopped() && !st.long_fired) || tap || sec[n].tapped };
-        if fire {
+        if fire && call_delete_held && k.with_call_delete().is_some() {
+            out.extend(k.with_call_delete());
+        } else if fire {
             if let Some(e) = k.tap(snap.loop_active.then_some(snap.loop_beats)) {
                 // The unit's 4 / 8 keys bring up the BEAT LOOP panel too.
                 if matches!(k, Key::Loop4 | Key::Loop8) { crate::cdj3000::open_panel(ctx, crate::cdj3000::Panel::BeatLoop); }
@@ -830,6 +843,10 @@ mod tests {
         assert!(matches!(Key::Menu.tap(None), Some(Event::Ui(UiEvent::Screen(TopScreen::Menu)))));
         assert!(matches!(Key::TimeMode.long(), Some(Event::Ui(UiEvent::AutoCue))));
         assert!(matches!(Key::Quantize.tap(None), Some(Event::Ui(UiEvent::CycleSetting(Setting::Quantize)))));
+        // BEAT JUMP by the deck's value; with CALL/DELETE held, the value.
+        assert!(matches!(Key::JumpNext.tap(None), Some(Event::Deck(ControlEvent::BeatJumpKey { forward: true }))));
+        assert!(matches!(Key::JumpPrev.with_call_delete(), Some(Event::Deck(ControlEvent::BeatJumpValue { up: false }))));
+        assert!(Key::Loop4.with_call_delete().is_none());
         assert!(matches!(Key::Playlist.tap(None), Some(Event::Ui(UiEvent::Screen(TopScreen::Playlist)))));
         for k in [Key::TrackFilter, Key::Shortcut, Key::KeySync] { assert!(k.tap(None).is_none()); }
     }

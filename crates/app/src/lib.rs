@@ -897,6 +897,8 @@ struct DeckApp {
     /// SLIP for a held action (a hot cue held, the platter held in VINYL),
     /// where the audio stops counting: the shadow runs in wall time.
     slip_hold:         Option<SlipHold>,
+    /// Keyboard: a Shift key is down (Shift+W/E steps the BEAT JUMP value).
+    shift_held:        bool,
     exit_after_capture: bool,
     /// Dev script: buttons held (`hold=`), and the lamp report / screenshot
     /// due this frame (`lamps=`, `shot=`).
@@ -990,8 +992,10 @@ struct UiFlags {
     slip_shadow: Option<u64>,
 }
 
-/// The deck settings the screen shows.
+/// The deck settings the screen and the faceplate show.
 fn fill_deck_settings(snap: &mut DeckSnapshot, settings: &settings::Settings) {
+    snap.quantize_beats  = settings.quantize_beats;
+    snap.beat_jump_beats = settings.beat_jump_beats;
     // A CDJ-3000 setting; the XDJ's screen keeps its playhead centred.
     snap.playhead_frac   = if settings.skin == settings::Skin::Cdj3000 { settings.wave_position.frac() } else { 0.5 };
 }
@@ -1058,7 +1062,7 @@ fn make_snapshot<'a>(
         loop_beats:    f.loop_beats,
         tempo_range:   f.tempo_range,
         quantize:      f.quantize,
-        playhead_frac: 0.5,
+        quantize_beats: 1.0, beat_jump_beats: 16.0, playhead_frac: 0.5,
         slip_shadow:   f.slip_shadow,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
@@ -1299,6 +1303,7 @@ impl DeckApp {
             loop_in_set:       false,
             slip_anchor:       None,
             slip_hold:         None,
+            shift_held:        false,
             exit_after_capture: false,
             script_held: Vec::new(),
             panel_held: Vec::new(),
@@ -1625,6 +1630,23 @@ impl DeckApp {
                     }
                     _ => log::info!("beat jump: no beat grid"),
                 }
+            }
+            // BEAT JUMP ◀ / ▶: by the deck's beat-jump value.
+            Event::Deck(ControlEvent::BeatJumpKey { forward }) => {
+                let beats = self.settings.beat_jump_beats;
+                self.apply(Event::Deck(ControlEvent::BeatJump { beats: if forward { beats } else { -beats } }));
+            }
+            // CALL/DELETE + BEAT JUMP ◀ / ▶: the value down / up, stopping at
+            // the ends (1/2 and 64).
+            Event::Deck(ControlEvent::BeatJumpValue { up }) => {
+                let v = &settings::BEAT_JUMP_VALUES;
+                let i = v.iter().position(|b| *b == self.settings.beat_jump_beats).unwrap_or(5);
+                let j = if up { (i + 1).min(v.len() - 1) } else { i.saturating_sub(1) };
+                if j != i {
+                    self.settings.beat_jump_beats = v[j];
+                    self.settings.save();
+                }
+                log::info!("beat jump value: {}", settings::beats_text(self.settings.beat_jump_beats));
             }
             Event::Deck(ControlEvent::NeedleSearch { position }) => {
                 let total = self.audio.len() as f64;
@@ -2202,9 +2224,11 @@ impl DeckApp {
         let ch = self.audio.channels as u64;
         let p = match (self.settings.quantize, self.beat_grid.as_ref(), self.samples_per_beat()) {
             (true, Some(g), Some(per_beat)) => {
+                // To the QUANTIZE beat value: 1/8, 1/4, 1/2 or a whole beat.
+                let step = per_beat * self.settings.quantize_beats.clamp(0.125, 1.0) as f64;
                 let anchor = g.anchor_sample as f64 * ch as f64;
-                let n = ((pos - anchor) / per_beat).round();
-                (anchor + n * per_beat).max(0.0)
+                let n = ((pos - anchor) / step).round();
+                (anchor + n * step).max(0.0)
             }
             _ => pos.max(0.0),
         };
@@ -2542,6 +2566,9 @@ impl DeckApp {
                 };
                 match k {
                     Key::CallDelete => { self.script_held.push(button.to_string()); return release(); }
+                    _ if self.script_held.iter().any(|h| h == "CALL_DELETE") && k.with_call_delete().is_some() => {
+                        if let Some(e) = k.with_call_delete() { self.apply(e); }
+                    }
                     Key::SearchPrev | Key::SearchNext => {
                         // Scan as far as the held key would.
                         let total = self.audio.len().max(1) as f64;
@@ -3477,6 +3504,7 @@ impl DeckApp {
             }
             return false;
         }
+        if matches!(code, ShiftLeft | ShiftRight) { self.shift_held = pressed; return false; }
         // Everything else acts on key-down only.
         if !pressed { return false; }
         // Phone preview: Tab flips SCREEN / CONTROLS (the swipe on device).
@@ -3554,6 +3582,11 @@ impl DeckApp {
             BracketRight => Some(Event::Deck(ControlEvent::MemoryCueCall { next: true })),
             Delete       => Some(Event::Deck(ControlEvent::MemoryCueDelete)),
             KeyS => Some(Event::Deck(ControlEvent::SlipToggle)),
+            // BEAT JUMP ◀ / ▶; with Shift the value down / up (CALL/DELETE + BEAT JUMP).
+            KeyW if self.shift_held => Some(Event::Deck(ControlEvent::BeatJumpValue { up: false })),
+            KeyE if self.shift_held => Some(Event::Deck(ControlEvent::BeatJumpValue { up: true })),
+            KeyW => Some(Event::Deck(ControlEvent::BeatJumpKey { forward: false })),
+            KeyE => Some(Event::Deck(ControlEvent::BeatJumpKey { forward: true })),
             KeyY => Some(Event::Deck(ControlEvent::SyncToggle)),
             KeyM => Some(Event::Deck(ControlEvent::MasterRequest)),
             KeyT => Some(Event::Ui(UiEvent::TimeMode)),
@@ -6852,6 +6885,47 @@ mod deck_tests {
         assert!((got - want).abs() < 0.15, "{what}: at {got:.2}s, want {want:.2}s");
     }
 
+    /// BEAT JUMP ◀ / ▶ jump by the value; CALL/DELETE + BEAT JUMP steps it
+    /// through 1/2 … 64 and stops at the ends.  120 BPM: a beat is 0.5 s.
+    #[test]
+    fn beat_jump_keys_use_the_value_and_call_delete_sets_it() {
+        let mut d = deck(60.0);
+        d.send(C::NeedleSearch { position: 10.0 / 60.0 });
+        let at = d.at();
+        d.send(C::BeatJumpKey { forward: true });
+        d.run(0.1);   // paused: the audio side lands the jump a moment later
+        near(d.at(), at + 8.0, "16 beats (the default) on");
+        d.send(C::BeatJumpValue { up: false });
+        d.send(C::BeatJumpValue { up: false });
+        assert_eq!(d.settings.beat_jump_beats, 4.0);
+        let at = d.at();
+        d.send(C::BeatJumpKey { forward: false });
+        d.run(0.1);
+        near(d.at(), at - 2.0, "4 beats back");
+        for _ in 0..10 { d.send(C::BeatJumpValue { up: false }); }
+        assert_eq!(d.settings.beat_jump_beats, 0.5, "stops at 1/2");
+        for _ in 0..10 { d.send(C::BeatJumpValue { up: true }); }
+        assert_eq!(d.settings.beat_jump_beats, 64.0, "stops at 64");
+    }
+
+    /// QUANTIZE snaps a hot cue to its beat value: 1/4 of a 0.5 s beat.
+    #[test]
+    fn quantize_snaps_to_its_beat_value() {
+        let mut d = deck(30.0);
+        d.settings.quantize = true;
+        let snapped = |d: &DeckApp| d.hot_cues[0].map(|p| p as f64 / (SR as f64 * 2.0)).unwrap();
+        for (beats, step) in [(1.0, 0.5), (0.25, 0.125)] {
+            d.settings.quantize_beats = beats;
+            d.send(C::NeedleSearch { position: 3.07 / 30.0 });
+            d.send(C::HotCueDelete { slot: 0 });
+            d.send(C::HotCueSet { slot: 0 });
+            let at = snapped(&d);
+            let off = (at / step - (at / step).round()).abs() * step;
+            assert!(off < 0.002, "QUANTIZE {beats}: the cue at {at:.4} s is on a {step} s step");
+            near(at, (3.07 / step).round() * step, "the nearest step");
+        }
+    }
+
     #[test]
     fn slip_returns_after_a_held_hot_cue_and_not_without_slip() {
         let mut d = deck(30.0);
@@ -7353,6 +7427,32 @@ mod keyboard_tests {
         d.send(C::TempoFader { position: 0.5 });
         for _ in 0..10 { d.send(C::TempoNudge { delta: 0.01 }); }
         assert!((d.tempo() - 1.06).abs() < 0.001, "held at +6 %: {}", d.tempo());
+    }
+
+    /// W / E = BEAT JUMP ◀ / ▶, Shift+W / E steps the value.
+    #[test]
+    fn beat_jump_keys() {
+        let near = |got: f64, want: f64, what: &str|
+            assert!((got - want).abs() < 0.15, "{what}: at {got:.2}s, want {want:.2}s");
+        let mut d = deck(60.0);
+        d.send(opendeck_protocol::ControlEvent::NeedleSearch { position: 20.0 / 60.0 });
+        let at = d.at();
+        d.key(KeyCode::KeyE);
+        d.run(0.1);
+        near(d.at(), at + 8.0, "E: 16 beats on");
+        d.key_edge(KeyCode::ShiftLeft, true);
+        d.key(KeyCode::KeyW);
+        d.key(KeyCode::KeyW);
+        d.key_edge(KeyCode::ShiftLeft, false);
+        assert_eq!(d.settings.beat_jump_beats, 4.0, "Shift+W twice: 16 → 4");
+        d.key_edge(KeyCode::ShiftRight, true);
+        d.key(KeyCode::KeyE);
+        d.key_edge(KeyCode::ShiftRight, false);
+        assert_eq!(d.settings.beat_jump_beats, 8.0, "Shift+E: 4 → 8");
+        let at = d.at();
+        d.key(KeyCode::KeyW);
+        d.run(0.1);
+        near(d.at(), at - 4.0, "W: 8 beats back");
     }
 
     #[test]
