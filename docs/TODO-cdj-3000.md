@@ -72,7 +72,7 @@ exceptions:
 | Touch Cue on the overview | all | S |
 | INFO overlay: EDIT RATING; other players' tabs are in #54 (draft) | all | S |
 | SHORTCUT screen; full UTILITY list (phase 6) | all | M |
-| Waveform current position CENTER/LEFT | all | S |
+| ~~Waveform current position CENTER/LEFT~~ done: MENU → WAVEFORM CURRENT POSITION; LEFT puts the playhead a quarter across | all | ✓ |
 | ~~Waveform Divisions PHRASE on our own overview~~ done: MENU → WAVEFORM DIVISIONS, rekordbox's phrases from the stick's `.EXT` or our own. A linked player's phrases (its PSSI over dbserver) not yet fetched | all | ✓ |
 | ~~6 players on PRO DJ LINK~~ done: PLAYER No. AUTO and 1–6 | all | ✓ |
 

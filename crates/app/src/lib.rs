@@ -990,6 +990,12 @@ struct UiFlags {
     slip_shadow: Option<u64>,
 }
 
+/// The deck settings the screen shows.
+fn fill_deck_settings(snap: &mut DeckSnapshot, settings: &settings::Settings) {
+    // A CDJ-3000 setting; the XDJ's screen keeps its playhead centred.
+    snap.playhead_frac   = if settings.skin == settings::Skin::Cdj3000 { settings.wave_position.frac() } else { 0.5 };
+}
+
 /// The LED-feedback view of the deck (`surface::Indicators`).
 fn surface_bits(f: &UiFlags, playing: bool, cued: bool) -> u32 {
     use surface::bit::*;
@@ -1052,6 +1058,7 @@ fn make_snapshot<'a>(
         loop_beats:    f.loop_beats,
         tempo_range:   f.tempo_range,
         quantize:      f.quantize,
+        playhead_frac: 0.5,
         slip_shadow:   f.slip_shadow,
         playing, speed, fader_speed,
         key_lock:      f.key_lock,
@@ -4032,6 +4039,7 @@ impl DeckApp {
         let ip_line = if self.screen_mode == ScreenMode::Menu { Self::ip_line(&mut self.ip_cache, &self.link) } else { String::new() };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
+        fill_deck_settings(&mut snap, &self.settings);
         snap.phrases      = &self.phrases;
         snap.divisions    = self.settings.divisions;
         if self.screen_mode == ScreenMode::Info {
@@ -4294,6 +4302,7 @@ impl DeckApp {
         let ip_line = if self.screen_mode == ScreenMode::Menu { Self::ip_line(&mut self.ip_cache, &self.link) } else { String::new() };
         let mut snap = make_snapshot(&self.path, self.beat_grid.as_ref(), &self.memory_cues, &self.track_tags, &self.audio, flags, pos, playing, speed, fader_speed, beat2_bpm, beat2_phase_beats, beat2_bib_v);
         snap.cols_visible = Self::cols_for(self.settings.skin, self.zoom_level);
+        fill_deck_settings(&mut snap, &self.settings);
         snap.phrases      = &self.phrases;
         snap.divisions    = self.settings.divisions;
         if self.screen_mode == ScreenMode::Info {

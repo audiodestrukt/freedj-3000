@@ -85,6 +85,11 @@ pub struct WaveformParams {
     /// Where the overall waveform's RGB data starts in the buffer
     /// (`waveform_cpu::preview_for`, `PREVIEW_N` words); 0 = none.
     pub ov_off:           f32,
+    /// Waveform Current Position: the playhead's place across the enlarged
+    /// waveform (0.5 = CENTER), where `playhead_col` is drawn.
+    pub playhead_frac:    f32,
+    /// Keeps the block a multiple of 16 bytes, as WGSL lays it out.
+    pub _pad:             f32,
 }
 
 /// Output pixels per layout pixel across: 1, except fullscreen fill on a
@@ -263,6 +268,8 @@ impl WaveformParams {
             rgb_off:           0.0,
             rgb_heights:       0.0,
             ov_off:            0.0,
+            playhead_frac:     snap.playhead_frac,
+            _pad:              0.0,
         }
     }
 }
@@ -549,6 +556,8 @@ impl WgpuRenderer {
             rgb_off:          0.0,
             rgb_heights:      0.0,
             ov_off:           0.0,
+            playhead_frac:    0.5,
+            _pad:             0.0,
         };
         let params_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label:    Some("waveform_params"),
@@ -1033,7 +1042,7 @@ pub(crate) const WAVEFORM_WGSL: &str = r#"
 // Each u32 packs [low, mid, high, amp] as little-endian bytes.
 
 struct Params {
-    playhead_col:       f32,  // column index at the enlarged-waveform centre
+    playhead_col:       f32,  // column index at the playhead (playhead_frac across)
     cols_visible:       f32,  // columns visible across the enlarged waveform
     num_cols:           f32,  // number of valid columns in the buffer
     screen_w:           f32,
@@ -1059,6 +1068,8 @@ struct Params {
     rgb_off:            f32,  // RGB levels in the buffer (waveform_cpu::rb_pack); 0 = none
     rgb_heights:        f32,  // 1 = rekordbox's heights with them
     ov_off:             f32,  // the overall waveform's RGB data (waveform_cpu::preview_for); 0 = none
+    playhead_frac:      f32,  // the playhead's place across the enlarged waveform (0.5 = CENTER)
+    _pad:               f32,
 };
 
 @group(0) @binding(0) var<storage, read> waveform: array<u32>;
@@ -1272,15 +1283,16 @@ fn draw_wave(q: vec2<f32>) -> vec4<f32> {
         return strip_bg();
     }
 
-    // Playhead line at the horizontal centre — red, full height, as on the unit.
-    if abs(q.x - (r.x + r.z * 0.5)) < 1.5 {
+    // Playhead line — red, full height, as on the unit; in the middle, or
+    // to the left (Waveform Current Position).
+    if abs(q.x - (r.x + r.z * p.playhead_frac)) < 1.5 {
         return playhead();
     }
 
     let wave_h = r.w - select(0.0, B2_STRIP_PX, p.beat2_period_cols > 0.0);
     let sy     = (q.y - r.y) / wave_h;
 
-    let half  = p.cols_visible * 0.5;
+    let half  = p.cols_visible * p.playhead_frac;
     let col_f = (p.playhead_col - half) + sx * p.cols_visible;
     // Start-cue marker — a ~2px orange line at the cue column.
     let cue_per_px = p.cols_visible / r.z;

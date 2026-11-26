@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, OutputGain, Player, Skin, Light, WaveColor, Divisions, DeckView, Stems, Dvs, PerfLog, About }
+pub enum Setting { AutoCueLevel, Quantize, TempoRange, OutputGain, Player, Skin, Light, WaveColor, WavePosition, Divisions, DeckView, Stems, Dvs, PerfLog, About }
 
 /// DECK VIEW is a desktop row: the iPad always shows the whole deck and the
 /// phone has its two pages.
@@ -23,6 +23,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
+    (Setting::WavePosition, "WAVEFORM CURRENT POSITION"),
     (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::DeckView,     "DECK VIEW"),
     (Setting::Stems,        "STEMS"),
@@ -40,6 +41,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
+    (Setting::WavePosition, "WAVEFORM CURRENT POSITION"),
     (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::Stems,        "STEMS"),
     (Setting::Dvs,          "DVS"),
@@ -57,6 +59,7 @@ pub const MENU: &[(Setting, &str)] = &[
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
+    (Setting::WavePosition, "WAVEFORM CURRENT POSITION"),
     (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
@@ -128,13 +131,35 @@ impl Divisions {
     }
 }
 
+/// Waveform Current Position, as on the CDJ-3000: where the playhead sits
+/// across the enlarged waveform.  LEFT shows more of what is coming.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+pub enum WavePosition {
+    #[default]
+    Center,
+    Left,
+}
+
+impl WavePosition {
+    pub fn label(self) -> &'static str {
+        match self { WavePosition::Center => "CENTER", WavePosition::Left => "LEFT" }
+    }
+
+    /// The playhead's place across the enlarged waveform, 0 = left edge.
+    pub fn frac(self) -> f32 {
+        match self { WavePosition::Center => 0.5, WavePosition::Left => LEFT_PLAYHEAD }
+    }
+}
+
+/// Where LEFT puts the playhead: a quarter of the way across.
+pub const LEFT_PLAYHEAD: f32 = 0.25;
+
 /// The unit's AUTO CUE LEVEL choices (dB).
 pub const AUTO_CUE_LEVELS: [f32; 8] = [-36.0, -42.0, -48.0, -54.0, -60.0, -66.0, -72.0, -78.0];
 /// OUTPUT GAIN choices (dB): a trim on the deck's output, never a boost.
 pub const OUTPUT_GAINS: [f32; 9] = [0.0, -3.0, -6.0, -9.0, -12.0, -15.0, -18.0, -24.0, -30.0];
 /// TEMPO RANGE choices as a fraction: ±6 %, ±10 %, ±16 %, WIDE (±100 %).
 pub const TEMPO_RANGES: [f32; 4] = [0.06, 0.10, 0.16, 1.00];
-
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
 pub struct Settings {
@@ -171,6 +196,9 @@ pub struct Settings {
     pub wave_color: WaveColor,
     /// Waveform Divisions (CDJ-3000 screen): TIME SCALE or PHRASE.
     pub divisions: Divisions,
+    /// Waveform Current Position (CDJ-3000 screen): the playhead in the
+    /// middle of the enlarged waveform, or towards its left.
+    pub wave_position: WavePosition,
     /// OUTPUT GAIN (dB, 0 or below): turns the deck's output down,
     /// independent of the device's volume.
     pub output_gain_db: f32,
@@ -210,7 +238,8 @@ const SEED: u8 = 4;
 impl Default for Settings {
     fn default() -> Self {
         Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000,
-               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, divisions: Divisions::Phrase, output_gain_db: 0.0, light: false, stems: true, dvs: crate::dvs::DvsMode::Off, dvs_status: "", seed: 0, phone: false }
+               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, divisions: Divisions::Phrase,
+               wave_position: WavePosition::Center, output_gain_db: 0.0, light: false, stems: true, dvs: crate::dvs::DvsMode::Off, dvs_status: "", seed: 0, phone: false }
     }
 }
 
@@ -294,6 +323,7 @@ impl Settings {
         match s {
             Setting::AutoCueLevel => c.auto_cue_level_db = step(&AUTO_CUE_LEVELS, c.auto_cue_level_db, dir),
             Setting::Quantize     => c.quantize = !c.quantize,
+            Setting::WavePosition => c.wave_position = step(&[WavePosition::Center, WavePosition::Left], c.wave_position, dir),
             Setting::TempoRange   => c.tempo_range = step(&TEMPO_RANGES, c.tempo_range, dir),
             Setting::OutputGain   => c.output_gain_db = step(&OUTPUT_GAINS, c.output_gain_db, dir),
             Setting::Player       => c.player = step(&[0u8, 1, 2, 3, 4, 5, 6], c.player, dir),
@@ -317,6 +347,7 @@ impl Settings {
         match s {
             Setting::AutoCueLevel => format!("{:.0} dB", self.auto_cue_level_db),
             Setting::Quantize     => if self.quantize { "ON".into() } else { "OFF".into() },
+            Setting::WavePosition => self.wave_position.label().into(),
             Setting::TempoRange   => Self::range_label(self.tempo_range),
             Setting::OutputGain   => if self.output_gain_db == 0.0 { "0 dB".into() } else { format!("{:.0} dB", self.output_gain_db) },
             Setting::Player if self.player == 0 => "AUTO   (applies at next launch)".into(),

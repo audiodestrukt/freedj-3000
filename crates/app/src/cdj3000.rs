@@ -553,9 +553,10 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         let cols = snap.cols_visible.max(1.0) as f64;
         let px = OutPx::of(ui, w, cols);
         let play_col = px.playhead(snap.position as f64 / ch / hop);
-        let x_of = |frame: f64| px.snap(w.min.x + ((frame / hop - play_col) / cols + 0.5) as f32 * w.width());
+        let ph = snap.playhead_frac as f64;   // Waveform Current Position
+        let x_of = |frame: f64| px.snap(w.min.x + ((frame / hop - play_col) / cols + ph) as f32 * w.width());
         let period = snap.sample_rate as f64 * 60.0 / g.bpm;
-        let first_frame = (play_col - cols / 2.0) * hop;
+        let first_frame = (play_col - cols * ph) * hop;
         let k0 = ((first_frame - g.anchor_sample as f64) / period).floor() as i64;
         let k1 = k0 + (cols * hop / period).ceil() as i64 + 2;
         let stroke = |c| Stroke::new(px.width(1.5 * u), c);
@@ -571,7 +572,7 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         // CDJ-3000 keeps them still while the waveform scrolls under them,
         // past the track's end too (2026-11-12, at 3.1, 5.3 and 8.0 s).
         for (n, num) in [(16.0, "16"), (32.0, "32")] {
-            let x = ahead_x(w, n * period / hop, cols);
+            let x = ahead_x(w, n * period / hop, cols, snap.playhead_frac);
             if x <= w.max.x {
                 label(ui, Pos2::new(x, lay.ticks_bot.max.y + 8.0 * u), Align2::CENTER_CENTER, num, 17.0, u, TEXT);
             }
@@ -588,7 +589,8 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         let cols = snap.cols_visible.max(1.0) as f64;
         let px = OutPx::of(ui, w, cols);
         let play_col = px.playhead(snap.position as f64 / ch / hop);
-        let x_of = |s: u64| px.snap(w.min.x + ((s as f64 / ch / hop - play_col) / cols + 0.5) as f32 * w.width());
+        let ph = snap.playhead_frac as f64;
+        let x_of = |s: u64| px.snap(w.min.x + ((s as f64 / ch / hop - play_col) / cols + ph) as f32 * w.width());
         let on = |x: f32| x >= w.min.x - 20.0 * u && x <= w.max.x;
         let top = lay.ticks_top.min.y - 6.0 * u;
         for &m in snap.memory_cues {
@@ -621,7 +623,7 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         let w = lay.wave;
         let cols = snap.cols_visible.max(1.0) as f64;
         let play_col = snap.position as f64 / ch / hop;
-        let x = w.min.x + ((snap.loop_start as f64 / ch / hop - play_col) / cols + 0.5) as f32 * w.width();
+        let x = w.min.x + ((snap.loop_start as f64 / ch / hop - play_col) / cols + snap.playhead_frac as f64) as f32 * w.width();
         if x >= w.min.x && x <= w.max.x {
             let m = lay.loop_mark;
             let tri = vec![Pos2::new(x - 9.0 * u, m.min.y + 16.0 * u), Pos2::new(x + 9.0 * u, m.min.y + 16.0 * u), Pos2::new(x, m.min.y)];
@@ -634,9 +636,11 @@ fn draw_field(ui: &Ui, snap: &DeckSnapshot, lay: &Layout, u: f32, out: &mut Vec<
         }
     }
 
-    // Playhead: white, through the whole field.
+    // Playhead: white, through the whole field; in the middle, or to the
+    // left (Waveform Current Position).
     let f = lay.field;
-    p.line_segment([Pos2::new(f.center().x, f.min.y), Pos2::new(f.center().x, f.max.y)], Stroke::new((3.0 * u).max(1.0), TEXT));
+    let x = f.min.x + f.width() * snap.playhead_frac;
+    p.line_segment([Pos2::new(x, f.min.y), Pos2::new(x, f.max.y)], Stroke::new((3.0 * u).max(1.0), TEXT));
 
     // ZOOM | GRID: the rotary's mode, a tap flips it.
     let z = lay.zoom;
@@ -888,8 +892,8 @@ fn grid_keys_lit(have_grid: bool, cue_set: bool, sync_offset: f32, grid_edited: 
 /// Where a mark `cols_ahead` waveform columns past the playhead sits on the
 /// enlarged waveform `w` showing `cols` columns: the playhead is centred, so
 /// it depends on the tempo and zoom only, never on the position.
-fn ahead_x(w: Rect, cols_ahead: f64, cols: f64) -> f32 {
-    w.min.x + (cols_ahead / cols.max(1.0) + 0.5) as f32 * w.width()
+fn ahead_x(w: Rect, cols_ahead: f64, cols: f64, playhead_frac: f32) -> f32 {
+    w.min.x + (cols_ahead / cols.max(1.0) + playhead_frac as f64) as f32 * w.width()
 }
 
 #[cfg(test)]
@@ -944,7 +948,7 @@ mod helper_tests {
     #[test]
     fn beat_marks_sit_still_ahead_of_the_playhead() {
         let w = Rect::from_min_size(Pos2::new(0.0, 0.0), egui::vec2(1280.0, 200.0));
-        let (x16, x32) = (ahead_x(w, 160.0, 1280.0), ahead_x(w, 320.0, 1280.0));
+        let (x16, x32) = (ahead_x(w, 160.0, 1280.0, 0.5), ahead_x(w, 320.0, 1280.0, 0.5));
         assert_eq!((x16, x32), (800.0, 960.0));
         assert!((x32 - 640.0 - 2.0 * (x16 - 640.0)).abs() < 1e-3);
     }
