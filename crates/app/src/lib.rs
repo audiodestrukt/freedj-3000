@@ -7023,6 +7023,19 @@ mod deck_tests {
         near(d.at(), at + 1.5, "and playing forward");
     }
 
+    /// Play on from 3 s until the playhead is between `lo` and `hi` seconds
+    /// into a beat (120 BPM: 0.5 s), however late the test machine runs;
+    /// where it is then.
+    fn run_to_phase(d: &mut DeckApp, lo: f64, hi: f64) -> f64 {
+        d.run(3.0);
+        for _ in 0..400 {
+            let ph = d.at() % 0.5;
+            if ph >= lo && ph < hi { return d.at(); }
+            d.run(0.004);
+        }
+        panic!("never between {lo} and {hi} into a beat (at {:.3})", d.at());
+    }
+
     /// SLIP REV with QUANTIZE turns on the beat nearest what is heard (120
     /// BPM: beats every 0.5 s).  Pressed at 3.35 s it plays on to 3.5 s and
     /// turns; let go at 3.1 s (heard) it reverses on to 3.0 s, then lands at
@@ -7033,17 +7046,16 @@ mod deck_tests {
         d.settings.quantize = true;
         d.settings.quantize_beats = 1.0;
         d.send(C::Play);
-        d.run(3.35);
-        let t0 = d.at();
-        assert!(t0 > 3.25 && t0 < 3.45, "{t0}");
+        let t0 = run_to_phase(&mut d, 0.33, 0.37);   // 0.15 s before a beat
+        let b = (t0 / 0.5).ceil() * 0.5;
         d.send(C::SlipReverse { held: true });
         d.run(0.1);
         near(d.at(), t0 + 0.1, "waits for the beat");
         d.run(0.45);
-        near(d.at(), 3.5 - (t0 + 0.55 - 3.5), "turned at 3.5 s");
+        near(d.at(), b - (t0 + 0.55 - b), "turned on the beat");
         d.send(C::SlipReverse { held: false });
         d.run(0.05);
-        near(d.at(), 3.5 - (t0 + 0.6 - 3.5), "let go: still back, to the beat");
+        near(d.at(), b - (t0 + 0.6 - b), "let go: still back, to the beat");
         d.run(0.45);
         near(d.at(), t0 + 1.05, "landed in time and playing on");
         assert!(!d.audio.reading_reverse());
@@ -7058,12 +7070,11 @@ mod deck_tests {
         d.settings.quantize = true;
         d.settings.quantize_beats = 1.0;
         d.send(C::Play);
-        d.run(3.05);
-        let t0 = d.at();
-        assert!(t0 > 3.0 && t0 < 3.2, "{t0}");
+        let t0 = run_to_phase(&mut d, 0.03, 0.08);   // just past a beat
+        let b = (t0 / 0.5).floor() * 0.5;
         d.send(C::SlipReverse { held: true });
         d.run(0.3);
-        near(d.at(), 3.0 - (t0 + 0.3 - 3.0), "turned now, as on 3.0 s");
+        near(d.at(), b - (t0 + 0.3 - b), "turned now, as on the beat");
         d.run(0.65);
         d.send(C::SlipReverse { held: false });   // heard ≈ 2.05 s: the beat at 2.0 s is just ahead
         d.run(0.45);
@@ -7077,10 +7088,9 @@ mod deck_tests {
         let mut d = deck(30.0);
         d.settings.quantize = true;
         d.send(C::Play);
-        d.run(3.35);
-        let t0 = d.at();
+        let t0 = run_to_phase(&mut d, 0.33, 0.37);
         d.send(C::SlipReverse { held: true });
-        d.run(0.05);   // the beat at 3.5 s is still ahead
+        d.run(0.05);   // the beat is still ahead
         d.send(C::SlipReverse { held: false });
         d.run(0.95);
         near(d.at(), t0 + 1.0, "played straight on");
