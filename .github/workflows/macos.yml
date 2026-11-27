@@ -173,10 +173,14 @@ jobs:
               <key>LSApplicationCategoryType</key><string>public.app-category.music</string>
               <key>NSHighResolutionCapable</key><true/>
               <key>NSLocalNetworkUsageDescription</key><string>OpenDeck talks Pro DJ Link with the other decks on your network to sync tempo and share tracks.</string>
+              <key>NSMicrophoneUsageDescription</key><string>DVS (MENU → DVS) reads the timecode record on your audio interface's input to play the deck from a turntable. Nothing is recorded or sent anywhere.</string>
           </dict>
           </plist>
           PLIST
           plutil -lint "$APP/Contents/Info.plist"
+          # macOS kills an app that opens an audio input without this (DVS
+          # did, on every launch once it was left on: 0.3.39).
+          plutil -extract NSMicrophoneUsageDescription raw "$APP/Contents/Info.plist" >/dev/null
 
           # Ad-hoc signature: Apple Silicon refuses to run an unsigned binary,
           # and the bundle must be sealed after Info.plist + icon are in place.

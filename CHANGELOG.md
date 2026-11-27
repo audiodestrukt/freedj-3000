@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+- macOS: turning DVS on closed the app, and it then closed on every launch
+  (DVS is remembered): the app bundle had no microphone usage description,
+  and macOS kills an app that opens an audio input without one. The macOS
+  build now carries it and checks for it. To recover 0.3.39 without an
+  update, set `"dvs"` back to `"Off"` in
+  `~/.local/share/opendeck/settings.json` (or delete the file).
+
 ## [0.3.39] — 2026-11-24
 
 ### Fixed

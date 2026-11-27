@@ -81,7 +81,7 @@ optional = true
 
 [dev-dependencies]
 tempfile = "3"
-naga     = { version = "22.1", features = ["wgsl-in"] }
+naga     = { version = "22.1", features = ["wgsl-in", "msl-out", "glsl-out", "spv-out"] }
 
 # midir has no Android backend (USB MIDI there is a Java API): MIDI surfaces
 # are stubbed out on Android, see surface/midi.rs.

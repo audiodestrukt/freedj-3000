@@ -1170,6 +1170,29 @@ mod rgb_tests {
         naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
             .validate(&module).expect("valid WGSL");
     }
+
+    /// And it translates for every backend the decks run on: Metal (macOS,
+    /// iOS), GLSL ES (the Pi's GL path, the CDJ-3000) and SPIR-V (Vulkan),
+    /// with the capabilities wgpu asks for by default, not all of them.
+    #[test]
+    fn the_waveform_shader_translates_for_metal_gl_and_vulkan() {
+        let src = crate::renderer::waveform_wgsl();
+        let module = naga::front::wgsl::parse_str(&src).unwrap();
+        let info = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::default())
+            .validate(&module).expect("valid with default capabilities");
+        let mut opts = naga::back::msl::Options::default();
+        opts.lang_version = (1, 2);
+        let pipe = naga::back::msl::PipelineOptions::default();
+        naga::back::msl::write_string(&module, &info, &opts, &pipe).expect("Metal");
+        for ep in &module.entry_points {
+            let mut out = String::new();
+            let gl = naga::back::glsl::Options { version: naga::back::glsl::Version::Embedded { version: 310, is_webgl: false }, ..Default::default() };
+            let pl = naga::back::glsl::PipelineOptions { shader_stage: ep.stage, entry_point: ep.name.clone(), multiview: None };
+            naga::back::glsl::Writer::new(&mut out, &module, &info, &gl, &pl, naga::proc::BoundsCheckPolicies::default())
+                .and_then(|mut w| w.write()).unwrap_or_else(|e| panic!("GLSL ES {}: {e}", ep.name));
+        }
+        naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), None).expect("SPIR-V");
+    }
 }
 
 /// How long a full raster of each kind takes, per colour mode (the CPU
