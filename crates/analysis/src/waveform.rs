@@ -19,6 +19,7 @@ pub const HOP_SIZE: usize = 512;
 pub type WaveformColumn = [u8; 4];
 
 /// A fully computed waveform ready for GPU upload.
+#[derive(Clone)]
 pub struct WaveformCache {
     pub columns:     Vec<WaveformColumn>,
     pub sample_rate: u32,

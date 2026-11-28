@@ -12,7 +12,9 @@ mod audio_cpal;
 mod audio_out;
 mod spawn;
 mod dvs;
-pub use audio_out::{HostOutput, HostSlot};
+pub use audio::Render;
+pub use audio_out::{AudioOut, Format, HostOutput, HostSlot, RenderSource, Running};
+pub use spawn::{Spawn, Spawner};
 mod browser;
 mod dbsession;
 mod framehost;
@@ -61,6 +63,8 @@ use browser::{Browser, Enter, Load};
 use snapshot::DeckSnapshot;
 use transport::Transport;
 use std::{
+    cell::RefCell,
+    rc::Rc,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -940,6 +944,12 @@ struct DeckApp {
     // Created on first `resumed` (winit) or by the SDL loop.
     host:        Option<Host>,
     renderer:    Option<Box<dyn Renderer>>,
+    /// A renderer still being made (a browser's GPU answers later); taken
+    /// by the next event (see `install_renderer`).
+    pending_renderer: Rc<RefCell<Option<Result<WgpuRenderer>>>>,
+    /// How this platform drives a future, and dresses a new window.
+    run_future:  fn(LocalFuture),
+    window_attrs: fn(WindowAttributes) -> WindowAttributes,
     egui_ctx:    egui::Context,
     /// Procedurally shaded faceplate sprites (jog, buttons), baked per size.
     chrome:         chrome::ChromeCache,
@@ -1319,6 +1329,9 @@ impl DeckApp {
             guards:      Vec::new(),
             host:        None,
             renderer:    None,
+            pending_renderer: Default::default(),
+            run_future:  Platform::native().run_future,
+            window_attrs: |a| a,
             egui_ctx:    egui::Context::default(),
             chrome:         chrome::ChromeCache::default(),
             last_render: Instant::now(),
@@ -3576,6 +3589,16 @@ impl DeckApp {
 
     fn request_redraw(&self) { if let Some(h) = &self.host { h.request_redraw(); } }
 
+    /// Take the renderer `resumed` started, once it is made, and draw.
+    fn install_renderer(&mut self) {
+        let Some(made) = self.pending_renderer.borrow_mut().take() else { return };
+        let renderer = made.expect("failed to create renderer");
+        self.renderer = Some(Box::new(renderer));
+        self.apply_wave_color();
+        // Kick off the first redraw.
+        self.request_redraw();
+    }
+
     /// Draw the waveforms in the saved WAVEFORM COLOR (at start-up, once a
     /// renderer exists, and on every change).
     pub(crate) fn apply_wave_color(&mut self) {
@@ -4923,6 +4946,7 @@ impl ApplicationHandler for DeckApp {
         }
         #[cfg(target_os = "ios")]
         let _ = (win_w, win_h);
+        let attrs = (self.window_attrs)(attrs);
 
         let window = Arc::new(
             event_loop
@@ -4964,9 +4988,14 @@ impl ApplicationHandler for DeckApp {
             log::warn!("display refresh rate unknown — assuming 60 Hz");
         }
 
-        let renderer =
-            pollster::block_on(WgpuRenderer::new(Arc::clone(&window), &self.waveform))
-                .expect("failed to create renderer");
+        // The renderer: at once natively; in a browser when its GPU
+        // answers (`install_renderer`, on a later event).
+        let slot = Rc::clone(&self.pending_renderer);
+        let (w, wave) = (Arc::clone(&window), self.waveform.clone());
+        (self.run_future)(Box::pin(async move {
+            let r = WgpuRenderer::new(w, &wave).await;
+            *slot.borrow_mut() = Some(r);
+        }));
 
         let egui_state = egui_winit::State::new(
             self.egui_ctx.clone(),
@@ -4978,11 +5007,7 @@ impl ApplicationHandler for DeckApp {
         );
 
         self.host     = Some(Host::Winit { window: Arc::clone(&window), egui_state });
-        self.renderer = Some(Box::new(renderer));
-        self.apply_wave_color();
-
-        // Kick off the first redraw.
-        window.request_redraw();
+        self.install_renderer();
 
         // Foreground and active: hold the screen awake (cold-launch case; the
         // Occluded handler re-asserts it on every later foreground).
@@ -5013,6 +5038,7 @@ impl ApplicationHandler for DeckApp {
         _window_id:  winit::window::WindowId,
         event:       WindowEvent,
     ) {
+        self.install_renderer();
         // Forward all events to egui first.
         if let Some(Host::Winit { window, egui_state }) = &mut self.host {
             let resp = egui_state.on_window_event(window.as_ref(), &event);
@@ -5096,6 +5122,7 @@ impl ApplicationHandler for DeckApp {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.install_renderer();
         // Drawing into a host's screen: no compositor to pace us, so a timer
         // (the display rate playing, the idle rate paused) — and at once when
         // a touch comes in.
@@ -5398,10 +5425,37 @@ fn music_dir(no_track: bool) -> Option<PathBuf> {
 
 /// Start a deck and run the UI event loop.  Platform-agnostic: every entry point
 /// (desktop `main`, iOS/Android) builds a `Config` and calls this.
-pub fn run(cfg: Config) -> Result<()> {
+/// A future the platform drives on the deck's own thread.
+pub type LocalFuture = std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>;
+
+/// What the platform under the deck provides.  [`Platform::native`] is the
+/// desktop and mobile apps'; a browser host fills in its own.
+pub struct Platform {
+    /// Where the sound goes; None: the sound card (or the plugin host's
+    /// callback, for a plugin).
+    pub audio_out:  Option<Box<dyn AudioOut>>,
+    /// Where background jobs run (spawn.rs).
+    pub spawn:      Spawner,
+    /// Drive `f` to completion: natively at once (block on it); in a
+    /// browser, on the page's event loop.
+    pub run_future: fn(LocalFuture),
+    /// Dress a new window (a browser's goes into the page).
+    pub window:     fn(WindowAttributes) -> WindowAttributes,
+}
+
+impl Platform {
+    pub fn native() -> Platform {
+        Platform { audio_out: None, spawn: spawn::threads(), run_future: |f| pollster::block_on(f), window: |a| a }
+    }
+}
+
+pub fn run(cfg: Config) -> Result<()> { run_on(cfg, Platform::native()) }
+
+/// [`run`] on a given platform.
+pub fn run_on(cfg: Config, platform: Platform) -> Result<()> {
     let host = cfg.host.is_some();
     #[allow(unused_mut)]   // mutated only by the SDL backend
-    let mut app = build(cfg)?;
+    let mut app = build(cfg, platform)?;
     // OPENDECK_RENDERER=sdl|wgpu picks the backend; wgpu + winit is the default.
     let want_sdl = std::env::var("OPENDECK_RENDERER").map(|v| v.eq_ignore_ascii_case("sdl")).unwrap_or(false);
     #[cfg(feature = "renderer-sdl")]
@@ -5413,7 +5467,7 @@ pub fn run(cfg: Config) -> Result<()> {
 
 /// Everything `run` sets up before the window: the audio, the analysis, Link,
 /// the servers, the input bus.  The returned deck owns all of it.
-fn build(cfg: Config) -> Result<DeckApp> {
+fn build(cfg: Config, platform: Platform) -> Result<DeckApp> {
     let track        = cfg.track;
     let browse_root  = cfg.browse_root;
     // Pro DJ Link player numbers: 1-4 is the universal space (CDJ-2000/NXS2,
@@ -5442,12 +5496,13 @@ fn build(cfg: Config) -> Result<DeckApp> {
     let link_send    = cfg.link_send && cfg.follow.is_none();
 
     // ── 1. Decode audio (or boot to an empty deck when no track is given) ─────
-    let out: Box<dyn audio_out::AudioOut> = match &cfg.host {
-        Some(h) => {
+    let out: Box<dyn audio_out::AudioOut> = match (platform.audio_out, &cfg.host) {
+        (Some(out), _) => out,
+        (None, Some(h)) => {
             log::info!("plugin host output at {} Hz", h.sample_rate);
             Box::new(audio_out::HostOut { sample_rate: h.sample_rate, slot: Arc::clone(&h.output) })
         }
-        None => audio_cpal::default_output()?,
+        (None, None) => audio_cpal::default_output()?,
     };
     if track.is_none() { log::info!("no track given — booting to an empty deck (browse + LOAD to play)"); }
     let audio = AudioHandle::open(out, track.as_deref())?;
@@ -5585,6 +5640,9 @@ fn build(cfg: Config) -> Result<DeckApp> {
     // ── 6. Run the UI event loop ──────────────────────────────────────────────
     let has_track = track.is_some();
     let mut app = DeckApp::new(track.unwrap_or_default(), browse_root, waveform, audio, beat_grid, fader_speed, beat2_bpm, beat2_anchor, beat2_player, beat2_bib, link, link_grid, Arc::clone(&link_send_flag), event_rx, indicators, settings);
+    app.spawn = platform.spawn;
+    app.run_future = platform.run_future;
+    app.window_attrs = platform.window;
     app.tile = cfg.host.as_ref().and_then(|h| h.tile);
     app.dvs_allowed = cfg.host.is_none();
     // Dev / bench: OPENDECK_DVS=abs|rel|int turns DVS on for this run (not saved).
@@ -5755,7 +5813,7 @@ impl ApplicationHandler for MultiDeck {
     fn user_event(&mut self, event_loop: &ActiveEventLoop, _: ()) {
         while let Ok(cmd) = self.rx.try_recv() {
             match cmd {
-                HostCmd::Add(id, cfg) => match build(cfg) {
+                HostCmd::Add(id, cfg) => match build(cfg, Platform::native()) {
                     Ok(mut d) => {
                         d.multi = true;
                         d.resumed(event_loop);
