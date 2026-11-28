@@ -135,6 +135,8 @@ pub(crate) struct DvsRender {
     pub samples: Arc<ArcSwap<Vec<f32>>>,
     pub position: Arc<AtomicU64>,
     pub in_flight: Arc<AtomicU64>,
+    /// The deck reads backwards (reverse play).
+    pub reading_rev: Arc<AtomicBool>,
     pub seek_request: Arc<AtomicU64>,
     pub loop_start: Arc<AtomicU64>,
     pub loop_end: Arc<AtomicU64>,
@@ -184,7 +186,8 @@ impl DvsRender {
                 // pending jump.
                 let req = self.seek_request.swap(NO_SEEK, Ordering::AcqRel);
                 let p = if req != NO_SEEK { req } else {
-                    self.position.load(Ordering::Relaxed).saturating_sub(self.in_flight.load(Ordering::Relaxed))
+                    crate::audio::heard_sample(self.position.load(Ordering::Relaxed), self.in_flight.load(Ordering::Relaxed),
+                                               self.reading_rev.load(Ordering::Relaxed))
                 };
                 if self.cur.is_none() { log::info!("dvs: the record drives the deck ({:?})", mode); }
                 else { log::info!("dvs: new buffer under the record: from frame {} (was {:.0})", p / ch as u64, self.cur.unwrap_or(0.0)); }

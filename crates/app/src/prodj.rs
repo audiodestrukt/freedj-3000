@@ -481,6 +481,9 @@ pub struct SenderState {
     pub send_full:   Arc<AtomicBool>,
     pub position:    Arc<AtomicU64>,   // decoder cursor, interleaved samples
     pub in_flight:   Arc<AtomicU64>,   // samples decoded but not yet audible
+    /// The deck reads backwards (reverse play): what is heard lies after
+    /// the cursor, and no beats go out (see the sender loop).
+    pub reverse:     Arc<AtomicBool>,
     pub playing:     Arc<AtomicBool>,
     pub fader_speed: Arc<AtomicU32>,   // f32 bits; SYNC writes this
     pub speed:       Arc<AtomicU32>,   // f32 bits; phase nudges write this
@@ -1587,7 +1590,12 @@ impl ProDjSender {
 
                     // ── Audible position estimate ────────────────────────────
                     let mut beat_due: Option<i64> = None;
-                    if playing {
+                    // Reverse play: the beat clock only runs forward, and the
+                    // decks that follow us sync to our beats, so none go out
+                    // (as paused); forward again, it picks up on the beat.
+                    // The absolute position below still runs backwards.
+                    let reverse = st.reverse.load(Ordering::Relaxed);
+                    if playing && !reverse {
                         if let Some(grid) = cur_grid {
                             let ch = st.channels.max(1) as u64;
                             let lp = st.loop_active.load(Ordering::Relaxed).then(|| (
@@ -1664,7 +1672,7 @@ impl ProDjSender {
                             // still queued.
                             let frames = if playing && est_frames >= 0.0 { est_frames } else {
                                 let pos = st.position.load(Ordering::Relaxed);
-                                (pos.saturating_sub(st.in_flight.load(Ordering::Relaxed)) / ch) as f64
+                                (crate::audio::heard_sample(pos, st.in_flight.load(Ordering::Relaxed), reverse) / ch) as f64
                             };
                             let pkt = me.build_abs_position(
                                 (total as f64 / sr) as u32,

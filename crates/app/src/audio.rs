@@ -341,6 +341,10 @@ impl AudioHandle {
     /// once its beat comes.
     pub fn reading_reverse(&self) -> bool { self.jump.reading_rev.load(Ordering::Relaxed) }
 
+    /// `reading_reverse`, shared, for whoever reports the playhead from
+    /// outside the deck (the Link sender).
+    pub fn reverse_flag(&self) -> Arc<AtomicBool> { Arc::clone(&self.jump.reading_rev) }
+
     /// Convenience: read current speed.
     pub fn speed_load(&self) -> f32 {
         f32::from_bits(self.speed.load(Ordering::Relaxed))
@@ -572,7 +576,7 @@ impl AudioHandle {
                 shared: Arc::clone(&dvs), samples: Arc::clone(&samples), position: Arc::clone(&position),
                 in_flight: Arc::clone(&in_flight), seek_request: Arc::clone(&seek_request),
                 loop_start: Arc::clone(&loop_start), loop_end: Arc::clone(&loop_end), loop_active: Arc::clone(&loop_active),
-                file_ch, sample_rate: file_sr,
+                reading_rev: Arc::clone(&jump.reading_rev), file_ch, sample_rate: file_sr,
             },
             processor: Mutex::new(inline),
         };
@@ -654,6 +658,9 @@ struct DvsParts {
     loop_start: Arc<AtomicU64>,
     loop_end: Arc<AtomicU64>,
     loop_active: Arc<AtomicBool>,
+    /// The deck reads backwards (reverse play): what is heard lies after
+    /// the cursor.
+    reading_rev: Arc<AtomicBool>,
     file_ch: usize,
     sample_rate: u32,
 }
@@ -665,7 +672,7 @@ impl DvsParts {
         DvsParts {
             shared: Default::default(), samples: Arc::new(ArcSwap::from_pointee(Vec::new())), position: Default::default(),
             in_flight: Default::default(), seek_request: Arc::new(AtomicU64::new(NO_SEEK)), loop_start: Default::default(),
-            loop_end: Default::default(), loop_active: Default::default(), file_ch: 2, sample_rate: 48_000,
+            loop_end: Default::default(), loop_active: Default::default(), reading_rev: Default::default(), file_ch: 2, sample_rate: 48_000,
         }
     }
 
@@ -673,7 +680,7 @@ impl DvsParts {
         let p = self.clone();
         crate::dvs::DvsRender {
             shared: p.shared, samples: p.samples, position: p.position, in_flight: p.in_flight, seek_request: p.seek_request,
-            loop_start: p.loop_start, loop_end: p.loop_end, loop_active: p.loop_active, file_ch: p.file_ch,
+            loop_start: p.loop_start, loop_end: p.loop_end, loop_active: p.loop_active, reading_rev: p.reading_rev, file_ch: p.file_ch,
             sample_rate: p.sample_rate, drive: Default::default(), cur: None, buf_id: 0, clock: 0, last_speed: None,
         }
     }
@@ -989,6 +996,14 @@ impl Render {
 }
 
 // ── Processor loop ────────────────────────────────────────────────────────────
+
+/// The source sample being heard: the decoder cursor `pos` less what is
+/// still queued (`in_flight`), or plus it when the read runs backwards
+/// (reverse play, where what is queued lies after the cursor).  For
+/// whoever reports the playhead from outside the deck (Link, DVS).
+pub(crate) fn heard_sample(pos: u64, in_flight: u64, reverse: bool) -> u64 {
+    if reverse { pos.saturating_add(in_flight) } else { pos.saturating_sub(in_flight) }
+}
 
 /// Where a relative jump lands: the source sample heard at the first of the
 /// `unplayed` output frames (the decoder's cursor `pos`, less (more, in
@@ -2431,6 +2446,16 @@ mod host_output_tests {
 mod reverse_tests {
     use super::*;
     use crate::audio_out::HostSlot;
+
+    /// What is heard, as Link and DVS reckon it: behind the cursor reading
+    /// forwards, ahead of it reading backwards (what is queued was read
+    /// after it, going down).
+    #[test]
+    fn what_is_heard_lies_behind_the_cursor_forwards_and_ahead_of_it_in_reverse() {
+        assert_eq!(heard_sample(10_000, 1_500, false), 8_500);
+        assert_eq!(heard_sample(10_000, 1_500, true), 11_500);
+        assert_eq!(heard_sample(1_000, 1_500, false), 0, "not before the track");
+    }
 
     /// A quantized turn goes to the grid point nearest what is heard.
     #[test]

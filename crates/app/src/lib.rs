@@ -5837,6 +5837,7 @@ fn build(cfg: Config, platform: Platform) -> Result<DeckApp> {
         send_full:   Arc::clone(&link_send_flag),
         position:    Arc::clone(&audio.position),
         in_flight:   Arc::clone(&audio.in_flight),
+        reverse:     audio.reverse_flag(),
         playing:     Arc::clone(&audio.playing),
         fader_speed: Arc::clone(&fader_speed),
         speed:       Arc::clone(&audio.speed),
