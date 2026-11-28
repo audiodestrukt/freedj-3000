@@ -330,7 +330,8 @@ mod imp {
     use std::path::{Path, PathBuf};
     use std::sync::mpsc::Sender;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use opendeck_types::time::Instant;
+    use std::time::Duration;
 
     /// Status cadence (the brief's ~60 Hz).
     const STATUS_EVERY: Duration = Duration::from_millis(16);

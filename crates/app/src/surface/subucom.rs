@@ -292,7 +292,8 @@ mod linux {
     use std::path::PathBuf;
     use std::sync::mpsc::Sender;
     use std::sync::Arc;
-    use std::time::{Duration, Instant};
+    use opendeck_types::time::Instant;
+    use std::time::Duration;
 
     /// `_IOW(0x70, 0, 16 bytes)`: hand the sub-CPU one LED frame.
     const MOSI_TRANSFER: libc::c_ulong = 0x4010_7000;

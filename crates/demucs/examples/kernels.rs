@@ -2,7 +2,7 @@
 //! the convolutions' shapes, and the attention softmax.
 //!
 //!   cargo run -p opendeck-demucs --release --example kernels
-use std::time::Instant;
+use opendeck_types::time::Instant;
 
 fn gflops(m: usize, k: usize, n: usize, threads: bool) -> f64 {
     let a = vec![0.5f32; m * k];

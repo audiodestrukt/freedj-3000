@@ -38,7 +38,7 @@ fn matches_pytorch_layer_by_layer() {
     assert_eq!(mix.len(), 2 * SEGMENT);
     let mut out = vec![0f32; 8 * SEGMENT];
     let mut worst = f64::INFINITY;
-    let t0 = std::time::Instant::now();
+    let t0 = opendeck_types::time::Instant::now();
     let mut last = t0;
     model.run_tapped(mix, &mut out, Some(&mut |name: &str, shape: &[usize], got: &[f32]| {
         let ms = last.elapsed().as_secs_f64() * 1e3;
@@ -47,7 +47,7 @@ fn matches_pytorch_layer_by_layer() {
         let a = agreement(want, got);
         println!("{name:8} {a:6.1} dB  {ms:7.1} ms");
         if name != "spec" { worst = worst.min(a) }
-        last = std::time::Instant::now();
+        last = opendeck_types::time::Instant::now();
     }));
     println!("one chunk in {:.2} s ({})", t0.elapsed().as_secs_f64(), if opendeck_demucs::half_precision() { "fp16 transformer" } else { "f32" });
     let (_, stems) = reference.get("stems").unwrap();

@@ -30,7 +30,7 @@ pub fn write_index(root: &Path, entries: &BTreeMap<u32, Value>, bits: u32) -> Re
     let index_bytes = serde_json::to_vec(&index)?;
 
     // A generation no earlier one shares: the hash of what it indexes and when.
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let now = opendeck_types::time::SystemTime::now().duration_since(opendeck_types::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let mut generation = [0u8; 16];
     generation.copy_from_slice(&sha256(&[&index_bytes[..], &now.to_be_bytes()[..]].concat())[..16]);
     if generation.iter().all(|b| *b == 0) { generation[0] = 1; }
@@ -110,7 +110,7 @@ pub fn write_bank(mods: &Path, roles: [&[i16]; 4], file_path: &str, source: &Pat
     let src = std::fs::read(source).with_context(|| format!("{}", source.display()))?;
     let md = std::fs::metadata(source)?;
     let bytes = |r: &[i16]| -> Vec<u8> { r.iter().flat_map(|v| v.to_le_bytes()).collect() };
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let now = opendeck_types::time::SystemTime::now().duration_since(opendeck_types::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
     let bundle = hex(&sha256(&[file_path.as_bytes(), &now.to_be_bytes()[..], &sha256(&bytes(roles[3]))[..]].concat())[..8]);
     let dir = mods.join("stems").join(&bundle);
     std::fs::create_dir_all(&dir)?;
@@ -124,7 +124,7 @@ pub fn write_bank(mods: &Path, roles: [&[i16]; 4], file_path: &str, source: &Pat
     e.insert("source_timing_policy".into(), "opendeck-decoded/1".into());
     e.insert("source_sha256".into(), hex(&sha256(&src)).into());
     e.insert("source_size".into(), md.len().into());
-    let mt = md.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos() as u64);
+    let mt = md.modified().ok().and_then(opendeck_types::time::file_time_since_epoch).map_or(0, |d| d.as_nanos() as u64);
     e.insert("source_modified_ns".into(), mt.into());
     for (r, pcm) in Role::ALL.iter().zip(roles) {
         let pcm = bytes(pcm);

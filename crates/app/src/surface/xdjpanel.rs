@@ -335,8 +335,8 @@ pub trait Link {
 /// `#` starts a comment.  An empty or missing file overrides nothing.
 struct Poke {
     path: Option<std::path::PathBuf>,
-    stamp: Option<std::time::SystemTime>,
-    checked: std::time::Instant,
+    stamp: Option<opendeck_types::time::FileTime>,
+    checked: opendeck_types::time::Instant,
     edits: Vec<(usize, char, u8)>,
 }
 
@@ -344,7 +344,7 @@ impl Poke {
     fn from_env() -> Self {
         let path = std::env::var_os("OPENDECK_XDJPANEL_POKE").map(std::path::PathBuf::from);
         if let Some(p) = &path { log::info!("xdjpanel: frame overrides from {}", p.display()); }
-        Poke { path, stamp: None, checked: std::time::Instant::now(), edits: Vec::new() }
+        Poke { path, stamp: None, checked: opendeck_types::time::Instant::now(), edits: Vec::new() }
     }
 
     fn parse(text: &str) -> Vec<(usize, char, u8)> {
@@ -365,7 +365,7 @@ impl Poke {
     fn apply(&mut self, out: &mut [u8; OUT]) {
         let Some(path) = &self.path else { return };
         if self.checked.elapsed() > std::time::Duration::from_millis(200) {
-            self.checked = std::time::Instant::now();
+            self.checked = opendeck_types::time::Instant::now();
             let stamp = std::fs::metadata(path).and_then(|m| m.modified()).ok();
             if stamp != self.stamp {
                 self.stamp = stamp;

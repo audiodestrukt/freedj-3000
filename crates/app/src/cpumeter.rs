@@ -12,7 +12,8 @@
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::time::{Duration, Instant};
+use opendeck_types::time::Instant;
+use std::time::Duration;
 
 /// Sampling interval.
 pub const EVERY: Duration = Duration::from_secs(10);

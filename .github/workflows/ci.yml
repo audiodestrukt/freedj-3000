@@ -48,6 +48,10 @@ jobs:
       - name: Cache cargo build
         uses: Swatinem/rust-cache@v2
 
+      # std's clock panics in a browser: everything uses opendeck_types::time.
+      - name: Check the clock
+        run: tools/ci/check-clock.sh
+
       - name: Build workspace
         run: cargo build --workspace
 

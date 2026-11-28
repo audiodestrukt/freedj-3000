@@ -535,7 +535,7 @@ impl ChromeCache {
     pub fn get(&mut self, ctx: &egui::Context, what: Sprite, px: usize) -> &TextureHandle {
         let px = px.max(8);
         self.tex.entry((what, px)).or_insert_with(|| {
-            let t = std::time::Instant::now();
+            let t = opendeck_types::time::Instant::now();
             let img = match what {
                 Sprite::Jog => render_jog(px),
                 Sprite::JogPlatter => render_jog_platter(px),

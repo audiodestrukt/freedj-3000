@@ -19,7 +19,8 @@ use opendeck_dbserver::{Client as DbClient, MenuItem, Slot};
 use opendeck_nfs::Nfs;
 use opendeck_rekordbox::{read_export, read_export_from, RbExport};
 use crate::media::{self, Access, Mount};
-use std::time::{Duration, Instant};
+use opendeck_types::time::Instant;
+use std::time::Duration;
 
 // What the decoder actually plays (symphonia: no Opus decoder exists).
 const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg"];
@@ -2296,7 +2297,7 @@ pub(crate) mod tests {
         link.peer_media.lock().unwrap().insert((3, 3), (opendeck_link::prodj::MediaInfo {
             player: 3, slot: 3, name: "OPENDECK".into(), tracks: 12, playlists: 1,
             date: "2026-09-17".into(), total: 32 << 30, free: 16 << 30, color: 0,
-        }, std::time::Instant::now()));
+        }, opendeck_types::time::Instant::now()));
         let b = Browser::new(home.path(), link);
         let rows = b.sources();
         let usb = rows.iter().find(|r| r.kind == SourceKind::Link && !r.rekordbox).expect("player media row");

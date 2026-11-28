@@ -12,7 +12,7 @@
 //! the player reports, not inside it.
 
 use opendeck_types::BeatGrid;
-use std::time::Instant;
+use opendeck_types::time::Instant;
 
 /// The followed player's track, as a list of beat times in ms (beat 1 first:
 /// Link counts beats from 1).

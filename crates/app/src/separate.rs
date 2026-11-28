@@ -110,7 +110,7 @@ pub struct Timing {
 /// first chunk of a run that starts mid-track has no earlier chunk to
 /// crossfade with; its first quarter comes from it alone.
 pub fn separate(track: &[f32], deck_sr: u32, sep: &mut dyn Separator, job: &Job, bank: &crate::stems::StemBank) -> Result<Timing> {
-    let t0 = std::time::Instant::now();
+    let t0 = opendeck_types::time::Instant::now();
     let frames = track.len() / 2;
     ensure!(frames > 0, "empty track");
     let seg = sep.segment();
@@ -272,7 +272,7 @@ fn run(track: &[f32], geo: &Geometry, (mean, std): (f32, f32), weight: &[f32], s
 
     let mut wrote_page = false;
     let playhead = || job.playhead.as_ref().map(|p| p.load(Ordering::Relaxed) as usize / 2);
-    let (mut last_ph, mut last_t) = (playhead(), std::time::Instant::now());
+    let (mut last_ph, mut last_t) = (playhead(), opendeck_types::time::Instant::now());
     // Only a run that began ahead of the playhead can be overtaken; one
     // filling the stretch behind it (the top, after a wrap) is meant to be.
     let began_ahead = last_ph.is_some_and(|p| p <= from);
@@ -292,7 +292,7 @@ fn run(track: &[f32], geo: &Geometry, (mean, std): (f32, f32), weight: &[f32], s
             let jumped = ph + deck_sr as usize / 2 < prev || ph > prev + reach;
             let overtaken = began_ahead && ph > deck_pos.max(from) + geo.to_deck(stride);
             last_ph = Some(ph);
-            last_t = std::time::Instant::now();
+            last_t = opendeck_types::time::Instant::now();
             if jumped || overtaken {
                 let want = geo.target(job, st.chunk_s) / PAGE_FRAMES;
                 if let Some(p) = bank.first_unready_from(want) {
@@ -307,7 +307,7 @@ fn run(track: &[f32], geo: &Geometry, (mean, std): (f32, f32), weight: &[f32], s
         let off = k * stride;
         let n = seg.min(len - off);
         mix_window(track, geo, (mean, std), off, n, &mut st.input)?;
-        let tm = std::time::Instant::now();
+        let tm = opendeck_types::time::Instant::now();
         sep.run(&st.input, &mut st.output)?;
         let dt = tm.elapsed().as_secs_f64();
         st.chunk_s = Some(dt);
@@ -433,7 +433,7 @@ pub mod coreml {
         let mut g = MODEL.lock().unwrap_or_else(|e| e.into_inner());
         let mut load_s = 0.0;
         if g.is_none() {
-            let t = std::time::Instant::now();
+            let t = opendeck_types::time::Instant::now();
             let mut e = [0u8; 512];
             let h = unsafe { freedj_sep_open(e.as_mut_ptr() as *mut c_char, e.len()) };
             if h.is_null() { bail!("model: {}", err_text(&e)); }
@@ -550,7 +550,7 @@ pub mod native {
         let mut g = MODEL.lock().unwrap_or_else(|e| e.into_inner());
         let mut load_s = 0.0;
         if g.is_none() {
-            let t = std::time::Instant::now();
+            let t = opendeck_types::time::Instant::now();
             let p = path().ok_or_else(|| anyhow!("OPENDECK_SEPARATE_MODEL is not a .safetensors file"))?;
             *g = Some(Native(opendeck_demucs::HtDemucs::load(&p)?));
             load_s = t.elapsed().as_secs_f64();
@@ -628,7 +628,7 @@ pub mod onnx {
         let mut g = MODEL.lock().unwrap_or_else(|e| e.into_inner());
         let mut load_s = 0.0;
         if g.is_none() {
-            let t = std::time::Instant::now();
+            let t = opendeck_types::time::Instant::now();
             let p = path().ok_or_else(|| anyhow!("OPENDECK_SEPARATE_MODEL is not a file"))?;
             let lib = std::env::var("ORT_DYLIB_PATH").unwrap_or_else(|_| "libonnxruntime.so.1.23".into());
             let env = ort::init_from(&lib).map_err(|e| anyhow!("{lib}: {e}"))?.build().map_err(|e| anyhow!("{e}"))?;

@@ -9,7 +9,7 @@
 use overdeck_display::{Screen, Touch};
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Instant;
+use opendeck_types::time::Instant;
 
 pub struct FrameHost {
     screen: Rc<RefCell<Screen>>,

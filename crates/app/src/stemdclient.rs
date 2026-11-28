@@ -24,7 +24,8 @@ use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream, ToSocketAddrs};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration, Instant};
+use opendeck_types::time::Instant;
+use std::time::Duration;
 
 const RATE: u32 = 44_100;
 

@@ -40,14 +40,14 @@ const HEADS: usize = 8;
 
 /// `OPENDECK_DEMUCS_PROF=1` prints the time of each step inside the
 /// transformer layers to stderr.
-struct Lap(Option<std::time::Instant>);
+struct Lap(Option<opendeck_types::time::Instant>);
 impl Lap {
     fn new() -> Self {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        Self(ON.get_or_init(|| std::env::var_os("OPENDECK_DEMUCS_PROF").is_some()).then(std::time::Instant::now))
+        Self(ON.get_or_init(|| std::env::var_os("OPENDECK_DEMUCS_PROF").is_some()).then(opendeck_types::time::Instant::now))
     }
     fn lap(&mut self, what: &str) {
-        if let Some(t) = self.0.as_mut() { eprintln!("  {what:10} {:7.1} ms", t.elapsed().as_secs_f64() * 1e3); *t = std::time::Instant::now() }
+        if let Some(t) = self.0.as_mut() { eprintln!("  {what:10} {:7.1} ms", t.elapsed().as_secs_f64() * 1e3); *t = opendeck_types::time::Instant::now() }
     }
 }
 
@@ -740,10 +740,10 @@ pub mod bench {
     /// ns per element: exp over a slice; and softmax_cols' passes on (m, cols).
     pub fn exp_and_softmax(m: usize, cols: usize) -> (f64, f64) {
         let mut x: Vec<f32> = (0..m * cols).map(|i| ((i * 7919) % 1000) as f32 * -0.003).collect();
-        let t = std::time::Instant::now();
+        let t = opendeck_types::time::Instant::now();
         for _ in 0..3 { for v in x.iter_mut() { *v = ops::exp(*v) - 1.0 } }
         let e = t.elapsed().as_secs_f64() / 3.0 / x.len() as f64 * 1e9;
-        let t = std::time::Instant::now();
+        let t = opendeck_types::time::Instant::now();
         for _ in 0..3 { ops::softmax_cols(&mut x, cols) }
         (e, t.elapsed().as_secs_f64() / 3.0 / x.len() as f64 * 1e9)
     }
@@ -761,13 +761,13 @@ pub mod bench {
         let mut o = vec![0f32; rows * super::DIM];
         let mut t = [0f64; 3];
         for rep in 0..4 {
-            let t0 = std::time::Instant::now();
+            let t0 = opendeck_types::time::Instant::now();
             gemm1_set(&kp, View { b: &q, base: 0, row_off: &qrows, cs: super::DIM }, rows, &mut s, Out { off: 0, rs: rows, cs: 1 });
-            let t1 = std::time::Instant::now();
+            let t1 = opendeck_types::time::Instant::now();
             ops::softmax_cols(&mut s, rows);
-            let t2 = std::time::Instant::now();
+            let t2 = opendeck_types::time::Instant::now();
             gemm1_set(&vp, View { b: &s, base: 0, row_off: &prows, cs: 1 }, rows, &mut o, Out { off: 0, rs: 1, cs: super::DIM });
-            let t3 = std::time::Instant::now();
+            let t3 = opendeck_types::time::Instant::now();
             if rep > 0 { t[0] += (t1 - t0).as_secs_f64(); t[1] += (t2 - t1).as_secs_f64(); t[2] += (t3 - t2).as_secs_f64() }
         }
         t.map(|v| v / 3.0)

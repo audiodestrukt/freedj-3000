@@ -32,7 +32,8 @@ use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
-use std::time::{Duration, Instant};
+use opendeck_types::time::Instant;
+use std::time::Duration;
 
 /// stemd's port.
 pub const PORT: u16 = 8420;

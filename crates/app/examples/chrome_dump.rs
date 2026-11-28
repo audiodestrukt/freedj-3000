@@ -21,7 +21,7 @@ fn main() {
     let dir = Path::new(args.get(1).map(String::as_str).unwrap_or("."));
     let jog_px: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(1200);
     std::fs::create_dir_all(dir).unwrap();
-    let t = std::time::Instant::now();
+    let t = opendeck_types::time::Instant::now();
     save(dir, "jog.png", &chrome::render_jog(jog_px));
     println!("jog bake: {:.0} ms", t.elapsed().as_secs_f32() * 1e3);
     let green = [0.10, 0.95, 0.25];

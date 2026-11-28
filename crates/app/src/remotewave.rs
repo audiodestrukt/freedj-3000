@@ -13,7 +13,8 @@ use opendeck_link::prodj::TrackRef;
 use std::collections::HashMap;
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use opendeck_types::time::Instant;
+use std::time::Duration;
 
 type Key = (u8, u8, u32);
 

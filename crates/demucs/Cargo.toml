@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+opendeck-types = { workspace = true }   # the clock (opendeck_types::time)
 anyhow         = { workspace = true }
 matrixmultiply = "0.3"
 realfft        = "3"

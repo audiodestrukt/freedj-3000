@@ -81,13 +81,13 @@ fn main() -> Result<()> {
         let (link, peers, ann) = (Arc::clone(&link), Arc::clone(&peers), ann.try_clone()?);
         std::thread::spawn(move || {
             let pkt = link.build_announce(ip, mac);
-            let mut last = std::time::Instant::now() - Duration::from_secs(5);
+            let mut last = opendeck_types::time::Instant::now() - Duration::from_secs(5);
             let mut buf = [0u8; 512];
             loop {
                 if last.elapsed() >= Duration::from_millis(1500) {
                     let _ = ann.send_to(&pkt, SocketAddrV4::new(Ipv4Addr::BROADCAST, PORT_ANNOUNCE));
                     for p in peers.lock().unwrap().iter() { let _ = ann.send_to(&pkt, SocketAddrV4::new(*p, PORT_ANNOUNCE)); }
-                    last = std::time::Instant::now();
+                    last = opendeck_types::time::Instant::now();
                 }
                 if let Ok((n, from)) = ann.recv_from(&mut buf) {
                     if let Some((dev, pip)) = ProDjLink::parse_announce(&buf[..n]) {
@@ -105,7 +105,7 @@ fn main() -> Result<()> {
         let (link, peers, st) = (Arc::clone(&link), Arc::clone(&peers), st.try_clone()?);
         std::thread::spawn(move || {
             let mut buf = [0u8; 2048];
-            let mut last = std::time::Instant::now();
+            let mut last = opendeck_types::time::Instant::now();
             let mut counter = 0u32;
             loop {
                 if let Ok((n, from)) = st.recv_from(&mut buf) {
@@ -140,7 +140,7 @@ fn main() -> Result<()> {
                     pkt[0x73] = 0x04;   // SD: none
                     pkt[0x75] = 0x01;   // link media available
                     for p in peers.lock().unwrap().iter() { let _ = st.send_to(&pkt, SocketAddrV4::new(*p, PORT_STATUS)); }
-                    last = std::time::Instant::now();
+                    last = opendeck_types::time::Instant::now();
                 }
             }
         });

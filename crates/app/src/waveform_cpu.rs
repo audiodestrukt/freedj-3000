@@ -1209,10 +1209,10 @@ mod bench {
         let lut = Lut::new();
         let n = 20_000usize;
         let mut cols: Vec<u32> = (0..n).map(|i| u32::from_le_bytes([(i * 7 % 230) as u8, (i * 13 % 120) as u8, (i * 5 % 50) as u8, (i * 3 % 255) as u8])).collect();
-        let t0 = std::time::Instant::now();
+        let t0 = opendeck_types::time::Instant::now();
         let rgb = own_rgb_columns(&cols);
         println!("RGB levels for {n} columns, once at load: {:.2} ms", t0.elapsed().as_secs_f64() * 1000.0);
-        let t1 = std::time::Instant::now();
+        let t1 = opendeck_types::time::Instant::now();
         let prev = preview_for(None, &cols, 512, 44_100);
         println!("overview RGB data, once at load: {:.2} ms", t1.elapsed().as_secs_f64() * 1000.0);
         cols.extend(rgb);   // as the renderers keep them (`rgb_off`, `ov_off`)
@@ -1227,7 +1227,7 @@ mod bench {
             };
             let mut out = Vec::new();
             for (kind, rect, label) in [(Kind::Wave, PxRect { x: 0, y: 200, w: 1280, h: 240 }, "wave"), (Kind::Overview, PxRect { x: 130, y: 600, w: 1020, h: 70 }, "overview")] {
-                let t0 = std::time::Instant::now();
+                let t0 = opendeck_types::time::Instant::now();
                 let reps = 20;
                 for _ in 0..reps { draw(&lut, &p, &cols, kind, rect, &mut out); }
                 println!("{name:5} {label:8} {:.2} ms a raster", t0.elapsed().as_secs_f64() * 1000.0 / reps as f64);

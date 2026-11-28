@@ -27,7 +27,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use opendeck_types::time::Instant;
+use std::time::Duration;
 
 /// Built-in surface definitions, compiled in.
 pub const PRESETS: &[(&str, &str)] = &[

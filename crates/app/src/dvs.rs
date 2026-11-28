@@ -356,7 +356,8 @@ pub fn feed_for_test(vinyl: &mut opendeck_timecode::Vinyl, shared: &DvsShared, s
 pub(crate) mod turntable {
     use super::*;
     use opendeck_timecode::{decoder::synth::Signal, vinyl::START_MS, Format, Vinyl};
-    use std::time::{Duration, Instant};
+    use opendeck_types::time::Instant;
+    use std::time::Duration;
 
     pub const SR: u32 = 48_000;
 
@@ -404,7 +405,8 @@ mod tests {
     use super::*;
     use super::turntable::{Turntable, SR};
     use crate::audio::AudioHandle;
-    use std::time::{Duration, Instant};
+    use opendeck_types::time::Instant;
+    use std::time::Duration;
 
     fn track() -> Vec<f32> {
         // 5 minutes of a 10 Hz ramp, ±0.1.

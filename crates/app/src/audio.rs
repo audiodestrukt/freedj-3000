@@ -371,7 +371,7 @@ impl AudioHandle {
         // session play off-speed (a 48 kHz track on a 44.1 kHz device ran
         // 8 % slow) and broke SYNC, whose beat clock assumes the deck rate.
         if !decoded.is_empty() && device_sr != file_sr {
-            let t0 = std::time::Instant::now();
+            let t0 = opendeck_types::time::Instant::now();
             decoded = resample_interleaved(&decoded, file_ch, file_sr, device_sr)?;
             log::info!("resampled start-up track {file_sr} → {device_sr} Hz in {:.2}s", t0.elapsed().as_secs_f32());
             file_sr = device_sr;
@@ -791,7 +791,7 @@ mod loop_read_tests {
         let n = 48_000 * 200;
         let mut x = 1u32;
         let s: Vec<f32> = (0..n * 2).map(|_| { x ^= x << 13; x ^= x >> 17; x ^= x << 5; (x as f32 / u32::MAX as f32) - 0.5 }).collect();
-        let t = std::time::Instant::now();
+        let t = opendeck_types::time::Instant::now();
         let out = resample_interleaved(&s, 2, 48_000, 44_100).unwrap();
         println!("resample_speed: {} frames in {:.2}s", out.len() / 2, t.elapsed().as_secs_f32());
     }
@@ -1069,7 +1069,7 @@ fn processor_loop(
     let mut scrub_cur: Option<f64> = None;
     let mut scrub_vel = 0.0f64;
     let mut scrub_seen = 0u64;
-    let mut scrub_moved = std::time::Instant::now();
+    let mut scrub_moved = opendeck_types::time::Instant::now();
     let mut scrub_buf: Vec<f32> = Vec::with_capacity(SCRUB_BLOCK * file_ch);
 
     // Stems: the ramp state and the mixed source block.
@@ -1107,7 +1107,7 @@ fn processor_loop(
                     (scrub.from.load(Ordering::Relaxed) / file_ch as u64) as f64
                 });
                 let seq = scrub.seq.load(Ordering::Relaxed);
-                if seq != scrub_seen { scrub_seen = seq; scrub_moved = std::time::Instant::now(); }
+                if seq != scrub_seen { scrub_seen = seq; scrub_moved = opendeck_types::time::Instant::now(); }
                 let goal = (target / file_ch as u64) as f64;
                 let queued = (ring_len - producer.slots()) / device_ch;
                 if queued as f64 >= SCRUB_AHEAD_S * sample_rate as f64 {

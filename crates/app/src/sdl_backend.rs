@@ -37,7 +37,8 @@ use sdl2::rect::{FPoint, Rect};
 use sdl2::render::{BlendMode, Canvas, ScaleMode, Texture, TextureCreator, Vertex, VertexIndices};
 use sdl2::video::{Window, WindowContext};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use opendeck_types::time::Instant;
+use std::time::Duration;
 use winit::keyboard::KeyCode;
 
 // ── Event loop ────────────────────────────────────────────────────────────────

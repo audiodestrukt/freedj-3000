@@ -148,7 +148,7 @@ fn open(st: &Arc<State>, req: &Request, body: Vec<u8>) -> Result<Response> {
         if ss.len() >= MAX_SESSIONS { return Ok(Response::error(429, "too many sessions")); }
         let mut i = st.inner.lock().unwrap();
         i.attempt += 1;
-        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
+        let t = opendeck_types::time::SystemTime::now().duration_since(opendeck_types::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos() as u64);
         let id = format!("s{:06x}-{}", (t ^ i.attempt.wrapping_mul(0x9e37_79b9)) & 0xff_ffff, i.attempt);
         drop(i);
         let s = Arc::new(Session {

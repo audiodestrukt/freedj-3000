@@ -14,7 +14,7 @@ use opendeck_timestretch::{Engine, Stretcher};
 use opendeck_types::{Decoder, PipelineStage};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use opendeck_types::time::Instant;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

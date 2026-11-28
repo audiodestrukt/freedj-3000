@@ -516,7 +516,7 @@ impl PipelineStage for BungeeStage {
 mod perf {
     use super::*;
     use opendeck_types::PipelineStage;
-    use std::time::Instant;
+    use opendeck_types::time::Instant;
 
     const SR: u32 = 48_000;
     const CH: usize = 2;

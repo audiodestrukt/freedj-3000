@@ -818,7 +818,7 @@ impl Renderer for WgpuRenderer {
         // Where a frame's time goes is the difference between "vsync-paced" and
         // "timer-paced with a compositor guessing".  Acquire is where a Fifo
         // swapchain blocks when it is genuinely throttling to the display.
-        let t_acquire = std::time::Instant::now();
+        let t_acquire = opendeck_types::time::Instant::now();
         let off_tex = self.offscreen.as_ref().map(|o| Arc::clone(&o.texture));
         let output = if off_tex.is_some() { None } else {
         let Some(surface) = &self.surface else { return };
@@ -877,7 +877,7 @@ impl Renderer for WgpuRenderer {
             self.egui_renderer.free_texture(id);
         }
 
-        let _t_tess = std::time::Instant::now();
+        let _t_tess = opendeck_types::time::Instant::now();
         let mut primitives = egui_ctx.tessellate(egui_shapes, pixels_per_point);
         if xs != 1.0 {
             for p in &mut primitives {
@@ -889,7 +889,7 @@ impl Renderer for WgpuRenderer {
             }
         }
         crate::perf_accum("tessellate", _t_tess.elapsed());
-        let _t_upl = std::time::Instant::now();
+        let _t_upl = opendeck_types::time::Instant::now();
         self.egui_renderer.update_buffers(
             &self.device,
             &self.queue,
@@ -960,12 +960,12 @@ impl Renderer for WgpuRenderer {
             );
         }
 
-        let _t_submit = std::time::Instant::now();
+        let _t_submit = opendeck_types::time::Instant::now();
         self.queue.submit(std::iter::once(encoder.finish()));
         crate::perf_accum("submit", _t_submit.elapsed());
 
         if let Some(o) = &mut self.offscreen {
-            let _t_rb = std::time::Instant::now();
+            let _t_rb = opendeck_types::time::Instant::now();
             let (w, h) = (self.surface_config.width, self.surface_config.height);
             let slice = o.readback.slice(..);
             slice.map_async(wgpu::MapMode::Read, |_| {});
@@ -1008,7 +1008,7 @@ impl Renderer for WgpuRenderer {
             }
         }
 
-        let t_present = std::time::Instant::now();
+        let t_present = opendeck_types::time::Instant::now();
         // Required on Wayland: this is what requests the compositor frame
         // callback that paces the next RedrawRequested.  See Renderer::new.
         if let Some(output) = output {

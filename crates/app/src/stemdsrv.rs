@@ -138,7 +138,7 @@ mod tests {
             let e = out.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
             (String::from_utf8_lossy(&out[..e]).split_whitespace().nth(1).unwrap().parse().unwrap(), out[e + 4..].to_vec())
         };
-        let t0 = std::time::Instant::now();
+        let t0 = opendeck_types::time::Instant::now();
         let body: Vec<u8> = mix.iter().flat_map(|v| v.to_le_bytes()).collect();
         let (st, b) = http("POST", "/v1/jobs?sample_rate=44100&channels=2&format=f32le&output_format=flac&output_sample_rate=96000&dsp_mode=1", &body);
         assert_eq!(st, 202, "{}", String::from_utf8_lossy(&b));

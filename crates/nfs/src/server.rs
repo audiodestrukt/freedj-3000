@@ -50,7 +50,7 @@ pub type MissHook = Arc<dyn Fn(&str) + Send + Sync>;
 pub struct Tree { inner: RwLock<Nodes>, on_miss: RwLock<Option<MissHook>> }
 
 fn mtime_of(md: &fs::Metadata) -> u32 {
-    md.modified().ok().and_then(|m| m.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs() as u32).unwrap_or(0)
+    md.modified().ok().and_then(opendeck_types::time::file_time_since_epoch).map(|d| d.as_secs() as u32).unwrap_or(0)
 }
 
 /// A name a client may look up: no hidden files, nothing that leaves the dir.

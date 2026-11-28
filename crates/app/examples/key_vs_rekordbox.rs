@@ -17,7 +17,7 @@
 use opendeck_analysis::key::{self, chroma_from_fine, key_from_chroma, Key, KeyConfig, KeyDetector, Profiles, DEFAULT_MINOR_BIAS, FINE};
 use opendeck_nfs::Nfs;
 use std::net::Ipv4Addr;
-use std::time::Instant;
+use opendeck_types::time::Instant;
 
 fn decode(bytes: Vec<u8>, ext: Option<&str>) -> anyhow::Result<(Vec<f32>, u32)> {
     use opendeck_types::Decoder;

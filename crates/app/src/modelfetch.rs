@@ -427,7 +427,7 @@ mod tests {
     fn real_model_zip_installs() {
         let Some(z) = std::env::var_os("OPENDECK_MODEL_ZIP") else { return };
         let dir = tempfile::tempdir().unwrap();
-        let t = std::time::Instant::now();
+        let t = opendeck_types::time::Instant::now();
         install_zip(Path::new(&z), dir.path()).unwrap();
         assert!(installed(dir.path()));
         let w = std::fs::metadata(dir.path().join(PACKAGE).join("Data/com.apple.CoreML/weights/weight.bin")).unwrap().len();

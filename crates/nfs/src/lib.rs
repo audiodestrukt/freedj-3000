@@ -311,7 +311,7 @@ impl Nfs {
         let nblocks = ((size + CHUNK - 1) / CHUNK) as usize;
         let dst = SocketAddrV4::new(*self.server.ip(), self.nfs_port);
         // Outstanding requests: xid → (block index, time sent, retries)
-        let mut inflight: std::collections::HashMap<u32, (usize, std::time::Instant, u32)> = std::collections::HashMap::new();
+        let mut inflight: std::collections::HashMap<u32, (usize, opendeck_types::time::Instant, u32)> = std::collections::HashMap::new();
         let mut next = 0usize;          // next block to request
         let mut done = 0usize;
         let mut got = vec![false; nblocks];
@@ -319,7 +319,7 @@ impl Nfs {
         let old_timeout = self.sock.read_timeout()?;
         self.sock.set_read_timeout(Some(Duration::from_millis(50)))?;
         let mut buf = vec![0u8; 65536];
-        let send = |me: &mut Self, block: usize, inflight: &mut std::collections::HashMap<u32, (usize, std::time::Instant, u32)>, retries: u32| -> Result<()> {
+        let send = |me: &mut Self, block: usize, inflight: &mut std::collections::HashMap<u32, (usize, opendeck_types::time::Instant, u32)>, retries: u32| -> Result<()> {
             me.xid = me.xid.wrapping_add(1);
             let xid = me.xid;
             let rel = block as u32 * CHUNK;
@@ -338,7 +338,7 @@ impl Nfs {
             msg.extend_from_slice(&want.to_be_bytes());
             msg.extend_from_slice(&want.to_be_bytes());
             me.sock.send_to(&msg, dst).context("nfs send")?;
-            inflight.insert(xid, (block, std::time::Instant::now(), retries));
+            inflight.insert(xid, (block, opendeck_types::time::Instant::now(), retries));
             Ok(())
         };
         let result = (|| -> Result<()> {
@@ -375,7 +375,7 @@ impl Nfs {
                     }
                     Err(_) => {
                         // Re-send anything older than the retransmit timeout.
-                        let now = std::time::Instant::now();
+                        let now = opendeck_types::time::Instant::now();
                         let stale: Vec<(u32, usize, u32)> = inflight.iter()
                             .filter(|(_, (_, t, _))| now.duration_since(*t) > Duration::from_millis(400))
                             .map(|(x, (b, _, k))| (*x, *b, *k)).collect();

@@ -21,7 +21,8 @@ use opendeck_nfs::server::Tree;
 use opendeck_types::{BeatAnalyzer, BeatGrid, Decoder};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use opendeck_types::time::Instant;
+use std::time::Duration;
 
 /// What the decoder plays; anything else in the folder is not a track.
 pub const AUDIO_EXTS: &[&str] = &["mp3", "wav", "flac", "m4a", "aac", "aiff", "aif", "ogg"];
@@ -500,7 +501,7 @@ const CACHE_VERSION: u16 = 8;
 
 fn cache_key(path: &Path) -> Option<String> {
     let md = std::fs::metadata(path).ok()?;
-    let mtime = md.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_secs();
+    let mtime = opendeck_types::time::file_time_since_epoch(md.modified().ok()?)?.as_secs();
     // The same file reached by a relative and an absolute path (the startup
     // argument vs a browser LOAD) must hit the same entry: on a Pi Zero a
     // miss is half a minute of re-analysis.

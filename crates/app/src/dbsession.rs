@@ -372,7 +372,8 @@ pub(crate) fn parse_bands(b: &[u8]) -> Option<Arc<Vec<[u8; 3]>>> {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::time::{Duration, Instant};
+    use opendeck_types::time::Instant;
+    use std::time::Duration;
 
     /// The blue preview as a CDJ-3000 sends it (400 pairs + a 100-byte tiny
     /// preview) and as our server sends it (the 400 pairs alone): the same

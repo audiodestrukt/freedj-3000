@@ -355,7 +355,7 @@ pub fn find_stick(file: &Path) -> Option<(PathBuf, String)> {
 struct Stick {
     /// Modification times of `index.json` and `index-v2/current` when read:
     /// a stick prepared again is read again.
-    stamp: (Option<std::time::SystemTime>, Option<std::time::SystemTime>),
+    stamp: (Option<opendeck_types::time::FileTime>, Option<opendeck_types::time::FileTime>),
     v2: bool,
     ids: HashMap<String, u32>,
     index: OnceLock<Option<Arc<oc::Index>>>,
@@ -363,7 +363,7 @@ struct Stick {
 
 static STICKS: std::sync::Mutex<Option<HashMap<PathBuf, Arc<Stick>>>> = std::sync::Mutex::new(None);
 
-fn stick_stamp(root: &Path) -> (Option<std::time::SystemTime>, Option<std::time::SystemTime>) {
+fn stick_stamp(root: &Path) -> (Option<opendeck_types::time::FileTime>, Option<opendeck_types::time::FileTime>) {
     let m = |p: &str| std::fs::metadata(root.join(p)).and_then(|m| m.modified()).ok();
     (m("CDJMODS/index.json"), m("CDJMODS/index-v2/current"))
 }
@@ -625,7 +625,7 @@ pub fn load_link(stick: &LinkStick, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usi
 }
 
 fn load_from(media: &mut dyn oc::Media, stick: &LinkStick, track: &Arc<Vec<f32>>, deck_sr: u32, ch: usize, job: Option<&crate::separate::Job>) -> Result<Option<Arc<StemBank>>> {
-    let t0 = std::time::Instant::now();
+    let t0 = opendeck_types::time::Instant::now();
     let rel = if stick.rel.starts_with('/') { stick.rel.clone() } else { format!("/{}", stick.rel) };
     let Some(entry) = link_entry(media, &rel, stick.id)? else { return Ok(None) };
     log::info!("stems: {} has stems for {rel} on {} (found in {:.0} ms)", stick.ip, stick.export, t0.elapsed().as_secs_f64() * 1e3);
@@ -685,7 +685,8 @@ impl SpanSource for LiveRole<'_> {
 }
 
 pub(crate) fn live_from(media: &mut NfsMedia, id: u32, track: &Arc<Vec<f32>>, deck_sr: u32, job: &crate::separate::Job, start_wait: std::time::Duration) -> Result<Option<Arc<StemBank>>> {
-    use std::time::{Duration, Instant};
+    use opendeck_types::time::Instant;
+    use std::time::Duration;
     let cancelled = || job.cancel.load(Ordering::Relaxed);
     // Only a source that serves live stems has the folder; one lookup says.
     if !media.exists("/CDJMODS/live")? { return Ok(None); }
@@ -803,7 +804,7 @@ pub fn build(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32>>
     if entry.layout != oc::index::Layout::Wav {
         return build_paged(media, entry, track, deck_sr, job);
     }
-    let t0 = std::time::Instant::now();
+    let t0 = opendeck_types::time::Instant::now();
     let full = role_at(media, entry, Role::FullMix, deck_sr)?;
     let offset = align(track, &full, deck_sr)?;
     drop(full);
@@ -940,7 +941,7 @@ pub(crate) fn deck_span(role: &mut impl SpanSource, media: &mut dyn oc::Media, f
 fn gcd(a: u64, b: u64) -> u64 { if b == 0 { a } else { gcd(b, a % b) } }
 
 fn build_paged(media: &mut dyn oc::Media, entry: &oc::Entry, track: &Arc<Vec<f32>>, deck_sr: u32, job: Option<&crate::separate::Job>) -> Result<Arc<StemBank>> {
-    let t0 = std::time::Instant::now();
+    let t0 = opendeck_types::time::Instant::now();
     let from = entry.sample_rate;
     // Every table first: a bad bank is refused before anything plays.
     let mut full = PagedRole::open(media, entry, Role::FullMix)?;
@@ -1324,7 +1325,7 @@ mod tests {
     fn mark(marks: &mut StemMarks, file: &Path) -> bool { mark_key(marks, MarkKey::File(file.to_path_buf())) }
 
     fn mark_key(marks: &mut StemMarks, key: MarkKey) -> bool {
-        let t0 = std::time::Instant::now();
+        let t0 = opendeck_types::time::Instant::now();
         loop {
             let v = marks.has(key.clone());
             marks.take_answers();
@@ -1383,7 +1384,7 @@ mod tests {
         for e in index.device.values() {
             let path = e.file_path.as_deref().unwrap();
             assert!(s.ids.contains_key(path), "{path} in export.pdb");
-            let t = std::time::Instant::now();
+            let t = opendeck_types::time::Instant::now();
             let got = entry_for(&root, path).unwrap().expect("found");
             assert_eq!(got.bundle, e.bundle, "{path}");
             eprintln!("{path}: {} via index-v2 in {:.1} ms", got.bundle, t.elapsed().as_secs_f64() * 1e3);
@@ -1413,7 +1414,7 @@ mod tests {
         let (root, rel) = find_stick(&file).unwrap();
         assert!(entry_for(&root, &rel).unwrap().is_some(), "found through index-v2");
         let mut marks = StemMarks::default();
-        let t = std::time::Instant::now();
+        let t = opendeck_types::time::Instant::now();
         assert!(!marks.has_stems(&file), "the first ask answers at once, before the lookup");
         assert!(t.elapsed() < std::time::Duration::from_millis(50));
         assert!(mark(&mut marks, &file));
@@ -1521,18 +1522,18 @@ mod tests {
     fn real_player_stems_over_link() {
         let Ok(ip) = std::env::var("OPENDECK_TEST_LINK_STEMS") else { return };
         let ip: std::net::Ipv4Addr = ip.parse().unwrap();
-        let t = std::time::Instant::now();
+        let t = opendeck_types::time::Instant::now();
         let mut m = NfsMedia::connect(ip, "/C/").unwrap();
         let index = oc::Index::parse(&oc::Media::read_all(&mut m, "/CDJMODS/index.json", LINK_INDEX_MAX).unwrap().expect("a prepared stick")).unwrap();
         eprintln!("index.json over NFS: {} tracks, {:.0} ms", index.device.len(), t.elapsed().as_secs_f64() * 1e3);
         for (id, e) in &index.device {
-            let t = std::time::Instant::now();
+            let t = opendeck_types::time::Instant::now();
             let got = link_entry(&mut m, e.file_path.as_deref().unwrap(), Some(*id)).unwrap().expect("found by ID");
             assert_eq!(got.bundle, e.bundle);
             eprintln!("  [{id}] {} via index-v2: {:.1} ms", got.bundle, t.elapsed().as_secs_f64() * 1e3);
         }
         let e = index.device.values().next().unwrap();
-        let t = std::time::Instant::now();
+        let t = opendeck_types::time::Instant::now();
         let r = oc::RoleReader::open(&mut m, e, Role::Drums).unwrap();
         let mut bytes = 0usize;
         let n = (r.frames() * 4).div_ceil(e.page_bytes as usize);
@@ -1659,7 +1660,7 @@ mod tests {
         let track = Arc::new(crate::audio::resample_interleaved(&pcm, 2, dec.sample_rate(), sr).unwrap());
         let job = Arc::new(crate::separate::Job::default());
         let (j, t, f) = (Arc::clone(&job), Arc::clone(&track), file.clone());
-        let t0 = std::time::Instant::now();
+        let t0 = opendeck_types::time::Instant::now();
         let h = std::thread::spawn(move || load_local(&f, &t, sr, 2, Some(&j)).unwrap().unwrap());
         let mut first = None;
         while !h.is_finished() {

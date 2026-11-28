@@ -26,7 +26,8 @@ use crate::input::Event;
 use std::sync::mpsc::Sender;
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
-use std::time::{Duration, Instant};
+use opendeck_types::time::Instant;
+use std::time::Duration;
 
 /// Gray-code transition table: index (prev << 2 | cur) → step.
 const QUAD: [i8; 16] = [0, -1, 1, 0, 1, 0, 0, -1, -1, 0, 0, 1, 0, 1, -1, 0];

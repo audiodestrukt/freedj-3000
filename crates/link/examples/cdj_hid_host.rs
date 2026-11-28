@@ -36,7 +36,8 @@ fn main() -> std::io::Result<()> {
     use std::io::{Read, Write};
     use std::os::unix::net::UnixStream;
     use std::path::PathBuf;
-    use std::time::{Duration, Instant};
+    use opendeck_types::time::Instant;
+    use std::time::Duration;
 
     let mut sock = "/tmp/cdj3k-emu-1000/instance-1/usb-link.sock".to_string();
     let mut id_path: Option<PathBuf> = None;

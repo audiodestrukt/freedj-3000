@@ -37,7 +37,7 @@ fn main() -> anyhow::Result<()> {
     println!("mounted {:?}", show(&first));
     for d in nfs.readdir(&root)?.iter().take(40) { println!("  {}", d.name); }
     if let Some(path) = args.next() {
-        let t0 = std::time::Instant::now();
+        let t0 = opendeck_types::time::Instant::now();
         // A path ending in '/' lists that folder instead of reading a file.
         if let Some(dir) = path.strip_suffix('/') {
             let (fh, _) = nfs.lookup_path(&root, dir)?;
@@ -47,7 +47,7 @@ fn main() -> anyhow::Result<()> {
         }
         let (fh, size) = nfs.lookup_path(&root, &path)?;
         println!("lookup {path:?}: {size} bytes ({:.0} ms)", t0.elapsed().as_secs_f64() * 1e3);
-        let t1 = std::time::Instant::now();
+        let t1 = opendeck_types::time::Instant::now();
         let data = nfs.read_file(&fh, size)?;
         let dt = t1.elapsed().as_secs_f64();
         println!("read {} bytes in {:.2} s = {:.1} MB/s; head {:02x?}", data.len(), dt, data.len() as f64 / dt / 1e6, &data[..data.len().min(8)]);

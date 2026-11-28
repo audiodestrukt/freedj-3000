@@ -104,7 +104,7 @@ impl AudioOut for HostOut {
 
 /// Tests: what a stand-in device heard, pull by pull (time, loudest sample).
 #[cfg(test)]
-pub type Trace = Arc<Mutex<Vec<(std::time::Instant, f32)>>>;
+pub type Trace = Arc<Mutex<Vec<(opendeck_types::time::Instant, f32)>>>;
 
 /// Tests: a stand-in device at `sample_rate` (stereo) that takes `frames`
 /// every `every_us` from a thread of its own, as a sound card's callback
@@ -131,7 +131,8 @@ impl AudioOut for PacedOut {
 
     fn start(self: Box<Self>, src: RenderSource) -> Result<Running> {
         use anyhow::Context;
-        use std::time::{Duration, Instant};
+        use opendeck_types::time::Instant;
+        use std::time::Duration;
         let stop = Arc::new(AtomicBool::new(false));
         let sd = Arc::clone(&stop);
         let mut fill = src.render();

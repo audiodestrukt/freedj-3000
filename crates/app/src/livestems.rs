@@ -186,7 +186,7 @@ impl LiveStems {
                     q = self.wake.wait(q).unwrap();
                 }
             };
-            let t0 = std::time::Instant::now();
+            let t0 = opendeck_types::time::Instant::now();
             match self.split_one(id) {
                 Ok(pages) => log::info!("live stems: track {id} split, {pages} pages in {:.1}s", t0.elapsed().as_secs_f32()),
                 Err(e) => log::warn!("live stems: track {id}: {e:#}"),
@@ -273,10 +273,10 @@ impl LiveStems {
     /// fit under the cap.
     fn make_room(&self, id: u32, need: u64) {
         let live = self.cdjmods.join("live");
-        let mut banks: Vec<(std::time::SystemTime, u64, PathBuf)> = std::fs::read_dir(&live).map(|rd| rd.flatten()
+        let mut banks: Vec<(opendeck_types::time::FileTime, u64, PathBuf)> = std::fs::read_dir(&live).map(|rd| rd.flatten()
             .filter(|e| e.file_name().to_string_lossy().parse::<u32>().is_ok_and(|n| n != id))
             .map(|e| {
-                let t = std::fs::metadata(e.path().join("pages")).and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                let t = std::fs::metadata(e.path().join("pages")).and_then(|m| m.modified()).unwrap_or(opendeck_types::time::FILE_EPOCH);
                 (t, dir_bytes(&e.path()), e.path())
             }).collect()).unwrap_or_default();
         let mut used: u64 = banks.iter().map(|b| b.1).sum();
@@ -295,7 +295,7 @@ const SOURCE: &str = ".source";
 
 fn source_key(p: &std::path::Path) -> String {
     let md = std::fs::metadata(p).ok();
-    let t = md.as_ref().and_then(|m| m.modified().ok()).and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_nanos());
+    let t = md.as_ref().and_then(|m| m.modified().ok()).and_then(opendeck_types::time::file_time_since_epoch).map_or(0, |d| d.as_nanos());
     format!("{}\n{}\n{t}\n", p.display(), md.map_or(0, |m| m.len()))
 }
 
@@ -397,7 +397,7 @@ mod tests {
             let reader = std::thread::spawn(move || crate::stems::live_from(&mut m, 1, &t, deck_sr, &j, Duration::from_secs(10)));
             if deck_sr == 44_100 {
                 // The deck has the first seconds of stems while the source is still splitting.
-                let t0 = std::time::Instant::now();
+                let t0 = opendeck_types::time::Instant::now();
                 while !job.bank.get().is_some_and(|b| b.range_ready(0..deck_sr as usize * 2 * 2)) {
                     assert!(t0.elapsed() < Duration::from_secs(10), "no early stems");
                     std::thread::sleep(Duration::from_millis(20));
@@ -416,7 +416,7 @@ mod tests {
         // A source with no live stems (no /CDJMODS/live): no answer, no wait.
         let plain = opendeck_nfs::server::NfsServer::start(opendeck_nfs::server::Tree::scan(music.path()).unwrap(), "/C/", 0, 0).unwrap();
         let mut m = crate::stems::NfsMedia::mount_at(std::net::Ipv4Addr::LOCALHOST, plain.portmap, "/C/").unwrap();
-        let t0 = std::time::Instant::now();
+        let t0 = opendeck_types::time::Instant::now();
         let track = Arc::new(vec![0f32; 1000]);
         assert!(crate::stems::live_from(&mut m, 1, &track, 44_100, &Job::default(), Duration::from_secs(10)).unwrap().is_none());
         assert!(t0.elapsed() < Duration::from_secs(1));
@@ -468,7 +468,7 @@ mod tests {
         let (j, t) = (Arc::clone(&job), Arc::clone(&track));
         let mut m = crate::stems::NfsMedia::mount_at(std::net::Ipv4Addr::LOCALHOST, srv.portmap, "/C/").unwrap();
         let reader = std::thread::spawn(move || crate::stems::live_from(&mut m, 1, &t, 44_100, &j, Duration::from_secs(10)));
-        let t0 = std::time::Instant::now();
+        let t0 = opendeck_types::time::Instant::now();
         while order.lock().unwrap().len() < 4 { assert!(t0.elapsed() < Duration::from_secs(10)); std::thread::sleep(Duration::from_millis(5)); }
         head.store(44_100 * 2 * 2, std::sync::atomic::Ordering::Relaxed);   // the player jumps back to 2 s
         let bank = reader.join().unwrap().unwrap().expect("live stems");
@@ -536,7 +536,7 @@ mod tests {
         srv.tree.overlay("CDJMODS", &mods).unwrap();
         srv.tree.on_miss(live.hook());
         let wait = |what: &str, f: &dyn Fn() -> bool| {
-            let t0 = std::time::Instant::now();
+            let t0 = opendeck_types::time::Instant::now();
             while !f() { assert!(t0.elapsed() < Duration::from_secs(10), "timed out: {what}"); std::thread::sleep(Duration::from_millis(10)); }
         };
 
@@ -556,7 +556,7 @@ mod tests {
         let reader = std::thread::spawn(move || crate::stems::live_from(&mut m, 1, &t, 44_100, &j, Duration::from_secs(10)));
         std::thread::sleep(Duration::from_millis(300));
         LOCAL.store(true, Relaxed);
-        let t0 = std::time::Instant::now();
+        let t0 = opendeck_types::time::Instant::now();
         assert!(reader.join().unwrap().unwrap().is_none(), "no stems came: the player splits it");
         assert!(t0.elapsed() < Duration::from_secs(2));
         assert!(job.bank.get().is_none(), "no empty bank left on the deck");
@@ -584,7 +584,7 @@ mod tests {
         let track = Arc::new(crate::audio::resample_interleaved(&s, 2, sr, 48_000).unwrap());
         let job = Job { playhead: Some(Arc::new(std::sync::atomic::AtomicU64::new(0))), ..Default::default() };
         let mut m = crate::stems::NfsMedia::mount_at(std::net::Ipv4Addr::LOCALHOST, srv.portmap, "/C/").unwrap();
-        let t0 = std::time::Instant::now();
+        let t0 = opendeck_types::time::Instant::now();
         let bank = std::thread::scope(|sc| {
             let h = sc.spawn(|| crate::stems::live_from(&mut m, 1, &track, 48_000, &job, Duration::from_secs(30)));
             while !job.bank.get().is_some_and(|b| b.range_ready(0..48_000 * 2 * 4)) { assert!(!h.is_finished() || job.bank.get().is_some()); std::thread::sleep(Duration::from_millis(20)); }
@@ -719,7 +719,7 @@ mod tests {
 
         let media = || crate::stems::NfsMedia::mount_at(std::net::Ipv4Addr::LOCALHOST, srv.portmap, "/C/").unwrap();
         let wait = |what: &str, mut f: Box<dyn FnMut() -> bool + '_>| {
-            let t0 = std::time::Instant::now();
+            let t0 = opendeck_types::time::Instant::now();
             while !f() { assert!(t0.elapsed() < Duration::from_secs(10), "timed out: {what}"); std::thread::sleep(Duration::from_millis(20)); }
         };
         assert!(LiveReader::open(&mut media(), 1).unwrap().is_none(), "the first lookup misses (and asks)");

@@ -85,7 +85,8 @@ impl AudioOut for Waiting {
     fn format(&self) -> Format { Format { sample_rate: 44_100, channels: 2 } }
 
     fn start(self: Box<Self>, src: RenderSource) -> Result<Running> {
-        use std::time::{Duration, Instant};
+        use opendeck_types::time::Instant;
+        use std::time::Duration;
         let stop = Arc::new(AtomicBool::new(false));
         let sd = Arc::clone(&stop);
         let format = src.format();

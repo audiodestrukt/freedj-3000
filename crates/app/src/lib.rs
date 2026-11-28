@@ -66,8 +66,9 @@ use std::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
         mpsc, Arc, Mutex,
     },
-    time::{Duration, Instant},
+    time::Duration,
 };
+use opendeck_types::time::Instant;
 use winit::{
     application::ApplicationHandler,
     event::{ElementState, KeyEvent, WindowEvent},
@@ -207,7 +208,7 @@ fn split_trace(line: &str) {
 
 /// Wall-clock time as `YYYY-MM-DD HH:MM:SS` UTC, for log lines.
 fn utc_now() -> String {
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let t = opendeck_types::time::SystemTime::now().duration_since(opendeck_types::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (days, rem) = (t / 86_400, t % 86_400);
     // Civil date from days since 1970 (Howard Hinnant's algorithm).
     let z = days as i64 + 719_468;

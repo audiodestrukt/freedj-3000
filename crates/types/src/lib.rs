@@ -2,6 +2,7 @@ pub mod beat;
 pub mod cue;
 pub mod engine;
 pub mod media;
+pub mod time;
 
 pub use beat::*;
 pub use cue::*;

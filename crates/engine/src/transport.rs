@@ -394,8 +394,8 @@ impl Transport {
         }
 
         s.timestamp_ns.store(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
+            opendeck_types::time::SystemTime::now()
+                .duration_since(opendeck_types::time::UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos() as u64,
             Relaxed,

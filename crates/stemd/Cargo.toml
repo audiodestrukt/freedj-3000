@@ -6,6 +6,7 @@ license = "GPL-2.0-or-later"
 description = "A stemd-compatible stem server: CDJ-3000s running cdj3k-mods (and any stemd client) get stems split by OpenDeck"
 
 [dependencies]
+opendeck-types = { workspace = true }   # the clock (opendeck_types::time)
 anyhow = "1"
 log = "0.4"
 serde_json = "1"

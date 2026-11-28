@@ -27,8 +27,9 @@ use std::{
         Arc, Mutex,
     },
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
+use opendeck_types::time::Instant;
 
 // ── Shared link state ─────────────────────────────────────────────────────────
 
@@ -813,7 +814,7 @@ fn diag_packet(port: u16, addr: SocketAddr, data: &[u8]) {
     if seen.contains(&key) { return; }
     seen.push(key);
     let hex: String = data.iter().map(|b| format!("{b:02x}")).collect();
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = opendeck_types::time::SystemTime::now().duration_since(opendeck_types::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     crate::cpumeter::file_line(&format!("link: {now} {port} {addr} {} {hex}  -- first type {t:#04x} from player {player}", data.len()));
 }
 
