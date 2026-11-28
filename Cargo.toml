@@ -79,7 +79,9 @@ wgpu        = "22"
 winit       = "0.30"
 egui        = "0.29"
 egui-wgpu   = "0.29"
-egui-winit  = "0.29"
+# No "clipboard": the deck never copies or pastes, and its clipboard crate
+# (arboard) has no browser build.
+egui-winit  = { version = "0.29", default-features = false, features = ["links", "wayland", "x11"] }
 
 # Text rendering
 glyphon     = "0.5"
