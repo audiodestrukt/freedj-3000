@@ -51,7 +51,7 @@ opendeck-ui          = { path = "crates/ui" }
 cpal        = { version = "0.15" }
 
 # MIDI I/O — for class-compliant controllers during development
-midir       = "0.10"
+midir       = "0.11"
 
 # HID I/O — for Native Instruments controllers (Kontrol S2 etc.)
 hidapi      = "2"

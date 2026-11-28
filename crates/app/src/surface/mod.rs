@@ -155,25 +155,48 @@ pub fn start(file: SurfaceFile, deck: Deck, tx: Sender<Event>, ind: Arc<Indicato
         if s.i2c.is_some() {
             i2c::spawn(s, deck, tx.clone(), Arc::clone(&ind));
         } else if s.midi.is_some() {
-            midis.push(midi::MidiSurface::new(s, deck, tx.clone(), Arc::clone(&ind)));
+            midis.push(s);
         }
     }
     if midis.is_empty() { return; }
+    // The MIDI loop is built on its own thread, so its port connections
+    // never cross threads (in a browser they are JavaScript objects, which
+    // cannot: a web host drives a `MidiLoop` from the page instead).
     let r = std::thread::Builder::new().name("surfaces".into()).spawn(move || {
-        // 25 Hz: LED refresh every tick, port scan every 2 s.
-        let tick = Duration::from_millis(40);
-        let mut n: u32 = 0;
+        let mut l = MidiLoop::new(midis, deck, tx, ind);
         loop {
-            if n.is_multiple_of(50) {
-                let avail = midi::port_names();
-                for m in &mut midis { m.reconcile(&avail); }
-            }
-            for m in &mut midis { m.refresh_leds(); }
-            n = n.wrapping_add(1);
-            std::thread::sleep(tick);
+            l.tick();
+            std::thread::sleep(MidiLoop::TICK);
         }
     });
     if let Err(e) = r { log::warn!("surfaces: {e}"); }
+}
+
+/// The MIDI surfaces, driven by whoever calls [`tick`](Self::tick) every
+/// [`TICK`](Self::TICK): LEDs refresh each tick, ports are looked for every
+/// 2 s (a controller plugged in later connects then; one pulled is dropped).
+pub struct MidiLoop {
+    midis: Vec<midi::MidiSurface>,
+    n: u32,
+}
+
+impl MidiLoop {
+    /// 25 Hz.
+    pub const TICK: Duration = Duration::from_millis(40);
+
+    pub fn new(surfaces: Vec<config::Surface>, deck: Deck, tx: Sender<Event>, ind: Arc<Indicators>) -> MidiLoop {
+        let midis = surfaces.into_iter().map(|s| midi::MidiSurface::new(s, deck, tx.clone(), Arc::clone(&ind))).collect();
+        MidiLoop { midis, n: 0 }
+    }
+
+    pub fn tick(&mut self) {
+        if self.n.is_multiple_of(50) {
+            let avail = midi::port_names();
+            for m in &mut self.midis { m.reconcile(&avail); }
+        }
+        for m in &mut self.midis { m.refresh_leds(); }
+        self.n = self.n.wrapping_add(1);
+    }
 }
 
 #[cfg(test)]

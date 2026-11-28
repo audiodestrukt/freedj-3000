@@ -228,7 +228,7 @@ mod port_tests {
     use super::*;
     use super::super::config::SurfaceFile;
     use crate::input::ControlEvent as CE;
-    use midir::os::unix::VirtualOutput;
+    use midir::ext::VirtualOutput;
     use std::sync::mpsc;
     use std::time::Duration;
 
