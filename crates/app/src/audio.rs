@@ -126,6 +126,11 @@ struct JumpShared {
     /// Output frames that were still in the ring after the buffer that
     /// flushed it: the jump's crossfade starts on the first of them.
     unplayed: Arc<AtomicU64>,
+    /// The flush now asked for is a relative jump (BEAT JUMP, a turn of the
+    /// lever): the output holds the old audio and lands on time.  Otherwise
+    /// an absolute seek (hot cue, CUE, needle, reloop): it starts exactly at
+    /// its target, the attack whole.
+    relative: Arc<AtomicBool>,
     /// Reverse play (the direction lever).  A change is resolved as a jump
     /// of nothing: from the frame being heard, crossfaded, the other way.
     reverse:  Arc<AtomicBool>,
@@ -481,6 +486,7 @@ impl AudioHandle {
         let in_flight  = Arc::new(AtomicU64::new(0));
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
         let jump = JumpShared { request: Arc::new(AtomicI64::new(NO_JUMP)), unplayed: Arc::new(AtomicU64::new(0)),
+                               relative: Arc::new(AtomicBool::new(false)),
                                reverse: Arc::new(AtomicBool::new(false)),
                                q_anchor: Arc::new(AtomicU64::new(0)), q_step: Arc::new(AtomicU64::new(0)),
                                q_land: Arc::new(AtomicBool::new(false)), reading_rev: Arc::new(AtomicBool::new(false)) };
@@ -561,7 +567,7 @@ impl AudioHandle {
             device_ch, device_sr,
             consumer: Arc::new(Mutex::new(consumer)), playing: Arc::clone(&playing), stats: Arc::clone(&stats),
             drain_flag: Arc::clone(&drain_flag),
-            scrub_live: Arc::clone(&scrub.live), unplayed: Arc::clone(&jump.unplayed),
+            scrub_live: Arc::clone(&scrub.live), unplayed: Arc::clone(&jump.unplayed), relative: Arc::clone(&jump.relative),
             dvs: DvsParts {
                 shared: Arc::clone(&dvs), samples: Arc::clone(&samples), position: Arc::clone(&position),
                 in_flight: Arc::clone(&in_flight), seek_request: Arc::clone(&seek_request),
@@ -628,6 +634,8 @@ pub(crate) struct StreamParts {
     scrub_live: Arc<AtomicBool>,
     /// Where the callback reports what a flush left unplayed (`JumpShared`).
     unplayed:   Arc<AtomicU64>,
+    /// The flush is a relative jump (`JumpShared::relative`).
+    relative:   Arc<AtomicBool>,
     /// DVS: what the callback needs to play the record's way.
     dvs: DvsParts,
     /// The processor, for an output that runs it from its callback; the
@@ -718,6 +726,16 @@ pub struct Render {
     /// Equal-power crossfade gains (the new audio's), one per frame.
     xfade:      Vec<f32>,
     unplayed:   Arc<AtomicU64>,
+    relative:   Arc<AtomicBool>,
+    /// An absolute seek's tail: a short fade-out, no crossfade, nothing of
+    /// the new audio skipped.
+    fade_only:  bool,
+    /// After an absolute seek, waiting for the new audio: the silence is
+    /// the stretcher re-priming, not an underrun.
+    priming:    bool,
+    /// The new audio fades in (frame `k` of the fade): a jump's hold ran out
+    /// before it was ready, so there was nothing to crossfade from.
+    fade_in:    Option<usize>,
     /// The processor, when this output runs it ([`AudioOut::runs_processor`]).
     processor:  Option<Processor>,
 }
@@ -750,6 +768,10 @@ impl Render {
             tail_at: 0,
             xf_at: None,
             unplayed: Arc::clone(&p.unplayed),
+            relative: Arc::clone(&p.relative),
+            fade_only: false,
+            priming: false,
+            fade_in: None,
             xfade: (0..xf_frames).map(|i| ((i as f32 + 0.5) / xf_frames as f32 * std::f32::consts::FRAC_PI_2).sin()).collect(),
             processor: p.processor.lock().ok().and_then(|mut g| g.take()),
         }
@@ -787,6 +809,8 @@ impl Render {
         }
         if !self.playing.load(Ordering::Relaxed) && !self.scrub_live.load(Ordering::Relaxed) {
             self.tail_at = self.tail.len();   // a pause ends any jump crossfade
+            self.fade_in = None;
+            self.priming = false;
             if self.gain > 0.0 {
                 // Fading out: ring audio × a falling gain, frame by
                 // frame.  A flush requested meanwhile waits until
@@ -827,13 +851,22 @@ impl Render {
         // audio exists, where the flushed path played silence until then.
         if self.drain_flag.load(Ordering::Acquire) {
             let underran = Self::pop_into(&mut consumer, out);
+            // A relative jump holds up to SEEK_HOLD_S and lands on time; an
+            // absolute seek keeps only a crossfade's worth, faded out, and
+            // starts at its target exactly (a hot cue's attack whole).
+            let relative = self.relative.load(Ordering::Relaxed);
+            let cap = if relative { self.tail.capacity() } else { (self.xfade.len() * self.device_ch).min(self.tail.capacity()) };
             self.tail.clear();
-            while self.tail.len() < self.tail.capacity() {
+            while self.tail.len() < cap {
                 match consumer.pop() { Ok(s) => self.tail.push(s), Err(_) => break }
             }
             self.tail.truncate(self.tail.len() / self.device_ch * self.device_ch);
             self.tail_at = 0;
             self.xf_at = None;
+            self.fade_only = !relative;
+            self.priming = !relative;
+            // Nothing to hold (the ring was dry): the new audio fades in.
+            self.fade_in = (relative && self.tail.is_empty()).then_some(0);
             let mut flushed = self.tail.len();
             while consumer.pop().is_ok() { flushed += 1; }
             // Published before the flag clears (Release): the processor reads
@@ -869,7 +902,7 @@ impl Render {
             for frame in out.chunks_mut(ch) {
                 if self.tail_at >= self.tail.len() { break; }
                 let left = (self.tail.len() - self.tail_at) / ch;
-                if self.xf_at.is_none() && left >= xf && consumer.slots() >= ready + self.tail_at {
+                if !self.fade_only && self.xf_at.is_none() && left >= xf && consumer.slots() >= ready + self.tail_at {
                     for _ in 0..self.tail_at { let _ = consumer.pop(); }   // catch up: see above
                     self.xf_at = Some(0);
                 }
@@ -894,18 +927,52 @@ impl Render {
                 done += ch;
             }
             out = &mut std::mem::take(&mut out)[done..];
+            // A jump's hold ran out before the new audio was ready: there
+            // was nothing to crossfade with, so it fades in instead of
+            // cutting in (a click, on a machine slow to re-prime).
+            if self.tail_at >= self.tail.len() && self.xf_at.is_none() && !self.fade_only { self.fade_in = Some(0); }
         }
 
         // Fill from the ring; count any sample we had to invent as
         // silence.  No allocation, and the atomics are touched only
         // when silence actually happens, so the clean path stays a
         // bare pop().
-        let underran = Self::pop_into(&mut consumer, out);
-        if underran > 0 {
+        let underran = match self.fade_in {
+            Some(k) => {
+                let (underran, next) = Self::pop_fading_in(&mut consumer, out, k, self.device_ch, &self.xfade);
+                self.fade_in = next;
+                underran
+            }
+            None => Self::pop_into(&mut consumer, out),
+        };
+        if self.priming {
+            // An absolute seek's silence until its audio arrives is the
+            // stretcher re-priming, not starvation.
+            if underran < out.len() as u64 { self.priming = false; }
+        } else if underran > 0 {
             // Genuine starvation — the core failed to keep up.
             self.stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
             self.stats.underrun_events.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// `pop_into`, fading the ring's audio in from frame `k` of the fade
+    /// `xfade` (silence until it arrives does not advance it); also the
+    /// frame the fade is at after, None once it is done.
+    fn pop_fading_in(consumer: &mut rtrb::Consumer<f32>, out: &mut [f32], mut k: usize, ch: usize, xfade: &[f32]) -> (u64, Option<usize>) {
+        let xf = xfade.len();
+        let mut underran = 0u64;
+        for frame in out.chunks_mut(ch) {
+            if consumer.slots() < frame.len() {
+                frame.fill(0.0);
+                underran += frame.len() as u64;
+                continue;
+            }
+            let g = if k < xf { xfade[k] } else { 1.0 };
+            for s in frame.iter_mut() { *s = consumer.pop().unwrap_or(0.0) * g; }
+            k += 1;
+        }
+        (underran, (k < xf).then_some(k))
     }
 
     /// Fill `out` from the ring; the count of samples it had to make silent.
@@ -1718,6 +1785,7 @@ impl Processor {
             }
             // Tell the output callback to flush stale buffered audio, and
             // land once it has (the top of the next steps).
+            self.jump.relative.store(req == NO_SEEK, Ordering::Relaxed);
             self.drain_flag.store(true, Ordering::Release);
             self.drain_wait = Some(0);
             self.yielded = false;
@@ -2170,7 +2238,7 @@ mod output_gain_tests {
             device_ch: 2, device_sr: 48_000,
             consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
             drain_flag: Arc::new(AtomicBool::new(false)),
-            scrub_live: Arc::new(AtomicBool::new(false)), unplayed: Arc::new(AtomicU64::new(0)),
+            scrub_live: Arc::new(AtomicBool::new(false)), unplayed: Arc::new(AtomicU64::new(0)), relative: Arc::new(AtomicBool::new(true)),
             dvs: DvsParts::idle(),
             processor: Mutex::new(None),
         };
@@ -2514,7 +2582,7 @@ mod seek_while_playing_tests {
             device_ch: 1, device_sr: 48_000,
             consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
             drain_flag: Arc::new(AtomicBool::new(false)),
-            scrub_live: Arc::new(AtomicBool::new(false)), unplayed: Arc::new(AtomicU64::new(0)),
+            scrub_live: Arc::new(AtomicBool::new(false)), unplayed: Arc::new(AtomicU64::new(0)), relative: Arc::new(AtomicBool::new(true)),
             dvs: DvsParts::idle(),
             processor: Mutex::new(None),
         };
@@ -2610,6 +2678,73 @@ mod seek_while_playing_tests {
         let n = ((after as f64 - phase) / beat).round();
         let ms = |f: f64| f / sr as f64 * 1000.0;
         (ms(after as f64 - (phase + n * beat)), ms(spread))
+    }
+
+    /// A stand-in output (mono, 48 kHz) for the hold tests: its parts and
+    /// its Render.  `relative`: the flush is a jump, else an absolute seek.
+    fn stand_in(relative: bool) -> (StreamParts, Render, rtrb::Producer<f32>) {
+        let (tx, rx) = rtrb::RingBuffer::<f32>::new(1 << 15);
+        let parts = StreamParts {
+            device_ch: 1, device_sr: 48_000,
+            consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
+            drain_flag: Arc::new(AtomicBool::new(false)),
+            scrub_live: Arc::new(AtomicBool::new(false)), unplayed: Arc::new(AtomicU64::new(0)),
+            relative: Arc::new(AtomicBool::new(relative)),
+            dvs: DvsParts::idle(),
+            processor: Mutex::new(None),
+        };
+        let fill = Render { trim: 1.0, ..Render::new(&parts) };
+        (parts, fill, tx)
+    }
+
+    /// A hot cue (an absolute seek) while playing: the old audio fades out
+    /// at once, and the cue's audio starts at its very first sample, at full
+    /// level: its attack whole, nothing of it skipped for the wait, and the
+    /// wait not counted as an underrun.
+    #[test]
+    fn a_hot_cue_while_playing_starts_at_its_target_with_the_attack_whole() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let (parts, mut fill, mut tx) = stand_in(false);
+        let xf = fill.xfade.len();
+        let mut buf = vec![0f32; 256];
+        for _ in 0..4_000 { tx.push(1.0).unwrap(); }             // the old audio
+        fill.fill(&mut buf);
+        parts.drain_flag.store(true, Ordering::Release);          // the hot cue
+        fill.fill(&mut buf);
+        assert!(buf.iter().all(|&v| v == 1.0), "the buffer it lands in plays on");
+        fill.fill(&mut buf);                                      // the stretcher re-primes
+        assert!(buf[..xf].windows(2).all(|w| w[1] <= w[0]) && buf[xf - 1] > 0.0, "the old audio fades out");
+        assert!(buf[xf..].iter().all(|&v| v == 0.0), "then silence until the cue's audio");
+        for i in 0..4_000 { tx.push(10_000.0 + i as f32).unwrap(); }
+        fill.fill(&mut buf);
+        assert_eq!(&buf[..3], &[10_000.0, 10_001.0, 10_002.0], "from the target's first sample, unfaded");
+        assert_eq!(parts.stats.underrun_events.load(Ordering::Relaxed), 0, "the wait is no underrun");
+        set_output_gain_db(0.0);
+    }
+
+    /// A jump whose new audio is later than the hold (a machine slow to
+    /// re-prime): the old audio fades out, and the new fades in rather than
+    /// cutting in from silence.
+    #[test]
+    fn a_jump_whose_new_audio_comes_late_fades_it_in() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let (parts, mut fill, mut tx) = stand_in(true);
+        let xf = fill.xfade.len();
+        let mut buf = vec![0f32; 256];
+        for _ in 0..(512 + 50) { tx.push(1.0).unwrap(); }        // little left to hold
+        fill.fill(&mut buf);
+        parts.drain_flag.store(true, Ordering::Release);          // the jump
+        fill.fill(&mut buf);
+        fill.fill(&mut buf);                                      // the short hold runs out
+        assert!(buf[49] < buf[0] && buf[50..].iter().all(|&v| v == 0.0), "the hold fades out and runs out");
+        for _ in 0..4_000 { tx.push(1.0).unwrap(); }             // the new audio, late
+        fill.fill(&mut buf);
+        assert!(buf[0] < 0.1, "fades in, no step: {}", buf[0]);
+        assert!(buf[..xf].windows(2).all(|w| w[1] >= w[0]), "rising");
+        assert_eq!(buf[xf], 1.0, "full level once the fade is done");
+        set_output_gain_db(0.0);
     }
 
     #[test]
