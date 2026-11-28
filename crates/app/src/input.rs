@@ -19,6 +19,18 @@ pub enum Event {
     /// Load this file (a plugin host restoring the deck's track), and with
     /// `play` start it playing once it has loaded.
     Load { path: std::path::PathBuf, play: bool },
+    /// Load a track from its bytes (a browser, which has no files: a
+    /// fetched or dropped file); `name` gives its title and format (by
+    /// extension).
+    LoadData { name: String, data: TrackData, play: bool },
+}
+
+/// A whole audio file in memory.
+#[derive(Clone)]
+pub struct TrackData(pub Vec<u8>);
+
+impl std::fmt::Debug for TrackData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{} bytes", self.0.len()) }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]

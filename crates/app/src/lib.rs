@@ -57,7 +57,7 @@ use audio::AudioHandle;
 use opendeck_analysis::{BeatAnalyzerImpl, WaveformBuilder, WaveformCache};
 use opendeck_types::{BeatAnalyzer, BeatGrid};
 use renderer::{Renderer, WgpuRenderer};
-pub use input::{ControlEvent, Event, JOG_SECS_PER_TICK};
+pub use input::{ControlEvent, Event, TrackData, JOG_SECS_PER_TICK};
 use input::{PerformMode, Screen as TopScreen, Source, UiEvent, ZOOM_LEVELS, ZOOM_DEFAULT};
 use browser::{Browser, Enter, Load};
 use snapshot::DeckSnapshot;
@@ -1366,11 +1366,15 @@ impl DeckApp {
     fn apply(&mut self, ev: Event) {
         log::debug!("event: {ev:?}");
         // A FOLLOW deck mirrors another player: nothing here moves it.
-        if self.follow.is_some() && matches!(ev, Event::Deck(_) | Event::Load { .. }) { return; }
+        if self.follow.is_some() && matches!(ev, Event::Deck(_) | Event::Load { .. } | Event::LoadData { .. }) { return; }
         match ev {
             Event::Load { path, play } => match self.load_track(&path, None) {
                 Ok(()) => self.play_on_load = play,
                 Err(e) => log::warn!("load {}: {e:#}", path.display()),
+            },
+            Event::LoadData { name, data, play } => match self.load_data(name.clone(), data.0) {
+                Ok(()) => self.play_on_load = play,
+                Err(e) => log::warn!("load {name}: {e:#}"),
             },
             Event::Deck(ControlEvent::Play)  => { self.lock_in_play(); log::info!("playing"); }
             Event::Deck(ControlEvent::Pause) => { self.audio.playing.store(false, Ordering::Relaxed); log::info!("paused"); }
@@ -2694,6 +2698,16 @@ impl DeckApp {
             .or_else(|| cached.as_ref().and_then(|a| Self::grid_from_analysis(a, prep.deck_sr, prep.deck_ch)));
         let name = path.display().to_string();
         prep.stream(name, path, dec, grid_cue, t0, tx, Some(cached))
+    }
+
+    /// Load a track from its bytes (`Event::LoadData`): decoded on a loader
+    /// job like any other load; `name`'s extension says the format.
+    fn load_data(&mut self, name: String, data: Vec<u8>) -> Result<()> {
+        let prep = self.prep();
+        self.start_fetch(name.clone(), move |tx| {
+            let f = Fetched { name: name.clone(), path: name, audio: AudioSrc::Bytes(data), grid: FetchedGrid::None, t0: Instant::now(), meta: None };
+            prep.complete(f, tx)
+        })
     }
 
     /// A grid from a cached media-server analysis (our own detector's beats,
@@ -5447,11 +5461,17 @@ pub struct Platform {
     pub run_future: fn(LocalFuture),
     /// Dress a new window (a browser's goes into the page).
     pub window:     fn(WindowAttributes) -> WindowAttributes,
+    /// Filled with the deck's event sender once it exists, for a platform
+    /// that feeds it events of its own (a browser loading a track).
+    pub events:     Option<EventSlot>,
 }
+
+/// Where a deck's event sender is left for whoever drives it from outside.
+pub type EventSlot = Arc<Mutex<Option<mpsc::Sender<Event>>>>;
 
 impl Platform {
     pub fn native() -> Platform {
-        Platform { audio_out: None, spawn: spawn::threads(), run_future: |f| pollster::block_on(f), window: |a| a }
+        Platform { audio_out: None, spawn: spawn::threads(), run_future: |f| pollster::block_on(f), window: |a| a, events: None }
     }
 }
 
@@ -5638,6 +5658,7 @@ fn build(cfg: Config, platform: Platform) -> Result<DeckApp> {
     //       channel; deck state goes back to their LEDs through `indicators`.
     let (event_tx, event_rx) = mpsc::channel::<Event>();
     if let Some(h) = &cfg.host { *h.events.lock().unwrap() = Some(event_tx.clone()); }
+    if let Some(slot) = &platform.events { *slot.lock().unwrap() = Some(event_tx.clone()); }
     let indicators = Arc::new(surface::Indicators::default());
     let deck = if deck_channel == 0 { surface::config::Deck::A } else { surface::config::Deck::B };
     log::info!("controller: deck {deck:?}");
@@ -6703,6 +6724,26 @@ mod load_off_frame_tests {
             std::thread::sleep(Duration::from_millis(2));
         }
         assert_eq!(d.audio.len(), SR as usize * 6 * 2, "the whole new track");
+    }
+
+    /// A track handed over as bytes (a browser has no files) loads like a
+    /// file, on a loader job; its name gives the title and the format.
+    #[test]
+    fn a_track_loads_from_its_bytes() {
+        let mut d = deck(2.0);
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("t.wav");
+        super::stream_load_tests::wav(&wav, SR, 3.0, 0.0);
+        let data = TrackData(std::fs::read(&wav).unwrap());
+        d.apply(Event::LoadData { name: "dropped.wav".into(), data, play: false });
+        let t0 = Instant::now();
+        while d.loading.is_some() || d.fetch_rx.is_some() {
+            assert!(t0.elapsed() < Duration::from_secs(10), "the load never came in");
+            d.poll_fetch();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(d.path, std::path::PathBuf::from("dropped.wav"));
+        assert_eq!(d.audio.len(), SR as usize * 3 * 2, "the whole track, from memory");
     }
 }
 

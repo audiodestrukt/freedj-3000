@@ -97,7 +97,9 @@ web: ## Build the browser version into crates/web/www (then: make web-serve)
 	PATH=$(WEB_TC)/bin:$$PATH DYLD_FALLBACK_LIBRARY_PATH=$(WEB_TC)/lib CARGO_TARGET_DIR=$(CURDIR)/target/wasm \
 	  wasm-pack build crates/web --target web --dev --out-dir www/pkg --no-typescript
 
-web-serve: web ## Serve the browser version at http://127.0.0.1:8765 (Chrome / Edge / Safari: needs WebGPU)
+DEMO ?= amplificate.mp3
+web-serve: web ## Serve the browser version at http://127.0.0.1:8765 with DEMO loaded (Chrome / Edge / Safari: needs WebGPU)
+	ln -sf $(CURDIR)/$(DEMO) crates/web/www/demo.mp3
 	cd crates/web/www && python3 -m http.server 8765 --bind 127.0.0.1
 
 relink: ## Force a relink — fixes "librubberband.so.N: cannot open shared object file"
