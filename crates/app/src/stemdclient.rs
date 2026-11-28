@@ -65,18 +65,13 @@ pub fn server() -> Option<SocketAddr> {
 
 /// Browse `_stemd._tcp` and keep the first server that isn't this device.
 fn browse() {
-    let Ok(d) = opendeck_stemd::mdns_sd::ServiceDaemon::new() else { return };
-    let Ok(rx) = d.browse("_stemd._tcp.local.") else { return };
-    let own: Vec<std::net::IpAddr> = if_addrs::get_if_addrs().map(|v| v.into_iter().map(|i| i.ip()).collect()).unwrap_or_default();
-    while let Ok(ev) = rx.recv() {
-        if let opendeck_stemd::mdns_sd::ServiceEvent::ServiceResolved(info) = ev {
-            let port = info.get_port();
-            if let Some(ip) = info.get_addresses().iter().map(|a| a.to_ip_addr()).find(|ip| ip.is_ipv4() && !own.contains(ip)) {
-                log::info!("stemd: found a server at {ip}:{port} ({})", info.get_fullname());
-                if let Some(s) = FOUND.get() { *s.lock().unwrap() = Some(SocketAddr::new(ip, port)); }
-            }
+    let own = opendeck_net::local_ips();
+    opendeck_net::mdns_browse("_stemd._tcp.local.", |f| {
+        if let Some(&ip) = f.addrs.iter().find(|ip| ip.is_ipv4() && !own.contains(ip)) {
+            log::info!("stemd: found a server at {ip}:{} ({})", f.port, f.fullname);
+            if let Some(s) = FOUND.get() { *s.lock().unwrap() = Some(SocketAddr::new(ip, f.port)); }
         }
-    }
+    });
 }
 
 // ── HTTP ─────────────────────────────────────────────────────────────────────

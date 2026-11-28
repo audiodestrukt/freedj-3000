@@ -19,7 +19,6 @@ use opendeck_link::prodj::{
     SYNC_OFF, SYNC_ON, PKT_MEDIA_QUERY, MediaInfo};
 use arc_swap::ArcSwap;
 use opendeck_types::{BeatGrid, EngineSnapshot};
-use socket2::{Domain, Protocol, Socket, Type};
 use std::{
     collections::HashMap,
     net::{Ipv4Addr, SocketAddr, UdpSocket},
@@ -603,20 +602,11 @@ pub fn beat_is_twin(last: &mut HashMap<u8, Instant>, player: u8, now: Instant) -
 // ── Sockets ───────────────────────────────────────────────────────────────────
 
 fn bind_shared(port: u16) -> Option<UdpSocket> {
-    // SO_REUSEADDR + SO_REUSEPORT so the port can be shared with other ProDJ
-    // Link tools (prolink_virtual_cdj, dysentery, a second freedj instance).
-    let raw = Socket::new(Domain::IPV4, Type::DGRAM, Some(Protocol::UDP))
-        .map_err(|e| log::warn!("ProDJ Link: socket create failed: {e}"))
-        .ok()?;
-    raw.set_reuse_address(true).ok();
-    #[cfg(unix)]
-    raw.set_reuse_port(true).ok();
-    raw.set_broadcast(true).ok();
-    let addr: SocketAddr = format!("0.0.0.0:{port}").parse().unwrap();
-    raw.bind(&addr.into())
+    // Shared with other ProDJ Link tools (prolink_virtual_cdj, dysentery, a
+    // second freedj instance): see opendeck_net::bind_shared_udp.
+    let sock = opendeck_net::bind_shared_udp(port)
         .map_err(|e| log::warn!("ProDJ Link: cannot bind port {port}: {e}"))
         .ok()?;
-    let sock: UdpSocket = raw.into();
     sock.set_read_timeout(Some(Duration::from_millis(500))).ok();
     Some(sock)
 }
@@ -664,10 +654,7 @@ fn pinned_iface() -> Option<&'static (String, Ipv4Addr, Ipv4Addr)> {
     static PIN: std::sync::OnceLock<Option<(String, Ipv4Addr, Ipv4Addr)>> = std::sync::OnceLock::new();
     PIN.get_or_init(|| {
         let name = std::env::var("OPENDECK_LINK_IFACE").ok().filter(|n| !n.is_empty())?;
-        let found = if_addrs::get_if_addrs().ok().and_then(|ifs| ifs.into_iter().find_map(|i| match i.addr {
-            if_addrs::IfAddr::V4(v4) if i.name == name => Some((v4.ip, v4.netmask)),
-            _ => None,
-        }));
+        let found = opendeck_net::interfaces().into_iter().find(|i| i.name == name).map(|i| (i.ip, i.netmask));
         match found {
             Some((ip, mask)) => { log::info!("ProDJ Link pinned to {name} ({ip})"); Some((name, ip, mask)) }
             None => {
@@ -718,36 +705,27 @@ fn link_interface(peers: &[Ipv4Addr]) -> (Ipv4Addr, Ipv4Addr, [u8; 6], String) {
         if ip.is_loopback() { return loopback_link(); }
     }
     let mut best: Option<(u8, Ipv4Addr, Ipv4Addr, [u8; 6], String)> = None;
-    if let Ok(ifs) = if_addrs::get_if_addrs() {
-        for i in ifs {
-            if i.is_loopback() { continue; }
-            let if_addrs::IfAddr::V4(v4) = &i.addr else { continue };
-            // An address added without `brd` reports no broadcast (or its own
-            // address); derive it from the netmask rather than broadcasting to
-            // ourselves.
-            let Some(bc) = broadcast_for(v4.ip, v4.netmask, v4.broadcast) else { continue };
-            if let Some((name, ..)) = pin {
-                if i.name != *name { continue; }
-            } else if i.name.starts_with("docker") || i.name.starts_with("br-") || i.name.starts_with("lxc") || i.name.starts_with("virbr") {
-                continue;
-            }
-            let reaches_peer = peers.iter().any(|p| same_subnet(v4.ip, *p, v4.netmask));
-            let score = match (reaches_peer, is_link_local(v4.ip)) {
-                (true,  _)     => 3,   // on a known player's subnet
-                (false, false) => 2,   // configured, but no player seen there yet
-                (false, true)  => 1,   // link-local: DHCP never answered
-            };
-            // Strictly greater keeps the original first-wins order on a tie.
-            if best.as_ref().is_some_and(|(b, ..)| *b >= score) { continue; }
-            let mac = std::fs::read_to_string(format!("/sys/class/net/{}/address", i.name))
-                .ok()
-                .and_then(|m| {
-                    let b: Vec<u8> = m.trim().split(':').filter_map(|h| u8::from_str_radix(h, 16).ok()).collect();
-                    b.try_into().ok()
-                })
-                .unwrap_or([0x02, 0xfd, 0, 0, 0, 1]);
-            best = Some((score, v4.ip, bc, mac, i.name.clone()));
+    for i in opendeck_net::interfaces() {
+        if i.loopback { continue; }
+        // An address added without `brd` reports no broadcast (or its own
+        // address); derive it from the netmask rather than broadcasting to
+        // ourselves.
+        let Some(bc) = broadcast_for(i.ip, i.netmask, i.broadcast) else { continue };
+        if let Some((name, ..)) = pin {
+            if i.name != *name { continue; }
+        } else if i.name.starts_with("docker") || i.name.starts_with("br-") || i.name.starts_with("lxc") || i.name.starts_with("virbr") {
+            continue;
         }
+        let reaches_peer = peers.iter().any(|p| same_subnet(i.ip, *p, i.netmask));
+        let score = match (reaches_peer, is_link_local(i.ip)) {
+            (true,  _)     => 3,   // on a known player's subnet
+            (false, false) => 2,   // configured, but no player seen there yet
+            (false, true)  => 1,   // link-local: DHCP never answered
+        };
+        // Strictly greater keeps the original first-wins order on a tie.
+        if best.as_ref().is_some_and(|(b, ..)| *b >= score) { continue; }
+        let mac = opendeck_net::mac(&i.name).unwrap_or([0x02, 0xfd, 0, 0, 0, 1]);
+        best = Some((score, i.ip, bc, mac, i.name.clone()));
     }
     match best {
         Some((_, ip, bc, mac, name)) => (ip, bc, mac, name),
@@ -986,7 +964,7 @@ fn listen_announce(link: Arc<LinkState>) -> Option<thread::JoinHandle<()>> {
     // Defenses go back to the claimant's port 50000 from a socket of our own.
     let defend_sock = UdpSocket::bind("0.0.0.0:0").ok();
     if let Some(d) = &defend_sock { let _ = d.set_broadcast(true); }
-    let local_ips = if_addrs::get_if_addrs().map(|v| v.into_iter().filter_map(|i| match i.addr { if_addrs::IfAddr::V4(a) => Some(a.ip), _ => None }).collect()).unwrap_or_default();
+    let local_ips = opendeck_net::interfaces().into_iter().map(|i| i.ip).collect();
     let guard = ClaimGuard { defend_port: defend_sock.as_ref().and_then(|d| d.local_addr().ok()).map(|a| a.port()), local_ips, ..Default::default() };
     let mut rx = AnnounceRx { link, guard };
     spawn("prodj-rx-50000", PORT_ANNOUNCE, sock, move |data, addr| {
@@ -1710,7 +1688,7 @@ impl ProDjSender {
                         // when the peer set changes: an iOS app is kept alive
                         // for days, and one carried from one Wi-Fi to another
                         // without a restart kept announcing to the old
-                        // network's broadcast address.  get_if_addrs is cheap.
+                        // network's broadcast address.  Listing the interfaces is cheap.
                         let mut peers: Vec<Ipv4Addr> = link.peers.lock()
                             .map(|p| p.values().copied().collect()).unwrap_or_default();
                         peers.sort();

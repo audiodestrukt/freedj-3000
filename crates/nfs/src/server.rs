@@ -245,10 +245,7 @@ struct Ports { mountd: u16, nfsd: u16 }
 
 /// This host's IPv4 addresses and netmasks.
 fn local_v4() -> Vec<(std::net::Ipv4Addr, std::net::Ipv4Addr)> {
-    if_addrs::get_if_addrs().map(|v| v.into_iter().filter_map(|i| match i.addr {
-        if_addrs::IfAddr::V4(a) => Some((a.ip, a.netmask)),
-        _ => None,
-    }).collect()).unwrap_or_default()
+    opendeck_net::interfaces().into_iter().map(|i| (i.ip, i.netmask)).collect()
 }
 
 /// The export group for a requester, as a CDJ writes it: the network of our

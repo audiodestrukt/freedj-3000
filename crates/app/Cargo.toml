@@ -49,8 +49,7 @@ log               = { workspace = true }
 env_logger        = { workspace = true }
 anyhow            = { workspace = true }
 opendeck-link     = { workspace = true }
-socket2           = { workspace = true }
-if-addrs          = "0.13"
+opendeck-net      = { workspace = true }
 png               = "0.17"
 jpeg-decoder      = { version = "0.3", default-features = false }   # cover art (most tags carry JPEG)
 serde             = { workspace = true }

@@ -8,7 +8,7 @@ license.workspace = true
 [dependencies]
 anyhow = { workspace = true }
 log    = { workspace = true }
-if-addrs = "0.13"
+opendeck-net = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -7,8 +7,6 @@ license.workspace = true
 
 [dependencies]
 opendeck-types = { workspace = true }
-tokio          = { workspace = true }
-socket2        = { workspace = true }
 log            = { workspace = true }
 thiserror      = { workspace = true }
 

@@ -1,0 +1,15 @@
+[package]
+name        = "opendeck-net"
+description = "The host's network: its interfaces, shared UDP sockets, mDNS. The one place that knows whether there is an OS network to use."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+log = { workspace = true }
+
+# A browser has none of this; there the crate reports no network (none.rs).
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+if-addrs = "0.13"
+socket2  = { workspace = true }
+mdns-sd  = "0.21.7"

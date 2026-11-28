@@ -23,9 +23,6 @@
 //! ([`Config::resample`]).  One job runs at a time, newest last.
 
 pub mod mode1;
-/// The mDNS crate, for clients that browse `_stemd._tcp`.
-#[cfg(feature = "mdns")]
-pub use mdns_sd;
 mod session;
 
 use anyhow::{bail, Context, Result};
@@ -143,8 +140,7 @@ struct State { cfg: Config, splitter: Arc<dyn Splitter>, inner: Mutex<Inner>, wa
 /// A running server.
 pub struct Server {
     pub port: u16,
-    #[cfg(feature = "mdns")]
-    _mdns: Option<mdns_sd::ServiceDaemon>,
+    _mdns: Option<opendeck_net::Advert>,
 }
 
 /// Start serving on `cfg.port`.
@@ -167,23 +163,14 @@ pub fn start(cfg: Config, splitter: Arc<dyn Splitter>) -> Result<Server> {
         }
     })?;
     log::info!("stemd: serving on port {port} (model {model})");
-    #[cfg(feature = "mdns")]
     let _mdns = if advertise { advertise_mdns(port, &model, &version).map_err(|e| log::warn!("stemd: no mDNS: {e:#}")).ok() } else { None };
-    #[cfg(not(feature = "mdns"))]
-    let _ = (advertise, version);
-    Ok(Server { port, #[cfg(feature = "mdns")] _mdns })
+    Ok(Server { port, _mdns })
 }
 
-#[cfg(feature = "mdns")]
-fn advertise_mdns(port: u16, model: &str, version: &str) -> Result<mdns_sd::ServiceDaemon> {
-    let d = mdns_sd::ServiceDaemon::new()?;
-    let host = std::env::var("HOSTNAME").ok().filter(|h| !h.is_empty()).unwrap_or_else(|| "opendeck".into());
-    let host: String = host.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '-' }).collect();
+/// Advertise `_stemd._tcp` for CDJ-3000s and other OpenDecks to find.
+fn advertise_mdns(port: u16, model: &str, version: &str) -> std::io::Result<opendeck_net::Advert> {
     let props = [("model", model), ("path", "/v1"), ("v", "1"), ("version", version)];
-    let info = mdns_sd::ServiceInfo::new("_stemd._tcp.local.", &format!("OpenDeck {host}"), &format!("{host}.local."), "", port, &props[..])?
-        .enable_addr_auto();
-    d.register(info)?;
-    Ok(d)
+    opendeck_net::mdns_advertise("_stemd._tcp.local.", &format!("OpenDeck {}", opendeck_net::host_label()), port, &props)
 }
 
 // ── HTTP ─────────────────────────────────────────────────────────────────────

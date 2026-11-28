@@ -10,6 +10,7 @@ members = [
     "crates/timecode",
     "crates/transport",
     "crates/link",
+    "crates/net",
     "crates/db",
     "crates/rekordbox",
     "crates/nfs",
@@ -42,6 +43,7 @@ opendeck-analysis    = { path = "crates/analysis" }
 opendeck-timestretch = { path = "crates/timestretch" }
 opendeck-timecode    = { path = "crates/timecode" }
 opendeck-link        = { path = "crates/link" }
+opendeck-net         = { path = "crates/net" }
 opendeck-db          = { path = "crates/db" }
 opendeck-ui          = { path = "crates/ui" }
 
@@ -85,8 +87,7 @@ glyphon     = "0.5"
 # Database
 rusqlite    = { version = "0.31", features = ["bundled"] }
 
-# Networking (ProDJ Link, Ableton Link)
-tokio       = { version = "1", features = ["full"] }
+# Networking (ProDJ Link: shared UDP ports, in crates/net)
 socket2     = { version = "0.5", features = ["all"] }
 
 # Shared state between threads

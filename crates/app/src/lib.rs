@@ -3203,8 +3203,8 @@ impl DeckApp {
     /// (Fields, not `&mut self`: the frame holds the renderer borrowed.)
     fn ip_line(cache: &mut (Option<Instant>, String), link: &prodj::LinkState) -> String {
         if cache.0.is_none_or(|t| t.elapsed() > Duration::from_secs(2)) {
-            let ifs: Vec<(String, std::net::Ipv4Addr)> = if_addrs::get_if_addrs().unwrap_or_default().into_iter()
-                .filter_map(|i| match i.addr { if_addrs::IfAddr::V4(v) if !v.ip.is_loopback() => Some((i.name, v.ip)), _ => None })
+            let ifs: Vec<(String, std::net::Ipv4Addr)> = opendeck_net::interfaces().into_iter()
+                .filter(|i| !i.ip.is_loopback()).map(|i| (i.name, i.ip))
                 .collect();
             let link = link.own_addr.lock().ok().and_then(|a| a.split_whitespace().next().and_then(|ip| ip.parse().ok()));
             *cache = (Some(Instant::now()), format_ips(&ifs, link));
