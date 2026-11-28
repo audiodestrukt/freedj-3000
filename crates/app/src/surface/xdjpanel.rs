@@ -60,10 +60,10 @@ const TOUCH_Y: (f32, f32) = (85.0, 900.0);
 const TOUCH_MIN: u16 = 16;
 
 /// Every key the panel reports that OpenDeck has an action for, by its
-/// cdj3k-emu name.  REV (16.7) has none; USB STOP is wired to the main
-/// board, not the panel.
+/// cdj3k-emu name.  USB STOP is wired to the main board, not the panel.
 const KEYS: &[(&str, usize, u8)] = &[
     ("PLAY", 16, 0x01), ("CUE", 16, 0x02), ("RELOOP", 16, 0x04), ("LOOP_OUT", 16, 0x08), ("LOOP_IN", 16, 0x10),
+    ("REV", 16, 0x80),
     ("ROTARY_PRESS", 17, 0x01),
     ("TRACK_PREV", 18, 0x01), ("TRACK_NEXT", 18, 0x02), ("SEARCH_PREV", 18, 0x04), ("SEARCH_NEXT", 18, 0x08),
     ("QUANTIZE", 19, 0x01), ("TIME_MODE", 19, 0x02), ("BACK", 19, 0x04), ("TAG_TRACK", 19, 0x08), ("SHORTCUT", 19, 0x10),
@@ -249,7 +249,7 @@ const STOCK_IDLE: [u8; OUT] = [
 mod lamp {
     /// PLAY: byte 0 bit 0 (on while playing).
     pub const PLAY: (usize, u8) = (0, 0x01);
-    /// REV: byte 0 bit 2.  OpenDeck has no reverse play, so it stays dark.
+    /// REV: byte 0 bit 2, lit while the deck plays in reverse.
     pub const REV: (usize, u8) = (0, 0x04);
     /// MASTER TEMPO: byte 1 bit 2.
     pub const MASTER_TEMPO: (usize, u8) = (1, 0x04);
@@ -294,7 +294,7 @@ pub fn mosi_frame(snap: &DeckSnapshot, blink: bool) -> [u8; OUT] {
     };
     let loaded = snap.total_samples > 0;
     set(lamp::PLAY, if snap.playing { true } else { loaded && blink });
-    set(lamp::REV, false);
+    set(lamp::REV, snap.reverse);
     set(lamp::MASTER_TEMPO, snap.key_lock);
     set(lamp::QUANTIZE, snap.quantize);
     for bits in lamp::VINYL { set(bits, snap.jog_vinyl); }

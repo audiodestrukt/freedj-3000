@@ -32,7 +32,7 @@ use opendeck_types::{Decoder, PipelineStage};
 use std::{
     path::Path,
     sync::{
-        atomic::{AtomicBool, AtomicI32, AtomicU32, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicI32, AtomicI64, AtomicU32, AtomicU64, Ordering},
         Arc, Mutex,
     },
     thread,
@@ -43,6 +43,8 @@ use std::{
 
 /// Frames fed to the timestretch engine per iteration.
 const BLOCK_FRAMES: usize = 512;
+/// A quantized SLIP REV's landing crossfade (into forward play, at the grid).
+const LAND_XFADE_S: f32 = 0.005;
 
 /// Ring buffer capacity in device samples (not frames).
 ///
@@ -104,6 +106,53 @@ fn back_pressure_slots(speed: f32, device_ch: usize) -> usize {
 /// Sentinel for `seek_request`: no seek pending.
 const NO_SEEK: u64 = u64::MAX;
 pub(crate) const NO_SEEK_PUB: u64 = NO_SEEK;
+/// `JumpShared::request` when no jump is pending.
+const NO_JUMP: i64 = i64::MIN;
+
+/// A relative jump (BEAT JUMP): UI → processor, and the callback's count of
+/// what was still unplayed when it flushed for it.
+///
+/// An absolute seek computed in the UI is only as good as the UI's idea of
+/// what is playing: the screen's smoothed playhead, read up to a frame before
+/// the processor and the callback act on it.  A beat jump landed a few to
+/// tens of ms off the beat that way, a different amount each time — heard as
+/// a stutter.  As Mixxx does (its jump is resolved in the engine), the offset
+/// goes to the audio side, which knows exactly which source frame is playing
+/// where the jump's crossfade starts.
+#[derive(Clone)]
+struct JumpShared {
+    /// Offset in interleaved source samples, or NO_JUMP.
+    request:  Arc<AtomicI64>,
+    /// Output frames that were still in the ring after the buffer that
+    /// flushed it: the jump's crossfade starts on the first of them.
+    unplayed: Arc<AtomicU64>,
+    /// Reverse play (the direction lever).  A change is resolved as a jump
+    /// of nothing: from the frame being heard, crossfaded, the other way.
+    reverse:  Arc<AtomicBool>,
+    /// SLIP REV with QUANTIZE: the turn waits for the grid, `anchor` +
+    /// k·`step` (source frames, f64 bits; a step of 0 turns at once), and
+    /// turning back with `land` it lands where forward play would be.
+    q_anchor: Arc<AtomicU64>,
+    q_step:   Arc<AtomicU64>,
+    q_land:   Arc<AtomicBool>,
+    /// The way the processor reads now (a quantized turn waits for its beat).
+    reading_rev: Arc<AtomicBool>,
+}
+
+/// A quantized turn's spot: the grid point (`anchor` + k·`step`, frames)
+/// nearest frame `pos`.
+fn grid_nearest(pos: f64, anchor: f64, step: f64) -> f64 {
+    (anchor + ((pos - anchor) / step).round() * step).max(0.0)
+}
+
+/// SLIP REV's landing, turning back at `at` after turning at `from`: as far
+/// past `from` as the reverse went before it (the same source frames, so the
+/// same time at any speed), clamped and frame-aligned.
+fn mirror(from: u64, at: u64, ch: usize, len: usize) -> u64 {
+    let t = (2 * from as i64 - at as i64).clamp(0, len as i64) as u64;
+    t / ch as u64 * ch as u64
+}
+
 
 // ── Audio integrity counters ──────────────────────────────────────────────────
 
@@ -114,15 +163,12 @@ pub(crate) const NO_SEEK_PUB: u64 = NO_SEEK;
 #[derive(Default)]
 pub struct AudioStats {
     /// Samples of silence the callback filled because the ring was empty while
-    /// playing — audible underruns (clicks / dropouts).  Steady-state only:
-    /// the *expected* re-prime silence right after a seek is excluded (that goes
-    /// to `seek_priming_samples`), so this is a clean "the core starved" signal.
+    /// playing — audible underruns (clicks / dropouts).  A seek while playing
+    /// makes none (it crossfades, see `Render`), so this is a clean "the
+    /// core starved" signal.
     pub underrun_samples: AtomicU64,
-    /// Callbacks that hit ≥1 steady-state underrun (distinct glitch events).
+    /// Callbacks that hit ≥1 underrun (distinct glitch events).
     pub underrun_events:  AtomicU64,
-    /// Silence samples the callback filled on the buffer where it flushed the
-    /// ring for a seek — expected re-prime gap, not a starvation glitch.
-    pub seek_priming_samples: AtomicU64,
     /// Frames the producer dropped because the ring was full (overrun).
     pub dropped_frames:   AtomicU64,
 }
@@ -173,6 +219,8 @@ pub struct AudioHandle {
     /// from `position` so a seek can't be clobbered by the processor's own
     /// per-block progress store and lost.
     pub seek_request: Arc<AtomicU64>,
+    /// Relative jumps (BEAT JUMP), resolved on the audio side; see `jump`.
+    jump:            JumpShared,
     /// Paused jog scrub: what the processor reads toward (see `scrub_to`).
     scrub:           ScrubShared,
     /// Stems: the loaded bank and the three stem levels (`stems.rs`).
@@ -251,6 +299,42 @@ impl AudioHandle {
         self.in_flight.store(0, Ordering::Relaxed);
         self.wake();
     }
+
+    /// Jump by `delta` interleaved samples from what is playing, resolved
+    /// by the audio side at the very sample the jump is heard (see
+    /// `JumpShared`).  `position` is left to the processor, which publishes
+    /// the landing spot as soon as it knows it.
+    pub fn jump(&self, delta: i64) {
+        self.scrub.target.store(NO_SEEK, Ordering::Release);
+        self.jump.request.store(delta, Ordering::Release);
+        self.wake();
+    }
+
+    /// Play backwards (or forwards again) from the frame being heard.
+    pub fn set_reverse(&self, on: bool) {
+        self.jump.q_step.store(0f64.to_bits(), Ordering::Relaxed);
+        self.jump.reverse.store(on, Ordering::Release);
+        self.wake();
+    }
+
+    /// SLIP REV with QUANTIZE: turn at the next grid point the read reaches
+    /// (`anchor` + k·`step`, source frames), not at once; `land` (letting
+    /// go) then lands where forward play would be.  Called back before the
+    /// beat, the turn is off.  Paused, in a loop, it turns at once.
+    pub fn set_reverse_on_grid(&self, on: bool, anchor: f64, step: f64, land: bool) {
+        self.jump.q_anchor.store(anchor.to_bits(), Ordering::Relaxed);
+        self.jump.q_step.store(step.max(0.0).to_bits(), Ordering::Relaxed);
+        self.jump.q_land.store(land, Ordering::Relaxed);
+        self.jump.reverse.store(on, Ordering::Release);
+        self.wake();
+    }
+
+    /// Playing in reverse (as asked; the audio turns within a buffer).
+    pub fn reverse(&self) -> bool { self.jump.reverse.load(Ordering::Relaxed) }
+
+    /// The way the audio reads now: as asked, but a quantized turn only
+    /// once its beat comes.
+    pub fn reading_reverse(&self) -> bool { self.jump.reading_rev.load(Ordering::Relaxed) }
 
     /// Convenience: read current speed.
     pub fn speed_load(&self) -> f32 {
@@ -396,6 +480,10 @@ impl AudioHandle {
         let drain_flag = Arc::new(AtomicBool::new(false));
         let in_flight  = Arc::new(AtomicU64::new(0));
         let seek_request = Arc::new(AtomicU64::new(NO_SEEK));
+        let jump = JumpShared { request: Arc::new(AtomicI64::new(NO_JUMP)), unplayed: Arc::new(AtomicU64::new(0)),
+                               reverse: Arc::new(AtomicBool::new(false)),
+                               q_anchor: Arc::new(AtomicU64::new(0)), q_step: Arc::new(AtomicU64::new(0)),
+                               q_land: Arc::new(AtomicBool::new(false)), reading_rev: Arc::new(AtomicBool::new(false)) };
         let scrub = ScrubShared {
             target: Arc::new(AtomicU64::new(NO_SEEK)), from: Arc::new(AtomicU64::new(0)),
             seq: Arc::new(AtomicU64::new(0)), live: Arc::new(AtomicBool::new(false)),
@@ -424,6 +512,7 @@ impl AudioHandle {
         let proc_drain_flag = Arc::clone(&drain_flag);
         let proc_in_flight  = Arc::clone(&in_flight);
         let proc_seek       = Arc::clone(&seek_request);
+        let proc_jump       = jump.clone();
         let proc_stats      = Arc::clone(&stats);
         let proc_scrub      = scrub.clone();
         let stems           = Arc::new(StemControl::default());
@@ -443,6 +532,7 @@ impl AudioHandle {
                     proc_drain_flag,
                     proc_in_flight,
                     proc_seek,
+                    proc_jump,
                     proc_scrub,
                     proc_stems,
                     proc_complete,
@@ -471,7 +561,7 @@ impl AudioHandle {
             device_ch, device_sr,
             consumer: Arc::new(Mutex::new(consumer)), playing: Arc::clone(&playing), stats: Arc::clone(&stats),
             drain_flag: Arc::clone(&drain_flag),
-            scrub_live: Arc::clone(&scrub.live),
+            scrub_live: Arc::clone(&scrub.live), unplayed: Arc::clone(&jump.unplayed),
             dvs: DvsParts {
                 shared: Arc::clone(&dvs), samples: Arc::clone(&samples), position: Arc::clone(&position),
                 in_flight: Arc::clone(&in_flight), seek_request: Arc::clone(&seek_request),
@@ -484,7 +574,7 @@ impl AudioHandle {
 
         log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
         Self::assemble(samples, position, playing, proc_thread, speed, key_lock, key_shift, loop_start, loop_end, loop_active,
-                       source_consumed, in_flight, seek_request, scrub, stems, stats, dvs, complete, file_sr, file_ch, tags,
+                       source_consumed, in_flight, seek_request, jump, scrub, stems, stats, dvs, complete, file_sr, file_ch, tags,
                        stream, processor)
     }
 
@@ -492,7 +582,7 @@ impl AudioHandle {
     fn assemble(samples: Arc<ArcSwap<Vec<f32>>>, position: Arc<AtomicU64>, playing: Arc<AtomicBool>, proc_thread: Option<thread::Thread>,
                 speed: Arc<AtomicU32>, key_lock: Arc<AtomicBool>, key_shift: Arc<AtomicI32>, loop_start: Arc<AtomicU64>, loop_end: Arc<AtomicU64>,
                 loop_active: Arc<AtomicBool>, source_consumed: Arc<AtomicU64>, in_flight: Arc<AtomicU64>,
-                seek_request: Arc<AtomicU64>, scrub: ScrubShared, stems: Arc<StemControl>, stats: Arc<AudioStats>,
+                seek_request: Arc<AtomicU64>, jump: JumpShared, scrub: ScrubShared, stems: Arc<StemControl>, stats: Arc<AudioStats>,
                 dvs: Arc<crate::dvs::DvsShared>, complete: Arc<AtomicBool>, file_sr: u32, file_ch: usize, tags: TrackTags, stream: Running,
                 processor: Option<thread::JoinHandle<()>>) -> Result<Self> {
         Ok(Self {
@@ -509,6 +599,7 @@ impl AudioHandle {
             source_consumed,
             in_flight,
             seek_request,
+            jump,
             scrub,
             stems,
             stats,
@@ -535,6 +626,8 @@ pub(crate) struct StreamParts {
     drain_flag: Arc<AtomicBool>,
     /// A paused jog scrub is feeding the ring: play it, as if playing.
     scrub_live: Arc<AtomicBool>,
+    /// Where the callback reports what a flush left unplayed (`JumpShared`).
+    unplayed:   Arc<AtomicU64>,
     /// DVS: what the callback needs to play the record's way.
     dvs: DvsParts,
     /// The processor, for an output that runs it from its callback; the
@@ -615,6 +708,16 @@ pub struct Render {
     trim:       f32,
     /// DVS: renders the record's way while it has the deck.
     dvs:        crate::dvs::DvsRender,
+    /// A seek while playing (BEAT JUMP, hot cue): up to SEEK_HOLD_S of the
+    /// audio the seek threw away, played on until the new position's audio
+    /// is ready and then crossfaded into it.  `tail_at` is how far it has
+    /// played; `xf_at` the frame of the crossfade once it has begun.
+    tail:       Vec<f32>,
+    tail_at:    usize,
+    xf_at:      Option<usize>,
+    /// Equal-power crossfade gains (the new audio's), one per frame.
+    xfade:      Vec<f32>,
+    unplayed:   Arc<AtomicU64>,
     /// The processor, when this output runs it ([`AudioOut::runs_processor`]).
     processor:  Option<Processor>,
 }
@@ -628,6 +731,14 @@ impl Render {
         // silent and honours any pending flush.  Start is untouched — no
         // fade-in — so cue latency stays exactly as it is.
         const STOP_FADE_S: f32 = 0.003;
+        // Seek crossfade: long enough that the cut is no click, short enough
+        // to stay a jump (a 4 ms slur is below anything heard as a fade).
+        const SEEK_XFADE_S: f32 = 0.004;
+        // How long the old audio may carry on while the stretcher re-primes
+        // from the new spot (Rubber Band wants several blocks after a reset).
+        const SEEK_HOLD_S: f32 = 0.040;
+        let xf_frames = ((p.device_sr as f32 * SEEK_XFADE_S) as usize).max(1);
+        let hold_frames = ((p.device_sr as f32 * SEEK_HOLD_S) as usize).max(2 * xf_frames);
         Render {
             consumer: Arc::clone(&p.consumer), playing: Arc::clone(&p.playing), scrub_live: Arc::clone(&p.scrub_live),
             drain_flag: Arc::clone(&p.drain_flag), stats: Arc::clone(&p.stats), device_ch: p.device_ch,
@@ -635,6 +746,11 @@ impl Render {
             gain: 1.0,
             trim: output_gain(),
             dvs: p.dvs.render(),
+            tail: Vec::with_capacity(hold_frames * p.device_ch),
+            tail_at: 0,
+            xf_at: None,
+            unplayed: Arc::clone(&p.unplayed),
+            xfade: (0..xf_frames).map(|i| ((i as f32 + 0.5) / xf_frames as f32 * std::f32::consts::FRAC_PI_2).sin()).collect(),
             processor: p.processor.lock().ok().and_then(|mut g| g.take()),
         }
     }
@@ -666,9 +782,11 @@ impl Render {
         if self.dvs.fill(out, self.device_ch) {
             while consumer.pop().is_ok() {}
             self.gain = 0.0;
+            self.tail_at = self.tail.len();   // and any jump crossfade is over
             return;
         }
         if !self.playing.load(Ordering::Relaxed) && !self.scrub_live.load(Ordering::Relaxed) {
+            self.tail_at = self.tail.len();   // a pause ends any jump crossfade
             if self.gain > 0.0 {
                 // Fading out: ring audio × a falling gain, frame by
                 // frame.  A flush requested meanwhile waits until
@@ -685,27 +803,113 @@ impl Render {
                 // Fell to zero inside this buffer: the rest is
                 // silence and the flush can proceed.
             }
-            if self.drain_flag.swap(false, Ordering::AcqRel) {
-                while consumer.pop().is_ok() {}
+            if self.drain_flag.load(Ordering::Acquire) {
+                let mut flushed = 0usize;
+                while consumer.pop().is_ok() { flushed += 1; }
+                self.unplayed.store((flushed / self.device_ch) as u64, Ordering::Relaxed);
+                self.drain_flag.store(false, Ordering::Release);
             }
             out.fill(0.0);
             return;
         }
         self.gain = 1.0;   // playing: no fade-in, and a restart mid-fade snaps up
 
-        // On seek, flush stale buffered audio.  This same buffer will
-        // then fill with silence until the producer re-primes from the
-        // new position — expected, so attribute it to seek priming,
-        // not to starvation.
-        let draining = self.drain_flag.swap(false, Ordering::AcqRel);
-        if draining {
-            while consumer.pop().is_ok() {}
+        // A seek while playing (BEAT JUMP, a hot cue).  Cutting the ring here
+        // left the output silent while the processor re-primed from the new
+        // spot (a block at least, ~12 ms, more for Rubber Band), and the cut
+        // itself was a step: a stutter and a click on every jump.  Instead
+        // this buffer still plays the audio the ring already holds, up to
+        // SEEK_HOLD_S more of it is kept as a tail, and only then is the rest
+        // flushed and the flag cleared: the processor waits for the clear
+        // before it pushes the new position, so nothing new is thrown away.
+        // From the next buffer the tail plays on until the new audio is
+        // there, then crossfades into it.  The jump lands as soon as the new
+        // audio exists, where the flushed path played silence until then.
+        if self.drain_flag.load(Ordering::Acquire) {
+            let underran = Self::pop_into(&mut consumer, out);
+            self.tail.clear();
+            while self.tail.len() < self.tail.capacity() {
+                match consumer.pop() { Ok(s) => self.tail.push(s), Err(_) => break }
+            }
+            self.tail.truncate(self.tail.len() / self.device_ch * self.device_ch);
+            self.tail_at = 0;
+            self.xf_at = None;
+            let mut flushed = self.tail.len();
+            while consumer.pop().is_ok() { flushed += 1; }
+            // Published before the flag clears (Release): the processor reads
+            // it once it sees the clear, to resolve a relative jump.
+            self.unplayed.store((flushed / self.device_ch) as u64, Ordering::Relaxed);
+            self.drain_flag.store(false, Ordering::Release);
+            if underran > 0 {
+                self.stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
+                self.stats.underrun_events.fetch_add(1, Ordering::Relaxed);
+            }
+            return;
+        }
+
+        // The hold and crossfade, frame by frame: the old tail at full level
+        // until the ring holds the new audio for the whole crossfade and a
+        // buffer after it, then old out and new in, equal power (the two are
+        // unrelated music).  Starting on less ran the ring dry a buffer later:
+        // Rubber Band re-primes in bursts.  A tail about to run out before
+        // then fades out alone.
+        //
+        // On time: the new audio begins at the jump target, but the tail has
+        // already played some frames of wall-clock time past the jump.  That
+        // much of the new audio is skipped as the crossfade starts, so the
+        // deck lands where it would have been had the new audio been ready
+        // at once — a jump in a running mix stays on the beat however long
+        // the stretcher took to re-prime.
+        let mut out = out;
+        if self.tail_at < self.tail.len() {
+            let ch = self.device_ch;
+            let xf = self.xfade.len();
+            let ready = xf * ch + out.len();   // plus the frames to skip, below
+            let mut done = 0;
+            for frame in out.chunks_mut(ch) {
+                if self.tail_at >= self.tail.len() { break; }
+                let left = (self.tail.len() - self.tail_at) / ch;
+                if self.xf_at.is_none() && left >= xf && consumer.slots() >= ready + self.tail_at {
+                    for _ in 0..self.tail_at { let _ = consumer.pop(); }   // catch up: see above
+                    self.xf_at = Some(0);
+                }
+                let old = &self.tail[self.tail_at..self.tail_at + ch];
+                match self.xf_at {
+                    Some(k) => {
+                        let gin = self.xfade[k];
+                        let gout = (1.0 - gin * gin).sqrt();
+                        for (c, sample) in frame.iter_mut().enumerate() {
+                            *sample = old[c] * gout + consumer.pop().unwrap_or(0.0) * gin;
+                        }
+                        self.xf_at = Some(k + 1);
+                        // Crossfade complete: the rest of the tail is dropped.
+                        if k + 1 == xf { self.tail_at = self.tail.len(); done += ch; break; }
+                    }
+                    None => {
+                        let g = if left <= xf { left as f32 / xf as f32 } else { 1.0 };
+                        for (c, sample) in frame.iter_mut().enumerate() { *sample = old[c] * g; }
+                    }
+                }
+                self.tail_at += ch;
+                done += ch;
+            }
+            out = &mut std::mem::take(&mut out)[done..];
         }
 
         // Fill from the ring; count any sample we had to invent as
         // silence.  No allocation, and the atomics are touched only
         // when silence actually happens, so the clean path stays a
         // bare pop().
+        let underran = Self::pop_into(&mut consumer, out);
+        if underran > 0 {
+            // Genuine starvation — the core failed to keep up.
+            self.stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
+            self.stats.underrun_events.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Fill `out` from the ring; the count of samples it had to make silent.
+    fn pop_into(consumer: &mut rtrb::Consumer<f32>, out: &mut [f32]) -> u64 {
         let mut underran = 0u64;
         for sample in out.iter_mut() {
             match consumer.pop() {
@@ -713,20 +917,52 @@ impl Render {
                 Err(_) => { *sample = 0.0; underran += 1; }
             }
         }
-        if underran > 0 {
-            if draining {
-                // Expected re-prime gap right after a seek/cue flush.
-                self.stats.seek_priming_samples.fetch_add(underran, Ordering::Relaxed);
-            } else {
-                // Genuine starvation — the core failed to keep up.
-                self.stats.underrun_samples.fetch_add(underran, Ordering::Relaxed);
-                self.stats.underrun_events.fetch_add(1, Ordering::Relaxed);
-            }
-        }
+        underran
     }
 }
 
 // ── Processor loop ────────────────────────────────────────────────────────────
+
+/// Where a relative jump lands: the source sample heard at the first of the
+/// `unplayed` output frames (the decoder's cursor `pos`, less (more, in
+/// reverse) the queued
+/// output at `speed` source frames per output frame and the stretcher's
+/// latency, as `in_flight` reckons it), plus `delta`; clamped to the track
+/// and on a frame boundary.
+fn jump_target(pos: u64, unplayed: usize, speed: f32, latency: usize, delta: i64, rev: bool, ch: usize, len: usize) -> u64 {
+    // Read backwards (`rev`), the queued audio lies after the cursor.
+    let queued = (unplayed as f64 * speed as f64 + latency as f64) * ch as f64;
+    let heard = if rev { pos as f64 + queued } else { pos as f64 - queued };
+    let t = (heard + delta as f64).clamp(0.0, len as f64) as u64;
+    t / ch as u64 * ch as u64
+}
+
+/// An absolute seek `pos` moved on by a jump `delta` that came right behind
+/// it (nothing has played from `pos` yet), clamped and frame-aligned.
+fn seek_plus(pos: u64, delta: i64, ch: usize, len: usize) -> u64 {
+    let t = (pos as i64 + delta).clamp(0, len as i64) as u64;
+    t / ch as u64 * ch as u64
+}
+
+/// Reverse play's next block, into `scratch`: the `want` samples before
+/// `pos`, frame by frame from the last one back, `src(i)` giving sample `i`.
+/// Inside a loop `[ls, le)` the read wraps from its start to its end, as a
+/// forward read wraps the other way; at the track's start it stops short.
+/// Returns the cursor after it (where the next block reads back from).
+fn read_block_rev(src: &dyn Fn(usize) -> f32, len: usize, pos: usize, want: usize, ch: usize,
+                  lp: Option<(usize, usize)>, scratch: &mut Vec<f32>) -> usize {
+    scratch.clear();
+    let mut cur = pos.min(len) / ch * ch;
+    // Only a cursor inside (or past) the loop wraps in it.
+    let wraps = lp.filter(|&(ls, le)| le > ls && cur > ls);
+    for _ in 0..want / ch {
+        if let Some((ls, le)) = wraps { if cur <= ls { cur = le / ch * ch; } }
+        if cur < ch { break; }
+        cur -= ch;
+        for c in 0..ch { scratch.push(src(cur + c)); }
+    }
+    cur
+}
 
 /// The next source block from `pos`, `want` samples long, and the cursor after
 /// it.  With a loop `[ls, le)` active, a block that would run past `le` is
@@ -1061,6 +1297,7 @@ pub(crate) struct Processor {
     drain_flag: Arc<AtomicBool>,
     in_flight:  Arc<AtomicU64>,
     seek_request: Arc<AtomicU64>,
+    jump:       JumpShared,
     scrub:      ScrubShared,
     stems:      Arc<StemControl>,
     complete:   Arc<AtomicBool>,
@@ -1097,6 +1334,48 @@ pub(crate) struct Processor {
     yielded:    bool,
     /// The record had the deck at the last step (DVS).
     dvs_held:   bool,
+    /// A seek or jump waiting for the output's flush (`drain_wait`) before
+    /// it lands: a relative jump is resolved from what the flush left
+    /// unplayed.
+    pending:    Option<Pending>,
+    /// Source frames inside the stretcher: fed in, not yet out (output frames
+    /// × speed), counted since its last reset.  What is heard is `proc_pos`
+    /// less this and the ring.  Counted, not `latency_frames()`: Rubber Band's
+    /// reported latency is not its delay once the start pad/delay is trimmed,
+    /// and a jump reckoned from it landed ~40 ms early.
+    held:       f64,
+    /// Reading backwards (the direction lever's REV / SLIP REV).
+    rev:        bool,
+    /// A quantized turn waiting for its grid point: the source sample it
+    /// turns at and, turning back from SLIP REV, where it lands.
+    turn_at:    Option<(u64, Option<u64>)>,
+    /// Where the last quantized turn was (SLIP REV's landing mirrors it), and
+    /// a landing's crossfade still to make: from the old read (its spot and
+    /// way) into the new one.
+    turned_from: u64,
+    land_xf:    Option<(u64, bool)>,
+    /// Until a quantized turn is heard, the queued audio still runs the old
+    /// way: the UI is shown the cursor as if it had gone on (the turn's
+    /// spot, the old way, the source samples read since) so that its
+    /// `position` less (more) `in_flight` stays what is heard.
+    turn_view:  Option<(u64, bool, u64)>,
+    xf_buf:     Vec<f32>,
+}
+
+/// A seek or jump whose flush is still under way; see `Processor::pending`.
+struct Pending {
+    /// A relative jump (no absolute seek came with it): where the audio
+    /// stood before the flush, to resolve it from.
+    relative:     bool,
+    before:       u64,
+    latency:      usize,
+    spd_now:      f32,
+    queued:       usize,
+    jmp:          i64,
+    mirror_about: Option<u64>,
+    /// It turns the read the other way, to `want_rev`.
+    flip:         bool,
+    want_rev:     bool,
 }
 
 impl Processor {
@@ -1112,6 +1391,7 @@ impl Processor {
         drain_flag: Arc<AtomicBool>,
         in_flight:  Arc<AtomicU64>,
         seek_request: Arc<AtomicU64>,
+        jump:       JumpShared,
         scrub:      ScrubShared,
         stems:      Arc<StemControl>,
         complete:   Arc<AtomicBool>,
@@ -1142,7 +1422,7 @@ impl Processor {
         }
 
         Processor {
-            samples, position, playing, speed, key_lock, key_shift, lp, drain_flag, in_flight, seek_request,
+            samples, position, playing, speed, key_lock, key_shift, lp, drain_flag, in_flight, seek_request, jump,
             scrub, stems, complete, dvs, sample_rate, file_ch, device_ch, producer, ring_len, stats,
             stretcher,
             proc_pos: 0,
@@ -1158,6 +1438,14 @@ impl Processor {
             drain_wait: None,
             yielded: false,
             dvs_held: false,
+            pending: None,
+            held: 0.0,
+            rev: false,
+            turn_at: None,
+            turned_from: 0,
+            land_xf: None,
+            turn_view: None,
+            xf_buf: Vec::with_capacity(BLOCK_FRAMES * file_ch),
         }
     }
 
@@ -1195,6 +1483,43 @@ impl Processor {
         let device_ch = self.device_ch;
         let sample_rate = self.sample_rate;
         let ring_len = self.ring_len;
+
+        // ── A seek or jump finishing its flush ────────────────────────────────
+        // Wait for the output to actually flush before pushing the first
+        // block from the new spot.  Otherwise, when the ring is empty (e.g. a
+        // cue preview from a paused deck), we push the block containing the
+        // cue transient and the callback promptly drains it with the stale
+        // audio — playback starts one block (~11 ms) late and the transient
+        // is lost.  The callback runs every buffer period even while paused
+        // (it clears drain_flag before the play check), so this clears fast;
+        // bounded so a stopped stream can't hang us.  Nothing else is taken
+        // up meanwhile, as when this was a loop that slept here.
+        if let Some(spins) = self.drain_wait {
+            if self.drain_flag.load(Ordering::Acquire) && spins < 50 {
+                self.drain_wait = Some(spins + 1);
+                return Wait::Sleep(Duration::from_millis(1));
+            }
+            self.drain_wait = None;
+        }
+        if let Some(p) = self.pending.take() {
+            if p.relative {
+                // The jump's crossfade starts on the first frame the flush
+                // left unplayed (the callback counted them); no callback in
+                // time (no device): the ring as it stood.
+                let len = self.samples.load().len();
+                let unplayed = if self.drain_flag.load(Ordering::Acquire) { p.queued }
+                               else { self.jump.unplayed.load(Ordering::Relaxed) as usize };
+                self.proc_pos = match p.mirror_about {
+                    Some(about) => mirror(about, jump_target(p.before, unplayed, p.spd_now, p.latency, 0, self.rev, file_ch, len), file_ch, len),
+                    None => jump_target(p.before, unplayed, p.spd_now, p.latency, p.jmp, self.rev, file_ch, len),
+                };
+                log::debug!("proc: jump {:+} from {} ({unplayed} frames unplayed) → {}{}", p.jmp, p.before, self.proc_pos,
+                            if p.flip { ", turning" } else { "" });
+                self.position.store(self.proc_pos, Ordering::Relaxed);
+            }
+            if p.flip { self.rev = p.want_rev; }
+            self.jump.reading_rev.store(self.rev, Ordering::Relaxed);
+        }
 
         // ── DVS ───────────────────────────────────────────────────────────────
         // The record has the deck: the output callback plays it. Stand aside
@@ -1272,12 +1597,32 @@ impl Processor {
         if !self.playing.load(Ordering::Relaxed) {
             // A seek while paused is honoured now, not at the next PLAY: move
             // the cursor, reset the stretcher and flush the ring (the callback
-            // swaps `drain_flag` every period even while paused), so both the
+            // clears `drain_flag` every period even while paused), so both the
             // published position and the first block after PLAY are right.
-            let req = self.seek_request.swap(NO_SEEK, Ordering::AcqRel);
+            let mut req = self.seek_request.swap(NO_SEEK, Ordering::AcqRel);
+            let mut jmp = self.jump.request.swap(NO_JUMP, Ordering::AcqRel);
+            // A turn of the lever is a jump of nothing, the other way.
+            let want_rev = self.jump.reverse.load(Ordering::Acquire);
+            if jmp == NO_JUMP && want_rev != self.rev { jmp = 0; }
+            self.turn_at = None;
+            self.land_xf = None;
+            self.turn_view = None;
+            if req != NO_SEEK && jmp != NO_JUMP {
+                // A jump right behind a seek: from the spot just sought.
+                req = seek_plus(req, jmp, file_ch, self.samples.load().len());
+            } else if req == NO_SEEK && jmp != NO_JUMP {
+                // Paused, nothing is consumed: what is heard next is the
+                // ring's head, as the UI's playhead has it.
+                let queued = self.queued() / device_ch;
+                let spd = f32::from_bits(self.speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
+                req = jump_target(self.proc_pos, queued, spd, self.held.round() as usize, jmp, self.rev, file_ch, self.samples.load().len());
+            }
+            self.rev = want_rev;
+            self.jump.reading_rev.store(self.rev, Ordering::Relaxed);
             if req != NO_SEEK {
                 log::debug!("proc: seek {} → {req} (paused)", self.proc_pos);
                 self.stretcher.reset();
+                self.held = 0.0;
                 self.proc_pos = req;
                 self.position.store(self.proc_pos, Ordering::Relaxed);
                 self.in_flight.store(0, Ordering::Relaxed);
@@ -1300,30 +1645,105 @@ impl Processor {
 
         // ── Seek detection ────────────────────────────────────────────────────
         let req = self.seek_request.swap(NO_SEEK, Ordering::AcqRel);
-        if req != NO_SEEK {
-            log::debug!("proc: seek {} → {req}", self.proc_pos);
+        let mut jmp = self.jump.request.swap(NO_JUMP, Ordering::AcqRel);
+        // A turn of the lever: a jump of nothing, then reading the other way.
+        // SLIP REV with QUANTIZE waits for the grid instead (see below).
+        let want_rev = self.jump.reverse.load(Ordering::Acquire);
+        let q_step = f64::from_bits(self.jump.q_step.load(Ordering::Relaxed));
+        let in_loop = self.lp.active.load(Ordering::Relaxed) && self.lp.end.load(Ordering::Relaxed) > self.lp.start.load(Ordering::Relaxed);
+        // How a jump below turns: `flip` reads the other way after it, and
+        // `mirror_about` lands it mirrored about that spot from what is heard
+        // (a quantized turn whose beat has just been heard: as if it had
+        // turned on it).  `reread` is a jump of nothing the same way, to
+        // read again from what is heard up to a beat already read past.
+        let mut flip = false;
+        let mut mirror_about: Option<u64> = None;
+        let mut reread = false;
+        if want_rev == self.rev {
+            if self.turn_at.take().is_some() { log::debug!("proc: quantized turn called off"); }
+        } else if q_step > 0.0 && !in_loop && req == NO_SEEK && jmp == NO_JUMP {
+            if self.turn_at.is_none() {
+                // The grid point nearest what is heard now: at most half a
+                // step to wait, or (just heard) none.
+                let len = samples.len();
+                let queued = self.queued() / device_ch;
+                let spd = f32::from_bits(self.speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
+                let heard = jump_target(self.proc_pos, queued, spd, self.held.round() as usize, 0, self.rev, file_ch, len);
+                let anchor = f64::from_bits(self.jump.q_anchor.load(Ordering::Relaxed));
+                let g = grid_nearest(heard as f64 / file_ch as f64, anchor, q_step).round() as u64 * file_ch as u64;
+                let g = g.min(len as u64 / file_ch as u64 * file_ch as u64);
+                let land = self.jump.q_land.load(Ordering::Relaxed);
+                let ahead = if self.rev { g < heard } else { g > heard };
+                if !ahead {
+                    // Heard already: turn now, mirrored about the beat (or,
+                    // turning back, about where the reverse began: where
+                    // forward play would be).
+                    jmp = 0;
+                    flip = true;
+                    mirror_about = Some(if land { self.turned_from } else { g });
+                    if !land { self.turned_from = g; }
+                    log::debug!("proc: beat {g} just heard (at {heard}): turning now");
+                } else {
+                    let land = land.then(|| mirror(self.turned_from, g, file_ch, len));
+                    self.turn_at = Some((g, land));
+                    // The read is past it already: read again from what is
+                    // heard, then turn on it.
+                    if if self.rev { self.proc_pos < g } else { self.proc_pos > g } { jmp = 0; reread = true; }
+                    log::debug!("proc: turn at {g} (heard {heard}, read {}){}{}", self.proc_pos,
+                                land.map_or(String::new(), |l| format!(", landing at {l}")),
+                                if reread { ", reading again" } else { "" });
+                }
+            }
+        } else {
+            if jmp == NO_JUMP { jmp = 0; }
+            flip = true;
+        }
+        if req != NO_SEEK || jmp != NO_JUMP {
+            if !reread { self.turn_at = None; }
+            self.land_xf = None;
+            self.turn_view = None;
+            // For a relative jump: where the audio stands now, before the
+            // flush (an absolute seek pending at the same time wins).
+            let before  = self.proc_pos;
+            let latency = self.held.round() as usize;
+            let spd_now = f32::from_bits(self.speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
+            let queued  = self.queued() / device_ch;
             self.stretcher.reset();
-            self.proc_pos = req;
-            self.position.store(self.proc_pos, Ordering::Relaxed);   // reflect immediately
-            // Tell the output callback to flush stale buffered audio.
+            self.held = 0.0;
+            if req != NO_SEEK {
+                log::debug!("proc: seek {} → {req}", self.proc_pos);
+                // A jump right behind it lands from the spot just sought.
+                self.proc_pos = if jmp != NO_JUMP { seek_plus(req, jmp, file_ch, samples.len()) } else { req };
+                self.position.store(self.proc_pos, Ordering::Relaxed);   // reflect immediately
+            }
+            // Tell the output callback to flush stale buffered audio, and
+            // land once it has (the top of the next steps).
             self.drain_flag.store(true, Ordering::Release);
             self.drain_wait = Some(0);
             self.yielded = false;
+            self.pending = Some(Pending { relative: req == NO_SEEK, before, latency, spd_now, queued, jmp, mirror_about, flip, want_rev });
+            return Wait::Sleep(Duration::from_millis(1));
         }
-        // Then WAIT for it to actually flush before pushing the first
-        // post-seek block.  Otherwise, when the ring is empty (e.g. a cue
-        // preview from a paused deck), we push the block containing the cue
-        // transient and the callback promptly drains it with the stale
-        // audio — playback starts one block (~11 ms) late and the transient
-        // is lost.  The callback runs every buffer period even while paused
-        // (it swaps drain_flag before the play check), so this clears fast;
-        // bounded so a stopped stream can't hang us.
-        if let Some(spins) = self.drain_wait {
-            if self.drain_flag.load(Ordering::Acquire) && spins < 50 {
-                self.drain_wait = Some(spins + 1);
-                return Wait::Sleep(Duration::from_millis(1));
+
+        // ── A quantized turn on its grid point ────────────────────────────────
+        // The read stops right on it (blocks are cut short below), turns, and
+        // goes on the other way from the same sample: no gap, nothing to
+        // crossfade.  Turning back from SLIP REV, it lands where forward play
+        // would be instead, crossfaded from the reverse.
+        if let Some((at, land)) = self.turn_at {
+            if (!self.rev && self.proc_pos >= at) || (self.rev && self.proc_pos <= at) {
+                self.turn_at = None;
+                self.turn_view = Some((at, self.rev, 0));
+                self.rev = !self.rev;
+                match land {
+                    None => self.turned_from = at,
+                    Some(to) => {
+                        self.land_xf = Some((at, !self.rev));
+                        self.proc_pos = to;
+                    }
+                }
+                log::debug!("proc: turned at {at}{}", land.map_or(String::new(), |l| format!(", landed at {l}")));
             }
-            self.drain_wait = None;
         }
 
         // ── Back-pressure ─────────────────────────────────────────────────────
@@ -1364,7 +1784,7 @@ impl Processor {
         if !complete_now {
             let (ls, le) = (lp.start.load(Ordering::Relaxed) as usize, lp.end.load(Ordering::Relaxed) as usize);
             let in_loop = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
-            if !in_loop && self.proc_pos as usize + BLOCK_FRAMES * file_ch > samples.len() {
+            if !in_loop && !self.rev && self.proc_pos as usize + BLOCK_FRAMES * file_ch > samples.len() {
                 return Wait::Sleep(Duration::from_millis(2));
             }
         }
@@ -1375,38 +1795,81 @@ impl Processor {
         // drain distance so the UI's audible-position estimate can actually
         // reach the end (otherwise in_flight freezes ~93 ms short and the deck
         // never registers end-of-track).
-        if self.proc_pos >= samples.len() as u64 {
+        // In reverse, the start of the track is its end.
+        if (!self.rev && self.proc_pos >= samples.len() as u64) || (self.rev && self.proc_pos == 0) {
             let ring_out_frames = self.queued() / device_ch;
             self.in_flight.store(ring_out_frames as u64 * file_ch as u64, Ordering::Relaxed);
             return Wait::Sleep(Duration::from_millis(5));
         }
 
         // ── Read a block from the source (loop-aware) ─────────────────────────
-        let want = BLOCK_FRAMES * file_ch;
+        let mut want = BLOCK_FRAMES * file_ch;
+        // A quantized turn ahead: read no further than its grid point.
+        if let Some((at, _)) = self.turn_at {
+            let d = if self.rev { self.proc_pos.saturating_sub(at) } else { at.saturating_sub(self.proc_pos) } as usize;
+            if d > 0 { want = want.min(d); }
+        }
         let (ls, le) = (lp.start.load(Ordering::Relaxed) as usize, lp.end.load(Ordering::Relaxed) as usize);
         let looping  = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
-        let (src_block, src_end) = read_block(samples, self.proc_pos as usize, want,
-                                              looping.then_some((ls, le)), &mut self.loop_buf);
-
-        // Stems: the same ranges through the stem mix, before the stretcher
-        // (one stretcher whatever the stems do).  Untouched when no bank is
-        // loaded for this track or every stem is at full.
         let bank = self.stems.bank().filter(|b| b.is_for(&current));
-        let src_block: &[f32] = if bank.is_some() || self.mixer.active() {
-            let (ranges, _) = block_ranges(samples.len(), self.proc_pos as usize, want, looping.then_some((ls, le)));
-            if self.mixer.mix(samples, bank.as_deref(), self.stems.gains(), &ranges, &mut self.mix_buf) { &self.mix_buf } else { src_block }
+        let mixer = &mut self.mixer;
+        let (src_block, src_end): (&[f32], usize) = if self.rev {
+            // Backwards: the frames before the cursor, last first, through
+            // the stem mix sample by sample when it is in play.
+            let stemmed = bank.is_some() || mixer.active();
+            let mixer = &*mixer;
+            let src = |i: usize| if stemmed { mixer.at(&current, bank.as_deref(), i) } else { samples[i] };
+            let end = read_block_rev(&src, samples.len(), self.proc_pos as usize, want, file_ch,
+                                     looping.then_some((ls, le)), &mut self.loop_buf);
+            (&self.loop_buf[..], end)
+        } else {
+            let (src_block, src_end) = read_block(samples, self.proc_pos as usize, want,
+                                                  looping.then_some((ls, le)), &mut self.loop_buf);
+
+            // Stems: the same ranges through the stem mix, before the stretcher
+            // (one stretcher whatever the stems do).  Untouched when no bank is
+            // loaded for this track or every stem is at full.
+            let src_block: &[f32] = if bank.is_some() || mixer.active() {
+                let (ranges, _) = block_ranges(samples.len(), self.proc_pos as usize, want, looping.then_some((ls, le)));
+                if mixer.mix(samples, bank.as_deref(), self.stems.gains(), &ranges, &mut self.mix_buf) { &self.mix_buf } else { src_block }
+            } else { src_block };
+            (src_block, src_end)
+        };
+
+        // A SLIP REV landing: its first few ms crossfade (equal power) from
+        // the reverse going on past the turn into the forward read.
+        let src_block: &[f32] = if let Some((from, from_rev)) = self.land_xf.take() {
+            let stemmed = bank.is_some() || self.mixer.active();
+            let mixer = &self.mixer;
+            let src = |i: usize| if stemmed { mixer.at(&current, bank.as_deref(), i) } else { samples[i] };
+            let frames = samples.len() / file_ch;
+            let n = ((sample_rate as f32 * LAND_XFADE_S) as usize).max(1).min(src_block.len() / file_ch);
+            self.xf_buf.clear();
+            self.xf_buf.extend_from_slice(src_block);
+            let f0 = (from / file_ch as u64) as i64;
+            for i in 0..n {
+                let fr = if from_rev { f0 - 1 - i as i64 } else { f0 + i as i64 };
+                let t = (i as f32 + 0.5) / n as f32 * std::f32::consts::FRAC_PI_2;
+                for c in 0..file_ch {
+                    let old = if fr >= 0 && (fr as usize) < frames { src(fr as usize * file_ch + c) } else { 0.0 };
+                    let k = i * file_ch + c;
+                    self.xf_buf[k] = self.xf_buf[k] * t.sin() + old * t.cos();
+                }
+            }
+            &self.xf_buf
         } else { src_block };
 
-        lp.consumed.fetch_add(src_block.len() as u64, Ordering::Relaxed);
+        self.lp.consumed.fetch_add(src_block.len() as u64, Ordering::Relaxed);
 
-        let final_block = !looping && src_end >= samples.len() && complete_now;
+        let final_block = !looping && complete_now && if self.rev { src_end == 0 } else { src_end >= samples.len() };
 
         // Advance the shared position so the UI/renderer sees it — unless a
         // seek arrived during this block: then the UI already published the
         // new spot and this store would overwrite it with the stale cursor.
         self.proc_pos = src_end as u64;
+        if let Some(v) = self.turn_view.as_mut() { v.2 += src_block.len() as u64; }
         if self.seek_request.load(Ordering::Acquire) == NO_SEEK {
-            self.position.store(self.proc_pos, Ordering::Relaxed);
+            self.position.store(shown_pos(self.proc_pos, self.turn_view), Ordering::Relaxed);
         }
 
         // ── Update speed + key-lock mode ─────────────────────────────────────────
@@ -1425,12 +1888,15 @@ impl Processor {
         // ── Timestretch ───────────────────────────────────────────────────────
         self.ts_out.clear();
         self.stretcher.process(src_block, &mut self.ts_out);
+        self.held += (src_block.len() / file_ch) as f64;
 
         if final_block && self.ts_out.is_empty() {
             // Flush RubberBand's tail at end of track.
             let silence = vec![0.0f32; BLOCK_FRAMES * file_ch];
             self.stretcher.process(&silence, &mut self.ts_out);
+            self.held += BLOCK_FRAMES as f64;
         }
+        self.held = (self.held - (self.ts_out.len() / file_ch) as f64 * spd as f64).max(0.0);
 
         // ── Channel mix & push to ring buffer ─────────────────────────────────
         // Cap to available slots so we never silently drop frames.
@@ -1459,9 +1925,29 @@ impl Processor {
         // can subtract it directly.
         let ring_out_frames = (RING_BUFFER_SAMPLES - self.producer.slots()) / device_ch;
         let src_frames_ahead =
-            (ring_out_frames as f32 * spd) as u64 + self.stretcher.latency_frames() as u64;
+            (ring_out_frames as f32 * spd) as u64 + self.held.round() as u64;
         self.in_flight.store(src_frames_ahead * file_ch as u64, Ordering::Relaxed);
+        // A quantized turn is heard once what was read since it is all that
+        // is queued: from then on the real cursor, and the new way.
+        if let Some((_, _, n)) = self.turn_view {
+            if n >= src_frames_ahead * file_ch as u64 {
+                self.turn_view = None;
+                self.jump.reading_rev.store(self.rev, Ordering::Relaxed);
+                if self.seek_request.load(Ordering::Acquire) == NO_SEEK { self.position.store(self.proc_pos, Ordering::Relaxed); }
+            }
+        }
         Wait::Go
+    }
+}
+
+/// The cursor the UI is shown: the real one, or while a quantized turn is
+/// still queued (`turn_view`: its spot, the old way, samples read since),
+/// where the old way would have got to.
+fn shown_pos(proc_pos: u64, turn_view: Option<(u64, bool, u64)>) -> u64 {
+    match turn_view {
+        Some((at, true, n))  => at.saturating_sub(n),
+        Some((at, false, n)) => at + n,
+        None => proc_pos,
     }
 }
 
@@ -1684,7 +2170,7 @@ mod output_gain_tests {
             device_ch: 2, device_sr: 48_000,
             consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
             drain_flag: Arc::new(AtomicBool::new(false)),
-            scrub_live: Arc::new(AtomicBool::new(false)),
+            scrub_live: Arc::new(AtomicBool::new(false)), unplayed: Arc::new(AtomicU64::new(0)),
             dvs: DvsParts::idle(),
             processor: Mutex::new(None),
         };
@@ -1869,5 +2355,283 @@ mod host_output_tests {
         }
         assert!(pa > 0.3, "deck A's output carries A's track ({pa})");
         assert_eq!(pb, 0.0, "deck B's output carries nothing of A's");
+    }
+}
+
+/// Reverse play's reads.
+#[cfg(test)]
+mod reverse_tests {
+    use super::*;
+    use crate::audio_out::HostSlot;
+
+    /// A quantized turn goes to the grid point nearest what is heard.
+    #[test]
+    fn a_quantized_turn_takes_the_nearest_grid_point() {
+        // Beats every 100 frames from frame 30.
+        assert_eq!(grid_nearest(250.0, 30.0, 100.0), 230.0);
+        assert_eq!(grid_nearest(290.0, 30.0, 100.0), 330.0);
+        assert_eq!(grid_nearest(230.0, 30.0, 100.0), 230.0);
+        assert_eq!(grid_nearest(-20.0, 30.0, 100.0), 0.0, "not before the track");
+        // SLIP REV turned at 1000, back at 800: lands at 1200 (stereo).
+        assert_eq!(mirror(1000, 800, 2, 100_000), 1200);
+        assert_eq!(mirror(1000, 800, 2, 1100), 1100, "not past the end");
+    }
+
+    /// A mono ramp read backwards: the samples before the cursor, last first.
+    #[test]
+    fn reads_backwards_from_the_cursor() {
+        let s: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let mut buf = Vec::new();
+        let end = read_block_rev(&|i| s[i], s.len(), 50, 5, 1, None, &mut buf);
+        assert_eq!(buf, vec![49.0, 48.0, 47.0, 46.0, 45.0]);
+        assert_eq!(end, 45);
+        // Stereo stays interleaved, frame by frame.
+        let st: Vec<f32> = (0..20).map(|i| i as f32).collect();
+        let end = read_block_rev(&|i| st[i], st.len(), 10, 4, 2, None, &mut buf);
+        assert_eq!(buf, vec![8.0, 9.0, 6.0, 7.0]);
+        assert_eq!(end, 6);
+    }
+
+    /// At the track's start it stops short; inside a loop it wraps to the end.
+    #[test]
+    fn stops_at_the_start_and_wraps_in_a_loop() {
+        let s: Vec<f32> = (0..100).map(|i| i as f32).collect();
+        let mut buf = Vec::new();
+        let end = read_block_rev(&|i| s[i], s.len(), 3, 10, 1, None, &mut buf);
+        assert_eq!((buf.clone(), end), (vec![2.0, 1.0, 0.0], 0));
+        let end = read_block_rev(&|i| s[i], s.len(), 22, 5, 1, Some((20, 30)), &mut buf);
+        assert_eq!(buf, vec![21.0, 20.0, 29.0, 28.0, 27.0], "loop [20, 30): 20 → 29");
+        assert_eq!(end, 27);
+        // A cursor before the loop does not wrap into it.
+        let end = read_block_rev(&|i| s[i], s.len(), 12, 3, 1, Some((20, 30)), &mut buf);
+        assert_eq!((buf.clone(), end), (vec![11.0, 10.0, 9.0], 9));
+    }
+
+    /// Reversed, what is heard lies after the cursor: a jump (or a turn of
+    /// the lever, a jump of 0) is measured from there.
+    #[test]
+    fn a_jump_in_reverse_is_measured_after_the_cursor() {
+        // 100 frames queued at 1x, 10 inside the stretcher, stereo.
+        assert_eq!(jump_target(10_000, 100, 1.0, 10, 0, false, 2, 100_000), 10_000 - 220);
+        assert_eq!(jump_target(10_000, 100, 1.0, 10, 0, true, 2, 100_000), 10_000 + 220);
+        assert_eq!(jump_target(10_000, 100, 1.0, 10, 1_000, true, 2, 100_000), 11_220);
+    }
+
+    /// Turning the lever while a tone plays: no silence and no click.
+    #[test]
+    fn a_turn_has_no_gap_and_no_click() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let sr = 44_100usize;
+        let slot: HostSlot = Arc::new(Mutex::new(None));
+        let deck = AudioHandle::open(Box::new(crate::audio_out::HostOut { sample_rate: sr as u32, slot: Arc::clone(&slot) }), None).unwrap();
+        let mut out = slot.lock().unwrap().take().unwrap();
+        let tone: Vec<f32> = (0..sr * 20).flat_map(|i| {
+            let s = 0.5 * (i as f32 * 110.0 * std::f32::consts::TAU / sr as f32).sin();
+            [s, s]
+        }).collect();
+        deck.load_samples(Arc::new(tone), sr as u32, 2).unwrap();
+        deck.seek(5 * sr as u64 * 2);   // room to play backwards (it stops at the start)
+        deck.set_playing(true);
+        let mut buf = vec![0f32; 512 * 2];
+        let mut rec = Vec::new();
+        let mut pull = |n: usize, rec: &mut Vec<f32>| for _ in 0..n {
+            out.fill(&mut buf);
+            rec.extend(buf.iter().step_by(2));
+            thread::sleep(Duration::from_micros(512 * 1_000_000 / 44_100));
+        };
+        pull(60, &mut rec);
+        let p0 = deck.position.load(Ordering::Relaxed);
+        rec.clear();
+        pull(4, &mut rec);
+        deck.set_reverse(true);
+        pull(60, &mut rec);
+        let p1 = deck.position.load(Ordering::Relaxed);
+        assert!(p1 < p0, "reading backwards: {p0} → {p1}");
+        let (mut run, mut gap) = (0, 0);
+        for s in &rec { if s.abs() < 1e-4 { run += 1; gap = gap.max(run); } else { run = 0; } }
+        let at = 4 * 512;
+        let step = rec[at - 1..at + 3 * 512].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+        eprintln!("turn: longest silence {gap} frames, biggest step {step:.3}");
+        assert!(gap < 8, "silence at the turn: {gap} frames");
+        assert!(step < 0.05, "click at the turn: step {step}");
+    }
+}
+
+/// A beat jump while playing: what the listener hears across the jump.
+#[cfg(test)]
+mod seek_while_playing_tests {
+    use super::*;
+    use crate::audio_out::HostSlot;
+
+    /// Play a steady tone through a host-pulled deck, jump 8 beats ahead
+    /// mid-play, and measure the longest run of silence and the biggest
+    /// sample-to-sample step in the output around the jump.
+    fn jump_gap_and_step() -> (usize, f32) {
+        let sr = 44_100usize;
+        let slot: HostSlot = Arc::new(Mutex::new(None));
+        let deck = AudioHandle::open(Box::new(crate::audio_out::HostOut { sample_rate: sr as u32, slot: Arc::clone(&slot) }), None).unwrap();
+        let mut out = slot.lock().unwrap().take().unwrap();
+        // 110 Hz: a step between neighbouring samples is at most ~0.008.
+        let tone: Vec<f32> = (0..sr * 20).flat_map(|i| {
+            let s = 0.5 * (i as f32 * 110.0 * std::f32::consts::TAU / sr as f32).sin();
+            [s, s]
+        }).collect();
+        deck.load_samples(Arc::new(tone), sr as u32, 2).unwrap();
+        deck.set_playing(true);
+        let mut buf = vec![0f32; 512 * 2];
+        let mut pull = |n: usize, rec: &mut Vec<f32>| for _ in 0..n {
+            out.fill(&mut buf);
+            rec.extend(buf.iter().step_by(2));
+            thread::sleep(Duration::from_micros(512 * 1_000_000 / 44_100));
+        };
+        let mut warm = Vec::new();
+        pull(60, &mut warm);                                   // steady playback
+        let mut rec = Vec::new();
+        pull(4, &mut rec);
+        deck.jump((8.0 * 60.0 / 128.0 * sr as f64) as i64 * 2);
+        pull(40, &mut rec);
+        let (mut run, mut gap) = (0, 0);
+        for s in &rec { if s.abs() < 1e-4 { run += 1; gap = gap.max(run); } else { run = 0; } }
+        // The step is measured around the jump: the buffer it lands in, the
+        // crossfade on the next and one buffer past it.  (Bungee also fades
+        // its first ~50 ms in after any reset, in grain-sized steps; that is
+        // the engine's start-up, not the jump.)
+        let at = 4 * 512;
+        let step = rec[at - 1..at + 3 * 512].windows(2).map(|w| (w[1] - w[0]).abs()).fold(0f32, f32::max);
+        (gap, step)
+    }
+
+    /// The jump stays on time: with the old audio holding on while the new
+    /// position re-primes, the new audio comes in exactly as far past the
+    /// jump target as the wall clock has moved since the jump.  Samples are
+    /// their own frame numbers (old: 0, 1, 2..; new: 10 000, 10 001..), so
+    /// the output says which frame of which stream it is playing.
+    #[test]
+    fn a_jump_lands_where_the_wall_clock_says() {
+        let (mut tx, rx) = rtrb::RingBuffer::<f32>::new(1 << 15);
+        let parts = StreamParts {
+            device_ch: 1, device_sr: 48_000,
+            consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
+            drain_flag: Arc::new(AtomicBool::new(false)),
+            scrub_live: Arc::new(AtomicBool::new(false)), unplayed: Arc::new(AtomicU64::new(0)),
+            dvs: DvsParts::idle(),
+            processor: Mutex::new(None),
+        };
+        let mut fill = Render { trim: 1.0, ..Render::new(&parts) };
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let xf = fill.xfade.len();
+        let mut buf = vec![0f32; 256];
+        for i in 0..4_000 { tx.push(i as f32).unwrap(); }        // old stream, 4 000 frames queued
+        fill.fill(&mut buf);                                      // plays 0..256
+        parts.drain_flag.store(true, Ordering::Release);          // the jump
+        fill.fill(&mut buf);                                      // still old: 256..512, then the hold
+        assert_eq!(buf[255], 511.0, "the jump buffer plays on, no silence");
+        assert!(!parts.drain_flag.load(Ordering::Acquire), "flush done, the processor may push");
+        // The processor is slow to re-prime: one buffer passes on the hold alone.
+        fill.fill(&mut buf);
+        assert_eq!(buf[0], 512.0, "the hold carries on from where the jump buffer stopped");
+        // Now the new audio arrives; the wall clock is 256 frames past the jump.
+        for i in 0..4_000 { tx.push(10_000.0 + i as f32).unwrap(); }
+        fill.fill(&mut buf);
+        let first_pure = buf[xf];                                 // right after the crossfade
+        assert_eq!(first_pure, 10_000.0 + (256 + xf) as f32,
+                   "lands 256 + crossfade frames past the target, as the clock says");
+        set_output_gain_db(0.0);
+    }
+
+    /// A click on every beat at 128 BPM; play, jump 8 beats mid-beat, and
+    /// return how far the beat after the jump is from where the steady clicks
+    /// say it should be (ms; 0 = on the beat).  `relative`: the deck's jump
+    /// (resolved on the audio side); otherwise the old way, an absolute seek
+    /// from the heard position as the UI reckons it (`position − in_flight`).
+    fn jump_beat_error_ms(relative: bool, speed: f32) -> (f64, f64) {
+        let sr = 44_100usize;
+        let period = sr as f64 * 60.0 / 128.0;
+        let slot: HostSlot = Arc::new(Mutex::new(None));
+        let deck = AudioHandle::open(Box::new(crate::audio_out::HostOut { sample_rate: sr as u32, slot: Arc::clone(&slot) }), None).unwrap();
+        let mut out = slot.lock().unwrap().take().unwrap();
+        let len = sr * 30;
+        let mut track = vec![0f32; len * 2];
+        let mut k = 0.0;
+        while (k * period) as usize + 220 < len {
+            let at = (k * period).round() as usize;
+            for i in 0..220 {
+                let v = 0.8 * (i as f32 * 1_000.0 * std::f32::consts::TAU / sr as f32).sin();
+                track[(at + i) * 2] = v; track[(at + i) * 2 + 1] = v;
+            }
+            k += 1.0;
+        }
+        deck.load_samples(Arc::new(track), sr as u32, 2).unwrap();
+        deck.speed.store(speed.to_bits(), Ordering::Relaxed);
+        deck.key_lock.store(true, Ordering::Relaxed);
+        deck.set_playing(true);
+        let mut buf = vec![0f32; 512 * 2];
+        let mut rec: Vec<f32> = Vec::new();
+        let mut pull = |n: usize, rec: &mut Vec<f32>| for _ in 0..n {
+            out.fill(&mut buf);
+            rec.extend(buf.iter().step_by(2));
+            thread::sleep(Duration::from_micros(512 * 1_000_000 / 44_100));
+        };
+        pull(130, &mut rec);                                   // ~1.5 s, mid-beat
+        let jump_frame = rec.len();
+        let delta = (8.0 * period).round() as i64 * 2;
+        if relative {
+            deck.jump(delta);
+        } else {
+            let heard = deck.position.load(Ordering::Relaxed) as i64 - deck.in_flight.load(Ordering::Relaxed) as i64;
+            deck.seek(((heard + delta).max(0) as u64) & !1);
+        }
+        pull(130, &mut rec);
+        // Click onsets: the first loud sample after a quiet stretch.
+        let mut onsets: Vec<usize> = Vec::new();
+        let mut last_loud: Option<usize> = None;
+        for (i, x) in rec.iter().enumerate() {
+            if x.abs() > 0.2 {
+                if last_loud.map_or(true, |l| i > l + 2_000) { onsets.push(i); }
+                last_loud = Some(i);
+            }
+        }
+        // The clicks before the jump, past the first 0.3 s of the stretcher's start-up.
+        let before: Vec<usize> = onsets.iter().copied().filter(|&o| o > sr * 3 / 10 && o < jump_frame).collect();
+        let after = onsets.iter().copied().find(|&o| o > jump_frame + 1_000).expect("a click after the jump");
+        assert!(before.len() >= 2, "clicks before the jump");
+        // Where the steady clicks put the beat after the jump: their mean
+        // phase on an even grid (one beat of output is the track's beat over
+        // the speed).  The spread of the steady clicks about that grid is the
+        // stretcher's own (WSOLA places grains up to a ms or two either way
+        // off 1x) and comes back as the second value.
+        let beat = period / speed as f64;
+        let first = before[0] as f64;
+        let offs: Vec<f64> = before.iter().map(|&o| { let o = o as f64 - first; o - (o / beat).round() * beat }).collect();
+        let phase = first + offs.iter().sum::<f64>() / offs.len() as f64;
+        let spread = offs.iter().fold(f64::MIN, |a, &b| a.max(b)) - offs.iter().fold(f64::MAX, |a, &b| a.min(b));
+        let n = ((after as f64 - phase) / beat).round();
+        let ms = |f: f64| f / sr as f64 * 1000.0;
+        (ms(after as f64 - (phase + n * beat)), ms(spread))
+    }
+
+    #[test]
+    fn a_jump_while_playing_stays_on_the_beat() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let (old, _) = jump_beat_error_ms(false, 1.0);
+        for speed in [1.0, 1.08, 0.94] {
+            let (new, spread) = jump_beat_error_ms(true, speed);
+            eprintln!("beat after the jump at {speed}x: {new:+.2} ms off (steady clicks spread {spread:.2} ms; at 1x an absolute seek from the heard position: {old:+.2} ms)");
+            assert!(new.abs() < 1.0 + spread, "at {speed}x the jump lands {new:+.2} ms off the beat");
+        }
+    }
+
+    #[test]
+    fn a_jump_while_playing_has_no_gap_and_no_click() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let (gap, step) = jump_gap_and_step();
+        eprintln!("beat jump: longest silence {gap} frames ({:.1} ms), biggest step {step:.3}", gap as f64 / 44.1);
+        // A 110 Hz tone crosses zero, so a few silent samples are natural.
+        assert!(gap < 8, "silence across the jump: {gap} frames");
+        assert!(step < 0.05, "click across the jump: step {step}");
     }
 }

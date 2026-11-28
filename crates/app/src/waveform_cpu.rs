@@ -473,7 +473,7 @@ impl WaveGeom {
         let r = p.wave_rect;
         let strip = p.beat2_period_cols > 0.0;
         Self {
-            half: p.cols_visible * 0.5,
+            half: p.cols_visible * p.playhead_frac,
             cue_per_px: p.cols_visible / r[2],
             cols_per_px: p.cols_visible / r[2],
             wave_h: r[3] - if strip { B2_STRIP_PX } else { 0.0 },
@@ -483,13 +483,13 @@ impl WaveGeom {
 }
 
 /// What pixel column `x` of the rect is.  `with_playhead` = false leaves the
-/// red centre line out (the incremental cache overlays it at copy time).
+/// red playhead line out (the incremental cache overlays it at copy time).
 fn classify(pal: &Palette, p: &WaveformParams, g: &WaveGeom, cols: &[u32], rect: PxRect, x: usize, with_playhead: bool) -> Column {
     let r = p.wave_rect;
     let qx = rect.x as f32 + x as f32 + 0.5;
     let sx = (qx - r[0]) / r[2];
     let col_f = (p.playhead_col - g.half) + sx * p.cols_visible;
-    if with_playhead && (qx - (r[0] + r[2] * 0.5)).abs() < 1.5 {
+    if with_playhead && (qx - (r[0] + r[2] * p.playhead_frac)).abs() < 1.5 {
         Column::Solid(pal.playhead)
     } else if (col_f - p.cue_col).abs() < g.cue_per_px {
         Column::Solid(pal.cue)
@@ -612,6 +612,8 @@ pub struct WaveKey {
     cue_col: f32, loop_cols: (f32, f32), slip_col: f32,
     cols_ptr: usize, cols_len: usize,
     light: bool,
+    // CENTER / LEFT moves every column: a change redraws the field.
+    playhead_frac: f32,
 }
 
 impl WaveKey {
@@ -624,6 +626,7 @@ impl WaveKey {
             cue_col: p.cue_col, loop_cols: (p.loop_start_col, p.loop_end_col), slip_col: p.slip_col,
             cols_ptr: cols.as_ptr() as usize, cols_len: cols.len(),
             light: p.light > 0.5,
+            playhead_frac: p.playhead_frac,
         }
     }
 }
@@ -668,10 +671,10 @@ pub fn playhead_rgb(lut: &Lut, p: &WaveformParams) -> [u8; 4] {
 }
 
 /// Pixel columns of `rect` the playhead line covers (the shader's
-/// `|q.x - centre| < 1.5`).
+/// `|q.x - playhead| < 1.5`).
 pub fn playhead_columns(p: &WaveformParams, rect: PxRect) -> std::ops::Range<usize> {
     let r = p.wave_rect;
-    let centre = r[0] + r[2] * 0.5;
+    let centre = r[0] + r[2] * p.playhead_frac;
     let (mut lo, mut hi) = (usize::MAX, 0usize);
     for x in 0..rect.w as usize {
         let qx = rect.x as f32 + x as f32 + 0.5;
@@ -851,11 +854,25 @@ mod tests {
             downbeat_offset: 0.0, beats_per_bar: 4.0, beat2_phase_beats: 0.0, beat2_period_cols: 0.0,
             color_mode: ColorMode::Blue as u32 as f32, wave_rect: wave, over_rect: over, amp_gain: 1.0,
             dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 0.0, detail_off: 0.0,
-            light: 0.0, rgb_off: 0.0, rgb_heights: 0.0, ov_off: 0.0,
+            light: 0.0, rgb_off: 0.0, rgb_heights: 0.0, ov_off: 0.0, playhead_frac: 0.5, _pad: 0.0,
         }
     }
 
     fn px(out: &[u32], w: usize, x: usize, y: usize) -> [u8; 4] { out[y * w + x].to_ne_bytes() }
+
+    /// Waveform Current Position LEFT: the playhead a quarter of the way
+    /// across, and the column under it is the playhead's.
+    #[test]
+    fn left_puts_the_playhead_a_quarter_across() {
+        let mut p = params(2000, [0.0, 0.0, 800.0, 200.0], [0.0; 4]);
+        let rect = PxRect::from_f32(p.wave_rect).unwrap();
+        assert_eq!(playhead_columns(&p, rect), 399..401, "CENTER");
+        p.playhead_frac = crate::settings::LEFT_PLAYHEAD;
+        assert_eq!(playhead_columns(&p, rect), 199..201, "LEFT");
+        let g = WaveGeom::new(&p);
+        let col_at = |x: f32| (p.playhead_col - g.half) + (x / 800.0) * p.cols_visible;
+        assert!((col_at(200.0) - p.playhead_col).abs() < 1e-3, "the playhead's column under the line");
+    }
 
     /// A silent stem mix draws OverCue's thin grey line through the middle
     /// of the track's span (2 px), and nothing outside the track; the track's
@@ -1224,6 +1241,7 @@ mod bench {
                 beat2_period_cols: 0.0, color_mode: mode as u32 as f32, wave_rect: [0.0, 200.0, 1280.0, 240.0], over_rect: [130.0, 600.0, 1020.0, 70.0],
                 amp_gain: 1.0, dim_played: 0.0, cue_col: 10.0, loop_start_col: 0.0, loop_end_col: 0.0, slip_col: -1.0, style: 1.0,
                 detail_off: 0.0, light: 0.0, rgb_off: n as f32, rgb_heights: 0.0, ov_off: 2.0 * n as f32,
+                playhead_frac: 0.5, _pad: 0.0,
             };
             let mut out = Vec::new();
             for (kind, rect, label) in [(Kind::Wave, PxRect { x: 0, y: 200, w: 1280, h: 240 }, "wave"), (Kind::Overview, PxRect { x: 130, y: 600, w: 1020, h: 70 }, "overview")] {

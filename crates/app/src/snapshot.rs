@@ -177,6 +177,17 @@ pub struct DeckSnapshot<'a> {
     /// knob position) and QUANTIZE (readout).
     pub tempo_range:    f32,
     pub quantize:       bool,
+    /// QUANTIZE's beat value (1/8 … 1) and BEAT JUMP's (1/2 … 64), shown in
+    /// their readouts.
+    pub quantize_beats: f32,
+    pub beat_jump_beats: f32,
+    /// Playing in reverse (the lever's REV, or SLIP REV held), and whether
+    /// it is the momentary SLIP REV.
+    pub reverse:        bool,
+    pub slip_reverse:   bool,
+    /// Waveform Current Position: the playhead's place across the enlarged
+    /// waveform, 0 = left edge (0.5 = CENTER).
+    pub playhead_frac:  f32,
     /// SLIP: the shadow playhead while a loop / held hot cue is slipping
     /// (interleaved samples) — drawn as a marker on both waveforms.
     pub slip_shadow:    Option<u64>,
@@ -315,6 +326,7 @@ impl<'a> DeckSnapshot<'a> {
             total_samples: 0, cue_point: 0, memory_cues: &[], phrases: &[], divisions: Default::default(), hot_cues: [None; 8], hot_rgb: [None; 8],
             perform_mode: crate::input::PerformMode::HotCue, perform_bank: 0, perform_delete: false,
             loop_active: false, loop_start: 0, loop_end: 0, loop_beats: 0.0, tempo_range: 10.0, quantize: false,
+            quantize_beats: 1.0, beat_jump_beats: 16.0, reverse: false, slip_reverse: false, playhead_frac: 0.5,
             slip_shadow: None, playing: false, speed: 1.0, fader_speed: 1.0, key_lock: false, jog_vinyl: false,
             remain_mode: true, auto_cue: false, slip: false, sync: false, master: false, zoom_grid_mode: false,
             grid_edited: false, cue_set: false, sync_offset: 0.0, source_link: false, phase_ticks_view: false,

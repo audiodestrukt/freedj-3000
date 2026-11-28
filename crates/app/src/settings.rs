@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 /// The rows of the MENU screen, in order.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Setting { AutoCueLevel, Quantize, TempoRange, OutputGain, Player, Skin, Light, WaveColor, Divisions, DeckView, Stems, Dvs, PerfLog, About }
+pub enum Setting { AutoCueLevel, Quantize, QuantizeBeats, BeatJump, TempoRange, OutputGain, Player, Skin, Light, WaveColor, WavePosition, Divisions, DeckView, Stems, Dvs, PerfLog, About }
 
 /// DECK VIEW is a desktop row: the iPad always shows the whole deck and the
 /// phone has its two pages.
@@ -17,12 +17,15 @@ pub enum Setting { AutoCueLevel, Quantize, TempoRange, OutputGain, Player, Skin,
 pub const MENU: &[(Setting, &str)] = &[
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
+    (Setting::QuantizeBeats, "QUANTIZE BEAT VALUE"),
+    (Setting::BeatJump,     "BEAT JUMP BEAT VALUE"),
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::OutputGain,   "OUTPUT GAIN"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
+    (Setting::WavePosition, "WAVEFORM CURRENT POSITION"),
     (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::DeckView,     "DECK VIEW"),
     (Setting::Stems,        "STEMS"),
@@ -34,12 +37,15 @@ pub const MENU: &[(Setting, &str)] = &[
 pub const MENU: &[(Setting, &str)] = &[
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
+    (Setting::QuantizeBeats, "QUANTIZE BEAT VALUE"),
+    (Setting::BeatJump,     "BEAT JUMP BEAT VALUE"),
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::OutputGain,   "OUTPUT GAIN"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
+    (Setting::WavePosition, "WAVEFORM CURRENT POSITION"),
     (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::Stems,        "STEMS"),
     (Setting::Dvs,          "DVS"),
@@ -51,12 +57,15 @@ pub const MENU: &[(Setting, &str)] = &[
 pub const MENU: &[(Setting, &str)] = &[
     (Setting::AutoCueLevel, "AUTO CUE LEVEL"),
     (Setting::Quantize,     "QUANTIZE"),
+    (Setting::QuantizeBeats, "QUANTIZE BEAT VALUE"),
+    (Setting::BeatJump,     "BEAT JUMP BEAT VALUE"),
     (Setting::TempoRange,   "TEMPO RANGE"),
     (Setting::OutputGain,   "OUTPUT GAIN"),
     (Setting::Player,       "PLAYER No."),
     (Setting::Skin,         "SCREEN"),
     (Setting::Light,        "LIGHT MODE"),
     (Setting::WaveColor,    "WAVEFORM COLOR"),
+    (Setting::WavePosition, "WAVEFORM CURRENT POSITION"),
     (Setting::Divisions,    "WAVEFORM DIVISIONS"),
     (Setting::Stems,        "STEMS"),
     (Setting::PerfLog,      "PERF LOG"),
@@ -128,12 +137,47 @@ impl Divisions {
     }
 }
 
+/// Waveform Current Position, as on the CDJ-3000: where the playhead sits
+/// across the enlarged waveform.  LEFT shows more of what is coming.
+#[derive(Clone, Copy, Serialize, Deserialize, Debug, PartialEq, Eq, Default)]
+pub enum WavePosition {
+    #[default]
+    Center,
+    Left,
+}
+
+impl WavePosition {
+    pub fn label(self) -> &'static str {
+        match self { WavePosition::Center => "CENTER", WavePosition::Left => "LEFT" }
+    }
+
+    /// The playhead's place across the enlarged waveform, 0 = left edge.
+    pub fn frac(self) -> f32 {
+        match self { WavePosition::Center => 0.5, WavePosition::Left => LEFT_PLAYHEAD }
+    }
+}
+
+/// Where LEFT puts the playhead: a quarter of the way across.
+pub const LEFT_PLAYHEAD: f32 = 0.25;
+
 /// The unit's AUTO CUE LEVEL choices (dB).
 pub const AUTO_CUE_LEVELS: [f32; 8] = [-36.0, -42.0, -48.0, -54.0, -60.0, -66.0, -72.0, -78.0];
 /// OUTPUT GAIN choices (dB): a trim on the deck's output, never a boost.
 pub const OUTPUT_GAINS: [f32; 9] = [0.0, -3.0, -6.0, -9.0, -12.0, -15.0, -18.0, -24.0, -30.0];
 /// TEMPO RANGE choices as a fraction: ±6 %, ±10 %, ±16 %, WIDE (±100 %).
 pub const TEMPO_RANGES: [f32; 4] = [0.06, 0.10, 0.16, 1.00];
+/// BEAT JUMP beat values, as on the CDJ-3000 (p.89): CALL/DELETE + BEAT
+/// JUMP ◀ / ▶ steps through them.  16 by default.
+pub const BEAT_JUMP_VALUES: [f32; 8] = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
+/// QUANTIZE beat values (p.88): the grid that CUE, hot cues, loop in/out,
+/// beat jumps and slip returns snap to.  1 by default.
+pub const QUANTIZE_VALUES: [f32; 4] = [0.125, 0.25, 0.5, 1.0];
+
+/// A beat count as the unit writes it: "1/8", "1/2", "1", "16".
+pub fn beats_text(beats: f32) -> String {
+    if beats >= 1.0 || beats <= 0.0 { format!("{}", beats.round() as i64) }
+    else { format!("1/{}", (1.0 / beats).round() as i64) }
+}
 
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 #[serde(default)]
@@ -171,6 +215,14 @@ pub struct Settings {
     pub wave_color: WaveColor,
     /// Waveform Divisions (CDJ-3000 screen): TIME SCALE or PHRASE.
     pub divisions: Divisions,
+    /// Waveform Current Position (CDJ-3000 screen): the playhead in the
+    /// middle of the enlarged waveform, or towards its left.
+    pub wave_position: WavePosition,
+    /// QUANTIZE's beat value (`QUANTIZE_VALUES`).
+    pub quantize_beats: f32,
+    /// BEAT JUMP's beat value (`BEAT_JUMP_VALUES`): the BEAT JUMP ◀ / ▶ keys
+    /// jump this far, and the screen shows it.
+    pub beat_jump_beats: f32,
     /// OUTPUT GAIN (dB, 0 or below): turns the deck's output down,
     /// independent of the device's volume.
     pub output_gain_db: f32,
@@ -210,7 +262,8 @@ const SEED: u8 = 4;
 impl Default for Settings {
     fn default() -> Self {
         Self { auto_cue_level_db: -48.0, quantize: true, tempo_range: 0.16, player: 0, jog_vinyl: true, perf_log: false, skin: Skin::Cdj3000,
-               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, divisions: Divisions::Phrase, output_gain_db: 0.0, light: false, stems: true, dvs: crate::dvs::DvsMode::Off, dvs_status: "", seed: 0, phone: false }
+               full_deck: cfg!(any(target_os = "macos", target_os = "windows")), wave_color: WaveColor::ThreeBand, divisions: Divisions::Phrase,
+               wave_position: WavePosition::Center, quantize_beats: 1.0, beat_jump_beats: 16.0, output_gain_db: 0.0, light: false, stems: true, dvs: crate::dvs::DvsMode::Off, dvs_status: "", seed: 0, phone: false }
     }
 }
 
@@ -294,6 +347,9 @@ impl Settings {
         match s {
             Setting::AutoCueLevel => c.auto_cue_level_db = step(&AUTO_CUE_LEVELS, c.auto_cue_level_db, dir),
             Setting::Quantize     => c.quantize = !c.quantize,
+            Setting::QuantizeBeats => c.quantize_beats = step(&QUANTIZE_VALUES, c.quantize_beats, dir),
+            Setting::BeatJump     => c.beat_jump_beats = step(&BEAT_JUMP_VALUES, c.beat_jump_beats, dir),
+            Setting::WavePosition => c.wave_position = step(&[WavePosition::Center, WavePosition::Left], c.wave_position, dir),
             Setting::TempoRange   => c.tempo_range = step(&TEMPO_RANGES, c.tempo_range, dir),
             Setting::OutputGain   => c.output_gain_db = step(&OUTPUT_GAINS, c.output_gain_db, dir),
             Setting::Player       => c.player = step(&[0u8, 1, 2, 3, 4, 5, 6], c.player, dir),
@@ -317,6 +373,9 @@ impl Settings {
         match s {
             Setting::AutoCueLevel => format!("{:.0} dB", self.auto_cue_level_db),
             Setting::Quantize     => if self.quantize { "ON".into() } else { "OFF".into() },
+            Setting::QuantizeBeats => beats_text(self.quantize_beats),
+            Setting::BeatJump     => format!("{}   (CALL/DELETE + BEAT JUMP)", beats_text(self.beat_jump_beats)),
+            Setting::WavePosition => self.wave_position.label().into(),
             Setting::TempoRange   => Self::range_label(self.tempo_range),
             Setting::OutputGain   => if self.output_gain_db == 0.0 { "0 dB".into() } else { format!("{:.0} dB", self.output_gain_db) },
             Setting::Player if self.player == 0 => "AUTO   (applies at next launch)".into(),

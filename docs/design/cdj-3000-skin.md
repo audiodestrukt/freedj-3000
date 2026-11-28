@@ -100,13 +100,13 @@ Size: S < 1 day, M 1–3 days, L > 3 days.
 | | Artwork in header, lists, INFO, jog | missing (tags have it) | S |
 | Settings | SHORTCUT screen (time mode, auto cue, colour, position…) | partial (MENU) | M |
 | | UTILITY list (CDJ set) | partial | M |
-| | Waveform Current Position CENTER/LEFT | missing | S |
+| | Waveform Current Position CENTER/LEFT | done (MENU → WAVEFORM CURRENT POSITION; LEFT = a quarter across) | ✓ |
 | Deck features | Hot cue colours A–H (RGB), comments | positions only | M |
 | | Gate Cue, Smart Cue | missing | S |
 | | Key detection + KEY readout (green when compatible) | missing | L |
 | | KEY SHIFT (semitones) + KEY SYNC | missing (stretcher can) | M |
-| | Beat Jump beat value 1/2–64, Quantize beat value | partial | S |
-| | Slip reverse lever, reverse | missing | M |
+| | Beat Jump beat value 1/2–64, Quantize beat value | done (CALL/DELETE + BEAT JUMP; MENU rows) | ✓ |
+| | Slip reverse lever, reverse | done (faceplate lever keys, XDJ panel REV, `R`; CDJ-3000 panel lever bits unmapped) | ✓ |
 | | Active loop, emergency loop, loop slip | partial | M |
 | | Vinyl speed adjust (touch/release) | planned (varispeed) | M |
 | | 6 players on PRO DJ LINK | 4 | M |

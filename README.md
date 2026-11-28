@@ -394,6 +394,8 @@ The keyboard stands in for the deck's buttons on a desktop.
 | `←` / `→` | Seek ±10 seconds |
 | `+` / `−` / `0` | Tempo +1 % / −1 % / back to 0 % |
 | `K` `S` `Y` `M` | MASTER TEMPO · SLIP · SYNC · MASTER |
+| `R` · hold `Shift`+`R` | REV: reverse play on / off · SLIP REV (reverse while held, then on where forward play would be) |
+| `W` / `E` · `Shift`+`W` / `E` | BEAT JUMP ◀ / ▶ · the jump value down / up (CALL/DELETE + BEAT JUMP) |
 | `N` · `[` / `]` · `Delete` | Memory cue: set · CALL previous / next · delete |
 | `A` | GRID ADJUST (the arrows then move the grid) |
 | `Z` / `X` | Zoom the enlarged waveform in / out |

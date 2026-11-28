@@ -65,14 +65,14 @@ exceptions:
 | KEY SYNC | all | M |
 | ~~Hot-cue colours from rekordbox (PCO2 in the `.EXT`)~~ done: read, drawn, served. Comments are read and served, not yet shown on our screen | all | S |
 | Gate Cue, Smart Cue | all | S |
-| Beat-jump value settable (CALL/DELETE + BEAT JUMP); quantize beat value | all | S |
-| Slip reverse, reverse | all | M |
+| ~~Beat-jump value settable (CALL/DELETE + BEAT JUMP); quantize beat value~~ done: CALL/DELETE + BEAT JUMP ◀ / ▶ steps 1/2–64, MENU → QUANTIZE BEAT VALUE (1/8–1) and BEAT JUMP BEAT VALUE, both in the readouts | all | ✓ |
+| ~~Slip reverse, reverse~~ done: the lever as SLIP REV / REV keys on the faceplate (and the XDJ panel's REV, `R`), reverse resolved on the audio side like a jump. The CDJ-3000 panel's lever bits are not mapped yet | all | ✓ |
 | Active loop, emergency loop, loop slip | all | M |
 | Vinyl speed adjust (touch/release) (`varispeed-engine.md`) | all | M |
 | Touch Cue on the overview | all | S |
 | INFO overlay: EDIT RATING; other players' tabs are in #54 (draft) | all | S |
 | SHORTCUT screen; full UTILITY list (phase 6) | all | M |
-| Waveform current position CENTER/LEFT | all | S |
+| ~~Waveform current position CENTER/LEFT~~ done: MENU → WAVEFORM CURRENT POSITION; LEFT puts the playhead a quarter across | all | ✓ |
 | ~~Waveform Divisions PHRASE on our own overview~~ done: MENU → WAVEFORM DIVISIONS, rekordbox's phrases from the stick's `.EXT` or our own. A linked player's phrases (its PSSI over dbserver) not yet fetched | all | ✓ |
 | ~~6 players on PRO DJ LINK~~ done: PLAYER No. AUTO and 1–6 | all | ✓ |
 
