@@ -8,7 +8,7 @@
 //! └──────────────────────────────────────┬──────────────────────────────┘
 //!                                        │ lock-free ring buffer
 //! ┌──────────────────────────────────────▼──────────────────────────────┐
-//! │ cpal callback (RT thread)                                           │
+//! │ output callback (RT thread: cpal, a plugin host; see audio_out.rs) │
 //! │  rtrb consumer → output device                                      │
 //! └─────────────────────────────────────────────────────────────────────┘
 //!
@@ -16,12 +16,16 @@
 //!   position    — source sample index; written by processor, readable by UI
 //!   playing     — play/pause flag; written by UI/HID, read by both threads
 //!   speed       — f32 bits; written by UI/HID, read by processor
-//!   drain_flag  — set by processor on seek-detect; cleared by cpal on drain
+//!   drain_flag  — set by processor on seek-detect; cleared by the output on drain
 
 use anyhow::{Context, Result};
 use arc_swap::ArcSwap;
 use crate::stems::{Mixer, StemControl};
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use crate::audio_out::{AudioOut, Format, RenderSource, Running};
+#[cfg(test)]
+use crate::audio_out::PacedOut;
+#[cfg(test)]
+pub use crate::audio_out::Trace;
 use opendeck_decode::{SymphoniaDecoder, TrackTags};
 use opendeck_timestretch::Stretcher;
 use opendeck_types::{Decoder, PipelineStage};
@@ -62,7 +66,7 @@ fn ring_samples(device_sr: u32, device_ch: usize) -> usize {
 /// limit (`deploy/pi/rt-audio`); without one it logs once and carries on at
 /// normal priority.  OPENDECK_RT=0 opts out.
 #[cfg(target_os = "linux")]
-fn try_realtime(name: &str, prio: i32) {
+pub(crate) fn try_realtime(name: &str, prio: i32) {
     if std::env::var("OPENDECK_RT").as_deref() == Ok("0") { return; }
     let param = libc::sched_param { sched_priority: prio };
     let rc = unsafe { libc::sched_setscheduler(0, libc::SCHED_FIFO, &param) };
@@ -73,7 +77,7 @@ fn try_realtime(name: &str, prio: i32) {
     }
 }
 #[cfg(not(target_os = "linux"))]
-fn try_realtime(_name: &str, _prio: i32) {}
+pub(crate) fn try_realtime(_name: &str, _prio: i32) {}
 
 /// Minimum free slots required before processing another block.
 ///
@@ -189,9 +193,8 @@ pub struct AudioHandle {
     /// Tags of the track decoded at open (the startup track); the deck copies
     /// these and replaces them on each browser LOAD.
     pub tags:        TrackTags,
-    _stream:     StreamOwner,
-    /// Tells the audio-dev supervisor (Linux) to stop when the deck is dropped.
-    _stream_shutdown: Arc<AtomicBool>,
+    /// The output, kept going until the deck is dropped.
+    _stream:     Running,
     _processor:  thread::JoinHandle<()>,
 }
 
@@ -321,83 +324,41 @@ impl AudioHandle {
 // ── Constructor ───────────────────────────────────────────────────────────────
 
 impl AudioHandle {
-    /// Open a deck with a decoded track.
-    pub fn open(path: &Path) -> Result<Self> {
-        let (decoded, file_sr, file_ch, tags) = decode_file(path)?;
-        Self::open_inner(Some((decoded, file_sr, file_ch as usize)), tags)
-    }
-
-    /// Open an empty deck: device up, no track, paused.  The deck rate follows
-    /// the output device and the deck is stereo; a later LOAD resamples to it in
-    /// `finish_load`.  Lets freedj boot to a browse-and-load state like a CDJ.
-    pub fn open_empty() -> Result<Self> {
-        Self::open_inner(None, TrackTags::default())
-    }
-
-    /// Open a deck whose output is pulled by a plugin host instead of a
-    /// sound card: stereo at the host's rate `sr`, with `track` loaded or
-    /// empty.  The host's audio callback takes the [`HostOutput`] left in
-    /// `slot` and calls its `fill` once per block, exactly as the device
-    /// callback would.
-    pub fn open_host(sr: u32, slot: &HostSlot, track: Option<&Path>) -> Result<Self> {
+    /// Open a deck playing to `out`, with `track` decoded and loaded, or
+    /// empty: paused, at the output's rate, in stereo (a later LOAD
+    /// resamples to it in `finish_load`), which lets freedj boot to a
+    /// browse-and-load state like a CDJ.
+    pub fn open(out: Box<dyn AudioOut>, track: Option<&Path>) -> Result<Self> {
         let (initial, tags) = match track {
-            Some(p) => { let (d, fsr, ch, tags) = decode_file(p)?; (Some((d, fsr, ch as usize)), tags) }
+            Some(p) => { let (d, sr, ch, tags) = decode_file(p)?; (Some((d, sr, ch)), tags) }
             None => (None, TrackTags::default()),
         };
-        Self::start(initial, tags, Output::Host { sr, slot: Arc::clone(slot) })
+        Self::start(initial, tags, out)
     }
 
-    /// A deck for tests: the real processor thread, with a stand-in device
-    /// (48 kHz stereo) that pulls the output at real time, 10 ms at a time,
-    /// through the same [`OutputFill`] as the device callback.
     /// A deck for latency tests: a stand-in device at `sr` taking `frames`
     /// every `every_us` (a low-latency interface), recording what it heard.
     #[cfg(test)]
     pub fn open_test_traced(samples: Vec<f32>, sr: u32, frames: usize, every_us: u64, trace: Trace) -> Result<Self> {
-        let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), Output::TestPulls { sr, frames, every_us, trace: Some(trace) })?;
+        let out = PacedOut { sample_rate: sr, frames, every_us, trace: Some(trace) };
+        let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), Box::new(out))?;
         h.set_playing(false);
         Ok(h)
     }
 
+    /// A deck for tests: the real processor thread, with a stand-in device
+    /// (48 kHz stereo) that pulls the output at real time, 10 ms at a time,
+    /// through the same [`Render`] as the device callback.
     #[cfg(test)]
     pub fn open_test(samples: Vec<f32>, sr: u32) -> Result<Self> {
-        let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), Output::Test)?;
+        let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), Box::new(PacedOut::realtime(48_000)))?;
         h.set_playing(false);
         Ok(h)
     }
 
-    fn open_inner(initial: Option<(Vec<f32>, u32, usize)>, tags: TrackTags) -> Result<Self> {
-        // ── 2. Open cpal device ────────────────────────────────────────────────
-        match default_device() {
-            Ok(out) => Self::start(initial, tags, Output::Device(out.0, out.1)),
-            // A deck that boots without its sound interface (a USB card not
-            // plugged in, or dropped in a supply dip) still comes up: silent,
-            // and on the interface as soon as it appears.  Linux only (the Pi
-            // appliance); elsewhere a missing device is still an error.
-            #[cfg(target_os = "linux")]
-            Err(e) => {
-                log::warn!("no audio output ({e:#}): starting silent, waiting for a device");
-                Self::start(initial, tags, Output::Waiting)
-            }
-            #[cfg(not(target_os = "linux"))]
-            Err(e) => Err(e),
-        }
-    }
-
-    /// Everything after the device is chosen.
-    fn start(initial: Option<(Vec<f32>, u32, usize)>, tags: TrackTags, output: Output) -> Result<Self> {
-        let (device_sr, device_ch) = match &output {
-            Output::Device(_, c) => (c.sample_rate().0, c.channels() as usize),
-            Output::Test => (48_000, 2),
-            Output::Host { sr, .. } => (*sr, 2),
-            #[cfg(test)]
-            Output::TestPulls { sr, .. } => (*sr, 2),
-            // The rate a CD-sourced library plays at; a device that turns up
-            // later is opened at this rate (ALSA's plug converts if it must).
-            #[cfg(target_os = "linux")]
-            Output::Waiting => (44_100, 2),
-        };
-
+    /// Everything after the output is chosen.
+    fn start(initial: Option<(Vec<f32>, u32, usize)>, tags: TrackTags, out: Box<dyn AudioOut>) -> Result<Self> {
+        let Format { sample_rate: device_sr, channels: device_ch } = out.format();
         // ── 1. Initial track, or an empty deck.  Empty takes the device rate, in stereo
         //       and starts paused; the processor idles until a track loads. ─────
         let (mut decoded, mut file_sr, file_ch, playing_init) = match initial {
@@ -416,12 +377,6 @@ impl AudioHandle {
             file_sr = device_sr;
         }
         let samples = Arc::new(ArcSwap::from_pointee(decoded));
-
-        let stream_config = cpal::StreamConfig {
-            channels:    device_ch as u16,
-            sample_rate: cpal::SampleRate(device_sr),
-            buffer_size: cpal::BufferSize::Default,
-        };
 
         // ── 3. Shared state ────────────────────────────────────────────────────
         let position   = Arc::new(AtomicU64::new(0));
@@ -501,21 +456,11 @@ impl AudioHandle {
             .context("failed to spawn processor thread")?;
         let proc_thread = processor.thread().clone();
 
-        // ── 6. cpal stream (RT callback, no allocation) ────────────────────────
-        // The device stream is owned by a supervisor thread on Linux so it can
-        // be rebuilt when ALSA gives up: after an xrun on a direct hw device
-        // (a loaded single-core Pi, an HDMI sink) cpal reports POLLERR from
-        // every poll and never recovers, leaving the deck silent.  The ring
-        // consumer lives behind a lock only the live callback ever takes
-        // (uncontended, try_lock, never blocks the RT path) so the next
-        // stream's callback can pick it up where the dead one left off.
-        let consumer = Arc::new(Mutex::new(consumer));
-        let failed   = Arc::new(AtomicBool::new(false));
-        let shutdown = Arc::new(AtomicBool::new(false));
+        // ── 6. The output pulls from the ring ─────────────────────────────────
         let parts = StreamParts {
-            config: stream_config, device_ch, device_sr,
-            consumer: Arc::clone(&consumer), playing: Arc::clone(&playing), stats: Arc::clone(&stats),
-            drain_flag: Arc::clone(&drain_flag), failed: Arc::clone(&failed),
+            device_ch, device_sr,
+            consumer: Arc::new(Mutex::new(consumer)), playing: Arc::clone(&playing), stats: Arc::clone(&stats),
+            drain_flag: Arc::clone(&drain_flag),
             scrub_live: Arc::clone(&scrub.live),
             dvs: DvsParts {
                 shared: Arc::clone(&dvs), samples: Arc::clone(&samples), position: Arc::clone(&position),
@@ -524,109 +469,12 @@ impl AudioHandle {
                 file_ch, sample_rate: file_sr,
             },
         };
-        let stream = match output {
-            Output::Test => {
-                // The tests' device: 10 ms of output every 10 ms.
-                let sd = Arc::clone(&shutdown);
-                let mut fill = OutputFill::new(&parts);
-                let t = thread::Builder::new().name("audio-test-out".into()).spawn(move || {
-                    let mut buf = vec![0f32; device_sr as usize / 100 * device_ch];
-                    let t0 = std::time::Instant::now();
-                    let mut n = 0u32;
-                    while !sd.load(Ordering::Relaxed) {
-                        fill.fill(&mut buf);
-                        n += 1;
-                        let due = t0 + Duration::from_millis(10) * n;
-                        if let Some(w) = due.checked_duration_since(std::time::Instant::now()) { thread::sleep(w); }
-                    }
-                }).context("failed to spawn audio-test-out thread")?;
-                StreamOwner::Thread(Some(t))
-            }
-            #[cfg(test)]
-            Output::TestPulls { frames, every_us, trace, .. } => {
-                let sd = Arc::clone(&shutdown);
-                let mut fill = OutputFill::new(&parts);
-                let t = thread::Builder::new().name("audio-test-pulls".into()).spawn(move || {
-                    let mut buf = vec![0f32; frames * device_ch];
-                    let t0 = std::time::Instant::now();
-                    let mut n = 0u32;
-                    while !sd.load(Ordering::Relaxed) {
-                        fill.fill(&mut buf);
-                        if let Some(t) = &trace {
-                            let peak = buf.iter().fold(0f32, |m, v| m.max(v.abs()));
-                            t.lock().unwrap().push((std::time::Instant::now(), peak));
-                        }
-                        n += 1;
-                        let due = t0 + Duration::from_micros(every_us) * n;
-                        if let Some(w) = due.checked_duration_since(std::time::Instant::now()) { thread::sleep(w); }
-                    }
-                }).context("failed to spawn audio-test-pulls thread")?;
-                StreamOwner::Thread(Some(t))
-            }
-            Output::Device(device, _) => Self::open_device(device, parts, &shutdown)?,
-            Output::Host { slot, .. } => {
-                // The host's callback owns the pulling; nothing to run here.
-                *slot.lock().unwrap() = Some(HostOutput { fill: OutputFill::new(&parts) });
-                StreamOwner::Thread(None)
-            }
-            #[cfg(target_os = "linux")]
-            Output::Waiting => {
-                // No device yet: keep time at real time, silently (the deck
-                // plays, its playhead moves), and look for the default device
-                // every 2 s; once it opens, it is supervised like any other.
-                let sd = Arc::clone(&shutdown);
-                let t = thread::Builder::new().name("audio-dev".into()).spawn(move || {
-                    let mut fill = OutputFill::new(&parts);
-                    let mut buf = vec![0f32; device_sr as usize / 100 * device_ch];
-                    let t0 = std::time::Instant::now();
-                    let mut n = 0u32;
-                    loop {
-                        if sd.load(Ordering::Relaxed) { return; }
-                        if n % 200 == 0 && n > 0 {
-                            if let Some((dev, st)) = default_device().ok()
-                                .and_then(|(d, _)| build_stream(&d, &parts).ok().map(|st| (d, st))) {
-                                log::info!("audio output appeared ({}): playing to it",
-                                           dev.name().unwrap_or_else(|_| "?".into()));
-                                drop(fill);
-                                supervise(dev, parts, st, &sd);
-                                return;
-                            }
-                        }
-                        fill.fill(&mut buf);
-                        n += 1;
-                        let due = t0 + Duration::from_millis(10) * n;
-                        if let Some(w) = due.checked_duration_since(std::time::Instant::now()) { thread::sleep(w); }
-                    }
-                }).context("failed to spawn audio-dev thread")?;
-                StreamOwner::Thread(Some(t))
-            }
-        };
+        let stream = out.start(RenderSource(parts))?;
 
         log::info!("audio playback started ({} key-lock pipeline)", opendeck_timestretch::Engine::from_env().name());
         Self::assemble(samples, position, playing, proc_thread, speed, key_lock, key_shift, loop_start, loop_end, loop_active,
                        source_consumed, in_flight, seek_request, scrub, stems, stats, dvs, complete, file_sr, file_ch, tags,
-                       stream, shutdown, processor)
-    }
-
-    /// The device stream: owned by a supervisor thread on Linux, inline elsewhere.
-    fn open_device(device: cpal::Device, parts: StreamParts, shutdown: &Arc<AtomicBool>) -> Result<StreamOwner> {
-        #[cfg(target_os = "linux")]
-        let stream = {
-            let (tx, rx) = std::sync::mpsc::channel::<Result<()>>();
-            let sd = Arc::clone(&shutdown);
-            let supervisor = thread::Builder::new().name("audio-dev".into()).spawn(move || {
-                let stream = match build_stream(&device, &parts) {
-                    Ok(st) => { let _ = tx.send(Ok(())); st }
-                    Err(e) => { let _ = tx.send(Err(e)); return; }
-                };
-                supervise(device, parts, stream, &sd);
-            }).context("failed to spawn audio-dev thread")?;
-            rx.recv().context("audio-dev thread died")??;
-            StreamOwner::Thread(Some(supervisor))
-        };
-        #[cfg(not(target_os = "linux"))]
-        let stream = { let _ = shutdown; StreamOwner::Inline(build_stream(&device, &parts)?) };
-        Ok(stream)
+                       stream, processor)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -634,8 +482,8 @@ impl AudioHandle {
                 speed: Arc<AtomicU32>, key_lock: Arc<AtomicBool>, key_shift: Arc<AtomicI32>, loop_start: Arc<AtomicU64>, loop_end: Arc<AtomicU64>,
                 loop_active: Arc<AtomicBool>, source_consumed: Arc<AtomicU64>, in_flight: Arc<AtomicU64>,
                 seek_request: Arc<AtomicU64>, scrub: ScrubShared, stems: Arc<StemControl>, stats: Arc<AudioStats>,
-                dvs: Arc<crate::dvs::DvsShared>, complete: Arc<AtomicBool>, file_sr: u32, file_ch: usize, tags: TrackTags, stream: StreamOwner,
-                shutdown: Arc<AtomicBool>, processor: thread::JoinHandle<()>) -> Result<Self> {
+                dvs: Arc<crate::dvs::DvsShared>, complete: Arc<AtomicBool>, file_sr: u32, file_ch: usize, tags: TrackTags, stream: Running,
+                processor: thread::JoinHandle<()>) -> Result<Self> {
         Ok(Self {
             samples,
             position,
@@ -660,27 +508,20 @@ impl AudioHandle {
             channels: file_ch as u8,
             tags,
             _stream: stream,
-            _stream_shutdown: shutdown,
             _processor: processor,
         })
     }
 }
 
-impl Drop for AudioHandle {
-    fn drop(&mut self) { self._stream_shutdown.store(true, Ordering::Relaxed); }
-}
-
-/// Everything a device stream's callback needs, so one can be built again
-/// after the previous one died.
-struct StreamParts {
-    config:     cpal::StreamConfig,
-    device_ch:  usize,
-    device_sr:  u32,
+/// Everything an output's callback needs, so one can be built again after
+/// the previous one died (see [`RenderSource`]).
+pub(crate) struct StreamParts {
+    pub(crate) device_ch:  usize,
+    pub(crate) device_sr:  u32,
     consumer:   Arc<Mutex<rtrb::Consumer<f32>>>,
     playing:    Arc<AtomicBool>,
     stats:      Arc<AudioStats>,
     drain_flag: Arc<AtomicBool>,
-    failed:     Arc<AtomicBool>,
     /// A paused jog scrub is feeding the ring: play it, as if playing.
     scrub_live: Arc<AtomicBool>,
     /// DVS: what the callback needs to play the record's way.
@@ -723,91 +564,6 @@ impl DvsParts {
     }
 }
 
-/// Who holds the cpal stream: the supervisor thread (Linux) or the handle.
-enum StreamOwner {
-    #[allow(dead_code)]
-    Thread(Option<thread::JoinHandle<()>>),
-    #[allow(dead_code)]
-    Inline(cpal::Stream),
-}
-
-/// Tests: what a stand-in device heard, pull by pull (time, loudest sample).
-#[cfg(test)]
-pub type Trace = Arc<Mutex<Vec<(std::time::Instant, f32)>>>;
-
-/// A plugin host's audio callback, standing in for the sound card's: the
-/// deck's output, interleaved stereo at the rate the deck was opened at.
-pub struct HostOutput { fill: OutputFill }
-
-impl HostOutput {
-    /// One block of output (interleaved stereo), from the RT thread: no
-    /// allocation, no blocking.  Silence where the deck has nothing ready.
-    pub fn fill(&mut self, out: &mut [f32]) { self.fill.fill(out) }
-}
-
-/// Where [`AudioHandle::open_host`] leaves the deck's [`HostOutput`].
-pub type HostSlot = Arc<Mutex<Option<HostOutput>>>;
-
-/// Where a deck's output goes.
-enum Output {
-    /// A plugin host pulls it (`open_host`).
-    Host { sr: u32, slot: HostSlot },
-    /// The system's output device, at its default config.
-    Device(cpal::Device, cpal::SupportedStreamConfig),
-    /// The tests' stand-in: pulls the output at real time, 48 kHz stereo.
-    #[allow(dead_code)]
-    Test,
-    /// Tests: a stand-in device at `sr` (stereo) that takes `frames` every
-    /// `every_ms`, as an ALSA device woken late takes two periods at once.
-    /// `trace`, when given, records each pull's time and loudest sample.
-    #[cfg(test)]
-    TestPulls { sr: u32, frames: usize, every_us: u64, trace: Option<Trace> },
-    /// No device at start: silent at real time until one appears (Linux).
-    #[cfg(target_os = "linux")]
-    Waiting,
-}
-
-/// The default output device and its default config.
-fn default_device() -> Result<(cpal::Device, cpal::SupportedStreamConfig)> {
-    let device = cpal::default_host()
-        .default_output_device()
-        .context("no output audio device found")?;
-    let supported = device
-        .default_output_config()
-        .context("failed to get default output config")?;
-    Ok((device, supported))
-}
-
-/// Keep a device stream alive: when the callback reports a failure (an
-/// xrun storm, a USB card pulled and put back), rebuild it, backing off to
-/// one try every 2 s.  Returns at shutdown.
-#[cfg(target_os = "linux")]
-fn supervise(device: cpal::Device, parts: StreamParts, mut stream: cpal::Stream, sd: &AtomicBool) {
-    while !sd.load(Ordering::Relaxed) {
-        thread::sleep(Duration::from_millis(100));
-        if !parts.failed.load(Ordering::Relaxed) { continue; }
-        log::warn!("audio stream failed — rebuilding the device stream");
-        drop(stream);
-        let mut wait = Duration::from_millis(100);
-        stream = loop {
-            match build_stream(&device, &parts) {
-                Ok(st) => break st,
-                Err(e) => {
-                    log::warn!("audio stream rebuild failed ({e:#}); retrying in {} ms", wait.as_millis());
-                    thread::sleep(wait);
-                    wait = (wait * 2).min(Duration::from_secs(2));
-                    if sd.load(Ordering::Relaxed) { return; }
-                }
-            }
-        };
-        parts.failed.store(false, Ordering::Relaxed);
-        log::info!("audio stream rebuilt");
-    }
-}
-
-/// The output callback's work, shared by the device stream and the tests'
-/// stand-in device: pull the ring into `out`, fading out on stop and
-/// flushing on a seek.  Real-time safe: no allocation, no blocking.
 /// MENU → OUTPUT GAIN: a trim on what leaves the deck, as a linear factor
 /// (f32 bits), 1.0 = 0 dB.  Only ever below 1: it turns the deck down
 /// against a hot output (an iPad at full volume) without touching the
@@ -829,7 +585,10 @@ pub fn set_output_gain_db(db: f32) {
 /// The output trim as a linear factor.
 pub fn output_gain() -> f32 { f32::from_bits(OUTPUT_GAIN.load(Ordering::Relaxed)) }
 
-struct OutputFill {
+/// The output callback's work, for every [`AudioOut`]: pull the ring into
+/// `out`, fading out on stop and flushing on a seek.  Real-time safe: no
+/// allocation, no blocking.
+pub struct Render {
     consumer:   Arc<Mutex<rtrb::Consumer<f32>>>,
     playing:    Arc<AtomicBool>,
     scrub_live: Arc<AtomicBool>,
@@ -844,8 +603,8 @@ struct OutputFill {
     dvs:        crate::dvs::DvsRender,
 }
 
-impl OutputFill {
-    fn new(p: &StreamParts) -> OutputFill {
+impl Render {
+    pub(crate) fn new(p: &StreamParts) -> Render {
         // Stop fade: cutting to silence mid-waveform is a step, and a step is
         // the click heard on every CUE release / pause.  On stop the callback
         // keeps playing what the ring already holds while a gain ramps to
@@ -853,7 +612,7 @@ impl OutputFill {
         // silent and honours any pending flush.  Start is untouched — no
         // fade-in — so cue latency stays exactly as it is.
         const STOP_FADE_S: f32 = 0.003;
-        OutputFill {
+        Render {
             consumer: Arc::clone(&p.consumer), playing: Arc::clone(&p.playing), scrub_live: Arc::clone(&p.scrub_live),
             drain_flag: Arc::clone(&p.drain_flag), stats: Arc::clone(&p.stats), device_ch: p.device_ch,
             fade_step: 1.0 / (p.device_sr as f32 * STOP_FADE_S).max(1.0),   // per frame
@@ -863,7 +622,9 @@ impl OutputFill {
         }
     }
 
-    fn fill(&mut self, out: &mut [f32]) {
+    /// One buffer of output (interleaved, at the output's format), from the
+    /// real-time thread.  Silence where the deck has nothing ready.
+    pub fn fill(&mut self, out: &mut [f32]) {
         self.fill_raw(out);
         // OUTPUT GAIN, last: 0 dB leaves the samples untouched; a change
         // moves linearly across this buffer, so stepping it never clicks.
@@ -945,33 +706,6 @@ impl OutputFill {
             }
         }
     }
-}
-
-fn build_stream(device: &cpal::Device, p: &StreamParts) -> Result<cpal::Stream> {
-    let failed = Arc::clone(&p.failed);
-    let mut fill = OutputFill::new(p);
-    let mut rt_asked = false;
-    let stream = device
-        .build_output_stream::<f32, _, _>(
-            &p.config,
-            move |out: &mut [f32], _info| {
-                // The device thread is cpal's; ask for RT priority from inside
-                // it, once (a syscall, no allocation).
-                if !rt_asked { rt_asked = true; try_realtime("cpal output", 30); }
-                fill.fill(out);
-            },
-            move |err| {
-                // Once per failure: cpal repeats the error on every poll of a
-                // dead ALSA stream, which would flood the log.
-                if !failed.swap(true, Ordering::Relaxed) {
-                    log::error!("audio stream error: {err}");
-                }
-            },
-            None,
-        )
-        .context("failed to build output stream")?;
-    stream.play().context("failed to start audio stream")?;
-    Ok(stream)
 }
 
 // ── Processor loop ────────────────────────────────────────────────────────────
@@ -1820,17 +1554,16 @@ mod output_gain_tests {
         let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let (mut tx, rx) = rtrb::RingBuffer::<f32>::new(1 << 16);
         let parts = StreamParts {
-            config: cpal::StreamConfig { channels: 2, sample_rate: cpal::SampleRate(48_000), buffer_size: cpal::BufferSize::Default },
             device_ch: 2, device_sr: 48_000,
             consumer: Arc::new(Mutex::new(rx)), playing: Arc::new(AtomicBool::new(true)), stats: Arc::new(AudioStats::default()),
-            drain_flag: Arc::new(AtomicBool::new(false)), failed: Arc::new(AtomicBool::new(false)),
+            drain_flag: Arc::new(AtomicBool::new(false)),
             scrub_live: Arc::new(AtomicBool::new(false)),
             dvs: DvsParts::idle(),
         };
         set_output_gain_db(0.0);
-        let mut fill = OutputFill::new(&parts);
+        let mut fill = Render::new(&parts);
         let mut buf = vec![0f32; 960];   // 10 ms of stereo
-        let mut run = |fill: &mut OutputFill, tx: &mut rtrb::Producer<f32>| {
+        let mut run = |fill: &mut Render, tx: &mut rtrb::Producer<f32>| {
             for _ in 0..buf.len() { tx.push(0.8).unwrap(); }
             fill.fill(&mut buf);
             buf.clone()
@@ -1853,32 +1586,6 @@ mod output_gain_tests {
         set_output_gain_db(6.0);
         assert_eq!(output_gain(), 1.0);
         set_output_gain_db(0.0);
-    }
-}
-
-#[cfg(all(test, target_os = "linux"))]
-mod no_device_tests {
-    use super::*;
-
-    /// A deck that boots without its sound interface (the Pi appliance with
-    /// the USB card unplugged) still runs: silent, keeping real time, so the
-    /// screen comes up and a track plays on; before, the app exited and the
-    /// service restarted it until systemd gave up.
-    #[test]
-    fn starts_silent_without_a_device_and_keeps_time() {
-        let sr = 44_100;
-        let samples = vec![0.1f32; sr as usize * 2 * 4];   // 4 s stereo
-        let h = AudioHandle::start(Some((samples, sr, 2)), TrackTags::default(), Output::Waiting).unwrap();
-        h.set_playing(true);
-        std::thread::sleep(Duration::from_millis(300));
-        let p1 = h.position.load(Ordering::Relaxed);
-        std::thread::sleep(Duration::from_millis(500));
-        let p2 = h.position.load(Ordering::Relaxed);
-        assert!(p1 > 0, "the playhead moves with no device");
-        // Real time, not as fast as the CPU can go: 0.5 s is 22 050 frames
-        // (44 100 samples); allow the ring's slack either way.
-        let d = p2 - p1;
-        assert!(d > 10_000 && d < 60_000, "advanced {d} in 0.5 s");
     }
 }
 
@@ -1908,7 +1615,7 @@ mod back_pressure_tests {
         let sr = 44_100;
         let samples = vec![0.1f32; sr as usize * 2 * 8];   // 8 s stereo
         let h = AudioHandle::start(Some((samples, sr, 2)), TrackTags::default(),
-                                   Output::TestPulls { sr, frames: 2 * 1_103, every_us: 50_000, trace: None }).unwrap();
+                                   Box::new(PacedOut { sample_rate: sr, frames: 2 * 1_103, every_us: 50_000, trace: None })).unwrap();
         h.set_playing(true);
         std::thread::sleep(Duration::from_millis(700));    // past the start-up fill
         let before = h.stats.underrun_events.load(Ordering::Relaxed);
@@ -1923,6 +1630,7 @@ mod back_pressure_tests {
 #[cfg(test)]
 mod host_output_tests {
     use super::*;
+    use crate::audio_out::{HostOut, HostOutput, HostSlot};
 
     /// A host pulling 512-frame blocks at real time, as Reaper does.
     fn pull(out: &mut HostOutput, blocks: usize) -> f32 {
@@ -1943,7 +1651,7 @@ mod host_output_tests {
         let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_output_gain_db(0.0);
         let slot: HostSlot = Arc::new(Mutex::new(None));
-        let deck = AudioHandle::open_host(44_100, &slot, None).unwrap();
+        let deck = AudioHandle::open(Box::new(HostOut { sample_rate: 44_100, slot: Arc::clone(&slot) }), None).unwrap();
         assert_eq!(deck.sample_rate, 44_100, "the deck runs at the host's rate");
         let mut out = slot.lock().unwrap().take().expect("the deck leaves its output for the host");
         assert_eq!(pull(&mut out, 10), 0.0, "an empty deck is silent");
@@ -1969,8 +1677,9 @@ mod host_output_tests {
         let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_output_gain_db(0.0);
         let (sa, sb): (HostSlot, HostSlot) = (Arc::new(Mutex::new(None)), Arc::new(Mutex::new(None)));
-        let a = AudioHandle::open_host(44_100, &sa, None).unwrap();
-        let b = AudioHandle::open_host(44_100, &sb, None).unwrap();
+        let host = |slot: &HostSlot| Box::new(HostOut { sample_rate: 44_100, slot: Arc::clone(slot) });
+        let a = AudioHandle::open(host(&sa), None).unwrap();
+        let b = AudioHandle::open(host(&sb), None).unwrap();
         let (mut oa, mut ob) = (sa.lock().unwrap().take().unwrap(), sb.lock().unwrap().take().unwrap());
         let tone: Vec<f32> = (0..44_100 * 4).flat_map(|i| {
             let s = 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / 44_100.0).sin();

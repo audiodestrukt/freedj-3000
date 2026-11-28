@@ -8,8 +8,11 @@
 //!   Esc / Q  — quit
 
 mod audio;
+mod audio_cpal;
+mod audio_out;
+mod spawn;
 mod dvs;
-pub use audio::{HostOutput, HostSlot};
+pub use audio_out::{HostOutput, HostSlot};
 mod browser;
 mod dbsession;
 mod framehost;
@@ -497,7 +500,8 @@ mod stream_load_tests {
         let path = dir.path().join("t.wav");
         wav(&path, 48_000, 30.0, 1.0);
         let prep = Prep { deck_sr: 44_100, deck_ch: 2, auto_cue: true, auto_cue_level_db: -48.0,
-                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0,
+                          spawn: spawn::threads() };
         let (tx, rx) = mpsc::channel();
         DeckApp::prepare_local(prep, path, None, &tx).unwrap();
         drop(tx);
@@ -531,7 +535,8 @@ mod stream_load_tests {
         wav(&path, 44_100, 20.0, 0.0);
         let gen = Arc::new(AtomicU64::new(1));
         let prep = Prep { deck_sr: 44_100, deck_ch: 2, auto_cue: false, auto_cue_level_db: -48.0,
-                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::clone(&gen), gen: 0 };
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::clone(&gen), gen: 0,
+                          spawn: spawn::threads() };
         let (tx, rx) = mpsc::channel();
         assert!(DeckApp::prepare_local(prep, path, None, &tx).is_err(), "superseded");
         drop(tx);
@@ -731,6 +736,10 @@ struct DeckApp {
     tag_list:     taglist::TagList,
     /// MENU / UTILITY settings; persisted (see settings.rs).
     settings:     settings::Settings,
+    /// Runs the deck's background jobs (track loads, stems, model release):
+    /// nothing that can wait on a file, the network or a big free runs on
+    /// the frame.  See spawn.rs.
+    spawn:        spawn::Spawner,
     menu_cursor:  usize,
     /// MENU's ABOUT screen is open (the version, support, addresses).
     about:        bool,
@@ -1202,6 +1211,7 @@ impl DeckApp {
             browser,
             tag_list,
             settings,
+            spawn:             spawn::threads(),
             menu_cursor:       0,
             about:             false,
             source_cursor:     0,
@@ -2779,7 +2789,7 @@ impl DeckApp {
             // first seconds, not after the whole file.
             let t_read = Instant::now();
             let (reader, feed) = opendeck_decode::growing::growing(size as u64);
-            std::thread::Builder::new().name("nfs-read".into()).spawn(move || {
+            prep.spawn.run("nfs-read", move || {
                 match nfs.read_file_with(&fh, size, |b| feed.push(b)) {
                     Ok(_) => {
                         let rs = t_read.elapsed().as_secs_f64().max(1e-3);
@@ -2968,6 +2978,7 @@ impl DeckApp {
             // start_fetch bumps the counter to this number as it spawns.
             gen: self.load_gen.load(Ordering::Relaxed) + 1,
             load_gen: Arc::clone(&self.load_gen),
+            spawn: Arc::clone(&self.spawn),
         }
     }
 
@@ -2982,7 +2993,7 @@ impl DeckApp {
         }
         self.load_gen.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = mpsc::channel();
-        std::thread::Builder::new().name("track-load".into()).spawn(move || {
+        self.spawn.run("track-load", move || {
             if let Err(e) = load(&tx) { let _ = tx.send(LoadMsg::Failed(e)); }
         })?;
         log::info!("loading {name:?} in the background");
@@ -3105,7 +3116,7 @@ impl DeckApp {
                                            playhead: Some(Arc::clone(&self.audio.position)), ..Default::default() });
         if split { self.stems_model_held = true; }
         let j = Arc::clone(&job);
-        let spawned = std::thread::Builder::new().name("stems-load".into()).spawn(move || {
+        let spawned = self.spawn.run("stems-load", move || {
             let found = match &link {
                 // A player that went away or media without stems: none
                 // prepared; the device can still split the track.
@@ -3228,7 +3239,7 @@ impl DeckApp {
             if self.stems_model_held && !busy {
                 self.stems_model_held = false;
                 self.stems_model_idle = None;
-                let _ = std::thread::Builder::new().name("stem-model-release".into()).spawn(separate::model::release);
+                let _ = self.spawn.run("stem-model-release", separate::model::release);
                 return;
             }
         }
@@ -3238,7 +3249,7 @@ impl DeckApp {
         if since.elapsed() >= MODEL_IDLE {
             self.stems_model_held = false;
             self.stems_model_idle = None;
-            let _ = std::thread::Builder::new().name("stem-model-release".into()).spawn(separate::model::release);
+            let _ = self.spawn.run("stem-model-release", separate::model::release);
             log::info!("stems: model released (STEMS closed)");
         }
     }
@@ -4547,6 +4558,9 @@ struct Prep {
     /// stacked up whole decodes and slowed the one that counted).
     load_gen: Arc<AtomicU64>,
     gen: u64,
+    /// Where the loader starts the work it hands off (the NFS read, key
+    /// detection).
+    spawn: spawn::Spawner,
 }
 
 impl Prep {
@@ -4764,7 +4778,7 @@ impl Prep {
                 // Key detection (untagged files) runs off the load path, then
                 // caches, and re-serves the row once the load has published it.
                 let (samples, cache_dir, link, path, sh) = (Arc::clone(&samples), self.cache_dir.clone(), self.link.clone(), path.clone(), Arc::clone(&shared));
-                std::thread::spawn(move || {
+                let _ = self.spawn.run("key-detect", move || {
                     // Detect on a copy: the lock is held only to read and to
                     // write the key.  Holding it through the detection (a pass
                     // over the whole track, ~100 ms on a desktop) stalled the
@@ -5427,17 +5441,15 @@ fn build(cfg: Config) -> Result<DeckApp> {
     let link_send    = cfg.link_send && cfg.follow.is_none();
 
     // ── 1. Decode audio (or boot to an empty deck when no track is given) ─────
-    let audio = match (&track, &cfg.host) {
-        (_, Some(h)) => {
+    let out: Box<dyn audio_out::AudioOut> = match &cfg.host {
+        Some(h) => {
             log::info!("plugin host output at {} Hz", h.sample_rate);
-            AudioHandle::open_host(h.sample_rate, &h.output, track.as_deref())?
+            Box::new(audio_out::HostOut { sample_rate: h.sample_rate, slot: Arc::clone(&h.output) })
         }
-        (Some(p), None) => AudioHandle::open(p)?,
-        (None, None) => {
-            log::info!("no track given — booting to an empty deck (browse + LOAD to play)");
-            AudioHandle::open_empty()?
-        }
+        None => audio_cpal::default_output()?,
     };
+    if track.is_none() { log::info!("no track given — booting to an empty deck (browse + LOAD to play)"); }
+    let audio = AudioHandle::open(out, track.as_deref())?;
     // `open` boots the audio thread playing.  Stop it here, before the
     // analysis below, when the platform wants a paused deck at launch; the
     // playhead is parked at the cue once the app exists (see below).
@@ -5964,7 +5976,8 @@ mod anlz_grid_tests {
         std::fs::write(dir.path().join("ANLZ0000.EXT"), ext).unwrap();
 
         let prep = Prep { deck_sr: deck_harness::SR, deck_ch: 2, auto_cue: true, auto_cue_level_db: -48.0,
-                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0,
+                          spawn: spawn::threads() };
         let (tx, rx) = mpsc::channel();
         DeckApp::prepare_local(prep, wav, Some(dir.path().join("ANLZ0000.DAT")), &tx).unwrap();
         drop(tx);
@@ -6589,6 +6602,45 @@ pub(crate) mod deck_harness {
 
 /// The deck's controls end to end, through the harness: each test is what a
 /// DJ does and what they hear.
+/// LOAD never waits on the frame: everything that reads a file, decodes or
+/// resamples runs as a background job (spawn.rs), and the frame only takes
+/// the result.
+#[cfg(test)]
+mod load_off_frame_tests {
+    use super::deck_harness::*;
+    use super::*;
+
+    /// With the load's job held, LOAD returns and frames go on, the deck
+    /// on the track it had; once the job runs, the new track comes in.
+    #[test]
+    fn load_returns_before_any_of_the_load_runs() {
+        let mut d = deck(2.0);
+        let held = Arc::new(spawn::Held::default());
+        d.spawn = held.clone();
+        let dir = tempfile::tempdir().unwrap();
+        let wav = dir.path().join("next.wav");
+        super::stream_load_tests::wav(&wav, SR, 6.0, 0.0);
+        let before = d.audio.len();
+
+        d.load_track(&wav, None).unwrap();
+        assert_eq!(held.names(), ["track-load"], "LOAD handed the load off and did none of it");
+        for _ in 0..20 { d.tick(); d.poll_fetch(); }
+        assert_eq!(d.loading.as_deref(), Some("next.wav"), "still loading");
+        assert_eq!(d.audio.len(), before, "the deck kept the track it had");
+
+        held.release();
+        let t0 = Instant::now();
+        while d.path != wav || d.fetch_rx.is_some() {
+            assert!(t0.elapsed() < Duration::from_secs(10), "the load never came in");
+            d.tick();
+            d.poll_fetch();
+            held.release();   // what the load hands off in turn (key detection)
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert_eq!(d.audio.len(), SR as usize * 6 * 2, "the whole new track");
+    }
+}
+
 #[cfg(test)]
 mod deck_tests {
     use super::deck_harness::*;
@@ -6666,7 +6718,8 @@ mod deck_tests {
         let wav = dir.path().join("t.wav");
         super::stream_load_tests::wav(&wav, SR, 6.0, 0.0);
         let prep = Prep { deck_sr: SR, deck_ch: 2, auto_cue: false, auto_cue_level_db: -48.0,
-                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0,
+                          spawn: spawn::threads() };
         let (tx, rx) = mpsc::channel();
         DeckApp::prepare_local(prep, wav, None, &tx).unwrap();
         drop(tx);
@@ -6724,7 +6777,8 @@ mod deck_tests {
             let wav = dir.join("t.wav");
             super::stream_load_tests::wav(&wav, SR, 20.0, 0.0);
             let prep = Prep { deck_sr: SR, deck_ch: 2, auto_cue: false, auto_cue_level_db: -48.0,
-                              cache_dir: dir.join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+                              cache_dir: dir.join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0,
+                          spawn: spawn::threads() };
             let (tx, rx) = mpsc::channel();
             DeckApp::prepare_local(prep, wav, None, &tx).unwrap();
             drop(tx);
@@ -6817,7 +6871,8 @@ mod deck_tests {
         let wav = dir.path().join("t.wav");
         super::stream_load_tests::wav(&wav, SR, 6.0, 0.0);
         let prep = Prep { deck_sr: SR, deck_ch: 2, auto_cue: false, auto_cue_level_db: -48.0,
-                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0 };
+                          cache_dir: dir.path().join("cache"), link: None, load_gen: Arc::new(AtomicU64::new(0)), gen: 0,
+                          spawn: spawn::threads() };
         let (tx, rx) = mpsc::channel();
         DeckApp::prepare_local(prep, wav, None, &tx).unwrap();
         drop(tx);
