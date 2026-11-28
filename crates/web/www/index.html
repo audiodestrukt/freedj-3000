@@ -6,7 +6,10 @@
   <title>OpenDeck</title>
   <style>
     html, body { margin: 0; height: 100%; background: #111; overflow: hidden; }
-    canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+    /* The deck fits whatever it is given, so the canvas follows the window.
+       !important: winit sets the canvas's size inline when it creates it,
+       and an inline size would pin it there. */
+    canvas { display: block; width: 100vw !important; height: 100vh !important; outline: none; }
   </style>
 </head>
 <body>
