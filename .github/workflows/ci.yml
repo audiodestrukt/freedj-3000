@@ -55,6 +55,12 @@ jobs:
       - name: Build workspace
         run: cargo build --workspace
 
+      # The browser build: no C++ (no BPM detection; key lock is WSOLA), no
+      # OS network (no Link). Checked so shared code can't quietly pick up
+      # something native-only.
+      - name: Check the browser build (wasm32)
+        run: cargo check -p opendeck-app --target wasm32-unknown-unknown
+
       # Skip timestretch_realtime_factor: it asserts an ABSOLUTE real-time factor
       # sized for the Pi 5 target, which false-fails on shared CI runners. It is a
       # local/hardware guard — run it with `make perf` (add OPENDECK_RTF_CEIL to

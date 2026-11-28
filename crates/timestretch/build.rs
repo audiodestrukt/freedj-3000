@@ -23,7 +23,15 @@
 use std::path::PathBuf;
 
 fn main() {
+    // What this build has, for src/lib.rs: `cfg(rubberband)`, `cfg(bungee)`.
+    // A browser (wasm32) has no C++ toolchain to link either with; the deck
+    // there keys-locks with WSOLA, pure Rust.
+    println!("cargo::rustc-check-cfg=cfg(rubberband)");
+    println!("cargo::rustc-check-cfg=cfg(bungee)");
+    if std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("wasm32") { return; }
+    println!("cargo::rustc-cfg=rubberband");
     if std::env::var_os("CARGO_FEATURE_BUNGEE").is_some() {
+        println!("cargo::rustc-cfg=bungee");
         build_bungee();
     }
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();

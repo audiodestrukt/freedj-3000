@@ -4,4 +4,5 @@ components = ["rustfmt", "clippy"]
 targets = [
     "aarch64-unknown-linux-gnu",    # Raspberry Pi 5 / Android arm64
     "x86_64-unknown-linux-gnu",     # NUC / dev machine
+    "wasm32-unknown-unknown",       # the browser build (CI checks it compiles)
 ]

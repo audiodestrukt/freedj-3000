@@ -1,10 +1,16 @@
+//! MiniBPM, the tempo estimator.  Where it isn't built (a browser; see
+//! build.rs) [`MiniBpm`] is still here and estimates nothing.
+
+#[cfg(minibpm)]
 use std::ffi::c_int;
 
+#[cfg(minibpm)]
 #[repr(C)]
 pub struct MiniBpmHandle {
     _private: [u8; 0],
 }
 
+#[cfg(minibpm)]
 extern "C" {
     pub fn minibpm_new(sample_rate: f32) -> *mut MiniBpmHandle;
     pub fn minibpm_free(h: *mut MiniBpmHandle);
@@ -17,13 +23,16 @@ extern "C" {
 }
 
 /// Safe wrapper around MiniBPM.
+#[cfg(minibpm)]
 pub struct MiniBpm {
     ptr: *mut MiniBpmHandle,
 }
 
 // MiniBPM is a single-threaded estimator; we only ever touch it from one thread.
+#[cfg(minibpm)]
 unsafe impl Send for MiniBpm {}
 
+#[cfg(minibpm)]
 impl MiniBpm {
     pub fn new(sample_rate: f32) -> Self {
         let ptr = unsafe { minibpm_new(sample_rate) };
@@ -49,8 +58,21 @@ impl MiniBpm {
     }
 }
 
+#[cfg(minibpm)]
 impl Drop for MiniBpm {
     fn drop(&mut self) {
         unsafe { minibpm_free(self.ptr) }
     }
+}
+
+/// No MiniBPM in this build: the same API, and no tempo is ever found.
+#[cfg(not(minibpm))]
+pub struct MiniBpm;
+
+#[cfg(not(minibpm))]
+impl MiniBpm {
+    pub fn new(_sample_rate: f32) -> Self { MiniBpm }
+    pub fn set_bpm_range(&mut self, _min: f64, _max: f64) {}
+    /// Always `None`: there is no estimator in this build.
+    pub fn estimate_tempo(&mut self, _samples: &[f32]) -> Option<f64> { None }
 }

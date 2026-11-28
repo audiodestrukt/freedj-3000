@@ -1,4 +1,4 @@
-//! Two pipeline stage implementations:
+//! Pipeline stage implementations:
 //!
 //! - `ResampleStage`:      speed change without pitch change (no key-lock).
 //!                         Uses `rubato` (pure Rust, sinc interpolation).
@@ -13,14 +13,30 @@
 //!                         either of the above.  `Stretcher::from_env` picks
 //!                         one at runtime from `OPENDECK_STRETCH`.
 
+// The C++ engines are built only where build.rs can build them: it sets
+// `cfg(rubberband)` and `cfg(bungee)` (not in a browser; Bungee also needs
+// the `bungee` feature).  WSOLA, pure Rust, is always here.
+#[cfg(rubberband)]
 mod rubberband_sys;
+#[cfg(rubberband)]
+mod rubberband;
+#[cfg(rubberband)]
+pub use rubberband::TimestretechStage;
+#[cfg(bungee)]
+mod bungee_sys;
+#[cfg(bungee)]
+mod bungee;
+#[cfg(bungee)]
+pub use bungee::BungeeStage;
 mod wsola;
 pub use wsola::WsolaStage;
-#[cfg(feature = "bungee")]
-mod bungee_sys;
 
 use opendeck_types::PipelineStage;
-use rubberband_sys as rb;
+
+/// Block size fed to an engine at a time (frames, not samples).  512 gives
+/// good latency at 44.1 kHz (~11 ms).
+#[allow(dead_code)]   // no C++ engine in this build
+pub(crate) const BLOCK_FRAMES: usize = 512;
 
 // ── Engine selection ──────────────────────────────────────────────────────────
 
@@ -36,29 +52,36 @@ pub enum Engine {
 }
 
 impl Engine {
-    /// `OPENDECK_STRETCH=rubberband|rb|r3`, `bungee` or `wsola`; default Rubber Band.
-    /// Unknown values and a build without the `bungee` feature fall back to
-    /// Rubber Band with a warning.
+    /// Whether this build has the engine: the C++ ones are not built in a
+    /// browser, and Bungee only with the `bungee` feature.
+    pub fn built(self) -> bool {
+        match self { Engine::RubberBand => cfg!(rubberband), Engine::Bungee => cfg!(bungee), Engine::Wsola => true }
+    }
+
+    /// The best engine this build has: Rubber Band, else Bungee, else WSOLA.
+    pub fn best() -> Engine {
+        [Engine::RubberBand, Engine::Bungee, Engine::Wsola].into_iter().find(|e| e.built()).unwrap_or(Engine::Wsola)
+    }
+
+    /// `OPENDECK_STRETCH=rubberband|rb|r3`, `bungee` or `wsola`; default the
+    /// best this build has ([`Engine::best`]).  Unknown values, and engines
+    /// this build lacks, fall back to that with a warning.
     pub fn from_env() -> Engine {
-        match std::env::var("OPENDECK_STRETCH").ok().as_deref().map(|v| v.trim().to_ascii_lowercase()) {
-            None => Engine::RubberBand,
+        let want = match std::env::var("OPENDECK_STRETCH").ok().as_deref().map(|v| v.trim().to_ascii_lowercase()) {
+            None => return Engine::best(),
             Some(v) => match v.as_str() {
                 "rubberband" | "rb" | "r3" | "" => Engine::RubberBand,
-                "bungee" => {
-                    if cfg!(feature = "bungee") {
-                        Engine::Bungee
-                    } else {
-                        log::warn!("OPENDECK_STRETCH=bungee but this build has no bungee feature; using Rubber Band");
-                        Engine::RubberBand
-                    }
-                }
+                "bungee" => Engine::Bungee,
                 "wsola" | "soundtouch" => Engine::Wsola,
                 other => {
-                    log::warn!("OPENDECK_STRETCH={other:?} unknown (rubberband|bungee|wsola); using Rubber Band");
-                    Engine::RubberBand
+                    log::warn!("OPENDECK_STRETCH={other:?} unknown (rubberband|bungee|wsola); using {}", Engine::best().name());
+                    return Engine::best();
                 }
             },
-        }
+        };
+        if want.built() { return want; }
+        log::warn!("OPENDECK_STRETCH asks for {} but this build has none; using {}", want.name(), Engine::best().name());
+        Engine::best()
     }
 
     pub fn name(self) -> &'static str {
@@ -66,23 +89,27 @@ impl Engine {
     }
 }
 
-/// A key-lock stage of either engine.
+/// A key-lock stage of whichever engine.
 pub enum Stretcher {
+    #[cfg(rubberband)]
     RubberBand(TimestretechStage),
-    #[cfg(feature = "bungee")]
+    #[cfg(bungee)]
     Bungee(BungeeStage),
     Wsola(WsolaStage),
 }
 
 impl Stretcher {
+    /// A stage of `engine`, or of [`Engine::best`] if this build lacks it.
     pub fn new(engine: Engine, sample_rate: u32, channels: u8) -> Self {
+        let engine = if engine.built() { engine } else { Engine::best() };
         match engine {
+            #[cfg(rubberband)]
             Engine::RubberBand => Stretcher::RubberBand(TimestretechStage::new(sample_rate, channels)),
-            #[cfg(feature = "bungee")]
+            #[cfg(bungee)]
             Engine::Bungee => Stretcher::Bungee(BungeeStage::new(sample_rate, channels)),
-            #[cfg(not(feature = "bungee"))]
-            Engine::Bungee => Stretcher::RubberBand(TimestretechStage::new(sample_rate, channels)),
-            Engine::Wsola => Stretcher::Wsola(WsolaStage::new(sample_rate, channels)),
+            // WSOLA, and (never chosen above) an engine not built.
+            #[allow(unreachable_patterns)]
+            _ => Stretcher::Wsola(WsolaStage::new(sample_rate, channels)),
         }
     }
 
@@ -95,8 +122,9 @@ impl Stretcher {
 
     pub fn engine(&self) -> Engine {
         match self {
+            #[cfg(rubberband)]
             Stretcher::RubberBand(_) => Engine::RubberBand,
-            #[cfg(feature = "bungee")]
+            #[cfg(bungee)]
             Stretcher::Bungee(_) => Engine::Bungee,
             Stretcher::Wsola(_) => Engine::Wsola,
         }
@@ -104,8 +132,9 @@ impl Stretcher {
 
     fn inner(&mut self) -> &mut dyn PipelineStage {
         match self {
+            #[cfg(rubberband)]
             Stretcher::RubberBand(s) => s,
-            #[cfg(feature = "bungee")]
+            #[cfg(bungee)]
             Stretcher::Bungee(s) => s,
             Stretcher::Wsola(s) => s,
         }
@@ -113,8 +142,9 @@ impl Stretcher {
 
     fn inner_ref(&self) -> &dyn PipelineStage {
         match self {
+            #[cfg(rubberband)]
             Stretcher::RubberBand(s) => s,
-            #[cfg(feature = "bungee")]
+            #[cfg(bungee)]
             Stretcher::Bungee(s) => s,
             Stretcher::Wsola(s) => s,
         }
@@ -164,355 +194,8 @@ impl PipelineStage for ResampleStage {
     }
 }
 
-// ── TimestretechStage (key-lock via Rubber Band R3) ───────────────────────────
-
-/// RAII wrapper around a `RubberBandState` pointer.
-///
-/// # Safety
-/// `RubberBandState` is not Send by default (it is a raw pointer), but
-/// Rubber Band's real-time path is explicitly designed to be called from a
-/// single audio thread, so we assert Send here and ensure we only ever
-/// touch `state` from one thread at a time (enforced by the `&mut self`
-/// receiver on every method).
-struct RbHandle {
-    state: rb::RubberBandState,
-}
-
-// SAFETY: we never share the pointer across threads; all access is through
-// `&mut self`, which the borrow checker prevents from being aliased.
-unsafe impl Send for RbHandle {}
-
-impl Drop for RbHandle {
-    fn drop(&mut self) {
-        unsafe { rb::rubberband_delete(self.state); }
-    }
-}
-
-// Block size fed to rubberband_process at a time (frames, not samples).
-// 512 gives good latency at 44.1 kHz (~11 ms).
-const BLOCK_FRAMES: usize = 512;
-
-pub struct TimestretechStage {
-    rb:              RbHandle,
-    channels:        usize,
-    speed:           f32,
-    pitch_semitones: f32,
-    /// Silent frames still to feed before the next real input, and output
-    /// frames still to drop, after a reset (Rubber Band's start pad and start
-    /// delay).  Without them R3 swallowed the start of whatever followed a
-    /// reset: a CUE on a kick lost its first ~29 ms.
-    pad_pending:     usize,
-    trim_pending:    usize,
-    // Deinterleaved input scratch buffers (one per channel).
-    in_bufs:         Vec<Vec<f32>>,
-    in_ptrs:         Vec<*const f32>,
-    // Deinterleaved output scratch buffers (one per channel).
-    out_bufs:        Vec<Vec<f32>>,
-    out_ptrs:        Vec<*mut f32>,
-}
-
-// SAFETY: same argument as RbHandle above; all raw pointers point into
-// in_bufs/out_bufs which live as long as the struct.
-unsafe impl Send for TimestretechStage {}
-
-impl TimestretechStage {
-    /// Create with the R3 (Finer) engine for maximum quality.
-    pub fn new(sample_rate: u32, channels: u8) -> Self {
-        let ch = channels as usize;
-
-        let state = unsafe {
-            rb::rubberband_new(
-                sample_rate,
-                channels as u32,
-                rb::REALTIME_R3_OPTIONS,
-                1.0, // time ratio  (1.0 = unchanged)
-                1.0, // pitch scale (1.0 = unchanged)
-            )
-        };
-        assert!(!state.is_null(), "rubberband_new returned null");
-
-        unsafe {
-            rb::rubberband_set_max_process_size(state, BLOCK_FRAMES as u32);
-        }
-
-        let latency = unsafe { rb::rubberband_get_latency(state) };
-        log::info!("Rubber Band R3 engine initialised — latency: {latency} frames");
-
-        let in_bufs:  Vec<Vec<f32>> = vec![vec![0.0f32; BLOCK_FRAMES]; ch];
-        let out_bufs: Vec<Vec<f32>> = vec![vec![0.0f32; BLOCK_FRAMES]; ch];
-        let in_ptrs:  Vec<*const f32> = in_bufs.iter().map(|v| v.as_ptr()).collect();
-        let out_ptrs: Vec<*mut f32>   = out_bufs.iter().map(|v| v.as_ptr() as *mut f32).collect();
-
-        Self {
-            rb: RbHandle { state },
-            channels: ch,
-            speed: 1.0,
-            pitch_semitones: 0.0,
-            pad_pending: 0,
-            trim_pending: 0,
-            in_bufs,
-            in_ptrs,
-            out_bufs,
-            out_ptrs,
-        }
-    }
-
-    /// Feed one block of interleaved frames into Rubber Band and collect
-    /// whatever output is ready into `output`.
-    fn push_block(&mut self, frames: &[f32], output: &mut Vec<f32>) {
-        let n = frames.len() / self.channels;
-        debug_assert!(n <= BLOCK_FRAMES);
-
-        // Deinterleave.
-        for ch in 0..self.channels {
-            for i in 0..n {
-                self.in_bufs[ch][i] = frames[i * self.channels + ch];
-            }
-            self.in_ptrs[ch] = self.in_bufs[ch].as_ptr();
-        }
-
-        unsafe {
-            rb::rubberband_process(
-                self.rb.state,
-                self.in_ptrs.as_ptr(),
-                n as u32,
-                0, // not final
-            );
-        }
-
-        // Drain all available output.
-        loop {
-            let avail = unsafe { rb::rubberband_available(self.rb.state) };
-            if avail <= 0 { break; }
-
-            let to_read = (avail as usize).min(BLOCK_FRAMES);
-
-            // Update out_ptrs in case Vec reallocated (shouldn't, but be safe).
-            for ch in 0..self.channels {
-                self.out_ptrs[ch] = self.out_bufs[ch].as_mut_ptr();
-            }
-
-            let got = unsafe {
-                rb::rubberband_retrieve(
-                    self.rb.state,
-                    self.out_ptrs.as_ptr() as *const *mut f32,
-                    to_read as u32,
-                )
-            } as usize;
-
-            // Re-interleave into output.
-            let prev_len = output.len();
-            output.resize(prev_len + got * self.channels, 0.0);
-            for i in 0..got {
-                for ch in 0..self.channels {
-                    output[prev_len + i * self.channels + ch] = self.out_bufs[ch][i];
-                }
-            }
-        }
-    }
-}
-
-impl TimestretechStage {
-    /// After a reset the next input starts a fresh stream: pad and trim it
-    /// as Rubber Band's real-time mode asks, so the first output frame is
-    /// the first input frame at full level.  The ratios must already be set;
-    /// they are (`set_speed` runs before every block).
-    fn arm_start(&mut self) {
-        unsafe {
-            self.pad_pending  = rb::rubberband_get_preferred_start_pad(self.rb.state) as usize;
-            self.trim_pending = rb::rubberband_get_start_delay(self.rb.state) as usize;
-        }
-    }
-}
-
-impl PipelineStage for TimestretechStage {
-    fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
-        let first_new = output.len();
-        if self.pad_pending > 0 {
-            let silence = vec![0.0f32; BLOCK_FRAMES * self.channels];
-            while self.pad_pending > 0 {
-                let n = self.pad_pending.min(BLOCK_FRAMES);
-                self.push_block(&silence[..n * self.channels], output);
-                self.pad_pending -= n;
-            }
-        }
-        // Feed input in BLOCK_FRAMES-sized chunks.
-        let stride = BLOCK_FRAMES * self.channels;
-        let mut offset = 0;
-        while offset < input.len() {
-            let end = (offset + stride).min(input.len());
-            self.push_block(&input[offset..end], output);
-            offset = end;
-        }
-        if self.trim_pending > 0 {
-            let have = (output.len() - first_new) / self.channels;
-            let drop = self.trim_pending.min(have);
-            output.drain(first_new..first_new + drop * self.channels);
-            self.trim_pending -= drop;
-        }
-    }
-
-    fn set_speed(&mut self, speed: f32) {
-        if (speed - self.speed).abs() > 1e-5 {
-            self.speed = speed;
-            unsafe {
-                rb::rubberband_set_time_ratio(self.rb.state, 1.0 / speed as f64);
-            }
-        }
-    }
-
-    fn set_pitch_semitones(&mut self, semitones: f32) {
-        if (semitones - self.pitch_semitones).abs() > 1e-4 {
-            self.pitch_semitones = semitones;
-            let scale = 2f64.powf(semitones as f64 / 12.0);
-            unsafe {
-                rb::rubberband_set_pitch_scale(self.rb.state, scale);
-            }
-        }
-    }
-
-    fn latency_frames(&self) -> usize {
-        unsafe { rb::rubberband_get_latency(self.rb.state) as usize }
-    }
-
-    fn reset(&mut self) {
-        unsafe { rb::rubberband_reset(self.rb.state); }
-        self.arm_start();
-    }
-}
-
-// ── BungeeStage (key-lock via Bungee Basic) ───────────────────────────────────
-
-/// Key-lock through Bungee's granular API behind a push adapter
-/// (`csrc/bungee_shim.cpp`).  Same contract as `TimestretechStage`: feed
-/// interleaved frames, collect whatever comes out; `latency_frames()` of
-/// input must go in after a reset before anything comes out, and the deck
-/// pre-rolls through that exactly as it does for Rubber Band.
-#[cfg(feature = "bungee")]
-pub struct BungeeStage {
-    handle:          BungeeHandle,
-    channels:        usize,
-    speed:           f32,
-    pitch_semitones: f32,
-    pitch_scale:     f64,
-    in_bufs:         Vec<Vec<f32>>,
-    in_ptrs:         Vec<*const f32>,
-    out_bufs:        Vec<Vec<f32>>,
-    out_ptrs:        Vec<*mut f32>,
-}
-
-#[cfg(feature = "bungee")]
-struct BungeeHandle(*mut std::os::raw::c_void);
-
-// SAFETY: as for RbHandle — one owner, all access through `&mut self`.
-#[cfg(feature = "bungee")]
-unsafe impl Send for BungeeHandle {}
-#[cfg(feature = "bungee")]
-unsafe impl Send for BungeeStage {}
-
-#[cfg(feature = "bungee")]
-impl Drop for BungeeHandle {
-    fn drop(&mut self) { unsafe { bungee_sys::od_bungee_destroy(self.0) } }
-}
-
-#[cfg(feature = "bungee")]
-impl BungeeStage {
-    /// Slowest speed the output buffers are sized for without reallocating
-    /// (the deck's tempo range is ±100% at most, i.e. 0.5×; vinyl-mode
-    /// crawl goes lower, and then the buffer simply grows once).
-    const MIN_SPEED_PREALLOC: f32 = 0.25;
-
-    pub fn new(sample_rate: u32, channels: u8) -> Self {
-        let ch = channels as usize;
-        let p = unsafe { bungee_sys::od_bungee_create(sample_rate as i32, ch as i32, BLOCK_FRAMES as i32) };
-        assert!(!p.is_null(), "od_bungee_create returned null");
-        let version = unsafe { std::ffi::CStr::from_ptr(bungee_sys::od_bungee_version()) }.to_string_lossy().into_owned();
-        let out_cap = (BLOCK_FRAMES as f32 / Self::MIN_SPEED_PREALLOC).ceil() as usize + 1;
-        let in_bufs:  Vec<Vec<f32>> = vec![vec![0.0f32; BLOCK_FRAMES]; ch];
-        let out_bufs: Vec<Vec<f32>> = vec![vec![0.0f32; out_cap]; ch];
-        let in_ptrs  = in_bufs.iter().map(|v| v.as_ptr()).collect();
-        let out_ptrs = out_bufs.iter().map(|v| v.as_ptr() as *mut f32).collect();
-        let stage = Self {
-            handle: BungeeHandle(p), channels: ch, speed: 1.0, pitch_semitones: 0.0, pitch_scale: 1.0,
-            in_bufs, in_ptrs, out_bufs, out_ptrs,
-        };
-        log::info!("Bungee {version} initialised — latency: {} frames", stage.latency_frames());
-        stage
-    }
-
-    fn push_block(&mut self, frames: &[f32], output: &mut Vec<f32>) {
-        let n = frames.len() / self.channels;
-        debug_assert!(n <= BLOCK_FRAMES);
-        if n == 0 { return; }
-        for ch in 0..self.channels {
-            for i in 0..n {
-                self.in_bufs[ch][i] = frames[i * self.channels + ch];
-            }
-            self.in_ptrs[ch] = self.in_bufs[ch].as_ptr();
-        }
-        // Steady state yields n / speed frames; the first push after a reset
-        // can carry up to half a block more (the owed fraction), so leave room.
-        let need = (n as f64 / self.speed as f64).ceil() as usize + 2;
-        for ch in 0..self.channels {
-            if self.out_bufs[ch].len() < need { self.out_bufs[ch].resize(need, 0.0); }
-            self.out_ptrs[ch] = self.out_bufs[ch].as_mut_ptr();
-        }
-        let got = unsafe {
-            bungee_sys::od_bungee_process(
-                self.handle.0,
-                self.in_ptrs.as_ptr(),
-                self.out_ptrs.as_ptr(),
-                n as i32,
-                self.speed as f64,
-                self.pitch_scale,
-                need as i32,
-            )
-        }.max(0) as usize;
-        let prev_len = output.len();
-        output.resize(prev_len + got * self.channels, 0.0);
-        for i in 0..got {
-            for ch in 0..self.channels {
-                output[prev_len + i * self.channels + ch] = self.out_bufs[ch][i];
-            }
-        }
-    }
-}
-
-#[cfg(feature = "bungee")]
-impl PipelineStage for BungeeStage {
-    fn process(&mut self, input: &[f32], output: &mut Vec<f32>) {
-        let stride = BLOCK_FRAMES * self.channels;
-        let mut offset = 0;
-        while offset < input.len() {
-            let end = (offset + stride).min(input.len());
-            self.push_block(&input[offset..end], output);
-            offset = end;
-        }
-    }
-
-    fn set_speed(&mut self, speed: f32) {
-        // Stream is forward-only; clamp away from zero so `in / speed` stays finite.
-        self.speed = speed.max(1e-3);
-    }
-
-    fn set_pitch_semitones(&mut self, semitones: f32) {
-        if (semitones - self.pitch_semitones).abs() > 1e-4 {
-            self.pitch_semitones = semitones;
-            self.pitch_scale = 2f64.powf(semitones as f64 / 12.0);
-        }
-    }
-
-    fn latency_frames(&self) -> usize {
-        unsafe { bungee_sys::od_bungee_latency(self.handle.0) }.max(0.0).round() as usize
-    }
-
-    fn reset(&mut self) {
-        unsafe { bungee_sys::od_bungee_reset(self.handle.0) }
-    }
-}
-
 // ── Performance regression guard ──────────────────────────────────────────────
-#[cfg(test)]
+#[cfg(all(test, rubberband))]
 mod perf {
     use super::*;
     use opendeck_types::PipelineStage;
@@ -645,7 +328,7 @@ mod perf {
     /// Bungee's cost next to R3's, same signal, same chunking.  Printed by
     /// `make perf`; asserted only against the real-time floor (it is the
     /// cheap engine, so the ceilings are the R3 ones).
-    #[cfg(feature = "bungee")]
+    #[cfg(bungee)]
     #[test]
     fn bungee_realtime_factor() {
         let secs = 8.0f32;
@@ -699,7 +382,7 @@ mod perf {
     }
 
     /// Bungee renders `in / speed` frames per push and real audio, not silence.
-    #[cfg(feature = "bungee")]
+    #[cfg(bungee)]
     #[test]
     fn bungee_frame_accounting_and_signal() {
         for speed in [0.5f32, 0.92, 1.0, 1.08, 2.0] {
@@ -764,7 +447,7 @@ mod perf {
             ("rubberband", || Box::new(TimestretechStage::new(SR, CH as u8))),
             ("wsola", || Box::new(WsolaStage::new(SR, CH as u8))),
         ];
-        #[cfg(feature = "bungee")]
+        #[cfg(bungee)]
         engines.push(("bungee", || Box::new(BungeeStage::new(SR, CH as u8))));
         for (name, make) in engines {
             for speed in [0.84f32, 0.92, 0.97, 1.03, 1.08, 1.16] {
@@ -813,7 +496,7 @@ mod perf {
             ("rubberband", || Box::new(TimestretechStage::new(SR, CH as u8))),
             ("wsola", || Box::new(WsolaStage::new(SR, CH as u8))),
         ];
-        #[cfg(feature = "bungee")]
+        #[cfg(bungee)]
         engines.push(("bungee", || Box::new(BungeeStage::new(SR, CH as u8))));
         for (name, make) in engines {
             for speed in [1.0f32, 1.08] {
