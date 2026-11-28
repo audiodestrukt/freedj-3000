@@ -418,7 +418,11 @@ impl WgpuRenderer {
         // this adapter actually supports.  `downlevel_defaults()` alone caps
         // max_texture_dimension_2d at 2048, which fails Surface::configure on
         // any display wider than 2048 physical pixels regardless of GPU.
-        let limits = wgpu::Limits::downlevel_defaults().using_resolution(adapter.limits());
+        // Ask for no more than the adapter can give: an adapter without
+        // compute shaders (WebGL2, in a browser) gets WebGL2's limits.
+        let compute = adapter.get_downlevel_capabilities().flags.contains(wgpu::DownlevelFlags::COMPUTE_SHADERS);
+        let base = if compute { wgpu::Limits::downlevel_defaults() } else { wgpu::Limits::downlevel_webgl2_defaults() };
+        let limits = base.using_resolution(adapter.limits());
         let max_dim = limits.max_texture_dimension_2d;
 
         let (device, queue) = adapter

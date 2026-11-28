@@ -138,57 +138,64 @@ fn bake(w: usize, h: usize, scale: f32, shadow: f32, field: &(dyn Fn(f32, f32) -
     let cx = w as f32 * 0.5;
     let cy = h as f32 * 0.5;
     let eps = 0.75;                       // finite-difference step, pixels
-    let rows = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(1, 16);
+    // One band per core, each on a thread of its own; where there are no
+    // threads to have (a browser), one band, here.
+    let rows = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).clamp(1, 16);
     let chunk = (h + rows - 1) / rows;
-    std::thread::scope(|sc| {
-        for (i, band) in px.chunks_mut(chunk * w * 4).enumerate() {
-            let y0 = i * chunk;
-            sc.spawn(move || {
-                for (ry, row) in band.chunks_mut(w * 4).enumerate() {
-                    let y = (y0 + ry) as f32 + 0.5 - cy;
-                    for (x_i, p) in row.chunks_mut(4).enumerate() {
-                        let x = x_i as f32 + 0.5 - cx;
-                        let s = field(x, y);
-                        if s.cover <= 0.0 {
-                            // Drop shadow: light is up-left, so it falls down-right.
-                            if shadow > 0.0 {
-                                let sx = x - 0.018 * scale;
-                                let sy = y - 0.030 * scale;
-                                let d = (sx * sx + sy * sy).sqrt() / scale - 1.0;
-                                let a = (1.0 - smooth(-0.01, shadow, d)) * 0.55;
-                                p[3] = (a * 255.0) as u8;
-                            }
-                            continue;
-                        }
-                        // Normal from the height field (heights are in radius
-                        // units, so convert the gradient to pixel slope).
-                        let hx = (field(x + eps, y).h - field(x - eps, y).h) * scale / (2.0 * eps);
-                        let hy = (field(x, y + eps).h - field(x, y - eps).h) * scale / (2.0 * eps);
-                        let n = norm([-hx, -hy, 1.0]);
-                        // Crude ambient occlusion: steep slopes / recesses darken.
-                        let ao = 0.55 + 0.45 * n[2];
-                        let c = shade(&s, n, ao);
-                        p[0] = to_srgb(c[0]);
-                        p[1] = to_srgb(c[1]);
-                        p[2] = to_srgb(c[2]);
-                        p[3] = (s.cover * 255.0 + 0.5) as u8;
-                        if s.cover < 1.0 && shadow > 0.0 {
-                            // Blend the edge pixel over the shadow so the rim
-                            // antialiases against it, not against transparency.
-                            let sx = x - 0.018 * scale;
-                            let sy = y - 0.030 * scale;
-                            let d = (sx * sx + sy * sy).sqrt() / scale - 1.0;
-                            let a = (1.0 - smooth(-0.01, shadow, d)) * 0.55;
-                            let tot = s.cover + a * (1.0 - s.cover);
-                            let k = s.cover / tot.max(1e-3);
-                            for ch in 0..3 { p[ch] = (p[ch] as f32 * k) as u8; }
-                            p[3] = (tot * 255.0) as u8;
-                        }
+    let paint = |band: &mut [u8], y0: usize| {
+        for (ry, row) in band.chunks_mut(w * 4).enumerate() {
+            let y = (y0 + ry) as f32 + 0.5 - cy;
+            for (x_i, p) in row.chunks_mut(4).enumerate() {
+                let x = x_i as f32 + 0.5 - cx;
+                let s = field(x, y);
+                if s.cover <= 0.0 {
+                    // Drop shadow: light is up-left, so it falls down-right.
+                    if shadow > 0.0 {
+                        let sx = x - 0.018 * scale;
+                        let sy = y - 0.030 * scale;
+                        let d = (sx * sx + sy * sy).sqrt() / scale - 1.0;
+                        let a = (1.0 - smooth(-0.01, shadow, d)) * 0.55;
+                        p[3] = (a * 255.0) as u8;
                     }
+                    continue;
                 }
-            });
+                // Normal from the height field (heights are in radius
+                // units, so convert the gradient to pixel slope).
+                let hx = (field(x + eps, y).h - field(x - eps, y).h) * scale / (2.0 * eps);
+                let hy = (field(x, y + eps).h - field(x, y - eps).h) * scale / (2.0 * eps);
+                let n = norm([-hx, -hy, 1.0]);
+                // Crude ambient occlusion: steep slopes / recesses darken.
+                let ao = 0.55 + 0.45 * n[2];
+                let c = shade(&s, n, ao);
+                p[0] = to_srgb(c[0]);
+                p[1] = to_srgb(c[1]);
+                p[2] = to_srgb(c[2]);
+                p[3] = (s.cover * 255.0 + 0.5) as u8;
+                if s.cover < 1.0 && shadow > 0.0 {
+                    // Blend the edge pixel over the shadow so the rim
+                    // antialiases against it, not against transparency.
+                    let sx = x - 0.018 * scale;
+                    let sy = y - 0.030 * scale;
+                    let d = (sx * sx + sy * sy).sqrt() / scale - 1.0;
+                    let a = (1.0 - smooth(-0.01, shadow, d)) * 0.55;
+                    let tot = s.cover + a * (1.0 - s.cover);
+                    let k = s.cover / tot.max(1e-3);
+                    for ch in 0..3 { p[ch] = (p[ch] as f32 * k) as u8; }
+                    p[3] = (tot * 255.0) as u8;
+                }
+            }
         }
-    });
+    };
+    if rows == 1 {
+        paint(&mut px, 0);
+    } else {
+        std::thread::scope(|sc| {
+            for (i, band) in px.chunks_mut(chunk * w * 4).enumerate() {
+                let paint = &paint;
+                sc.spawn(move || paint(band, i * chunk));
+            }
+        });
+    }
     ColorImage::from_rgba_unmultiplied([w, h], &px)
 }
 

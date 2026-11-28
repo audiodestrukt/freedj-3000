@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>OpenDeck</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #111; overflow: hidden; }
+    canvas { display: block; width: 100vw; height: 100vh; outline: none; }
+  </style>
+</head>
+<body>
+  <script>
+    // wgpu 22 reads GPUSupportedLimits.maxInterStageShaderComponents, which
+    // browsers have removed (it reads undefined and wgpu panics), and passes
+    // it back when asking for a device (an unknown limit is refused).  Give
+    // it the old value to read, and take it out of the request.  Goes when
+    // the app moves to a wgpu that no longer knows the limit.
+    if (window.GPUSupportedLimits) {
+      const name = "maxInterStageShaderComponents";
+      const own = Object.getOwnPropertyDescriptor(GPUSupportedLimits.prototype, name);
+      Object.defineProperty(GPUSupportedLimits.prototype, name, {
+        configurable: true,
+        get() { return (own && own.get && own.get.call(this)) ?? this.maxInterStageShaderVariables * 4; },
+      });
+      const requestDevice = GPUAdapter.prototype.requestDevice;
+      GPUAdapter.prototype.requestDevice = function (desc) {
+        if (desc && desc.requiredLimits) delete desc.requiredLimits[name];
+        return requestDevice.call(this, desc);
+      };
+    }
+  </script>
+  <script type="module">
+    import init from "./pkg/opendeck_web.js";
+    init();
+  </script>
+</body>
+</html>

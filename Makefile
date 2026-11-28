@@ -53,7 +53,7 @@ ios_app        = $(shell cd ios && xcodebuild -project freedj.xcodeproj -scheme 
                    | awk '/ BUILT_PRODUCTS_DIR =/{print $$3}')/freedj.app
 
 .DEFAULT_GOAL := help
-.PHONY: deckbench help build debug relink plugin reaper-demo reaper-mixer reaper-mixer-check reaper-routine ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot shots-appstore check fmt clippy test perf cad clean reference distclean
+.PHONY: deckbench help build debug web web-serve relink plugin reaper-demo reaper-mixer reaper-mixer-check reaper-routine ios ios-device ios-sim run chrome dev two-deck link-pair beat virtual-cdj shot shots-appstore check fmt clippy test perf cad clean reference distclean
 
 ## ── Build ──────────────────────────────────────────────────────────────────
 
@@ -89,6 +89,16 @@ reaper-mixer-check: plugin ## Run reaper-mixer for 60 s and check its meters (ne
 reaper-routine: plugin ## REAPER: a beat-juggle and scratch routine on two decks of TRACK at BPM, all automation
 	mkdir -p $(REAPER_FX) && cp tools/reaper/opendeck_xfader.jsfx $(REAPER_FX)/
 	OPENDECK_TRACK="$$(realpath -m "$(TRACK)")" OPENDECK_BPM=$(or $(BPM),130) $(REAPER_BIN) -new $(CURDIR)/tools/reaper/opendeck_routine.lua
+
+# The browser build: wasm-pack (cargo install wasm-pack) with rustup's
+# toolchain, which carries the wasm32 target (a Homebrew rustc doesn't).
+WEB_TC ?= $(HOME)/.rustup/toolchains/stable-$(shell rustc -vV | sed -n 's/host: //p')
+web: ## Build the browser version into crates/web/www (then: make web-serve)
+	PATH=$(WEB_TC)/bin:$$PATH DYLD_FALLBACK_LIBRARY_PATH=$(WEB_TC)/lib CARGO_TARGET_DIR=$(CURDIR)/target/wasm \
+	  wasm-pack build crates/web --target web --dev --out-dir www/pkg --no-typescript
+
+web-serve: web ## Serve the browser version at http://127.0.0.1:8765 (Chrome / Edge / Safari: needs WebGPU)
+	cd crates/web/www && python3 -m http.server 8765 --bind 127.0.0.1
 
 relink: ## Force a relink — fixes "librubberband.so.N: cannot open shared object file"
 	@touch crates/timestretch/build.rs crates/app/src/main.rs

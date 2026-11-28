@@ -1,0 +1,29 @@
+[package]
+name        = "opendeck-web"
+description = "OpenDeck in a browser: the deck on a page, its sound through Web Audio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# The whole crate is the browser host; natively it is empty.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+opendeck-app         = { path = "../app" }
+winit                = { workspace = true }
+# The browser draws through WebGPU: the waveform reads a storage buffer,
+# which WebGL2 has none of.  www/index.html patches one thing wgpu 22
+# expects of it that browsers have since dropped.
+wgpu                 = { workspace = true, features = ["webgpu"] }
+log                  = { workspace = true }
+anyhow               = { workspace = true }
+wasm-bindgen         = "0.2"
+wasm-bindgen-futures = "0.4"
+console_error_panic_hook = "0.1"
+console_log          = "1"
+web-sys = { version = "0.3", features = [
+    "Window", "Document", "Element", "HtmlElement", "EventTarget", "Event",
+    "AudioContext", "BaseAudioContext", "AudioContextState", "AudioNode", "AudioDestinationNode",
+    "ScriptProcessorNode", "AudioProcessingEvent", "AudioBuffer",
+] }

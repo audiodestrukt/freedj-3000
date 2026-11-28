@@ -3592,7 +3592,13 @@ impl DeckApp {
     /// Take the renderer `resumed` started, once it is made, and draw.
     fn install_renderer(&mut self) {
         let Some(made) = self.pending_renderer.borrow_mut().take() else { return };
-        let renderer = made.expect("failed to create renderer");
+        let mut renderer = made.expect("failed to create renderer");
+        // The window may have been sized while the renderer was being made
+        // (a browser's canvas is laid out after it is created): catch up.
+        if let Some(Host::Winit { window, .. }) = &self.host {
+            let sz = window_px(window);
+            if sz.width > 0 && sz.height > 0 { renderer.resize(sz.width, sz.height); }
+        }
         self.renderer = Some(Box::new(renderer));
         self.apply_wave_color();
         // Kick off the first redraw.
