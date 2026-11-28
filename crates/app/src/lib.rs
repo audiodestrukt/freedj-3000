@@ -800,6 +800,9 @@ struct DeckApp {
     /// be verified against `specs/xdj-1000mk2/` without an audio device.
     transport:         Transport,
     smoothed_pos:      f64,       // phase-locked playhead, source samples
+    /// The loop that was last running, while what is heard may still be
+    /// its end from before a wrap (see `heard_pos`).
+    wrapped_loop:      std::cell::Cell<Option<(u64, u64)>>,
     resync_frames:     u32,       // consecutive frames the reference has been far off
     refresh_interval:  Duration,  // display period; each frame lands in one of these
     frame_count:       u64,
@@ -1278,6 +1281,7 @@ impl DeckApp {
             beat2_phase:       prodj::PeerPhase::new(),
             prev_pos:          0,
             smoothed_pos:      0.0,
+            wrapped_loop:      Default::default(),
             resync_frames:     0,
             refresh_interval:  FRAME_INTERVAL,
             frame_count:       0,
@@ -2358,8 +2362,31 @@ impl DeckApp {
     /// Leave the loop by the pad / RELOOP: with SLIP engaged, jump to where the
     /// track would have been had it never looped.
     fn exit_loop_slip(&mut self) {
+        let unwrap = self.queued_wrap();
         self.exit_loop();
+        if self.slip_shadow().is_none() {
+            // Plays on from what is heard: a wrap the read has already made
+            // but that is still queued must not play after EXIT, so jump the
+            // audio on by the loop's length from the frame being heard (the
+            // same music on both sides of the crossfade).
+            if let Some(len) = unwrap {
+                self.audio.jump(len as i64);
+                log::info!("loop: exit before a queued wrap was heard; played on");
+            }
+        }
         self.slip_end();
+    }
+
+    /// The running loop's length, when the read has wrapped back to its
+    /// start but the wrap is still queued (what is heard is the loop's end).
+    /// None for a loop shorter than what is queued (more than one wrap may
+    /// be in it) and in reverse.
+    fn queued_wrap(&self) -> Option<u64> {
+        if !self.audio.loop_active.load(Ordering::Relaxed) || self.audio.reading_reverse() { return None; }
+        let (ls, le) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
+        let raw = self.audio.position.load(Ordering::Relaxed);
+        let queued = self.audio.in_flight.load(Ordering::Relaxed);
+        (le > ls && le - ls > queued && raw >= ls && raw < le && raw - ls < queued).then_some(le - ls)
     }
 
     // ── SLIP ─────────────────────────────────────────────────────────────────
@@ -3934,10 +3961,21 @@ impl DeckApp {
         let (ls, le) = (self.audio.loop_start.load(Ordering::Relaxed), self.audio.loop_end.load(Ordering::Relaxed));
         // In reverse the cursor reads backwards, so what is heard lies after it.
         let h = if self.audio.reading_reverse() { raw_pos as i64 + in_flight as i64 } else { raw_pos as i64 - in_flight as i64 };
-        if loop_active && le > ls && (h < ls as i64 || (self.audio.reading_reverse() && h >= le as i64 && (raw_pos as i64) < le as i64)) {
-            let len = (le - ls) as i64;
-            (ls as i64 + ((h - ls as i64) % len + len) % len) as f64
-        } else { h.clamp(0, self.audio.len() as i64) as f64 }
+        let wrap = |ls: u64, le: u64| { let len = (le - ls) as i64; (ls as i64 + ((h - ls as i64) % len + len) % len) as f64 };
+        if loop_active && le > ls {
+            self.wrapped_loop.set(Some((ls, le)));
+            if h < ls as i64 || (self.audio.reading_reverse() && h >= le as i64 && (raw_pos as i64) < le as i64) {
+                return wrap(ls, le);
+            }
+        } else if let Some((ls, le)) = self.wrapped_loop.get() {
+            // The loop just ended (EXIT) right after the read wrapped: the
+            // cursor is back near its start but what is heard is still its
+            // end, so keep wrapping until that has played.  Cleared the first
+            // time it doesn't hold, so it never outlives the wrap.
+            if h < ls as i64 && raw_pos >= ls && raw_pos < le && !self.audio.reading_reverse() { return wrap(ls, le); }
+            self.wrapped_loop.set(None);
+        }
+        h.clamp(0, self.audio.len() as i64) as f64
     }
 
     /// One frame of the on-screen playhead (`smoothed_pos`): free-run at the
@@ -7408,6 +7446,28 @@ mod deck_tests {
             d.run(0.05);
             assert!(d.at() >= start - 0.05 && d.at() <= out + 0.05, "inside {start:.2}..{out:.2}: at {:.2}", d.at());
         }
+    }
+
+    /// EXIT right after the read wrapped: the cursor is back near the loop's
+    /// start but what is heard is still its end, so the playhead stays in
+    /// the loop until that has played, then follows the cursor as usual.
+    #[test]
+    fn the_playhead_stays_in_the_loop_when_exit_comes_right_after_a_wrap() {
+        let d = deck(30.0);
+        let s = |secs: f64| (secs * SR as f64) as u64 * 2;
+        let (ls, le) = (s(1.0), s(1.6));
+        d.audio.loop_start.store(ls, Ordering::Relaxed);
+        d.audio.loop_end.store(le, Ordering::Relaxed);
+        d.audio.loop_active.store(true, Ordering::Relaxed);
+        // Read 0.1 s past the wrap, 0.16 s queued: heard is 1.54 s.
+        let (raw, fl) = (s(1.1), s(0.16));
+        let near = |got: f64, want: u64| (got - want as f64).abs() < 4.0;
+        assert!(near(d.heard_pos(raw, fl), s(1.54)), "looping: wrapped");
+        d.audio.loop_active.store(false, Ordering::Relaxed);           // EXIT
+        assert!(near(d.heard_pos(raw, fl), s(1.54)), "just after EXIT: still the loop's end, not 0.94 s");
+        assert!(near(d.heard_pos(s(1.3), fl), s(1.14)), "once the wrap is heard: the cursor's own");
+        // Later, playing into the old loop's span from before it: no wrap.
+        assert!(near(d.heard_pos(s(1.05), fl), s(0.89)), "a fresh entry is not taken for a wrap");
     }
 
     /// RELOOP/EXIT without SLIP: EXIT plays on out of the loop; RELOOP jumps
