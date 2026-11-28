@@ -140,7 +140,8 @@ pub struct AudioHandle {
     /// Play / pause.
     pub playing:     Arc<AtomicBool>,
     /// The processor thread, parked while paused; see `set_playing`.
-    proc_thread:     std::thread::Thread,
+    /// None when the output runs the processor from its callback.
+    proc_thread:     Option<std::thread::Thread>,
     /// Playback speed as f32 bits (1.0 = normal, 0.5 = half, 2.0 = double).
     /// Set via `speed_store` / `speed_load` helpers.
     pub speed:       Arc<AtomicU32>,
@@ -195,17 +196,21 @@ pub struct AudioHandle {
     pub tags:        TrackTags,
     /// The output, kept going until the deck is dropped.
     _stream:     Running,
-    _processor:  thread::JoinHandle<()>,
+    _processor:  Option<thread::JoinHandle<()>>,
 }
 
 impl AudioHandle {
+    /// Wake the processor from a park (no thread: nothing to wake, the
+    /// output's next callback steps it).
+    fn wake(&self) { if let Some(t) = &self.proc_thread { t.unpark(); } }
+
     /// Start or stop playback.  Starting also wakes the processor thread,
     /// which parks while paused instead of polling — every PLAY path must
     /// come through here or the first block waits for the park timeout.
     pub fn set_playing(&self, on: bool) {
         if on { self.end_scrub(); }
         self.playing.store(on, Ordering::Relaxed);
-        if on { self.proc_thread.unpark(); }
+        if on { self.wake(); }
     }
 
     /// Paused jog: let the listener hear the track under the moving
@@ -222,7 +227,7 @@ impl AudioHandle {
         self.scrub.seq.fetch_add(1, Ordering::Relaxed);
         self.position.store(to, Ordering::Relaxed);
         self.in_flight.store(0, Ordering::Relaxed);
-        self.proc_thread.unpark();
+        self.wake();
     }
 
     /// Hand a scrub over to the transport: PLAY (or a seek) starts from
@@ -244,7 +249,7 @@ impl AudioHandle {
         self.seek_request.store(pos, Ordering::Release);
         self.position.store(pos, Ordering::Relaxed);
         self.in_flight.store(0, Ordering::Relaxed);
-        self.proc_thread.unpark();
+        self.wake();
     }
 
     /// Convenience: read current speed.
@@ -340,7 +345,7 @@ impl AudioHandle {
     /// every `every_us` (a low-latency interface), recording what it heard.
     #[cfg(test)]
     pub fn open_test_traced(samples: Vec<f32>, sr: u32, frames: usize, every_us: u64, trace: Trace) -> Result<Self> {
-        let out = PacedOut { sample_rate: sr, frames, every_us, trace: Some(trace) };
+        let out = PacedOut { sample_rate: sr, frames, every_us, trace: Some(trace), runs_processor: false };
         let h = Self::start(Some((samples, sr, 2)), TrackTags::default(), Box::new(out))?;
         h.set_playing(false);
         Ok(h)
@@ -449,11 +454,17 @@ impl AudioHandle {
                     ring_len,
                     proc_stats,
                 );
-        let processor = thread::Builder::new()
-            .name("audio-proc".into())
-            .spawn(move || proc.run())
-            .context("failed to spawn processor thread")?;
-        let proc_thread = processor.thread().clone();
+        // Its own thread, or (an output with none) the output's callback.
+        let (processor, inline) = if out.runs_processor() {
+            (None, Some(proc))
+        } else {
+            let t = thread::Builder::new()
+                .name("audio-proc".into())
+                .spawn(move || proc.run())
+                .context("failed to spawn processor thread")?;
+            (Some(t), None)
+        };
+        let proc_thread = processor.as_ref().map(|t| t.thread().clone());
 
         // ── 6. The output pulls from the ring ─────────────────────────────────
         let parts = StreamParts {
@@ -467,6 +478,7 @@ impl AudioHandle {
                 loop_start: Arc::clone(&loop_start), loop_end: Arc::clone(&loop_end), loop_active: Arc::clone(&loop_active),
                 file_ch, sample_rate: file_sr,
             },
+            processor: Mutex::new(inline),
         };
         let stream = out.start(RenderSource(parts))?;
 
@@ -477,12 +489,12 @@ impl AudioHandle {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn assemble(samples: Arc<ArcSwap<Vec<f32>>>, position: Arc<AtomicU64>, playing: Arc<AtomicBool>, proc_thread: thread::Thread,
+    fn assemble(samples: Arc<ArcSwap<Vec<f32>>>, position: Arc<AtomicU64>, playing: Arc<AtomicBool>, proc_thread: Option<thread::Thread>,
                 speed: Arc<AtomicU32>, key_lock: Arc<AtomicBool>, key_shift: Arc<AtomicI32>, loop_start: Arc<AtomicU64>, loop_end: Arc<AtomicU64>,
                 loop_active: Arc<AtomicBool>, source_consumed: Arc<AtomicU64>, in_flight: Arc<AtomicU64>,
                 seek_request: Arc<AtomicU64>, scrub: ScrubShared, stems: Arc<StemControl>, stats: Arc<AudioStats>,
                 dvs: Arc<crate::dvs::DvsShared>, complete: Arc<AtomicBool>, file_sr: u32, file_ch: usize, tags: TrackTags, stream: Running,
-                processor: thread::JoinHandle<()>) -> Result<Self> {
+                processor: Option<thread::JoinHandle<()>>) -> Result<Self> {
         Ok(Self {
             samples,
             position,
@@ -525,6 +537,9 @@ pub(crate) struct StreamParts {
     scrub_live: Arc<AtomicBool>,
     /// DVS: what the callback needs to play the record's way.
     dvs: DvsParts,
+    /// The processor, for an output that runs it from its callback; the
+    /// first [`Render`] takes it.
+    processor: Mutex<Option<Processor>>,
 }
 
 /// The deck state the output callback reads while the record drives.
@@ -600,6 +615,8 @@ pub struct Render {
     trim:       f32,
     /// DVS: renders the record's way while it has the deck.
     dvs:        crate::dvs::DvsRender,
+    /// The processor, when this output runs it ([`AudioOut::runs_processor`]).
+    processor:  Option<Processor>,
 }
 
 impl Render {
@@ -618,12 +635,14 @@ impl Render {
             gain: 1.0,
             trim: output_gain(),
             dvs: p.dvs.render(),
+            processor: p.processor.lock().ok().and_then(|mut g| g.take()),
         }
     }
 
     /// One buffer of output (interleaved, at the output's format), from the
     /// real-time thread.  Silence where the deck has nothing ready.
     pub fn fill(&mut self, out: &mut [f32]) {
+        if let Some(p) = self.processor.as_mut() { p.fill_to(out.len()); }
         self.fill_raw(out);
         // OUTPUT GAIN, last: 0 dB leaves the samples untouched; a change
         // moves linearly across this buffer, so stepping it never clicks.
@@ -1021,6 +1040,9 @@ struct LoopShared {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Wait {
     Go,
+    /// Ahead of the output: room for more, but no hurry (its thread
+    /// sleeps; a callback carries on filling).
+    Yield(Duration),
     Sleep(Duration),
     Park(Duration),
 }
@@ -1145,7 +1167,7 @@ impl Processor {
         loop {
             match self.step() {
                 Wait::Go => {}
-                Wait::Sleep(d) => thread::sleep(d),
+                Wait::Yield(d) | Wait::Sleep(d) => thread::sleep(d),
                 Wait::Park(d) => thread::park_timeout(d),
             }
         }
@@ -1153,6 +1175,19 @@ impl Processor {
 
     /// Ring samples queued for the output.
     fn queued(&self) -> usize { self.ring_len - self.producer.slots() }
+
+    /// An output with no processor thread: step until the ring holds `want`
+    /// samples, or the processor has to wait (paused, at a seek's flush,
+    /// the ring full, the track not decoded that far).
+    fn fill_to(&mut self, want: usize) {
+        for _ in 0..256 {
+            if self.queued() >= want { return; }
+            match self.step() {
+                Wait::Go | Wait::Yield(_) => {}
+                Wait::Sleep(_) | Wait::Park(_) => return,
+            }
+        }
+    }
 
     /// One move: a block into the ring, or the reason to wait.
     pub(crate) fn step(&mut self) -> Wait {
@@ -1315,7 +1350,7 @@ impl Processor {
             let yield_ms   = (fill_ratio * 8.0) as u64;
             if yield_ms > 0 {
                 self.yielded = true;
-                return Wait::Sleep(Duration::from_millis(yield_ms));
+                return Wait::Yield(Duration::from_millis(yield_ms));
             }
         }
         self.yielded = false;
@@ -1651,6 +1686,7 @@ mod output_gain_tests {
             drain_flag: Arc::new(AtomicBool::new(false)),
             scrub_live: Arc::new(AtomicBool::new(false)),
             dvs: DvsParts::idle(),
+            processor: Mutex::new(None),
         };
         set_output_gain_db(0.0);
         let mut fill = Render::new(&parts);
@@ -1707,13 +1743,57 @@ mod back_pressure_tests {
         let sr = 44_100;
         let samples = vec![0.1f32; sr as usize * 2 * 8];   // 8 s stereo
         let h = AudioHandle::start(Some((samples, sr, 2)), TrackTags::default(),
-                                   Box::new(PacedOut { sample_rate: sr, frames: 2 * 1_103, every_us: 50_000, trace: None })).unwrap();
+                                   Box::new(PacedOut { sample_rate: sr, frames: 2 * 1_103, every_us: 50_000, trace: None, runs_processor: false })).unwrap();
         h.set_playing(true);
         std::thread::sleep(Duration::from_millis(700));    // past the start-up fill
         let before = h.stats.underrun_events.load(Ordering::Relaxed);
         std::thread::sleep(Duration::from_millis(2500));
         let after = h.stats.underrun_events.load(Ordering::Relaxed);
         assert_eq!(after - before, 0, "underruns while playing steadily: {}", after - before);
+    }
+}
+
+/// An output with no threads to give (a browser's) runs the processor
+/// from its own callback.
+#[cfg(test)]
+mod inline_processor_tests {
+    use super::*;
+
+    /// The deck plays through such an output at real time, without
+    /// underruns, and pauses and plays again as with a processor thread.
+    #[test]
+    fn an_output_can_run_the_processor_from_its_callback() {
+        let _gain = GAIN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        set_output_gain_db(0.0);
+        let sr = 48_000;
+        let tone: Vec<f32> = (0..sr as usize * 6).flat_map(|i| {
+            let s = 0.5 * (i as f32 * 440.0 * std::f32::consts::TAU / sr as f32).sin();
+            [s, s]
+        }).collect();
+        let trace: Trace = Default::default();
+        let out = PacedOut { sample_rate: sr, frames: 480, every_us: 10_000, trace: Some(Arc::clone(&trace)), runs_processor: true };
+        let h = AudioHandle::start(Some((tone, sr, 2)), TrackTags::default(), Box::new(out)).unwrap();
+        assert!(h.proc_thread.is_none(), "no processor thread");
+
+        h.set_playing(true);
+        thread::sleep(Duration::from_millis(300));   // past the start
+        let (p0, u0) = (h.position.load(Ordering::Relaxed), h.stats.underrun_events.load(Ordering::Relaxed));
+        thread::sleep(Duration::from_millis(1000));
+        let (p1, u1) = (h.position.load(Ordering::Relaxed), h.stats.underrun_events.load(Ordering::Relaxed));
+        let secs = (p1 - p0) as f64 / (sr as f64 * 2.0);
+        assert!((0.8..1.2).contains(&secs), "real time: {secs:.2} s of track in 1 s");
+        assert_eq!(u1 - u0, 0, "no underruns while playing");
+        let loud = trace.lock().unwrap().iter().rev().take(50).filter(|(_, peak)| *peak > 0.3).count();
+        assert!(loud > 45, "it is heard: {loud} of the last 50 pulls");
+
+        h.set_playing(false);
+        thread::sleep(Duration::from_millis(200));
+        let paused = h.position.load(Ordering::Relaxed);
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(h.position.load(Ordering::Relaxed), paused, "paused: the playhead holds");
+        h.set_playing(true);
+        thread::sleep(Duration::from_millis(200));
+        assert!(h.position.load(Ordering::Relaxed) > paused, "PLAY again: it moves");
     }
 }
 

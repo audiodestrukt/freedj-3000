@@ -32,6 +32,11 @@ pub trait AudioOut {
     /// Start pulling the deck's output.  The returned [`Running`] keeps the
     /// output going; dropping it stops it.
     fn start(self: Box<Self>, src: RenderSource) -> Result<Running>;
+    /// The output runs the deck's processor from its own callback, so the
+    /// deck starts no thread for it: a host with no threads (a browser).
+    /// The callback then does the stretching too, so this is only for an
+    /// output whose callback is not a hard real-time one.
+    fn runs_processor(&self) -> bool { false }
 }
 
 /// Hands out the deck's output callback.  An output that rebuilds its
@@ -115,19 +120,23 @@ pub struct PacedOut {
     pub frames: usize,
     pub every_us: u64,
     pub trace: Option<Trace>,
+    /// Run the processor from the callback, as a browser's output does.
+    pub runs_processor: bool,
 }
 
 #[cfg(test)]
 impl PacedOut {
     /// 10 ms of output every 10 ms.
     pub fn realtime(sample_rate: u32) -> PacedOut {
-        PacedOut { sample_rate, frames: sample_rate as usize / 100, every_us: 10_000, trace: None }
+        PacedOut { sample_rate, frames: sample_rate as usize / 100, every_us: 10_000, trace: None, runs_processor: false }
     }
 }
 
 #[cfg(test)]
 impl AudioOut for PacedOut {
     fn format(&self) -> Format { Format { sample_rate: self.sample_rate, channels: 2 } }
+
+    fn runs_processor(&self) -> bool { self.runs_processor }
 
     fn start(self: Box<Self>, src: RenderSource) -> Result<Running> {
         use anyhow::Context;
