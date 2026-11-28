@@ -427,10 +427,7 @@ impl AudioHandle {
         let proc_complete   = Arc::clone(&complete);
         let proc_dvs        = Arc::clone(&dvs);
 
-        let processor = thread::Builder::new()
-            .name("audio-proc".into())
-            .spawn(move || {
-                processor_loop(
+        let proc = Processor::new(
                     proc_samples,
                     proc_position,
                     proc_playing,
@@ -452,7 +449,9 @@ impl AudioHandle {
                     ring_len,
                     proc_stats,
                 );
-            })
+        let processor = thread::Builder::new()
+            .name("audio-proc".into())
+            .spawn(move || proc.run())
             .context("failed to spawn processor thread")?;
         let proc_thread = processor.thread().clone();
 
@@ -1014,7 +1013,22 @@ struct LoopShared {
     consumed: Arc<AtomicU64>,
 }
 
-fn processor_loop(
+/// What the processor wants after a [`Processor::step`]: go again now, or
+/// wait. Its own thread waits as told (`park` is cut short by
+/// `AudioHandle`'s unpark: PLAY, a seek, a scrub); an output that runs the
+/// processor from its callback ([`AudioOut::runs_processor`]) just stops
+/// for this buffer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Wait {
+    Go,
+    Sleep(Duration),
+    Park(Duration),
+}
+
+/// The source side of the deck: reads the track (loops, stems, scrub,
+/// seeks), time-stretches it, and fills the ring the output plays from.
+/// Driven by [`step`](Self::step), one move at a time.
+pub(crate) struct Processor {
     samples:    Arc<ArcSwap<Vec<f32>>>,
     position:   Arc<AtomicU64>,
     playing:    Arc<AtomicBool>,
@@ -1032,113 +1046,185 @@ fn processor_loop(
     sample_rate: u32,
     file_ch:    usize,
     device_ch:  usize,
-    mut producer: rtrb::Producer<f32>,
+    producer:   rtrb::Producer<f32>,
     ring_len:   usize,
     stats:      Arc<AudioStats>,
-) {
-    try_realtime("audio-proc", 20);
-    let mut stretcher = Stretcher::from_env(sample_rate, file_ch as u8);
 
-    // ── Pre-roll: push silence to warm up the RubberBand engine ──────────────
-    // The R3 engine needs latency_frames of input before it produces output.
-    // Without this, the first ~100ms of playback is silent (ring buffer stays
-    // empty while RubberBand fills its internal pipeline).
-    {
-        let latency = stretcher.latency_frames();
-        let silence = vec![0.0f32; latency * file_ch];
-        let mut warmup = Vec::new();
-        stretcher.process(&silence, &mut warmup);
-        // Then start clean, as after a seek: the first PLAY is armed the same
-        // way (Rubber Band's start pad / delay), so a track's opening
-        // transient comes out whole.
-        stretcher.reset();
-        log::debug!("proc: pre-rolled {latency} silence frames");
+    stretcher:  Stretcher,
+    /// Internal read cursor: the processor owns this; the UI / HID jump
+    /// `position` (through `seek_request`) to seek.
+    proc_pos:   u64,
+    /// Timestretched (file_ch interleaved) audio.
+    ts_out:     Vec<f32>,
+    /// Scratch for a source block that wraps the loop boundary (tail + head).
+    loop_buf:   Vec<f32>,
+    /// Paused jog scrub: the read cursor (frames), its speed (frames per
+    /// output frame), the last scrub request seen and when it came.
+    scrub_cur:  Option<f64>,
+    scrub_vel:  f64,
+    scrub_seen: u64,
+    scrub_moved: opendeck_types::time::Instant,
+    scrub_buf:  Vec<f32>,
+    /// Stems: the ramp state and the mixed source block.
+    mixer:      Mixer,
+    mix_buf:    Vec<f32>,
+    /// After a seek: waiting (this many 1 ms steps so far) for the output
+    /// to flush the ring before the first block from the new spot.
+    drain_wait: Option<u32>,
+    /// The proportional yield before a block has been taken.
+    yielded:    bool,
+    /// The record had the deck at the last step (DVS).
+    dvs_held:   bool,
+}
+
+impl Processor {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        samples:    Arc<ArcSwap<Vec<f32>>>,
+        position:   Arc<AtomicU64>,
+        playing:    Arc<AtomicBool>,
+        speed:      Arc<AtomicU32>,
+        key_lock:   Arc<AtomicBool>,
+        key_shift:  Arc<AtomicI32>,
+        lp:         LoopShared,
+        drain_flag: Arc<AtomicBool>,
+        in_flight:  Arc<AtomicU64>,
+        seek_request: Arc<AtomicU64>,
+        scrub:      ScrubShared,
+        stems:      Arc<StemControl>,
+        complete:   Arc<AtomicBool>,
+        dvs:        Arc<crate::dvs::DvsShared>,
+        sample_rate: u32,
+        file_ch:    usize,
+        device_ch:  usize,
+        producer:   rtrb::Producer<f32>,
+        ring_len:   usize,
+        stats:      Arc<AudioStats>,
+    ) -> Processor {
+        let mut stretcher = Stretcher::from_env(sample_rate, file_ch as u8);
+
+        // ── Pre-roll: push silence to warm up the RubberBand engine ──────────
+        // The R3 engine needs latency_frames of input before it produces output.
+        // Without this, the first ~100ms of playback is silent (ring buffer stays
+        // empty while RubberBand fills its internal pipeline).
+        {
+            let latency = stretcher.latency_frames();
+            let silence = vec![0.0f32; latency * file_ch];
+            let mut warmup = Vec::new();
+            stretcher.process(&silence, &mut warmup);
+            // Then start clean, as after a seek: the first PLAY is armed the same
+            // way (Rubber Band's start pad / delay), so a track's opening
+            // transient comes out whole.
+            stretcher.reset();
+            log::debug!("proc: pre-rolled {latency} silence frames");
+        }
+
+        Processor {
+            samples, position, playing, speed, key_lock, key_shift, lp, drain_flag, in_flight, seek_request,
+            scrub, stems, complete, dvs, sample_rate, file_ch, device_ch, producer, ring_len, stats,
+            stretcher,
+            proc_pos: 0,
+            ts_out: Vec::with_capacity(BLOCK_FRAMES * file_ch * 8),
+            loop_buf: Vec::with_capacity(BLOCK_FRAMES * file_ch),
+            scrub_cur: None,
+            scrub_vel: 0.0,
+            scrub_seen: 0,
+            scrub_moved: opendeck_types::time::Instant::now(),
+            scrub_buf: Vec::with_capacity(SCRUB_BLOCK * file_ch),
+            mixer: Mixer::default(),
+            mix_buf: Vec::with_capacity(BLOCK_FRAMES * file_ch),
+            drain_wait: None,
+            yielded: false,
+            dvs_held: false,
+        }
     }
 
-    // Internal read cursor — the processor owns this, UI/HID may jump `position`
-    // to trigger a seek.
-    let mut proc_pos: u64 = 0;
+    /// The processor's own thread: step, and wait as each step asks.
+    fn run(mut self) {
+        try_realtime("audio-proc", 20);
+        loop {
+            match self.step() {
+                Wait::Go => {}
+                Wait::Sleep(d) => thread::sleep(d),
+                Wait::Park(d) => thread::park_timeout(d),
+            }
+        }
+    }
 
-    // Output buffer for timestretched (file_ch interleaved) audio.
-    let mut ts_out: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch * 8);
-    // Scratch for a source block that wraps the loop boundary (tail + head).
-    let mut loop_buf: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch);
+    /// Ring samples queued for the output.
+    fn queued(&self) -> usize { self.ring_len - self.producer.slots() }
 
-    // Paused jog scrub: the read cursor (frames), its speed (frames per
-    // output frame), the last scrub request seen and when it came.
-    let mut scrub_cur: Option<f64> = None;
-    let mut scrub_vel = 0.0f64;
-    let mut scrub_seen = 0u64;
-    let mut scrub_moved = opendeck_types::time::Instant::now();
-    let mut scrub_buf: Vec<f32> = Vec::with_capacity(SCRUB_BLOCK * file_ch);
+    /// One move: a block into the ring, or the reason to wait.
+    pub(crate) fn step(&mut self) -> Wait {
+        let file_ch = self.file_ch;
+        let device_ch = self.device_ch;
+        let sample_rate = self.sample_rate;
+        let ring_len = self.ring_len;
 
-    // Stems: the ramp state and the mixed source block.
-    let mut mixer = Mixer::default();
-    let mut mix_buf: Vec<f32> = Vec::with_capacity(BLOCK_FRAMES * file_ch);
-
-    loop {
         // ── DVS ───────────────────────────────────────────────────────────────
         // The record has the deck: the output callback plays it. Stand aside
         // (and leave seek_request to it) until it hands back.
-        if dvs.driving() {
-            stretcher.reset();
-            thread::park_timeout(Duration::from_millis(5));
-            if !dvs.driving() {
-                let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
-                if req != NO_SEEK { proc_pos = req; position.store(proc_pos, Ordering::Relaxed); }
-                in_flight.store(0, Ordering::Relaxed);
-            }
-            continue;
+        if self.dvs.driving() {
+            self.stretcher.reset();
+            self.dvs_held = true;
+            return Wait::Park(Duration::from_millis(5));
+        }
+        if std::mem::take(&mut self.dvs_held) {
+            // Handed back: carry on from where the record left the playhead.
+            let req = self.seek_request.swap(NO_SEEK, Ordering::AcqRel);
+            if req != NO_SEEK { self.proc_pos = req; self.position.store(self.proc_pos, Ordering::Relaxed); }
+            self.in_flight.store(0, Ordering::Relaxed);
         }
         // ── Paused jog scrub ──────────────────────────────────────────────────
         // Read straight from the track toward the wheel's position (no
         // stretcher: the pitch follows the wheel, as on a record), a couple of
         // blocks ahead of the device. Ends when the wheel has been still for
         // SCRUB_IDLE and the cursor has arrived, or at once on PLAY / a seek.
-        let target = scrub.target.load(Ordering::Acquire);
-        if target != NO_SEEK && !playing.load(Ordering::Relaxed) && seek_request.load(Ordering::Acquire) == NO_SEEK {
-            let current = samples.load_full();
+        let target = self.scrub.target.load(Ordering::Acquire);
+        if target != NO_SEEK && !self.playing.load(Ordering::Relaxed) && self.seek_request.load(Ordering::Acquire) == NO_SEEK {
+            let current = self.samples.load_full();
             let frames = current.len() / file_ch.max(1);
             if frames > 1 {
-                let cur = *scrub_cur.get_or_insert_with(|| {
+                let (scrub, scrub_vel) = (&self.scrub, &mut self.scrub_vel);
+                let cur = *self.scrub_cur.get_or_insert_with(|| {
                     scrub.live.store(true, Ordering::Release);
-                    scrub_vel = 0.0;
+                    *scrub_vel = 0.0;
                     log::debug!("proc: scrub from {}", scrub.from.load(Ordering::Relaxed));
                     (scrub.from.load(Ordering::Relaxed) / file_ch as u64) as f64
                 });
-                let seq = scrub.seq.load(Ordering::Relaxed);
-                if seq != scrub_seen { scrub_seen = seq; scrub_moved = opendeck_types::time::Instant::now(); }
+                let seq = self.scrub.seq.load(Ordering::Relaxed);
+                if seq != self.scrub_seen { self.scrub_seen = seq; self.scrub_moved = opendeck_types::time::Instant::now(); }
                 let goal = (target / file_ch as u64) as f64;
-                let queued = (ring_len - producer.slots()) / device_ch;
+                let queued = self.queued() / device_ch;
                 if queued as f64 >= SCRUB_AHEAD_S * sample_rate as f64 {
-                    thread::sleep(Duration::from_millis(1));
-                    continue;
+                    return Wait::Sleep(Duration::from_millis(1));
                 }
-                scrub_buf.clear();
-                let bank = stems.bank().filter(|b| b.is_for(&current));
+                self.scrub_buf.clear();
+                let bank = self.stems.bank().filter(|b| b.is_for(&current));
+                let mixer = &self.mixer;
                 let src = |i: usize| mixer.at(&current, bank.as_deref(), i);
-                let (c, v) = scrub_block_from(&src, current.len(), file_ch, cur, scrub_vel, goal, sample_rate, SCRUB_BLOCK, &mut scrub_buf);
-                scrub_cur = Some(c);
-                scrub_vel = v;
-                for f in scrub_buf.chunks(file_ch) {
-                    for d in 0..device_ch { let _ = producer.push(f[d.min(file_ch - 1)]); }
+                let (c, v) = scrub_block_from(&src, current.len(), file_ch, cur, self.scrub_vel, goal, sample_rate, SCRUB_BLOCK, &mut self.scrub_buf);
+                self.scrub_cur = Some(c);
+                self.scrub_vel = v;
+                for f in self.scrub_buf.chunks(file_ch) {
+                    for d in 0..device_ch { let _ = self.producer.push(f[d.min(file_ch - 1)]); }
                 }
                 let arrived = (goal - c).abs() < 2.0 && v.abs() < 0.05;
                 if log::log_enabled!(log::Level::Trace) { log::trace!("proc: scrub gap {:.1} vel {v:.4} queued {queued} seq {seq}", goal - c); }
-                if !(arrived && scrub_moved.elapsed() > SCRUB_IDLE) { continue; }
+                if !(arrived && self.scrub_moved.elapsed() > SCRUB_IDLE) { return Wait::Go; }
                 // Still and there: park on the spot, ready for PLAY.
-                let _ = scrub.target.compare_exchange(target, NO_SEEK, Ordering::AcqRel, Ordering::Relaxed);
+                let _ = self.scrub.target.compare_exchange(target, NO_SEEK, Ordering::AcqRel, Ordering::Relaxed);
             }
         }
-        if let Some(c) = scrub_cur.take() {
+        if let Some(c) = self.scrub_cur.take() {
             // The scrub is over (arrived, PLAY, or a seek). PLAY and seeks
             // bring their own seek_request; an arrival parks the processor
             // where the wheel left the playhead.
-            scrub.live.store(false, Ordering::Release);
+            self.scrub.live.store(false, Ordering::Release);
             log::debug!("proc: scrub ends at frame {c:.0}");
-            if seek_request.load(Ordering::Acquire) == NO_SEEK {
-                let at = ((c.round().max(0.0)) as u64 * file_ch as u64).min(samples.load().len() as u64);
-                seek_request.store(at, Ordering::Release);
+            if self.seek_request.load(Ordering::Acquire) == NO_SEEK {
+                let at = ((c.round().max(0.0)) as u64 * file_ch as u64).min(self.samples.load().len() as u64);
+                self.seek_request.store(at, Ordering::Release);
             }
         }
 
@@ -1148,59 +1234,61 @@ fn processor_loop(
         // wakeups (this loop ran 500 times a second doing nothing, which on a
         // phone keeps the core out of its idle state).  The timeout is only a
         // safety net for a store that bypassed `set_playing`.
-        if !playing.load(Ordering::Relaxed) {
+        if !self.playing.load(Ordering::Relaxed) {
             // A seek while paused is honoured now, not at the next PLAY: move
             // the cursor, reset the stretcher and flush the ring (the callback
             // swaps `drain_flag` every period even while paused), so both the
             // published position and the first block after PLAY are right.
-            let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
+            let req = self.seek_request.swap(NO_SEEK, Ordering::AcqRel);
             if req != NO_SEEK {
-                log::debug!("proc: seek {proc_pos} → {req} (paused)");
-                stretcher.reset();
-                proc_pos = req;
-                position.store(proc_pos, Ordering::Relaxed);
-                in_flight.store(0, Ordering::Relaxed);
-                drain_flag.store(true, Ordering::Release);
+                log::debug!("proc: seek {} → {req} (paused)", self.proc_pos);
+                self.stretcher.reset();
+                self.proc_pos = req;
+                self.position.store(self.proc_pos, Ordering::Relaxed);
+                self.in_flight.store(0, Ordering::Relaxed);
+                self.drain_flag.store(true, Ordering::Release);
             }
-            thread::park_timeout(Duration::from_millis(50));
-            continue;
+            return Wait::Park(Duration::from_millis(50));
         }
 
         // Load the current track buffer once per block (lock-free).  A runtime
         // LOAD swaps this pointer; we pick up the new track on the next block,
         // and the seek path below drains the ring for the position reset.
-        let current = samples.load_full();
+        let current = self.samples.load_full();
         let samples: &[f32] = &current;
 
         // Empty deck (no track loaded yet): idle exactly like the paused path so
         // nothing indexes a zero-length buffer even if PLAY is pressed.
         if samples.is_empty() {
-            thread::park_timeout(Duration::from_millis(50));
-            continue;
+            return Wait::Park(Duration::from_millis(50));
         }
 
         // ── Seek detection ────────────────────────────────────────────────────
-        let req = seek_request.swap(NO_SEEK, Ordering::AcqRel);
+        let req = self.seek_request.swap(NO_SEEK, Ordering::AcqRel);
         if req != NO_SEEK {
-            log::debug!("proc: seek {proc_pos} → {req}");
-            stretcher.reset();
-            proc_pos = req;
-            position.store(proc_pos, Ordering::Relaxed);   // reflect immediately
-            // Tell the cpal callback to flush stale buffered audio.
-            drain_flag.store(true, Ordering::Release);
-            // Then WAIT for it to actually flush before pushing the first
-            // post-seek block.  Otherwise, when the ring is empty (e.g. a cue
-            // preview from a paused deck), we push the block containing the cue
-            // transient and the callback promptly drains it with the stale
-            // audio — playback starts one block (~11 ms) late and the transient
-            // is lost.  The callback runs every buffer period even while paused
-            // (it swaps drain_flag before the play check), so this clears fast;
-            // bounded so a stopped stream can't hang us.
-            let mut spins = 0;
-            while drain_flag.load(Ordering::Acquire) && spins < 50 {
-                thread::sleep(Duration::from_millis(1));
-                spins += 1;
+            log::debug!("proc: seek {} → {req}", self.proc_pos);
+            self.stretcher.reset();
+            self.proc_pos = req;
+            self.position.store(self.proc_pos, Ordering::Relaxed);   // reflect immediately
+            // Tell the output callback to flush stale buffered audio.
+            self.drain_flag.store(true, Ordering::Release);
+            self.drain_wait = Some(0);
+            self.yielded = false;
+        }
+        // Then WAIT for it to actually flush before pushing the first
+        // post-seek block.  Otherwise, when the ring is empty (e.g. a cue
+        // preview from a paused deck), we push the block containing the cue
+        // transient and the callback promptly drains it with the stale
+        // audio — playback starts one block (~11 ms) late and the transient
+        // is lost.  The callback runs every buffer period even while paused
+        // (it swaps drain_flag before the play check), so this clears fast;
+        // bounded so a stopped stream can't hang us.
+        if let Some(spins) = self.drain_wait {
+            if self.drain_flag.load(Ordering::Acquire) && spins < 50 {
+                self.drain_wait = Some(spins + 1);
+                return Wait::Sleep(Duration::from_millis(1));
             }
+            self.drain_wait = None;
         }
 
         // ── Back-pressure ─────────────────────────────────────────────────────
@@ -1213,32 +1301,36 @@ fn processor_loop(
         // full (just above threshold) sleep ~5ms; when empty sleep ~0ms.  This
         // avoids both glitches (sleeping too long when buffer drains fast) and
         // CPU spin (sleeping too little when buffer is comfortably full).
-        let free = producer.slots();
-        let need = back_pressure_slots(f32::from_bits(speed.load(Ordering::Relaxed)), device_ch);
+        let free = self.producer.slots();
+        let need = back_pressure_slots(f32::from_bits(self.speed.load(Ordering::Relaxed)), device_ch);
         if free < need {
-            thread::sleep(Duration::from_millis(5));
-            continue;
+            return Wait::Sleep(Duration::from_millis(5));
         }
         // Buffer has room — sleep proportionally so we don't spin hot.
         // At 1× speed, one BLOCK_FRAMES = ~11.6ms of audio, so sleeping
         // (buffer_fill_ratio × 8ms) keeps us well ahead without wasting CPU.
-        let fill_ratio = 1.0 - (free as f32 / ring_len as f32);
-        let yield_ms   = (fill_ratio * 8.0) as u64;
-        if yield_ms > 0 {
-            thread::sleep(Duration::from_millis(yield_ms));
+        // The yield is taken once per block: the next step goes on with it.
+        if !self.yielded {
+            let fill_ratio = 1.0 - (free as f32 / ring_len as f32);
+            let yield_ms   = (fill_ratio * 8.0) as u64;
+            if yield_ms > 0 {
+                self.yielded = true;
+                return Wait::Sleep(Duration::from_millis(yield_ms));
+            }
         }
+        self.yielded = false;
 
         // ── Decode frontier ───────────────────────────────────────────────────
         // A streaming load is still decoding past here: wait for more rather
         // than ending the track (decode runs far ahead of real time, so this
         // only happens right after a seek into undecoded audio).
-        let complete_now = complete.load(Ordering::Acquire);
+        let complete_now = self.complete.load(Ordering::Acquire);
+        let lp = &self.lp;
         if !complete_now {
             let (ls, le) = (lp.start.load(Ordering::Relaxed) as usize, lp.end.load(Ordering::Relaxed) as usize);
             let in_loop = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
-            if !in_loop && proc_pos as usize + BLOCK_FRAMES * file_ch > samples.len() {
-                thread::sleep(Duration::from_millis(2));
-                continue;
+            if !in_loop && self.proc_pos as usize + BLOCK_FRAMES * file_ch > samples.len() {
+                return Wait::Sleep(Duration::from_millis(2));
             }
         }
 
@@ -1248,27 +1340,26 @@ fn processor_loop(
         // drain distance so the UI's audible-position estimate can actually
         // reach the end (otherwise in_flight freezes ~93 ms short and the deck
         // never registers end-of-track).
-        if proc_pos >= samples.len() as u64 {
-            let ring_out_frames = (ring_len - producer.slots()) / device_ch;
-            in_flight.store(ring_out_frames as u64 * file_ch as u64, Ordering::Relaxed);
-            thread::sleep(Duration::from_millis(5));
-            continue;
+        if self.proc_pos >= samples.len() as u64 {
+            let ring_out_frames = self.queued() / device_ch;
+            self.in_flight.store(ring_out_frames as u64 * file_ch as u64, Ordering::Relaxed);
+            return Wait::Sleep(Duration::from_millis(5));
         }
 
         // ── Read a block from the source (loop-aware) ─────────────────────────
         let want = BLOCK_FRAMES * file_ch;
         let (ls, le) = (lp.start.load(Ordering::Relaxed) as usize, lp.end.load(Ordering::Relaxed) as usize);
         let looping  = lp.active.load(Ordering::Relaxed) && le > ls && le <= samples.len();
-        let (src_block, src_end) = read_block(samples, proc_pos as usize, want,
-                                              looping.then_some((ls, le)), &mut loop_buf);
+        let (src_block, src_end) = read_block(samples, self.proc_pos as usize, want,
+                                              looping.then_some((ls, le)), &mut self.loop_buf);
 
         // Stems: the same ranges through the stem mix, before the stretcher
         // (one stretcher whatever the stems do).  Untouched when no bank is
         // loaded for this track or every stem is at full.
-        let bank = stems.bank().filter(|b| b.is_for(&current));
-        let src_block: &[f32] = if bank.is_some() || mixer.active() {
-            let (ranges, _) = block_ranges(samples.len(), proc_pos as usize, want, looping.then_some((ls, le)));
-            if mixer.mix(samples, bank.as_deref(), stems.gains(), &ranges, &mut mix_buf) { &mix_buf } else { src_block }
+        let bank = self.stems.bank().filter(|b| b.is_for(&current));
+        let src_block: &[f32] = if bank.is_some() || self.mixer.active() {
+            let (ranges, _) = block_ranges(samples.len(), self.proc_pos as usize, want, looping.then_some((ls, le)));
+            if self.mixer.mix(samples, bank.as_deref(), self.stems.gains(), &ranges, &mut self.mix_buf) { &self.mix_buf } else { src_block }
         } else { src_block };
 
         lp.consumed.fetch_add(src_block.len() as u64, Ordering::Relaxed);
@@ -1278,9 +1369,9 @@ fn processor_loop(
         // Advance the shared position so the UI/renderer sees it — unless a
         // seek arrived during this block: then the UI already published the
         // new spot and this store would overwrite it with the stale cursor.
-        proc_pos = src_end as u64;
-        if seek_request.load(Ordering::Acquire) == NO_SEEK {
-            position.store(proc_pos, Ordering::Relaxed);
+        self.proc_pos = src_end as u64;
+        if self.seek_request.load(Ordering::Acquire) == NO_SEEK {
+            self.position.store(self.proc_pos, Ordering::Relaxed);
         }
 
         // ── Update speed + key-lock mode ─────────────────────────────────────────
@@ -1289,32 +1380,32 @@ fn processor_loop(
         // by pitch-shifting the stretcher UP by the same factor as the tempo
         // change, so time_ratio (1/spd) and pitch_scale (spd) combine to a plain
         // speed change of the source.
-        let spd = f32::from_bits(speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
-        stretcher.set_speed(spd);
+        let spd = f32::from_bits(self.speed.load(Ordering::Relaxed)).clamp(0.25, 4.0);
+        self.stretcher.set_speed(spd);
         // KEY SHIFT adds its semitones on top, in either mode.
-        let shift = key_shift.load(Ordering::Relaxed) as f32;
-        let semitones = shift + if key_lock.load(Ordering::Relaxed) { 0.0 } else { 12.0 * spd.log2() };
-        stretcher.set_pitch_semitones(semitones);
+        let shift = self.key_shift.load(Ordering::Relaxed) as f32;
+        let semitones = shift + if self.key_lock.load(Ordering::Relaxed) { 0.0 } else { 12.0 * spd.log2() };
+        self.stretcher.set_pitch_semitones(semitones);
 
         // ── Timestretch ───────────────────────────────────────────────────────
-        ts_out.clear();
-        stretcher.process(src_block, &mut ts_out);
+        self.ts_out.clear();
+        self.stretcher.process(src_block, &mut self.ts_out);
 
-        if final_block && ts_out.is_empty() {
+        if final_block && self.ts_out.is_empty() {
             // Flush RubberBand's tail at end of track.
             let silence = vec![0.0f32; BLOCK_FRAMES * file_ch];
-            stretcher.process(&silence, &mut ts_out);
+            self.stretcher.process(&silence, &mut self.ts_out);
         }
 
         // ── Channel mix & push to ring buffer ─────────────────────────────────
         // Cap to available slots so we never silently drop frames.
-        let out_frames    = ts_out.len() / file_ch;
-        let slots_free    = producer.slots();
+        let out_frames    = self.ts_out.len() / file_ch;
+        let slots_free    = self.producer.slots();
         let frames_to_push = out_frames.min(slots_free / device_ch);
 
         if frames_to_push < out_frames {
             let dropped = (out_frames - frames_to_push) as u64;
-            stats.dropped_frames.fetch_add(dropped, Ordering::Relaxed);
+            self.stats.dropped_frames.fetch_add(dropped, Ordering::Relaxed);
             log::warn!("proc: ring buffer full, dropped {} frames", dropped);
         }
 
@@ -1322,7 +1413,7 @@ fn processor_loop(
             for dev_ch_idx in 0..device_ch {
                 let src_ch = dev_ch_idx.min(file_ch - 1);
                 // producer.push() can't fail here — we checked slots_free above
-                let _ = producer.push(ts_out[i * file_ch + src_ch]);
+                let _ = self.producer.push(self.ts_out[i * file_ch + src_ch]);
             }
         }
 
@@ -1331,10 +1422,11 @@ fn processor_loop(
         // hears is that minus everything still queued: the ring buffer plus the
         // stretcher's internal latency.  Expressed in source samples so the UI
         // can subtract it directly.
-        let ring_out_frames = (RING_BUFFER_SAMPLES - producer.slots()) / device_ch;
+        let ring_out_frames = (RING_BUFFER_SAMPLES - self.producer.slots()) / device_ch;
         let src_frames_ahead =
-            (ring_out_frames as f32 * spd) as u64 + stretcher.latency_frames() as u64;
-        in_flight.store(src_frames_ahead * file_ch as u64, Ordering::Relaxed);
+            (ring_out_frames as f32 * spd) as u64 + self.stretcher.latency_frames() as u64;
+        self.in_flight.store(src_frames_ahead * file_ch as u64, Ordering::Relaxed);
+        Wait::Go
     }
 }
 

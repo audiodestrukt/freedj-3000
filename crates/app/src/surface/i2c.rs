@@ -27,6 +27,7 @@ use std::sync::mpsc::Sender;
 use std::sync::Arc;
 #[cfg(target_os = "linux")]
 use opendeck_types::time::Instant;
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 /// Gray-code transition table: index (prev << 2 | cur) → step.
